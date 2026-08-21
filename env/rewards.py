@@ -234,12 +234,17 @@ class AerialHeightReward(BaseReward):
 
 class AlignedShotReward(BaseReward):
     """
-    Rewards positioning and hits that align the ball trajectory toward the opponent net.
+    Rewards aligning and driving through the ball toward the opponent net.
+    Strictly gates out standstill parking: car must be actively moving (>350 uu/s) toward the ball.
     """
     def __init__(self, weight: float = 0.05):
         super().__init__(weight)
 
     def get_reward(self, car: CarState, arena: RocketSimArena, action: np.ndarray, is_goal: bool, scoring_team: Optional[int]) -> float:
+        car_speed = float(np.linalg.norm(car.vel))
+        if car_speed < 350.0:
+            return 0.0
+
         target_goal_y = ARENA_EXTENT_Y if car.team == 0 else -ARENA_EXTENT_Y
         target_goal = np.array([0.0, target_goal_y, GOAL_HEIGHT * 0.5], dtype=np.float32)
         ball_to_goal = target_goal - arena.ball.pos
@@ -254,10 +259,16 @@ class AlignedShotReward(BaseReward):
             return 0.0
         unit_car_to_ball = car_to_ball / dist_to_ball
 
+        # Car must be driving toward the ball
+        speed_toward_ball = float(np.dot(car.vel, unit_car_to_ball))
+        if speed_toward_ball < 350.0:
+            return 0.0
+
         alignment = float(np.dot(unit_car_to_ball, unit_ball_to_goal))
         if alignment > 0.0 and dist_to_ball < 2000.0:
             dist_factor = max(0.0, 1.0 - (dist_to_ball / 2000.0))
-            return self.weight * alignment * dist_factor
+            norm_speed = min(1.0, speed_toward_ball / CAR_MAX_SPEED)
+            return self.weight * alignment * dist_factor * norm_speed
         return 0.0
 
 
