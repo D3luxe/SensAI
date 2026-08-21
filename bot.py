@@ -175,19 +175,16 @@ class SenseiRLBot(BaseAgent):
         car_speed = float(np.linalg.norm(car_state.vel))
         controller.handbrake = bool(act[7] > 0.6 and abs(steer_val) > 0.6 and car_speed < 1400.0 and not is_kickoff)
 
-        # Jump & Dodge State Handler (handles rising-edge pulse for second jump/flip)
-        raw_jump = bool(act[5] > 0.0)
+        # Direct 1-to-1 Jump mapping (eliminates involuntary spastic auto-flips)
+        controller.jump = bool(act[5] > 0.0)
+
+        # In-air vs on-ground orientation stabilization
         if is_on_ground:
-            self._air_timer = 0.0
-            self._jump_pulsed = False
-            controller.jump = raw_jump
+            # On ground: steering only (prevent residual pitch/roll from causing awkward aerial twitches on minor bumps)
+            controller.pitch = 0.0
+            controller.roll = 0.0
         else:
-            self._air_timer = getattr(self, "_air_timer", 0.0) + (1.0 / 60.0)
-            if self._air_timer > 0.08 and not getattr(self, "_jump_pulsed", False) and raw_jump:
-                # 1-frame release pulse so the game registers the dodge/second jump
-                controller.jump = False
-                self._jump_pulsed = True
-            else:
-                controller.jump = raw_jump
+            controller.pitch = float(np.clip(act[2], -1.0, 1.0))
+            controller.roll = float(np.clip(act[4], -1.0, 1.0))
 
         return controller

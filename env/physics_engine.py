@@ -273,7 +273,7 @@ class RocketSimArena:
                     cs = rsim.CarState()
                     cs.pos = rsim.Vec(bx + float(np.random.uniform(-300.0, 300.0)), max(-4800.0, by - offset_dist), 17.0)
                     cs.vel = rsim.Vec(0.0, float(np.random.uniform(400.0, 1000.0)), 0.0)
-                    cs.rot_mat = rsim.Angle(0.0, math.pi / 2, 0.0).as_rot_mat()
+                    cs.rot_mat = rsim.Angle(yaw=math.pi / 2, pitch=0.0, roll=0.0).as_rot_mat()
                     cs.boost = float(np.random.uniform(50.0, 100.0))
                     self._rsim_cars[i].set_state(cs)
 
@@ -282,7 +282,7 @@ class RocketSimArena:
                     cs = rsim.CarState()
                     cs.pos = rsim.Vec(float(np.random.uniform(-1000.0, 1000.0)), float(np.random.uniform(3000.0, 4500.0)), 17.0)
                     cs.vel = rsim.Vec(0.0, 0.0, 0.0)
-                    cs.rot_mat = rsim.Angle(0.0, -math.pi / 2, 0.0).as_rot_mat()
+                    cs.rot_mat = rsim.Angle(yaw=-math.pi / 2, pitch=0.0, roll=0.0).as_rot_mat()
                     cs.boost = float(np.random.uniform(33.0, 75.0))
                     self._rsim_cars[half_players + i].set_state(cs)
             else:
@@ -299,7 +299,7 @@ class RocketSimArena:
                     cs = rsim.CarState()
                     cs.pos = rsim.Vec(bx, by - dist, 17.0)
                     cs.vel = rsim.Vec(0.0, float(np.random.uniform(400.0, 900.0)), 0.0)
-                    cs.rot_mat = rsim.Angle(0.0, math.pi / 2, 0.0).as_rot_mat()
+                    cs.rot_mat = rsim.Angle(yaw=math.pi / 2, pitch=0.0, roll=0.0).as_rot_mat()
                     cs.boost = float(np.random.uniform(40.0, 80.0))
                     self._rsim_cars[i].set_state(cs)
 
@@ -308,7 +308,7 @@ class RocketSimArena:
                     cs = rsim.CarState()
                     cs.pos = rsim.Vec(bx, by + dist, 17.0)
                     cs.vel = rsim.Vec(0.0, -float(np.random.uniform(400.0, 900.0)), 0.0)
-                    cs.rot_mat = rsim.Angle(0.0, -math.pi / 2, 0.0).as_rot_mat()
+                    cs.rot_mat = rsim.Angle(yaw=-math.pi / 2, pitch=0.0, roll=0.0).as_rot_mat()
                     cs.boost = float(np.random.uniform(40.0, 80.0))
                     self._rsim_cars[half_players + i].set_state(cs)
 
