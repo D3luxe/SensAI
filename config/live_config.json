@@ -1,0 +1,31 @@
+{
+  "updated_at": 1787342755.0456567,
+  "learning_rate": 0.0003,
+  "ent_coef": 0.01,
+  "clip_range": 0.2,
+  "paused": false,
+  "save_checkpoint_requested": false,
+  "rewards": {
+    "goal_weight": 100.0,
+    "concede_weight": -100.0,
+    "save_weight": 50.0,
+    "touch_ball_weight": 10.0,
+    "kickoff_first_touch_bonus": 35.0,
+    "demo_bump_weight": 15.0,
+    "boost_steal_weight": 10.0,
+    "goal_speed_multi": 1.5,
+    "touch_aerial_flip_multi": 2.5,
+    "dodge_rush_multi": 1.5,
+    "ball_vel_toward_goal_weight": 0.08,
+    "speed_toward_ball_weight": 0.05,
+    "kickoff_weight": 0.05,
+    "face_ball_weight": 0.02,
+    "aligned_shot_weight": 0.05,
+    "aerial_height_weight": 0.05,
+    "behind_ball_weight": 0.03,
+    "possession_weight": 0.07,
+    "defensive_position_weight": 0.03,
+    "boost_management_weight": 0.05,
+    "velocity_weight": 0.02
+  }
+}

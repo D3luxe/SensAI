@@ -1,0 +1,179 @@
+"""
+RLBot In-Game Agent Wrapper for SenseiBot.
+Converts live Rocket League GameTickPacket data into model observations and returns controller inputs.
+"""
+
+from __future__ import annotations
+import os
+import math
+import numpy as np
+import torch
+
+try:
+    from rlbot.agents.base_agent import BaseAgent, SimpleControllerState
+    from rlbot.utils.structures.game_data_struct import GameTickPacket
+    RLBOT_AVAILABLE = True
+except ImportError:
+    RLBOT_AVAILABLE = False
+    BaseAgent = object
+    SimpleControllerState = object
+    GameTickPacket = object
+
+from agent.models import ActorCritic
+from env.observations import DefaultObservationBuilder
+from env.physics_engine import (
+    CarState, BallState, BoostPad,
+    ARENA_EXTENT_X, ARENA_EXTENT_Y, ARENA_HEIGHT_Z,
+    CAR_MAX_SPEED, BALL_MAX_SPEED, GOAL_HEIGHT
+)
+
+
+class SenseiRLBot(BaseAgent):
+    def __init__(self, name, team, index):
+        if RLBOT_AVAILABLE:
+            super().__init__(name, team, index)
+        self.name = name
+        self.team = team
+        self.index = index
+        self.model: torch.nn.Module | None = None
+        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        self.obs_builder = DefaultObservationBuilder(symmetric=True)
+
+    def initialize_agent(self):
+        # Look for model checkpoint
+        model_paths = [
+            "checkpoints/latest_model.pt",
+            "../checkpoints/latest_model.pt",
+            os.path.join(os.path.dirname(__file__), "checkpoints", "latest_model.pt")
+        ]
+        chosen_path = None
+        for p in model_paths:
+            if os.path.exists(p):
+                chosen_path = p
+                break
+
+        obs_dim = 64
+        act_dim = 8
+        self.model = ActorCritic(obs_dim=obs_dim, act_dim=act_dim, continuous_actions=True).to(self.device)
+
+        if chosen_path:
+            try:
+                ckpt = torch.load(chosen_path, map_location=self.device)
+                self.model.load_state_dict(ckpt["model_state_dict"])
+                self.model.eval()
+                print(f"[SenseiRLBot] Loaded in-game model from {chosen_path}")
+            except Exception as e:
+                print(f"[SenseiRLBot] Warning: Could not load weights from {chosen_path}: {e}")
+        else:
+            print("[SenseiRLBot] No checkpoint found, initializing with default model weights.")
+            self.model.eval()
+
+    def get_output(self, packet: GameTickPacket) -> SimpleControllerState:
+        controller = SimpleControllerState()
+
+        if not packet.game_info.is_round_active:
+            return controller
+
+        # Extract self car
+        my_car = packet.game_cars[self.index]
+        is_on_ground = bool(my_car.has_wheel_contact)
+        has_jump = is_on_ground or (not getattr(my_car, "jumped", False))
+        has_flip = not getattr(my_car, "double_jumped", False)
+
+        car_state = CarState(
+            id=self.index,
+            team=self.team,
+            pos=np.array([my_car.physics.location.x, my_car.physics.location.y, my_car.physics.location.z], dtype=np.float32),
+            vel=np.array([my_car.physics.velocity.x, my_car.physics.velocity.y, my_car.physics.velocity.z], dtype=np.float32),
+            rot=np.array([my_car.physics.rotation.pitch, my_car.physics.rotation.yaw, my_car.physics.rotation.roll], dtype=np.float32),
+            ang_vel=np.array([my_car.physics.angular_velocity.x, my_car.physics.angular_velocity.y, my_car.physics.angular_velocity.z], dtype=np.float32),
+            boost=float(my_car.boost),
+            on_ground=is_on_ground,
+            has_jump=has_jump,
+            has_flip=has_flip
+        )
+
+        # Extract ball
+        b_phys = packet.game_ball.physics
+        ball_state = BallState(
+            pos=np.array([b_phys.location.x, b_phys.location.y, b_phys.location.z], dtype=np.float32),
+            vel=np.array([b_phys.velocity.x, b_phys.velocity.y, b_phys.velocity.z], dtype=np.float32),
+            ang_vel=np.array([b_phys.angular_velocity.x, b_phys.angular_velocity.y, b_phys.angular_velocity.z], dtype=np.float32)
+        )
+
+        # Build dummy arena struct for obs builder
+        class MockArena:
+            def __init__(self, ball, cars):
+                self.ball = ball
+                self.cars = cars
+                self.boost_pads = BoostPad.create_standard_pads()
+
+        # Find opponent
+        opponents = []
+        for i in range(packet.num_cars):
+            if i != self.index:
+                opp_car = packet.game_cars[i]
+                opp_on_ground = bool(opp_car.has_wheel_contact)
+                opp_jump = opp_on_ground or (not getattr(opp_car, "jumped", False))
+                opp_flip = not getattr(opp_car, "double_jumped", False)
+                opponents.append(CarState(
+                    id=i,
+                    team=opp_car.team,
+                    pos=np.array([opp_car.physics.location.x, opp_car.physics.location.y, opp_car.physics.location.z], dtype=np.float32),
+                    vel=np.array([opp_car.physics.velocity.x, opp_car.physics.velocity.y, opp_car.physics.velocity.z], dtype=np.float32),
+                    rot=np.array([opp_car.physics.rotation.pitch, opp_car.physics.rotation.yaw, opp_car.physics.rotation.roll], dtype=np.float32),
+                    ang_vel=np.array([opp_car.physics.angular_velocity.x, opp_car.physics.angular_velocity.y, opp_car.physics.angular_velocity.z], dtype=np.float32),
+                    boost=float(opp_car.boost),
+                    on_ground=opp_on_ground,
+                    has_jump=opp_jump,
+                    has_flip=opp_flip
+                ))
+
+        arena = MockArena(ball_state, [car_state] + opponents)
+        obs = self.obs_builder.build_obs(car_state, arena)
+
+        # Model Inference
+        with torch.no_grad():
+            obs_tensor = torch.tensor(obs, dtype=torch.float32, device=self.device).unsqueeze(0)
+            action, _, _, _ = self.model.get_action_and_value(obs_tensor, deterministic=True)
+            act = action.squeeze(0).cpu().numpy()
+
+        # Action Mapping
+        # [throttle, steer, pitch, yaw, roll, jump, boost, handbrake]
+        raw_throttle = float(act[0])
+        steer_val = float(np.clip(act[1], -1.0, 1.0))
+
+        # Standard RLGym discrete deadband mapping for responsive drive feel
+        if raw_throttle > 0.05:
+            controller.throttle = 1.0
+        elif raw_throttle < -0.35:
+            controller.throttle = -1.0
+        else:
+            controller.throttle = 0.0
+
+        controller.steer = steer_val
+        controller.pitch = float(np.clip(act[2], -1.0, 1.0))
+        controller.yaw = float(np.clip(act[3], -1.0, 1.0))
+        controller.roll = float(np.clip(act[4], -1.0, 1.0))
+        controller.boost = bool(act[6] > 0.0 and (raw_throttle > 0.0 or not is_on_ground))
+
+        # Handbrake: only engage for sharp low-to-medium speed turns to prevent involuntary high-speed spinouts
+        car_speed = float(np.linalg.norm(car_state.vel))
+        controller.handbrake = bool(act[7] > 0.6 and abs(steer_val) > 0.6 and car_speed < 1400.0)
+
+        # Jump & Dodge State Handler (handles rising-edge pulse for second jump/flip)
+        raw_jump = bool(act[5] > 0.0)
+        if is_on_ground:
+            self._air_timer = 0.0
+            self._jump_pulsed = False
+            controller.jump = raw_jump
+        else:
+            self._air_timer = getattr(self, "_air_timer", 0.0) + (1.0 / 60.0)
+            if self._air_timer > 0.08 and not getattr(self, "_jump_pulsed", False) and raw_jump:
+                # 1-frame release pulse so the game registers the dodge/second jump
+                controller.jump = False
+                self._jump_pulsed = True
+            else:
+                controller.jump = raw_jump
+
+        return controller
