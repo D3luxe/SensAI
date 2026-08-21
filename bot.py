@@ -21,6 +21,7 @@ except ImportError:
 
 from agent.models import ActorCritic
 from env.observations import DefaultObservationBuilder
+from env.actions import DiscreteActionParser, ContinuousActionParser
 from env.physics_engine import (
     CarState, BallState, BoostPad,
     ARENA_EXTENT_X, ARENA_EXTENT_Y, ARENA_HEIGHT_Z,

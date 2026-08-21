@@ -18,7 +18,7 @@ from env.physics_engine import (
     CAR_LENGTH, CAR_WIDTH, BALL_RADIUS
 )
 from env.observations import DefaultObservationBuilder
-from env.actions import ContinuousActionParser
+from env.actions import ContinuousActionParser, DiscreteActionParser
 from env.rewards import RewardManager
 from agent.models import ActorCritic
 import json
