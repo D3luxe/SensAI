@@ -157,9 +157,23 @@ class SenseiRLBot(BaseAgent):
         controller.roll = float(np.clip(act[4], -1.0, 1.0))
         controller.boost = bool(act[6] > 0.0 and (raw_throttle > 0.0 or not is_on_ground))
 
+        # Kickoff strike-through commitment (ensures bots strike through the kickoff ball)
+        ball_pos = ball_state.pos
+        ball_speed = float(np.linalg.norm(ball_state.vel))
+        is_kickoff = (abs(ball_pos[0]) < 50.0 and abs(ball_pos[1]) < 50.0 and ball_speed < 100.0)
+        
+        car_to_ball = ball_pos - car_state.pos
+        dist_to_ball = float(np.linalg.norm(car_to_ball))
+        if dist_to_ball > 1e-4:
+            unit_to_ball = car_to_ball / dist_to_ball
+            fwd_align = float(np.dot(car_state.get_forward_vector(), unit_to_ball))
+            if is_kickoff and fwd_align > 0.3:
+                controller.throttle = 1.0
+                controller.boost = bool(car_state.boost > 0)
+
         # Handbrake: only engage for sharp low-to-medium speed turns to prevent involuntary high-speed spinouts
         car_speed = float(np.linalg.norm(car_state.vel))
-        controller.handbrake = bool(act[7] > 0.6 and abs(steer_val) > 0.6 and car_speed < 1400.0)
+        controller.handbrake = bool(act[7] > 0.6 and abs(steer_val) > 0.6 and car_speed < 1400.0 and not is_kickoff)
 
         # Jump & Dodge State Handler (handles rising-edge pulse for second jump/flip)
         raw_jump = bool(act[5] > 0.0)

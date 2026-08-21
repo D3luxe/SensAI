@@ -310,12 +310,20 @@ class BehindBallReward(BaseReward):
 
 class PossessionReward(BaseReward):
     """
-    Rewards close-proximity dribbling and speed-matching.
+    Rewards close-proximity dribbling and speed-matching when actively carrying the ball.
+    Strictly gates out stationary ball/car parking to eliminate the standstill exploit.
     """
     def __init__(self, weight: float = 0.04):
         super().__init__(weight)
 
     def get_reward(self, car: CarState, arena: RocketSimArena, action: np.ndarray, is_goal: bool, scoring_team: Optional[int]) -> float:
+        ball_speed = float(np.linalg.norm(arena.ball.vel))
+        car_speed = float(np.linalg.norm(car.vel))
+        
+        # Ball and car must both be actively moving across the pitch (> 200 uu/s) to count as possession
+        if ball_speed < 200.0 or car_speed < 200.0:
+            return 0.0
+
         dist = float(np.linalg.norm(car.pos - arena.ball.pos))
         if dist < 350.0:
             rel_speed = float(np.linalg.norm(car.vel - arena.ball.vel))
