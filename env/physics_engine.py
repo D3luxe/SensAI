@@ -5,9 +5,22 @@ Simulates car kinematics, ball aerodynamics, arena boundaries, collisions, boost
 
 from __future__ import annotations
 import math
+import os
 import numpy as np
 from dataclasses import dataclass, field
 from typing import List, Tuple, Dict, Any, Optional
+
+try:
+    import RocketSim as rsim
+    # Initialize RocketSim once
+    try:
+        rsim.init()
+        ROCKETSIM_AVAILABLE = True
+    except Exception as e:
+        print(f"[RocketSim] Init note: {e}")
+        ROCKETSIM_AVAILABLE = False
+except ImportError:
+    ROCKETSIM_AVAILABLE = False
 
 # Arena Constants (Unreal Units)
 ARENA_EXTENT_X = 4096.0
@@ -157,6 +170,7 @@ class CarState:
 class RocketSimArena:
     """
     Simulates a full Rocket League arena step by step with car controls and ball physics.
+    Utilizes native C++ Bullet Physics via RocketSim when available, with pure-Python fallback.
     """
     def __init__(self, num_players: int = 2, game_mode: str = "1v1"):
         self.num_players = num_players
@@ -166,6 +180,37 @@ class RocketSimArena:
         self.boost_pads = BoostPad.create_standard_pads()
         self.scored_team: Optional[int] = None
         self.step_count = 0
+
+        self._use_rsim = False
+        self._rsim_arena = None
+        self._rsim_cars = []
+
+        if ROCKETSIM_AVAILABLE:
+            try:
+                self._rsim_arena = rsim.Arena(rsim.GameMode.SOCCAR)
+                half = self.num_players // 2
+                for _ in range(half):
+                    self._rsim_cars.append(self._rsim_arena.add_car(rsim.Team.BLUE, rsim.CarConfig(rsim.CarConfig.OCTANE)))
+                for _ in range(half):
+                    self._rsim_cars.append(self._rsim_arena.add_car(rsim.Team.ORANGE, rsim.CarConfig(rsim.CarConfig.OCTANE)))
+
+                def on_goal_cb(**kwargs):
+                    st = kwargs.get("scoring_team")
+                    self.scored_team = 0 if st == rsim.Team.BLUE else 1
+
+                def on_touch_cb(**kwargs):
+                    car_obj = kwargs.get("car")
+                    if car_obj:
+                        for c in self.cars:
+                            if c.id == car_obj.id - 1:
+                                c.ball_touches += 1
+
+                self._rsim_arena.set_goal_score_callback(on_goal_cb)
+                self._rsim_arena.set_ball_touch_callback(on_touch_cb)
+                self._use_rsim = True
+            except Exception as e:
+                self._use_rsim = False
+
         self._init_cars()
 
     def _init_cars(self):
@@ -195,11 +240,86 @@ class RocketSimArena:
     def reset(self, random_kickoff: bool = True):
         self.step_count = 0
         self.scored_team = None
+
+        if self._use_rsim and self._rsim_arena:
+            # Native C++ RocketSim Reset
+            half_players = self.num_players // 2
+            spawn_mode = "kickoff"
+            if random_kickoff:
+                roll = np.random.rand()
+                if roll < 0.35:
+                    spawn_mode = "kickoff"
+                elif roll < 0.75:
+                    spawn_mode = "striking"
+                else:
+                    spawn_mode = "contested"
+
+            if spawn_mode == "kickoff":
+                self._rsim_arena.reset_kickoff()
+            elif spawn_mode == "striking":
+                # Ball setup
+                bx = float(np.random.uniform(-1800.0, 1800.0))
+                by = float(np.random.uniform(-1500.0, 1500.0))
+                bz = float(np.random.uniform(BALL_RADIUS, 350.0))
+                b_vel_y = float(np.random.uniform(-400.0, 400.0))
+                bs = rsim.BallState()
+                bs.pos = rsim.Vec(bx, by, bz)
+                bs.vel = rsim.Vec(float(np.random.uniform(-300.0, 300.0)), b_vel_y, float(np.random.uniform(0.0, 300.0)))
+                self._rsim_arena.ball.set_state(bs)
+
+                # Blue car
+                for i in range(half_players):
+                    offset_dist = float(np.random.uniform(600.0, 1200.0))
+                    cs = rsim.CarState()
+                    cs.pos = rsim.Vec(bx + float(np.random.uniform(-300.0, 300.0)), max(-4800.0, by - offset_dist), 17.0)
+                    cs.vel = rsim.Vec(0.0, float(np.random.uniform(400.0, 1000.0)), 0.0)
+                    cs.rot_mat = rsim.Angle(0.0, math.pi / 2, 0.0).as_rot_mat()
+                    cs.boost = float(np.random.uniform(50.0, 100.0))
+                    self._rsim_cars[i].set_state(cs)
+
+                # Orange car
+                for i in range(half_players):
+                    cs = rsim.CarState()
+                    cs.pos = rsim.Vec(float(np.random.uniform(-1000.0, 1000.0)), float(np.random.uniform(3000.0, 4500.0)), 17.0)
+                    cs.vel = rsim.Vec(0.0, 0.0, 0.0)
+                    cs.rot_mat = rsim.Angle(0.0, -math.pi / 2, 0.0).as_rot_mat()
+                    cs.boost = float(np.random.uniform(33.0, 75.0))
+                    self._rsim_cars[half_players + i].set_state(cs)
+            else:
+                # Contested setup
+                bx = float(np.random.uniform(-1200.0, 1200.0))
+                by = float(np.random.uniform(-800.0, 800.0))
+                bs = rsim.BallState()
+                bs.pos = rsim.Vec(bx, by, BALL_RADIUS)
+                bs.vel = rsim.Vec(0.0, 0.0, 0.0)
+                self._rsim_arena.ball.set_state(bs)
+
+                for i in range(half_players):
+                    dist = float(np.random.uniform(700.0, 1200.0))
+                    cs = rsim.CarState()
+                    cs.pos = rsim.Vec(bx, by - dist, 17.0)
+                    cs.vel = rsim.Vec(0.0, float(np.random.uniform(400.0, 900.0)), 0.0)
+                    cs.rot_mat = rsim.Angle(0.0, math.pi / 2, 0.0).as_rot_mat()
+                    cs.boost = float(np.random.uniform(40.0, 80.0))
+                    self._rsim_cars[i].set_state(cs)
+
+                for i in range(half_players):
+                    dist = float(np.random.uniform(700.0, 1200.0))
+                    cs = rsim.CarState()
+                    cs.pos = rsim.Vec(bx, by + dist, 17.0)
+                    cs.vel = rsim.Vec(0.0, -float(np.random.uniform(400.0, 900.0)), 0.0)
+                    cs.rot_mat = rsim.Angle(0.0, -math.pi / 2, 0.0).as_rot_mat()
+                    cs.boost = float(np.random.uniform(40.0, 80.0))
+                    self._rsim_cars[half_players + i].set_state(cs)
+
+            self._sync_from_rsim()
+            return
+
+        # Pure-Python Fallback Reset
         for pad in self.boost_pads:
             pad.is_active = True
             pad.cooldown_timer = 0.0
 
-        # Kickoff spawns
         kickoff_spawns_team0 = [
             (0.0, -4608.0, math.pi / 2),
             (-256.0, -3840.0, math.pi / 2),
@@ -216,146 +336,95 @@ class RocketSimArena:
         ]
 
         half_players = self.num_players // 2
+        self.ball.reset()
+        spawn_idx = np.random.randint(len(kickoff_spawns_team0)) if random_kickoff else 0
 
-        # Choose State Initialization Mode
-        # If random_kickoff is True: 35% Kickoff, 40% Shooting/Striking, 25% Contested 50-50
-        spawn_mode = "kickoff"
-        if random_kickoff:
-            roll = np.random.rand()
-            if roll < 0.35:
-                spawn_mode = "kickoff"
-            elif roll < 0.75:
-                spawn_mode = "striking"
-            else:
-                spawn_mode = "contested"
+        for i in range(half_players):
+            idx = (spawn_idx + i) % len(kickoff_spawns_team0)
+            x, y, yaw = kickoff_spawns_team0[idx]
+            self.cars[i].pos = np.array([x, y, 17.0], dtype=np.float32)
+            self.cars[i].vel = np.zeros(3, dtype=np.float32)
+            self.cars[i].rot = np.array([0.0, yaw, 0.0], dtype=np.float32)
+            self.cars[i].ang_vel = np.zeros(3, dtype=np.float32)
+            self.cars[i].boost = 33.3
+            self.cars[i].on_ground = True
+            self.cars[i].has_jump = True
+            self.cars[i].has_flip = True
+            self.cars[i].ball_touches = 0
 
-        if spawn_mode == "striking":
-            # Ball in midfield with forward trajectory
-            bx = float(np.random.uniform(-1800.0, 1800.0))
-            by = float(np.random.uniform(-1500.0, 1500.0))
-            bz = float(np.random.uniform(BALL_RADIUS, 350.0))
-            b_vel_y = float(np.random.uniform(-400.0, 400.0))
-            self.ball.pos = np.array([bx, by, bz], dtype=np.float32)
-            self.ball.vel = np.array([float(np.random.uniform(-300.0, 300.0)), b_vel_y, float(np.random.uniform(0.0, 300.0))], dtype=np.float32)
-            self.ball.ang_vel = np.zeros(3, dtype=np.float32)
+        for i in range(half_players):
+            car_idx = half_players + i
+            idx = (spawn_idx + i) % len(kickoff_spawns_team1)
+            x, y, yaw = kickoff_spawns_team1[idx]
+            self.cars[car_idx].pos = np.array([x, y, 17.0], dtype=np.float32)
+            self.cars[car_idx].vel = np.zeros(3, dtype=np.float32)
+            self.cars[car_idx].rot = np.array([0.0, yaw, 0.0], dtype=np.float32)
+            self.cars[car_idx].ang_vel = np.zeros(3, dtype=np.float32)
+            self.cars[car_idx].boost = 33.3
+            self.cars[car_idx].on_ground = True
+            self.cars[car_idx].has_jump = True
+            self.cars[car_idx].has_flip = True
+            self.cars[car_idx].ball_touches = 0
 
-            # Team 0 car behind ball pressing forward
-            for i in range(half_players):
-                offset_dist = float(np.random.uniform(600.0, 1200.0))
-                self.cars[i].pos = np.array([bx + np.random.uniform(-300.0, 300.0), max(-4800.0, by - offset_dist), 17.0], dtype=np.float32)
-                self.cars[i].vel = np.array([0.0, float(np.random.uniform(400.0, 1000.0)), 0.0], dtype=np.float32)
-                self.cars[i].rot = np.array([0.0, math.pi / 2, 0.0], dtype=np.float32)
-                self.cars[i].boost = float(np.random.uniform(50.0, 100.0))
-                self.cars[i].on_ground = True
-                self.cars[i].has_jump = True
-                self.cars[i].has_flip = True
-                self.cars[i].is_jumping = False
-                self.cars[i].jump_timer = 0.0
-                self.cars[i].air_timer = 0.0
-                self.cars[i].ball_touches = 0
-                self.cars[i].demoed = False
+    def _sync_from_rsim(self):
+        """Synchronizes Python CarState and BallState from C++ RocketSim."""
+        b_state = self._rsim_arena.ball.get_state()
+        self.ball.pos = b_state.pos.as_numpy().astype(np.float32)
+        self.ball.vel = b_state.vel.as_numpy().astype(np.float32)
+        self.ball.ang_vel = b_state.ang_vel.as_numpy().astype(np.float32)
 
-            # Team 1 car in defending position
-            for i in range(half_players):
-                car_idx = half_players + i
-                self.cars[car_idx].pos = np.array([float(np.random.uniform(-1000.0, 1000.0)), float(np.random.uniform(3000.0, 4500.0)), 17.0], dtype=np.float32)
-                self.cars[car_idx].vel = np.zeros(3, dtype=np.float32)
-                self.cars[car_idx].rot = np.array([0.0, -math.pi / 2, 0.0], dtype=np.float32)
-                self.cars[car_idx].boost = float(np.random.uniform(33.0, 75.0))
-                self.cars[car_idx].on_ground = True
-                self.cars[car_idx].has_jump = True
-                self.cars[car_idx].has_flip = True
-                self.cars[car_idx].is_jumping = False
-                self.cars[car_idx].jump_timer = 0.0
-                self.cars[car_idx].air_timer = 0.0
-                self.cars[car_idx].ball_touches = 0
-                self.cars[car_idx].demoed = False
+        for i, r_car in enumerate(self._rsim_cars):
+            c_state = r_car.get_state()
+            ang = c_state.rot_mat.as_angle()
+            car = self.cars[i]
+            car.pos = c_state.pos.as_numpy().astype(np.float32)
+            car.vel = c_state.vel.as_numpy().astype(np.float32)
+            car.rot = np.array([ang.pitch, ang.yaw, ang.roll], dtype=np.float32)
+            car.ang_vel = c_state.ang_vel.as_numpy().astype(np.float32)
+            car.boost = float(c_state.boost)
+            car.on_ground = bool(c_state.is_on_ground)
+            car.has_jump = bool(not c_state.has_jumped or c_state.is_on_ground)
+            car.has_flip = bool(not c_state.has_flipped and not c_state.is_on_ground)
+            car.is_supersonic = bool(c_state.is_supersonic)
+            car.demoed = bool(c_state.is_demoed)
 
-        elif spawn_mode == "contested":
-            # Midfield 50-50 challenge
-            bx = float(np.random.uniform(-1200.0, 1200.0))
-            by = float(np.random.uniform(-800.0, 800.0))
-            self.ball.pos = np.array([bx, by, BALL_RADIUS], dtype=np.float32)
-            self.ball.vel = np.zeros(3, dtype=np.float32)
-            self.ball.ang_vel = np.zeros(3, dtype=np.float32)
-
-            for i in range(half_players):
-                dist = float(np.random.uniform(700.0, 1200.0))
-                self.cars[i].pos = np.array([bx, by - dist, 17.0], dtype=np.float32)
-                self.cars[i].vel = np.array([0.0, float(np.random.uniform(400.0, 900.0)), 0.0], dtype=np.float32)
-                self.cars[i].rot = np.array([0.0, math.pi / 2, 0.0], dtype=np.float32)
-                self.cars[i].boost = float(np.random.uniform(40.0, 80.0))
-                self.cars[i].on_ground = True
-                self.cars[i].has_jump = True
-                self.cars[i].has_flip = True
-                self.cars[i].is_jumping = False
-                self.cars[i].jump_timer = 0.0
-                self.cars[i].air_timer = 0.0
-                self.cars[i].ball_touches = 0
-                self.cars[i].demoed = False
-
-            for i in range(half_players):
-                car_idx = half_players + i
-                dist = float(np.random.uniform(700.0, 1200.0))
-                self.cars[car_idx].pos = np.array([bx, by + dist, 17.0], dtype=np.float32)
-                self.cars[car_idx].vel = np.array([0.0, -float(np.random.uniform(400.0, 900.0)), 0.0], dtype=np.float32)
-                self.cars[car_idx].rot = np.array([0.0, -math.pi / 2, 0.0], dtype=np.float32)
-                self.cars[car_idx].boost = float(np.random.uniform(40.0, 80.0))
-                self.cars[car_idx].on_ground = True
-                self.cars[car_idx].has_jump = True
-                self.cars[car_idx].has_flip = True
-                self.cars[car_idx].is_jumping = False
-                self.cars[car_idx].jump_timer = 0.0
-                self.cars[car_idx].air_timer = 0.0
-                self.cars[car_idx].ball_touches = 0
-                self.cars[car_idx].demoed = False
-
-        else:
-            # Standard Kickoff
-            self.ball.reset()
-            spawn_idx = np.random.randint(len(kickoff_spawns_team0)) if random_kickoff else 0
-
-            for i in range(half_players):
-                idx = (spawn_idx + i) % len(kickoff_spawns_team0)
-                x, y, yaw = kickoff_spawns_team0[idx]
-                self.cars[i].pos = np.array([x, y, 17.0], dtype=np.float32)
-                self.cars[i].vel = np.zeros(3, dtype=np.float32)
-                self.cars[i].rot = np.array([0.0, yaw, 0.0], dtype=np.float32)
-                self.cars[i].ang_vel = np.zeros(3, dtype=np.float32)
-                self.cars[i].boost = 33.3
-                self.cars[i].on_ground = True
-                self.cars[i].has_jump = True
-                self.cars[i].has_flip = True
-                self.cars[i].is_jumping = False
-                self.cars[i].jump_timer = 0.0
-                self.cars[i].air_timer = 0.0
-                self.cars[i].ball_touches = 0
-                self.cars[i].demoed = False
-
-            for i in range(half_players):
-                car_idx = half_players + i
-                idx = (spawn_idx + i) % len(kickoff_spawns_team1)
-                x, y, yaw = kickoff_spawns_team1[idx]
-                self.cars[car_idx].pos = np.array([x, y, 17.0], dtype=np.float32)
-                self.cars[car_idx].vel = np.zeros(3, dtype=np.float32)
-                self.cars[car_idx].rot = np.array([0.0, yaw, 0.0], dtype=np.float32)
-                self.cars[car_idx].ang_vel = np.zeros(3, dtype=np.float32)
-                self.cars[car_idx].boost = 33.3
-                self.cars[car_idx].on_ground = True
-                self.cars[car_idx].has_jump = True
-                self.cars[car_idx].has_flip = True
-                self.cars[car_idx].is_jumping = False
-                self.cars[car_idx].jump_timer = 0.0
-                self.cars[car_idx].air_timer = 0.0
-                self.cars[car_idx].ball_touches = 0
-                self.cars[car_idx].demoed = False
+        # Synchronize boost pads
+        r_pads = self._rsim_arena.get_boost_pads()
+        for i, pad in enumerate(self.boost_pads):
+            if i < len(r_pads):
+                p_state = r_pads[i].get_state()
+                pad.is_active = bool(p_state.is_active)
+                pad.cooldown_timer = float(p_state.cooldown)
 
     def step(self, actions: List[np.ndarray], dt: float = 1.0 / 15.0) -> Tuple[bool, Optional[int]]:
         """
-        Step simulation by dt seconds with high-precision 120 Hz sub-stepping.
-        Guarantees zero tunneling on ball collisions and smooth continuous physics.
+        Step simulation by dt seconds.
+        Uses C++ RocketSim native Bullet Physics when available.
         """
         self.step_count += 1
+
+        if self._use_rsim and self._rsim_arena:
+            self.scored_team = None
+            ticks = max(1, int(round(dt * 120.0)))
+            for i, r_car in enumerate(self._rsim_cars):
+                act = actions[i] if i < len(actions) else np.zeros(8, dtype=np.float32)
+                ctrl = rsim.CarControls(
+                    throttle=float(act[0]),
+                    steer=float(act[1]),
+                    pitch=float(act[2]),
+                    yaw=float(act[3]),
+                    roll=float(act[4]),
+                    jump=bool(act[5] > 0.0),
+                    boost=bool(act[6] > 0.0),
+                    handbrake=bool(act[7] > 0.5)
+                )
+                r_car.set_controls(ctrl)
+
+            self._rsim_arena.step(ticks)
+            self._sync_from_rsim()
+            return (self.scored_team is not None), self.scored_team
+
+        # Pure Python Fallback Step
         substeps = max(1, int(round(dt * 120.0)))
         sub_dt = dt / substeps
 
@@ -427,20 +496,16 @@ class RocketSimArena:
                     else:
                         car.vel += fwd * (CAR_DRIVE_ACCEL * 0.5 * throttle * dt)
                 else:
-                    # Coasting friction
                     car.vel *= max(0.0, 1.0 - 0.5 * dt)
 
-                # Steering (positive steer turns right / clockwise)
                 turn_rate = (3.5 - 2.0 * (speed / CAR_MAX_SPEED)) * steer
                 if handbrake:
                     turn_rate *= 1.8
-                    # Side friction reduction for drifting
                     right = car.get_right_vector()
                     side_vel = np.dot(car.vel, right)
                     car.vel -= right * (side_vel * 0.4)
                 car.rot[1] -= turn_rate * dt
 
-                # Jump initiation
                 if jump and car.has_jump:
                     car.on_ground = False
                     car.is_jumping = True
@@ -448,24 +513,19 @@ class RocketSimArena:
                     car.vel[2] += CAR_JUMP_INITIAL_VEL
                     car.has_jump = False
             else:
-                # In air
                 car.air_timer += dt
-                # Gravity
                 car.vel[2] += GRAVITY * dt
 
-                # Jump hold acceleration
                 if jump and car.is_jumping and car.jump_timer > 0:
                     car.vel[2] += CAR_JUMP_ACCEL * dt
                     car.jump_timer -= dt
                 else:
                     car.is_jumping = False
 
-                # Aerial rotation (pitch up > 0, yaw right > 0, roll right > 0)
                 car.rot[0] += pitch * CAR_AIR_PITCH_TORQUE * dt
                 car.rot[1] -= yaw * CAR_AIR_YAW_TORQUE * dt
                 car.rot[2] += roll * CAR_AIR_ROLL_TORQUE * dt
 
-                # Dodge / Flip on jump re-press (rising edge) or first air jump
                 jump_edge = jump and not car.prev_jump
                 if jump_edge and car.has_flip and not car.is_jumping and car.air_timer < 1.25:
                     fwd_input = throttle if abs(throttle) >= abs(pitch) else -pitch
@@ -480,21 +540,17 @@ class RocketSimArena:
                         if dodge_norm > 1e-3:
                             dodge_dir /= dodge_norm
                             car.vel += dodge_dir * CAR_DODGE_IMPULSE
-                            # Flip angular velocity boost
                             car.rot[0] += fwd_input * 1.5
                             car.rot[2] += side_input * 1.5
 
             car.prev_jump = jump
 
-            # Clamp car speed
             curr_speed = float(np.linalg.norm(car.vel))
             if curr_speed > CAR_MAX_SPEED:
                 car.vel = (car.vel / curr_speed) * CAR_MAX_SPEED
 
-            # Position integration
             car.pos += car.vel * dt
 
-            # Floor collision
             if car.pos[2] <= 17.0:
                 car.pos[2] = 17.0
                 car.vel[2] = max(0.0, car.vel[2])
@@ -502,12 +558,10 @@ class RocketSimArena:
                 car.rot[0] = 0.0
                 car.rot[2] = 0.0
 
-            # Ceiling collision
             if car.pos[2] >= ARENA_HEIGHT_Z - 17.0:
                 car.pos[2] = ARENA_HEIGHT_Z - 17.0
                 car.vel[2] = min(0.0, car.vel[2])
 
-            # Arena wall collisions for car
             car_corner = abs(car.pos[0]) + abs(car.pos[1])
             if car_corner > CORNER_LIMIT - 60.0:
                 sign_x = math.copysign(1.0, car.pos[0])
@@ -522,12 +576,10 @@ class RocketSimArena:
                 car.pos[0] = math.copysign(ARENA_EXTENT_X - 60.0, car.pos[0])
                 car.vel[0] *= -0.2
             elif abs(car.pos[1]) > ARENA_EXTENT_Y - 60.0:
-                # Check goal net opening
                 if not (abs(car.pos[0]) < GOAL_HALF_WIDTH and car.pos[2] < GOAL_HEIGHT):
                     car.pos[1] = math.copysign(ARENA_EXTENT_Y - 60.0, car.pos[1])
                     car.vel[1] *= -0.2
 
-            # Boost pad collection
             for pad in self.boost_pads:
                 if pad.is_active and np.linalg.norm(car.pos - pad.pos) < 160.0:
                     if car.boost < 100.0:
@@ -544,7 +596,6 @@ class RocketSimArena:
 
         self.ball.pos += self.ball.vel * dt
 
-        # Ball Floor & Ceiling Bounce
         if self.ball.pos[2] <= BALL_RADIUS:
             self.ball.pos[2] = BALL_RADIUS
             self.ball.vel[2] = -self.ball.vel[2] * BALL_RESTITUTION
@@ -552,7 +603,6 @@ class RocketSimArena:
             self.ball.pos[2] = ARENA_HEIGHT_Z - BALL_RADIUS
             self.ball.vel[2] = -self.ball.vel[2] * BALL_RESTITUTION
 
-        # Ball 45-Degree Slanted Corner Wall Bounce
         corner_val = abs(self.ball.pos[0]) + abs(self.ball.pos[1])
         if corner_val >= CORNER_LIMIT - BALL_RADIUS:
             sign_x = math.copysign(1.0, self.ball.pos[0])
@@ -564,48 +614,38 @@ class RocketSimArena:
             if vel_in_norm < 0:
                 self.ball.vel -= (1.0 + BALL_RESTITUTION) * vel_in_norm * c_norm
 
-        # Ball Side Wall Bounce
         elif abs(self.ball.pos[0]) >= ARENA_EXTENT_X - BALL_RADIUS:
             self.ball.pos[0] = math.copysign(ARENA_EXTENT_X - BALL_RADIUS, self.ball.pos[0])
             self.ball.vel[0] = -self.ball.vel[0] * BALL_RESTITUTION
 
-        # Ball Back Wall & Goal Scoring Check
         elif abs(self.ball.pos[1]) >= ARENA_EXTENT_Y - BALL_RADIUS:
             in_goal_x = abs(self.ball.pos[0]) < (GOAL_HALF_WIDTH - BALL_RADIUS * 0.5)
             in_goal_z = self.ball.pos[2] < (GOAL_HEIGHT - BALL_RADIUS * 0.5)
 
             if in_goal_x and in_goal_z:
-                # Goal scored!
                 if self.ball.pos[1] > 0:
-                    # Scored in Orange Goal -> Team 0 (Blue) scores!
                     self.scored_team = 0
                     return True, 0
                 else:
-                    # Scored in Blue Goal -> Team 1 (Orange) scores!
                     self.scored_team = 1
                     return True, 1
             else:
-                # Rebound from back wall
                 self.ball.pos[1] = math.copysign(ARENA_EXTENT_Y - BALL_RADIUS, self.ball.pos[1])
                 self.ball.vel[1] = -self.ball.vel[1] * BALL_RESTITUTION
 
-        # 4. Ball-Car Collisions
         for car in self.cars:
             if car.demoed:
                 continue
             delta = self.ball.pos - car.pos
             dist = float(np.linalg.norm(delta))
-            min_dist = BALL_RADIUS + 75.0  # Octane hitbox collision radius (92.75 + 75.0 = 167.75 uu)
+            min_dist = BALL_RADIUS + 75.0
             if dist < min_dist and dist > 1e-4:
                 car.ball_touches += 1
                 normal = delta / dist
-                # Push ball outside car
                 self.ball.pos = car.pos + normal * min_dist
-                # Standard Rocket League elastic collision impulse
                 relative_vel = self.ball.vel - car.vel
                 vel_along_normal = float(np.dot(relative_vel, normal))
                 if vel_along_normal < 0:
-                    # Normal elastic collision impulse + Rocket League car impact bonus
                     restitution_impulse = -(1.0 + BALL_RESTITUTION) * vel_along_normal
                     car_hit_power = 200.0 + float(np.linalg.norm(car.vel)) * 0.4
                     self.ball.vel += normal * (restitution_impulse + car_hit_power)
