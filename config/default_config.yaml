@@ -3,6 +3,8 @@ environment:
   max_episode_steps: 3000
   num_envs: 64
   tick_skip: 8
+model:
+  continuous_actions: false
 hyperparameters:
   batch_size: 8192
   clip_range: 0.2
@@ -23,20 +25,20 @@ rewards:
   aligned_shot_weight: 25.0
   ball_vel_toward_goal_weight: 0.08
   behind_ball_weight: 0.03
-  boost_management_weight: 0.05
+  boost_management_weight: 0.08
   boost_steal_weight: 10.0
   concede_weight: -100.0
   defensive_position_weight: 0.03
   demo_bump_weight: 15.0
   dodge_rush_multi: 1.5
-  face_ball_weight: 0.02
+  face_ball_weight: 0.07
   goal_speed_multi: 1.5
   goal_weight: 100.0
   kickoff_first_touch_bonus: 35.0
   kickoff_weight: 0.05
-  possession_weight: 0.07
+  possession_weight: 0.1
   save_weight: 50.0
   speed_toward_ball_weight: 0.05
   touch_aerial_flip_multi: 2.5
   touch_ball_weight: 10.0
-  velocity_weight: 0.02
+  velocity_weight: 0.045

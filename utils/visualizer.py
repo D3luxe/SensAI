@@ -92,8 +92,9 @@ def load_model(model_path: Optional[str], device: str = "cpu") -> Optional[Actor
         try:
             ckpt = torch.load(model_path, map_location=device)
             obs_dim = ckpt.get("obs_dim", 64)
-            act_dim = ckpt.get("act_dim", 8)
-            model = ActorCritic(obs_dim=obs_dim, act_dim=act_dim, continuous_actions=True).to(device)
+            continuous = ckpt.get("continuous_actions", True)
+            act_dim = ckpt.get("act_dim", 8 if continuous else 19)
+            model = ActorCritic(obs_dim=obs_dim, act_dim=act_dim, continuous_actions=continuous).to(device)
             model.load_state_dict(ckpt["model_state_dict"])
             model.eval()
             return model
@@ -240,7 +241,11 @@ def simulate_match(
             with torch.no_grad():
                 obs_t = torch.tensor(obs0, dtype=torch.float32, device=device).unsqueeze(0)
                 act0, _, _, _ = blue_model.get_action_and_value(obs_t, deterministic=True)
-                act0 = act0.squeeze(0).cpu().numpy()
+                if blue_model.continuous_actions:
+                    act0 = act0.squeeze(0).cpu().numpy()
+                else:
+                    act0_idx = int(act0.squeeze().cpu().item())
+                    act0 = DiscreteActionParser().parse_actions(act0_idx)
         else:
             diff = arena.ball.pos - arena.cars[0].pos
             fwd = arena.cars[0].get_forward_vector()
@@ -253,12 +258,16 @@ def simulate_match(
             with torch.no_grad():
                 obs_t1 = torch.tensor(obs1, dtype=torch.float32, device=device).unsqueeze(0)
                 act1, _, _, _ = orange_model.get_action_and_value(obs_t1, deterministic=True)
-                act1 = act1.squeeze(0).cpu().numpy()
+                if orange_model.continuous_actions:
+                    act1 = act1.squeeze(0).cpu().numpy()
+                else:
+                    act1_idx = int(act1.squeeze().cpu().item())
+                    act1 = DiscreteActionParser().parse_actions(act1_idx)
         else:
             diff_o = arena.ball.pos - arena.cars[1].pos
             fwd_o = arena.cars[1].get_forward_vector()
             steer_o = np.clip(diff_o[0] * fwd_o[1] - diff_o[1] * fwd_o[0], -1.0, 1.0)
-            act1 = np.array([0.8, steer_o, 0.0, 0.0, 0.0, 0.0, 0.5, 0.0], dtype=np.float32)
+            act1 = np.array([1.0, steer_o, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0], dtype=np.float32)
 
         actions = [act0, act1]
         goal, scoring_team = arena.step(actions, dt=1.0 / 15.0)

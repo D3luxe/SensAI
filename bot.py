@@ -53,19 +53,26 @@ class SenseiRLBot(BaseAgent):
                 break
 
         obs_dim = 64
+        self.discrete_parser = DiscreteActionParser()
+        self.continuous_actions = True
         act_dim = 8
-        self.model = ActorCritic(obs_dim=obs_dim, act_dim=act_dim, continuous_actions=True).to(self.device)
 
         if chosen_path:
             try:
                 ckpt = torch.load(chosen_path, map_location=self.device)
+                self.continuous_actions = ckpt.get("continuous_actions", True)
+                act_dim = ckpt.get("act_dim", 8 if self.continuous_actions else self.discrete_parser.action_dim)
+                self.model = ActorCritic(obs_dim=obs_dim, act_dim=act_dim, continuous_actions=self.continuous_actions).to(self.device)
                 self.model.load_state_dict(ckpt["model_state_dict"])
                 self.model.eval()
-                print(f"[SenseiRLBot] Loaded in-game model from {chosen_path}")
+                print(f"[SenseiRLBot] Loaded in-game model from {chosen_path} (Mode: {'Continuous' if self.continuous_actions else 'Discrete RLGym (19 actions)'})")
             except Exception as e:
                 print(f"[SenseiRLBot] Warning: Could not load weights from {chosen_path}: {e}")
+                self.model = ActorCritic(obs_dim=obs_dim, act_dim=act_dim, continuous_actions=self.continuous_actions).to(self.device)
+                self.model.eval()
         else:
             print("[SenseiRLBot] No checkpoint found, initializing with default model weights.")
+            self.model = ActorCritic(obs_dim=obs_dim, act_dim=act_dim, continuous_actions=self.continuous_actions).to(self.device)
             self.model.eval()
 
     def get_output(self, packet: GameTickPacket) -> SimpleControllerState:
@@ -136,20 +143,28 @@ class SenseiRLBot(BaseAgent):
         with torch.no_grad():
             obs_tensor = torch.tensor(obs, dtype=torch.float32, device=self.device).unsqueeze(0)
             action, _, _, _ = self.model.get_action_and_value(obs_tensor, deterministic=True)
-            act = action.squeeze(0).cpu().numpy()
+            if self.continuous_actions:
+                act = action.squeeze(0).cpu().numpy()
+            else:
+                act_idx = int(action.squeeze().cpu().item())
+                act = self.discrete_parser.parse_actions(act_idx)
 
         # Action Mapping
         # [throttle, steer, pitch, yaw, roll, jump, boost, handbrake]
         raw_throttle = float(act[0])
         steer_val = float(np.clip(act[1], -1.0, 1.0))
 
-        # Standard RLGym discrete deadband mapping for responsive drive feel
-        if raw_throttle > 0.05:
-            controller.throttle = 1.0
-        elif raw_throttle < -0.35:
-            controller.throttle = -1.0
+        if self.continuous_actions:
+            # Continuous deadband
+            if raw_throttle > 0.05:
+                controller.throttle = 1.0
+            elif raw_throttle < -0.35:
+                controller.throttle = -1.0
+            else:
+                controller.throttle = 0.0
         else:
-            controller.throttle = 0.0
+            # Discrete lookup table already contains exact discrete values
+            controller.throttle = raw_throttle
 
         controller.steer = steer_val
         controller.pitch = float(np.clip(act[2], -1.0, 1.0))

@@ -176,6 +176,7 @@ class PPOTrainer:
             "config": self.config,
             "obs_dim": self.obs_dim,
             "act_dim": self.act_dim,
+            "continuous_actions": self.continuous_actions,
         }, path)
 
     def cleanup_old_checkpoints(self, max_to_keep: Optional[int] = None):
@@ -379,7 +380,11 @@ class PPOTrainer:
             sps = int(self.total_actors * self.num_steps / (time.time() - iter_start_time))
 
             # Compute rollout behavioral telemetry
-            act_np = b_actions.cpu().numpy()
+            if self.continuous_actions:
+                act_np = b_actions.cpu().numpy()
+            else:
+                act_indices = b_actions.cpu().numpy().astype(int)
+                act_np = self.env.envs[0].action_parser.parse_actions(act_indices)
             obs_np = b_obs.cpu().numpy()
 
             thr_col = act_np[:, 0]

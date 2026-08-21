@@ -43,27 +43,31 @@ class ContinuousActionParser:
 
 class DiscreteActionParser:
     """
-    Lookup table for discrete action space (combines common driving/aerial action combos).
+    Standard RLGym Discrete Lookup Table Action Space (19 curated driving & aerial actions).
+    Eliminates exploration noise interference, continuous brake locking, and accidental spinouts.
     """
     def __init__(self):
-        # 16 standard combinations of drive, steer, jump, boost, aerials
+        # [throttle, steer, pitch, yaw, roll, jump, boost, handbrake]
         self.lookup_table = np.array([
-            [0.0, 0.0, 0.0, 0.0, 0.0, 0, 0, 0],   # 0: Coast / Idle
-            [1.0, 0.0, 0.0, 0.0, 0.0, 0, 0, 0],   # 1: Forward
-            [1.0, -1.0, 0.0, 0.0, 0.0, 0, 0, 0],  # 2: Forward + Left
-            [1.0, 1.0, 0.0, 0.0, 0.0, 0, 0, 0],   # 3: Forward + Right
-            [-1.0, 0.0, 0.0, 0.0, 0.0, 0, 0, 0],  # 4: Reverse
-            [-1.0, -1.0, 0.0, 0.0, 0.0, 0, 0, 0], # 5: Reverse + Left
-            [-1.0, 1.0, 0.0, 0.0, 0.0, 0, 0, 0],  # 6: Reverse + Right
-            [1.0, 0.0, 0.0, 0.0, 0.0, 0, 1, 0],   # 7: Forward + Boost
-            [1.0, -1.0, 0.0, 0.0, 0.0, 0, 1, 0],  # 8: Forward + Left + Boost
-            [1.0, 1.0, 0.0, 0.0, 0.0, 0, 1, 0],   # 9: Forward + Right + Boost
-            [1.0, 0.0, 0.0, 0.0, 0.0, 1, 0, 0],   # 10: Jump + Forward
-            [1.0, 0.0, -1.0, 0.0, 0.0, 1, 1, 0],  # 11: Jump + Boost + Pitch Up (Aerial)
-            [1.0, 0.0, 1.0, 0.0, 0.0, 1, 0, 0],   # 12: Front Flip / Dodge
-            [1.0, -1.0, 0.0, -1.0, 0.0, 1, 0, 0], # 13: Left Flip / Dodge
-            [1.0, 1.0, 0.0, 1.0, 0.0, 1, 0, 0],  # 14: Right Flip / Dodge
-            [1.0, -1.0, 0.0, 0.0, 0.0, 0, 0, 1],  # 15: Power slide / Drift Left
+            [ 0.0,  0.0,  0.0,  0.0,  0.0, 0, 0, 0],  # 0: Coast / Idle
+            [ 1.0,  0.0,  0.0,  0.0,  0.0, 0, 0, 0],  # 1: Forward Drive
+            [ 1.0, -1.0,  0.0,  0.0,  0.0, 0, 0, 0],  # 2: Forward + Steer Left
+            [ 1.0,  1.0,  0.0,  0.0,  0.0, 0, 0, 0],  # 3: Forward + Steer Right
+            [ 1.0,  0.0,  0.0,  0.0,  0.0, 0, 1, 0],  # 4: Forward Boost (Straight Line Rush)
+            [ 1.0, -1.0,  0.0,  0.0,  0.0, 0, 1, 0],  # 5: Forward Boost + Steer Left
+            [ 1.0,  1.0,  0.0,  0.0,  0.0, 0, 1, 0],  # 6: Forward Boost + Steer Right
+            [-1.0,  0.0,  0.0,  0.0,  0.0, 0, 0, 0],  # 7: Brake / Reverse
+            [-1.0, -1.0,  0.0,  0.0,  0.0, 0, 0, 0],  # 8: Reverse + Steer Left
+            [-1.0,  1.0,  0.0,  0.0,  0.0, 0, 0, 0],  # 9: Reverse + Steer Right
+            [ 1.0, -1.0,  0.0,  0.0,  0.0, 0, 0, 1],  # 10: Powerslide / Drift Left
+            [ 1.0,  1.0,  0.0,  0.0,  0.0, 0, 0, 1],  # 11: Powerslide / Drift Right
+            [ 1.0,  0.0,  0.0,  0.0,  0.0, 1, 0, 0],  # 12: Jump / Hop Forward
+            [ 1.0,  0.0, -1.0,  0.0,  0.0, 1, 0, 0],  # 13: Front Flip / Speed Dodge (Pitch -1 = forward flip in RL)
+            [ 1.0, -1.0,  0.0, -1.0,  0.0, 1, 0, 0],  # 14: Left Diagonal Flip / Dodge
+            [ 1.0,  1.0,  0.0,  1.0,  0.0, 1, 0, 0],  # 15: Right Diagonal Flip / Dodge
+            [-1.0,  0.0,  1.0,  0.0,  0.0, 1, 0, 0],  # 16: Back Flip (Pitch +1 = back flip in RL)
+            [ 1.0,  0.0, -1.0,  0.0,  0.0, 1, 1, 0],  # 17: Aerial Launch (Jump + Boost + Pitch Up)
+            [ 1.0,  0.0,  0.0,  0.0,  0.0, 0, 1, 0],  # 18: In-Air Boost Rush
         ], dtype=np.float32)
         self.action_dim = len(self.lookup_table)
 
