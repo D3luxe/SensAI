@@ -20,7 +20,7 @@ logging:
   tensorboard: true
 rewards:
   aerial_height_weight: 0.05
-  aligned_shot_weight: 0.05
+  aligned_shot_weight: 25.0
   ball_vel_toward_goal_weight: 0.08
   behind_ball_weight: 0.03
   boost_management_weight: 0.05

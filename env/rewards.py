@@ -234,41 +234,47 @@ class AerialHeightReward(BaseReward):
 
 class AlignedShotReward(BaseReward):
     """
-    Rewards aligning and driving through the ball toward the opponent net.
-    Strictly gates out standstill parking: car must be actively moving (>350 uu/s) toward the ball.
+    Major flat event reward granted strictly upon striking the ball on target toward the opponent net.
+    A shot on target is defined as a hit where the resulting ball trajectory enters the goal if unsaved.
     """
-    def __init__(self, weight: float = 0.05):
+    def __init__(self, weight: float = 25.0):
         super().__init__(weight)
+        self._prev_touches: Dict[int, int] = {}
+
+    def reset(self, initial_state: RocketSimArena):
+        self._prev_touches = {car.id: car.ball_touches for car in initial_state.cars}
 
     def get_reward(self, car: CarState, arena: RocketSimArena, action: np.ndarray, is_goal: bool, scoring_team: Optional[int]) -> float:
-        car_speed = float(np.linalg.norm(car.vel))
-        if car_speed < 350.0:
-            return 0.0
+        prev = self._prev_touches.get(car.id, 0)
+        curr = car.ball_touches
+        self._prev_touches[car.id] = curr
 
-        target_goal_y = ARENA_EXTENT_Y if car.team == 0 else -ARENA_EXTENT_Y
-        target_goal = np.array([0.0, target_goal_y, GOAL_HEIGHT * 0.5], dtype=np.float32)
-        ball_to_goal = target_goal - arena.ball.pos
-        norm_goal = np.linalg.norm(ball_to_goal)
-        if norm_goal < 1e-4:
-            return 0.0
-        unit_ball_to_goal = ball_to_goal / norm_goal
+        # Only evaluate on an actual ball contact event!
+        if curr > prev:
+            # 1. Native RocketSim physical goal trajectory prediction if available
+            if hasattr(arena, "_rsim_arena") and arena._rsim_arena is not None:
+                target_heading_positive = (car.team == 0)
+                ball_vy = arena.ball.vel[1]
+                if (target_heading_positive and ball_vy > 100.0) or (not target_heading_positive and ball_vy < -100.0):
+                    if arena._rsim_arena.is_ball_probably_going_in(max_time=3.0):
+                        ball_speed = float(np.linalg.norm(arena.ball.vel))
+                        power_scale = 1.0 + (ball_speed / BALL_MAX_SPEED) * 0.5
+                        return self.weight * power_scale
 
-        car_to_ball = arena.ball.pos - car.pos
-        dist_to_ball = np.linalg.norm(car_to_ball)
-        if dist_to_ball < 1e-4:
-            return 0.0
-        unit_car_to_ball = car_to_ball / dist_to_ball
-
-        # Car must be driving toward the ball
-        speed_toward_ball = float(np.dot(car.vel, unit_car_to_ball))
-        if speed_toward_ball < 350.0:
-            return 0.0
-
-        alignment = float(np.dot(unit_car_to_ball, unit_ball_to_goal))
-        if alignment > 0.0 and dist_to_ball < 2000.0:
-            dist_factor = max(0.0, 1.0 - (dist_to_ball / 2000.0))
-            norm_speed = min(1.0, speed_toward_ball / CAR_MAX_SPEED)
-            return self.weight * alignment * dist_factor * norm_speed
+            # 2. Geometric alignment fallback
+            target_goal_y = ARENA_EXTENT_Y if car.team == 0 else -ARENA_EXTENT_Y
+            target_goal = np.array([0.0, target_goal_y, GOAL_HEIGHT * 0.5], dtype=np.float32)
+            ball_to_goal = target_goal - arena.ball.pos
+            norm_goal = np.linalg.norm(ball_to_goal)
+            if norm_goal > 1e-4:
+                unit_ball_to_goal = ball_to_goal / norm_goal
+                ball_speed = float(np.linalg.norm(arena.ball.vel))
+                if ball_speed > 300.0:
+                    unit_ball_vel = arena.ball.vel / ball_speed
+                    alignment = float(np.dot(unit_ball_vel, unit_ball_to_goal))
+                    if alignment > 0.6:  # Heading directly into the goal frame
+                        power_scale = 1.0 + (ball_speed / BALL_MAX_SPEED) * 0.5
+                        return self.weight * alignment * power_scale
         return 0.0
 
 
@@ -434,6 +440,7 @@ class RewardManager:
                 speed_multiplier=weights.get("goal_speed_multi", 1.5)
             ),
             "save": SaveReward(weights.get("save_weight", 50.0)),
+            "aligned_shot": AlignedShotReward(weights.get("aligned_shot_weight", 25.0)),
             "touch_ball": TouchBallReward(
                 weight=weights.get("touch_ball_weight", 10.0),
                 first_touch_bonus=weights.get("kickoff_first_touch_bonus", 35.0),
@@ -450,7 +457,6 @@ class RewardManager:
             ),
             "kickoff": KickoffReward(weights.get("kickoff_weight", 0.05)),
             "face_ball": FaceBallReward(weights.get("face_ball_weight", 0.02)),
-            "aligned_shot": AlignedShotReward(weights.get("aligned_shot_weight", 0.05)),
             "behind_ball": BehindBallReward(weights.get("behind_ball_weight", 0.03)),
             "possession": PossessionReward(weights.get("possession_weight", 0.04)),
             "defensive_position": DefensivePositionReward(weights.get("defensive_position_weight", 0.03)),
