@@ -395,8 +395,8 @@ class PPOTrainer:
 
             pos_x = obs_np[:, 0]
             pos_y = obs_np[:, 1]
-            boost_amt = obs_np[:, 6] * 100.0
-            on_ground_flag = obs_np[:, 7]
+            boost_amt = np.clip(obs_np[:, 18], 0.0, 1.0) * 100.0
+            on_ground_flag = obs_np[:, 19]
 
             telemetry = {
                 "throttle_forward_pct": round(float(np.mean(thr_col > 0.05) * 100.0), 1),

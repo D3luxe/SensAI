@@ -195,7 +195,7 @@ class SenseiRLBot(BaseAgent):
         controller.roll = float(np.clip(act[4], -1.0, 1.0))
         controller.boost = bool(act[6] > 0.0 and (raw_throttle > 0.0 or not is_on_ground))
 
-        # Kickoff strike-through commitment (ensures bots strike through the kickoff ball)
+        # Attack Commitment (ensures bots strike through kickoffs and open stationary balls)
         ball_pos = ball_state.pos
         ball_speed = float(np.linalg.norm(ball_state.vel))
         is_kickoff = (abs(ball_pos[0]) < 50.0 and abs(ball_pos[1]) < 50.0 and ball_speed < 100.0)
@@ -205,9 +205,11 @@ class SenseiRLBot(BaseAgent):
         if dist_to_ball > 1e-4:
             unit_to_ball = car_to_ball / dist_to_ball
             fwd_align = float(np.dot(car_state.get_forward_vector(), unit_to_ball))
-            if is_kickoff and fwd_align > 0.3:
+            # If on kickoff or facing an open stationary ball directly ahead (< 600 uu)
+            if (is_kickoff and fwd_align > 0.3) or (dist_to_ball < 600.0 and fwd_align > 0.6 and ball_speed < 350.0 and is_on_ground):
                 controller.throttle = 1.0
-                controller.boost = bool(car_state.boost > 0)
+                if is_kickoff:
+                    controller.boost = bool(car_state.boost > 0)
 
         # Handbrake: only engage for sharp low-to-medium speed turns to prevent involuntary high-speed spinouts
         car_speed = float(np.linalg.norm(car_state.vel))

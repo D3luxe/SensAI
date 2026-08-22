@@ -221,11 +221,15 @@ class BigPadReward(BaseReward):
 class SaveBoostReward(BaseReward):
     """
     Rewards maintaining healthy boost tank reserves using the concave sqrt(boost / 100) curve.
+    Strictly motion-gated: only active when actively moving (> 250 uu/s) to eliminate standstill parking.
     """
     def __init__(self, weight: float = 0.02):
         super().__init__(weight)
 
     def get_reward(self, car: CarState, arena: RocketSimArena, action: np.ndarray, is_goal: bool, scoring_team: Optional[int]) -> float:
+        car_speed = float(np.linalg.norm(car.vel))
+        if car_speed < 250.0:
+            return 0.0
         return math.sqrt(max(0.0, car.boost / 100.0)) * self.weight
 
 
