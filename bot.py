@@ -32,7 +32,8 @@ from env.physics_engine import (
 
 def rotation_to_rot_mat(pitch: float, yaw: float, roll: float) -> np.ndarray:
     if ROCKETSIM_AVAILABLE and hasattr(rsim, "Angle"):
-        return rsim.Angle(pitch, yaw, roll).as_rot_mat().as_numpy().astype(np.float32)
+        # RocketSim Angle constructor takes (yaw, pitch, roll)
+        return rsim.Angle(yaw, pitch, roll).as_rot_mat().as_numpy().astype(np.float32)
     cp, sp = math.cos(pitch), math.sin(pitch)
     cy, sy = math.cos(yaw), math.sin(yaw)
     cr, sr = math.cos(roll), math.sin(roll)
