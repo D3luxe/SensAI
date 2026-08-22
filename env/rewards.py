@@ -523,6 +523,37 @@ class BoostStealReward(BaseReward):
         return 0.0
 
 
+class InactivityPenaltyReward(BaseReward):
+    """
+    Escalating per-step penalty assessed when a bot sits stationary (>1.0s) without moving.
+    Eliminates mutual standstills, midfield staring, and parking equilibria.
+    """
+    def __init__(self, weight: float = 0.05, grace_steps: int = 15):
+        super().__init__(weight)
+        self.grace_steps = grace_steps
+        self._idle_ticks: Dict[int, int] = {}
+
+    def reset(self, initial_state: RocketSimArena):
+        self._idle_ticks = {car.id: 0 for car in initial_state.cars}
+
+    def get_reward(self, car: CarState, arena: RocketSimArena, action: np.ndarray, is_goal: bool, scoring_team: Optional[int]) -> float:
+        car_speed = float(np.linalg.norm(car.vel))
+        ticks = self._idle_ticks.get(car.id, 0)
+
+        if car_speed < 150.0:
+            ticks += 1
+        else:
+            ticks = max(0, ticks - 2)
+
+        self._idle_ticks[car.id] = ticks
+
+        if ticks > self.grace_steps:
+            # Escalates up to 4x penalty as prolonged idling continues
+            escalation = min(4.0, 1.0 + (ticks - self.grace_steps) / 30.0)
+            return -self.weight * escalation
+        return 0.0
+
+
 class RewardManager:
     """
     Manages all reward functions and exposes dynamic runtime weight updates.
@@ -564,6 +595,7 @@ class RewardManager:
             "save_boost": SaveBoostReward(weights.get("save_boost_weight", 0.02)),
             "velocity": VelocityReward(weights.get("velocity_weight", 0.02)),
             "aerial_height": AerialHeightReward(weights.get("aerial_height_weight", 0.05)),
+            "inactivity_penalty": InactivityPenaltyReward(weights.get("inactivity_penalty_weight", 0.05)),
         }
 
     def reset(self, initial_state: RocketSimArena):
@@ -594,6 +626,7 @@ class RewardManager:
             "defensive_position_weight": "defensive_position",
             "demo_bump_weight": "demo_bump",
             "boost_steal_weight": "boost_steal",
+            "inactivity_penalty_weight": "inactivity_penalty",
         }
 
         for param_key, reward_name in mapping.items():

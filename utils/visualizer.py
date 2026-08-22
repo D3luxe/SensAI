@@ -127,6 +127,7 @@ def render_reward_breakdown_plot(blue_rewards: Dict[str, float], orange_rewards:
         "save_boost": "Boost Tank Retention",
         "aerial_height": "Aerial Jump / Height",
         "velocity": "General Driving Speed",
+        "inactivity_penalty": "Inactivity & Standstill Penalty",
     }
 
     # Dynamically capture all active reward categories
