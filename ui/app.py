@@ -396,9 +396,9 @@ def create_ui():
                             info="Per-step reward for positioning along the line between defending net and ball when defending."
                         )
                         boost_slider = gr.Slider(
-                            0.0, 0.3, value=rew_cfg.get("boost_management_weight", 0.05), step=0.01,
-                            label="Boost Pad Pickup Gain (+Delta)",
-                            info="Per-step delta reward for driving over boost pads and replenishing tank reserves."
+                            0.0, 20.0, value=rew_cfg.get("boost_management_weight", 5.0), step=0.5,
+                            label="Boost Management & Pad Pickup Bounty",
+                            info="Dual RLGym boost system: Flat bounty for small (+2.0) and big (+5.0) pads, plus sqrt(boost) retention guidance."
                         )
                         velocity_slider = gr.Slider(
                             0.0, 0.1, value=rew_cfg.get("velocity_weight", 0.02), step=0.005,
@@ -754,12 +754,12 @@ def create_ui():
             # Standardized defaults:
             # 1. Flat: goal=100.0, concede=-100.0, save=50.0, shot_on_target=25.0, touch=10.0, kickoff_bounty=35.0, demo=15.0, boost_steal=10.0
             # 2. Multipliers: goal_spd=1.5, touch_flip=2.5, dodge_rush=1.5
-            # 3. Guidance: bvg=0.08, speed=0.05, kickoff=0.05, face=0.02, aerial=0.05, behind=0.03, poss=0.04, def_pos=0.03, boost=0.05, vel=0.02
+            # 3. Guidance: bvg=0.08, speed=0.05, kickoff=0.05, face=0.02, aerial=0.05, behind=0.03, poss=0.04, def_pos=0.03, boost=5.0, vel=0.02
             return (
                 100.0, -100.0, 50.0, 25.0, 10.0, 35.0, 15.0, 10.0,
                 1.5, 2.5, 1.5,
                 0.08, 0.05, 0.05, 0.02, 0.05,
-                0.03, 0.04, 0.03, 0.05, 0.02
+                0.03, 0.04, 0.03, 5.0, 0.02
             )
 
         reset_rewards_btn.click(

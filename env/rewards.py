@@ -180,23 +180,36 @@ class SaveReward(BaseReward):
 
 class BoostManagementReward(BaseReward):
     """
-    Rewards collecting boost pads (+delta boost gain).
+    Standard RLGym Dual-Action Boost Architecture:
+    1. Event Bounty: Flat +2.0 pts for small pads (0.4x weight), +5.0 pts for big orbs (1.0x weight).
+    2. SaveBoost Curve: sqrt(boost / 100) micro-guidance for maintaining reserves.
     """
-    def __init__(self, weight: float = 0.05):
+    def __init__(self, weight: float = 5.0, save_weight: float = 0.02):
         super().__init__(weight)
+        self.save_weight = save_weight
         self._prev_boost: Dict[int, float] = {}
 
     def reset(self, initial_state: RocketSimArena):
         self._prev_boost = {car.id: car.boost for car in initial_state.cars}
 
     def get_reward(self, car: CarState, arena: RocketSimArena, action: np.ndarray, is_goal: bool, scoring_team: Optional[int]) -> float:
-        prev = self._prev_boost.get(car.id, 33.3)
+        prev = self._prev_boost.get(car.id, car.boost)
         curr = car.boost
         self._prev_boost[car.id] = curr
-        # Purely reward gaining boost from pads (+delta)
-        if curr > prev:
-            return (curr - prev) / 100.0 * self.weight
-        return 0.0
+
+        rew = 0.0
+
+        # 1. Event Pickup Bounty
+        if curr > prev + 5.0:
+            if curr > prev + 50.0:  # Big 100 Orb
+                rew += 1.0 * self.weight
+            else:  # Small 12 Pad
+                rew += 0.4 * self.weight
+
+        # 2. SaveBoost Non-Linear Tank Retention
+        rew += math.sqrt(max(0.0, curr / 100.0)) * self.save_weight
+
+        return rew
 
 
 class VelocityReward(BaseReward):
@@ -460,7 +473,7 @@ class RewardManager:
             "behind_ball": BehindBallReward(weights.get("behind_ball_weight", 0.03)),
             "possession": PossessionReward(weights.get("possession_weight", 0.04)),
             "defensive_position": DefensivePositionReward(weights.get("defensive_position_weight", 0.03)),
-            "boost_management": BoostManagementReward(weights.get("boost_management_weight", 0.05)),
+            "boost_management": BoostManagementReward(weights.get("boost_management_weight", 5.0)),
             "velocity": VelocityReward(weights.get("velocity_weight", 0.02)),
             "aerial_height": AerialHeightReward(weights.get("aerial_height_weight", 0.05)),
         }

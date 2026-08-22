@@ -3,8 +3,6 @@ environment:
   max_episode_steps: 3000
   num_envs: 64
   tick_skip: 8
-model:
-  continuous_actions: false
 hyperparameters:
   batch_size: 8192
   clip_range: 0.2
@@ -20,25 +18,27 @@ logging:
   max_checkpoints_to_keep: 5
   save_dir: checkpoints
   tensorboard: true
+model:
+  continuous_actions: false
 rewards:
   aerial_height_weight: 0.05
   aligned_shot_weight: 25.0
   ball_vel_toward_goal_weight: 0.08
   behind_ball_weight: 0.03
-  boost_management_weight: 0.08
+  boost_management_weight: 5.0
   boost_steal_weight: 10.0
   concede_weight: -100.0
   defensive_position_weight: 0.03
   demo_bump_weight: 15.0
-  dodge_rush_multi: 1.5
-  face_ball_weight: 0.07
+  dodge_rush_multi: 2.0
+  face_ball_weight: 0.025
   goal_speed_multi: 1.5
-  goal_weight: 100.0
+  goal_weight: 125.0
   kickoff_first_touch_bonus: 35.0
   kickoff_weight: 0.05
-  possession_weight: 0.1
+  possession_weight: 0.03
   save_weight: 50.0
   speed_toward_ball_weight: 0.05
   touch_aerial_flip_multi: 2.5
-  touch_ball_weight: 10.0
-  velocity_weight: 0.045
+  touch_ball_weight: 5.0
+  velocity_weight: 0.035
