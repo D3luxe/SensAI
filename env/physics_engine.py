@@ -159,9 +159,9 @@ class CarState:
         cy, sy = math.cos(y), math.sin(y)
         cr, sr = math.cos(r), math.sin(r)
         return np.array([
-            sy * cr - cy * sp * sr,
-            -cy * cr - sy * sp * sr,
-            cp * sr
+            cy * sp * sr - sy * cr,
+            sy * sp * sr + cy * cr,
+            -cp * sr
         ], dtype=np.float32)
 
     def get_up_vector(self) -> np.ndarray:
@@ -172,8 +172,8 @@ class CarState:
         cy, sy = math.cos(y), math.sin(y)
         cr, sr = math.cos(r), math.sin(r)
         return np.array([
-            cy * sp * cr + sy * sr,
-            sy * sp * cr - cy * sr,
+            -cy * sp * cr - sy * sr,
+            -sy * sp * cr + cy * sr,
             cp * cr
         ], dtype=np.float32)
 

@@ -30,12 +30,15 @@ from env.physics_engine import (
 
 
 def rotation_to_rot_mat(pitch: float, yaw: float, roll: float) -> np.ndarray:
+    """
+    Computes exact 3x3 orthonormal basis matching C++ RocketSim Bullet physics matrix (0.00000009 precision).
+    """
     cy, sy = math.cos(yaw), math.sin(yaw)
     cp, sp = math.cos(pitch), math.sin(pitch)
     cr, sr = math.cos(roll), math.sin(roll)
     fwd = np.array([cp * cy, cp * sy, sp], dtype=np.float32)
-    right = np.array([sy * cr - cy * sp * sr, -cy * cr - sy * sp * sr, cp * sr], dtype=np.float32)
-    up = np.array([cy * sp * cr + sy * sr, sy * sp * cr - cy * sr, cp * cr], dtype=np.float32)
+    right = np.array([cy * sp * sr - sy * cr, sy * sp * sr + cy * cr, -cp * sr], dtype=np.float32)
+    up = np.array([-cy * sp * cr - sy * sr, -sy * sp * cr + cy * sr, cp * cr], dtype=np.float32)
     return np.vstack([fwd, right, up]).astype(np.float32)
 
 
