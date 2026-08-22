@@ -157,24 +157,44 @@ class GoalReward(BaseReward):
 class SaveReward(BaseReward):
     """
     Major defensive reward for making a goal-line save / clear.
+    Strictly rate-limited with a 3.5s cooldown per defensive sequence (eliminates in-box touch farming).
+    Requires the ball to be in the danger zone and actively cleared away from the net.
     """
     def __init__(self, weight: float = 50.0):
         super().__init__(weight)
         self._prev_touches: Dict[int, int] = {}
+        self._save_cooldown: Dict[int, float] = {}
 
     def reset(self, initial_state: RocketSimArena):
         self._prev_touches = {car.id: car.ball_touches for car in initial_state.cars}
+        self._save_cooldown = {car.id: 0.0 for car in initial_state.cars}
 
     def get_reward(self, car: CarState, arena: RocketSimArena, action: np.ndarray, is_goal: bool, scoring_team: Optional[int]) -> float:
         prev = self._prev_touches.get(car.id, 0)
         curr = car.ball_touches
         self._prev_touches[car.id] = curr
-        if curr > prev:
-            # Check if ball was heading towards car's defending goal net
+
+        # Update cooldown
+        cd = self._save_cooldown.get(car.id, 0.0)
+        if cd > 0.0:
+            self._save_cooldown[car.id] = max(0.0, cd - (1.0 / 15.0))
+
+        if curr > prev and self._save_cooldown.get(car.id, 0.0) <= 0.0:
             defending_y = -ARENA_EXTENT_Y if car.team == 0 else ARENA_EXTENT_Y
             dist_to_defend = abs(arena.ball.pos[1] - defending_y)
+
+            # Ball must be in defensive danger zone (< 2000 uu from defending goal)
             if dist_to_defend < 2000.0 and abs(arena.ball.pos[0]) < GOAL_HALF_WIDTH * 1.5:
-                return self.weight
+                # The touch must propel the ball AWAY from the defending goal (positive Vy for Blue, negative Vy for Orange)
+                ball_vy = arena.ball.vel[1]
+                is_clearing = (ball_vy > 250.0) if car.team == 0 else (ball_vy < -250.0)
+
+                if is_clearing:
+                    self._save_cooldown[car.id] = 3.5
+                    ball_speed = float(np.linalg.norm(arena.ball.vel))
+                    power_scale = 1.0 + (ball_speed / BALL_MAX_SPEED) * 0.5
+                    return self.weight * power_scale
+
         return 0.0
 
 
