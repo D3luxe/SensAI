@@ -101,6 +101,7 @@ class SenseiRLBot(BaseAgent):
                 self.model = ActorCritic(obs_dim=obs_dim, act_dim=ckpt_act_dim, continuous_actions=self.continuous_actions).to(self.device)
                 self.model.load_state_dict(ckpt["model_state_dict"])
                 self.model.eval()
+                self.loaded_ckpt_mtime = os.path.getmtime(ckpt_path) if os.path.exists(ckpt_path) else 0.0
                 msg = f"[SensAI] Successfully loaded in-game model from {ckpt_path} (Mode: {'Continuous' if self.continuous_actions else f'Discrete RLGym ({ckpt_act_dim} actions)'})"
                 print(msg)
                 log_debug(f"[INIT] {msg}")
@@ -125,6 +126,14 @@ class SenseiRLBot(BaseAgent):
             return controller
 
         try:
+            # Periodic live check for newer training checkpoints (every 120 ticks = 1 second)
+            if self.tick_count % 120 == 0:
+                latest_ckpt = self.get_latest_checkpoint()
+                if latest_ckpt and os.path.exists(latest_ckpt):
+                    mtime = os.path.getmtime(latest_ckpt)
+                    if mtime > getattr(self, "loaded_ckpt_mtime", 0.0):
+                        self.initialize_agent()
+
             if self.model is None:
                 self.initialize_agent()
 

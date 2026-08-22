@@ -68,14 +68,19 @@ class TouchBallReward(BaseReward):
             car_to_ball = arena.ball.pos - car.pos
             dist = float(np.linalg.norm(car_to_ball))
             bumper_alignment = 1.0
+            directional_dodge_bounty = 0.0
             if dist > 1e-4:
                 unit_to_ball = car_to_ball / dist
                 fwd = car.get_forward_vector()
                 align = float(np.dot(fwd, unit_to_ball))
                 bumper_alignment = 1.0 + 0.8 * max(0.0, align)  # Up to 1.8x bonus for square nose strikes vs side-swipes
 
-            # Base Hit Bounty + Kickoff First-Touch Bounty
-            return (self.weight * aerial_flip_mult * power_factor * bumper_alignment) + first_bounty
+                # Directional Dodge Strike Bounty: heavily reward diagonal and side flips into off-center balls
+                if car.just_dodged and (abs(action[3]) > 0.1 or abs(action[4]) > 0.1):
+                    directional_dodge_bounty = 15.0
+
+            # Base Hit Bounty + Kickoff First-Touch Bounty + Directional Dodge Bounty
+            return (self.weight * aerial_flip_mult * power_factor * bumper_alignment) + first_bounty + directional_dodge_bounty
 
         return 0.0
 
