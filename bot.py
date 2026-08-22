@@ -236,6 +236,8 @@ class SenseiRLBot(BaseAgent):
                 controller.roll = float(np.clip(act[4], -1.0, 1.0))
 
             self.tick_count += 1
+            ball_pos = ball_state.pos
+            is_kickoff = bool(abs(ball_pos[0]) < 50.0 and abs(ball_pos[1]) < 50.0 and float(np.linalg.norm(ball_state.vel)) < 100.0)
             if self.tick_count <= 10 or self.tick_count % 120 == 0 or is_kickoff:
                 log_debug(
                     f"[TICK {self.tick_count}] pos=({car_state.pos[0]:.0f}, {car_state.pos[1]:.0f}) "
