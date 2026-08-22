@@ -137,32 +137,39 @@ class CarState:
     demo_timer: float = 0.0
     prev_jump: bool = False
     just_dodged: bool = False
+    rot_mat: Optional[np.ndarray] = None  # 3x3 orthonormal basis: [forward, right, up]
 
     def get_forward_vector(self) -> np.ndarray:
-        p, y, r = self.rot
+        if self.rot_mat is not None:
+            return self.rot_mat[0].copy()
+        p, y, _ = self.rot
         cp, sp = math.cos(p), math.sin(p)
         cy, sy = math.cos(y), math.sin(y)
-        return np.array([cy * cp, sy * cp, sp], dtype=np.float32)
+        return np.array([cp * cy, cp * sy, sp], dtype=np.float32)
 
     def get_right_vector(self) -> np.ndarray:
+        if self.rot_mat is not None:
+            return self.rot_mat[1].copy()
         p, y, r = self.rot
         cp, sp = math.cos(p), math.sin(p)
         cy, sy = math.cos(y), math.sin(y)
         cr, sr = math.cos(r), math.sin(r)
         return np.array([
-            sy * cr + cy * sp * sr,
-            -cy * cr + sy * sp * sr,
+            cy * sp * sr - sy * cr,
+            sy * sp * sr + cy * cr,
             -cp * sr
         ], dtype=np.float32)
 
     def get_up_vector(self) -> np.ndarray:
+        if self.rot_mat is not None:
+            return self.rot_mat[2].copy()
         p, y, r = self.rot
         cp, sp = math.cos(p), math.sin(p)
         cy, sy = math.cos(y), math.sin(y)
         cr, sr = math.cos(r), math.sin(r)
         return np.array([
-            -sy * sr + cy * sp * cr,
-            cy * sr + sy * sp * cr,
+            -cy * sp * cr - sy * sr,
+            -sy * sp * cr + cy * sr,
             cp * cr
         ], dtype=np.float32)
 
@@ -247,12 +254,14 @@ class RocketSimArena:
             spawn_mode = "kickoff"
             if random_kickoff:
                 roll = np.random.rand()
-                if roll < 0.35:
+                if roll < 0.30:
                     spawn_mode = "kickoff"
-                elif roll < 0.75:
+                elif roll < 0.55:
                     spawn_mode = "striking"
-                else:
+                elif roll < 0.75:
                     spawn_mode = "contested"
+                else:
+                    spawn_mode = "wall_play"
 
             if spawn_mode == "kickoff":
                 self._rsim_arena.reset_kickoff()
@@ -285,7 +294,7 @@ class RocketSimArena:
                     cs.rot_mat = rsim.Angle(yaw=-math.pi / 2, pitch=0.0, roll=0.0).as_rot_mat()
                     cs.boost = float(np.random.uniform(33.0, 75.0))
                     self._rsim_cars[half_players + i].set_state(cs)
-            else:
+            elif spawn_mode == "contested":
                 # Contested setup
                 bx = float(np.random.uniform(-1200.0, 1200.0))
                 by = float(np.random.uniform(-800.0, 800.0))
@@ -308,6 +317,36 @@ class RocketSimArena:
                     cs = rsim.CarState()
                     cs.pos = rsim.Vec(bx, by + dist, 17.0)
                     cs.vel = rsim.Vec(0.0, -float(np.random.uniform(400.0, 900.0)), 0.0)
+                    cs.rot_mat = rsim.Angle(yaw=-math.pi / 2, pitch=0.0, roll=0.0).as_rot_mat()
+                    cs.boost = float(np.random.uniform(40.0, 80.0))
+                    self._rsim_cars[half_players + i].set_state(cs)
+            else:
+                # Wall & Aerial Play setup (sidewall driving and wall clears)
+                side_sign = 1.0 if np.random.rand() > 0.5 else -1.0
+                wall_x = side_sign * 3800.0
+                ball_y = float(np.random.uniform(-1000.0, 1000.0))
+                ball_z = float(np.random.uniform(350.0, 850.0))
+
+                bs = rsim.BallState()
+                bs.pos = rsim.Vec(wall_x, ball_y, ball_z)
+                bs.vel = rsim.Vec(0.0, float(np.random.uniform(200.0, 600.0)), float(np.random.uniform(-100.0, 200.0)))
+                self._rsim_arena.ball.set_state(bs)
+
+                # Blue car attacking wall
+                for i in range(half_players):
+                    cs = rsim.CarState()
+                    cs.pos = rsim.Vec(side_sign * 4070.0, ball_y - float(np.random.uniform(400.0, 800.0)), max(100.0, ball_z - 150.0))
+                    cs.vel = rsim.Vec(0.0, float(np.random.uniform(500.0, 900.0)), 0.0)
+                    wall_roll = math.pi / 2 if side_sign > 0 else -math.pi / 2
+                    cs.rot_mat = rsim.Angle(yaw=math.pi / 2, pitch=0.0, roll=wall_roll).as_rot_mat()
+                    cs.boost = float(np.random.uniform(50.0, 100.0))
+                    self._rsim_cars[i].set_state(cs)
+
+                # Orange car defending midfield/net
+                for i in range(half_players):
+                    cs = rsim.CarState()
+                    cs.pos = rsim.Vec(float(np.random.uniform(-800.0, 800.0)), float(np.random.uniform(2500.0, 4000.0)), 17.0)
+                    cs.vel = rsim.Vec(0.0, 0.0, 0.0)
                     cs.rot_mat = rsim.Angle(yaw=-math.pi / 2, pitch=0.0, roll=0.0).as_rot_mat()
                     cs.boost = float(np.random.uniform(40.0, 80.0))
                     self._rsim_cars[half_players + i].set_state(cs)
@@ -380,6 +419,7 @@ class RocketSimArena:
             car.pos = c_state.pos.as_numpy().astype(np.float32)
             car.vel = c_state.vel.as_numpy().astype(np.float32)
             car.rot = np.array([ang.pitch, ang.yaw, ang.roll], dtype=np.float32)
+            car.rot_mat = c_state.rot_mat.as_numpy().astype(np.float32)
             car.ang_vel = c_state.ang_vel.as_numpy().astype(np.float32)
             car.boost = float(c_state.boost)
             car.on_ground = bool(c_state.is_on_ground)

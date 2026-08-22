@@ -29,6 +29,16 @@ from env.physics_engine import (
 )
 
 
+def rotation_to_rot_mat(pitch: float, yaw: float, roll: float) -> np.ndarray:
+    cp, sp = math.cos(pitch), math.sin(pitch)
+    cy, sy = math.cos(yaw), math.sin(yaw)
+    cr, sr = math.cos(roll), math.sin(roll)
+    fwd = np.array([cp * cy, cp * sy, sp], dtype=np.float32)
+    right = np.array([cy * sp * sr - sy * cr, sy * sp * sr + cy * cr, -cp * sr], dtype=np.float32)
+    up = np.array([-cy * sp * cr - sy * sr, -sy * sp * cr + cy * sr, cp * cr], dtype=np.float32)
+    return np.array([fwd, right, up], dtype=np.float32)
+
+
 class SenseiRLBot(BaseAgent):
     def __init__(self, name, team, index):
         if RLBOT_AVAILABLE:
@@ -39,40 +49,39 @@ class SenseiRLBot(BaseAgent):
         self.model: torch.nn.Module | None = None
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self.obs_builder = DefaultObservationBuilder(symmetric=True)
+        self.discrete_parser = DiscreteActionParser()
+        self.continuous_actions = False
+
+    def get_latest_checkpoint(self) -> Optional[str]:
+        ckpt_dir = os.path.join(os.path.dirname(__file__), "checkpoints")
+        if not os.path.exists(ckpt_dir):
+            return None
+        files = [os.path.join(ckpt_dir, f) for f in os.listdir(ckpt_dir) if f.endswith(".pt")]
+        if not files:
+            return None
+        files.sort(key=os.path.getmtime, reverse=True)
+        return files[0]
 
     def initialize_agent(self):
-        # Look for model checkpoint
-        model_paths = [
-            "checkpoints/latest_model.pt",
-            "../checkpoints/latest_model.pt",
-            os.path.join(os.path.dirname(__file__), "checkpoints", "latest_model.pt")
-        ]
-        chosen_path = None
-        for p in model_paths:
-            if os.path.exists(p):
-                chosen_path = p
-                break
-
+        ckpt_path = self.get_latest_checkpoint()
         obs_dim = 64
-        self.discrete_parser = DiscreteActionParser()
-        self.continuous_actions = True
         act_dim = 8
 
-        if chosen_path:
+        if ckpt_path:
             try:
-                ckpt = torch.load(chosen_path, map_location=self.device)
-                self.continuous_actions = ckpt.get("continuous_actions", True)
+                ckpt = torch.load(ckpt_path, map_location=self.device)
+                self.continuous_actions = ckpt.get("continuous_actions", False)
                 act_dim = ckpt.get("act_dim", 8 if self.continuous_actions else self.discrete_parser.action_dim)
                 self.model = ActorCritic(obs_dim=obs_dim, act_dim=act_dim, continuous_actions=self.continuous_actions).to(self.device)
                 self.model.load_state_dict(ckpt["model_state_dict"])
                 self.model.eval()
-                print(f"[SensAI] Loaded in-game model from {chosen_path} (Mode: {'Continuous' if self.continuous_actions else 'Discrete RLGym (19 actions)'})")
+                print(f"[SensAI] Loaded in-game model from {ckpt_path} (Mode: {'Continuous' if self.continuous_actions else 'Discrete RLGym (19 actions)'})")
             except Exception as e:
-                print(f"[SensAI] Warning: Could not load weights from {chosen_path}: {e}")
+                print(f"[SensAI] Warning: Could not load weights from {ckpt_path}: {e}")
                 self.model = ActorCritic(obs_dim=obs_dim, act_dim=act_dim, continuous_actions=self.continuous_actions).to(self.device)
                 self.model.eval()
         else:
-            print("[SensAI] No checkpoint found, initializing with default model weights.")
+            print("[SensAI] Warning: No checkpoint found, initialized untrained network.")
             self.model = ActorCritic(obs_dim=obs_dim, act_dim=act_dim, continuous_actions=self.continuous_actions).to(self.device)
             self.model.eval()
 
@@ -88,12 +97,19 @@ class SenseiRLBot(BaseAgent):
         has_jump = is_on_ground or (not getattr(my_car, "jumped", False))
         has_flip = not getattr(my_car, "double_jumped", False)
 
+        car_rot_mat = rotation_to_rot_mat(
+            my_car.physics.rotation.pitch,
+            my_car.physics.rotation.yaw,
+            my_car.physics.rotation.roll
+        )
+
         car_state = CarState(
             id=self.index,
             team=self.team,
             pos=np.array([my_car.physics.location.x, my_car.physics.location.y, my_car.physics.location.z], dtype=np.float32),
             vel=np.array([my_car.physics.velocity.x, my_car.physics.velocity.y, my_car.physics.velocity.z], dtype=np.float32),
             rot=np.array([my_car.physics.rotation.pitch, my_car.physics.rotation.yaw, my_car.physics.rotation.roll], dtype=np.float32),
+            rot_mat=car_rot_mat,
             ang_vel=np.array([my_car.physics.angular_velocity.x, my_car.physics.angular_velocity.y, my_car.physics.angular_velocity.z], dtype=np.float32),
             boost=float(my_car.boost),
             on_ground=is_on_ground,
@@ -124,12 +140,18 @@ class SenseiRLBot(BaseAgent):
                 opp_on_ground = bool(opp_car.has_wheel_contact)
                 opp_jump = opp_on_ground or (not getattr(opp_car, "jumped", False))
                 opp_flip = not getattr(opp_car, "double_jumped", False)
+                opp_rot_mat = rotation_to_rot_mat(
+                    opp_car.physics.rotation.pitch,
+                    opp_car.physics.rotation.yaw,
+                    opp_car.physics.rotation.roll
+                )
                 opponents.append(CarState(
                     id=i,
                     team=opp_car.team,
                     pos=np.array([opp_car.physics.location.x, opp_car.physics.location.y, opp_car.physics.location.z], dtype=np.float32),
                     vel=np.array([opp_car.physics.velocity.x, opp_car.physics.velocity.y, opp_car.physics.velocity.z], dtype=np.float32),
                     rot=np.array([opp_car.physics.rotation.pitch, opp_car.physics.rotation.yaw, opp_car.physics.rotation.roll], dtype=np.float32),
+                    rot_mat=opp_rot_mat,
                     ang_vel=np.array([opp_car.physics.angular_velocity.x, opp_car.physics.angular_velocity.y, opp_car.physics.angular_velocity.z], dtype=np.float32),
                     boost=float(opp_car.boost),
                     on_ground=opp_on_ground,

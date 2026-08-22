@@ -36,6 +36,7 @@ class DefaultObservationBuilder:
         if inv == -1.0:
             fwd = np.array([-fwd[0], -fwd[1], fwd[2]], dtype=np.float32)
             right = np.array([-right[0], -right[1], right[2]], dtype=np.float32)
+            up = np.array([-up[0], -up[1], up[2]], dtype=np.float32)
 
         # 1. Self Car State (22 features)
         car_pos_norm = np.array([
