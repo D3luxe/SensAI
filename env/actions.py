@@ -43,12 +43,13 @@ class ContinuousActionParser:
 
 class DiscreteActionParser:
     """
-    Standard RLGym Discrete Lookup Table Action Space (19 curated driving & aerial actions).
-    Eliminates exploration noise interference, continuous brake locking, and accidental spinouts.
+    Standard RLGym 24-Action Discrete Lookup Table (Ground Locomotion, Dodges, 3D Flight & Air-Roll).
+    Equips the policy with complete 6-DOF aerospace controls, air-roll recoveries, and directional aerial carries.
     """
     def __init__(self):
         # [throttle, steer, pitch, yaw, roll, jump, boost, handbrake]
         self.lookup_table = np.array([
+            # ── GROUND LOCOMOTION & POWERSLIDES ──
             [ 0.0,  0.0,  0.0,  0.0,  0.0, 0, 0, 0],  # 0: Coast / Idle
             [ 1.0,  0.0,  0.0,  0.0,  0.0, 0, 0, 0],  # 1: Forward Drive
             [ 1.0, -1.0,  0.0,  0.0,  0.0, 0, 0, 0],  # 2: Forward + Steer Left
@@ -61,13 +62,22 @@ class DiscreteActionParser:
             [-1.0,  1.0,  0.0,  0.0,  0.0, 0, 0, 0],  # 9: Reverse + Steer Right
             [ 1.0, -1.0,  0.0,  0.0,  0.0, 0, 0, 1],  # 10: Powerslide / Drift Left
             [ 1.0,  1.0,  0.0,  0.0,  0.0, 0, 0, 1],  # 11: Powerslide / Drift Right
+
+            # ── JUMPS & FLIPS ──
             [ 1.0,  0.0,  0.0,  0.0,  0.0, 1, 0, 0],  # 12: Jump / Hop Forward
-            [ 1.0,  0.0, -1.0,  0.0,  0.0, 1, 0, 0],  # 13: Front Flip / Speed Dodge (Pitch -1 = forward flip in RL)
-            [ 1.0, -1.0,  0.0, -1.0,  0.0, 1, 0, 0],  # 14: Left Diagonal Flip / Dodge
-            [ 1.0,  1.0,  0.0,  1.0,  0.0, 1, 0, 0],  # 15: Right Diagonal Flip / Dodge
-            [-1.0,  0.0,  1.0,  0.0,  0.0, 1, 0, 0],  # 16: Back Flip (Pitch +1 = back flip in RL)
-            [ 1.0,  0.0, -1.0,  0.0,  0.0, 1, 1, 0],  # 17: Aerial Launch (Jump + Boost + Pitch Up)
-            [ 1.0,  0.0,  0.0,  0.0,  0.0, 0, 1, 0],  # 18: In-Air Boost Rush
+            [ 1.0,  0.0, -1.0,  0.0,  0.0, 1, 0, 0],  # 13: Front Flip / Speed Dodge
+            [ 1.0, -1.0, -1.0, -1.0,  0.0, 1, 0, 0],  # 14: Left Diagonal Flip
+            [ 1.0,  1.0, -1.0,  1.0,  0.0, 1, 0, 0],  # 15: Right Diagonal Flip
+            [-1.0,  0.0,  1.0,  0.0,  0.0, 1, 0, 0],  # 16: Back Flip
+            [ 0.0, -1.0,  0.0,  0.0, -1.0, 1, 0, 0],  # 17: Side Dodge Left
+            [ 0.0,  1.0,  0.0,  0.0,  1.0, 1, 0, 0],  # 18: Side Dodge Right
+
+            # ── 3D AERIAL FLIGHT & AIR-ROLL ──
+            [ 1.0,  0.0,  1.0,  0.0,  0.0, 0, 1, 0],  # 19: Fast Aerial Climb (Nose UP + Boost)
+            [ 1.0,  0.0,  1.0, -1.0,  0.0, 0, 1, 0],  # 20: Aerial Climb + Yaw Left + Boost
+            [ 1.0,  0.0,  1.0,  1.0,  0.0, 0, 1, 0],  # 21: Aerial Climb + Yaw Right + Boost
+            [ 1.0,  0.0,  1.0,  0.0, -1.0, 0, 1, 0],  # 22: Directional Air-Roll Left + Pitch UP + Boost
+            [ 1.0,  0.0,  1.0,  0.0,  1.0, 0, 1, 0],  # 23: Directional Air-Roll Right + Pitch UP + Boost
         ], dtype=np.float32)
         self.action_dim = len(self.lookup_table)
 

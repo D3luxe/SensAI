@@ -88,17 +88,17 @@ class SenseiRLBot(BaseAgent):
     def initialize_agent(self):
         ckpt_path = self.get_latest_checkpoint()
         obs_dim = 64
-        act_dim = 19
+        act_dim = self.discrete_parser.action_dim
 
         if ckpt_path:
             try:
                 ckpt = torch.load(ckpt_path, map_location=self.device)
                 self.continuous_actions = ckpt.get("continuous_actions", False)
-                act_dim = ckpt.get("act_dim", 8 if self.continuous_actions else self.discrete_parser.action_dim)
-                self.model = ActorCritic(obs_dim=obs_dim, act_dim=act_dim, continuous_actions=self.continuous_actions).to(self.device)
+                ckpt_act_dim = ckpt.get("act_dim", 8 if self.continuous_actions else self.discrete_parser.action_dim)
+                self.model = ActorCritic(obs_dim=obs_dim, act_dim=ckpt_act_dim, continuous_actions=self.continuous_actions).to(self.device)
                 self.model.load_state_dict(ckpt["model_state_dict"])
                 self.model.eval()
-                msg = f"[SensAI] Successfully loaded in-game model from {ckpt_path} (Mode: {'Continuous' if self.continuous_actions else 'Discrete RLGym (19 actions)'})"
+                msg = f"[SensAI] Successfully loaded in-game model from {ckpt_path} (Mode: {'Continuous' if self.continuous_actions else f'Discrete RLGym ({ckpt_act_dim} actions)'})"
                 print(msg)
                 log_debug(f"[INIT] {msg}")
             except Exception as e:

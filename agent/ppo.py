@@ -214,8 +214,33 @@ class PPOTrainer:
             print(f"[PPO Trainer] Checkpoint not found at {path}")
             return
         checkpoint = torch.load(path, map_location=self.device)
-        self.agent.load_state_dict(checkpoint["model_state_dict"])
-        self.optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
+        saved_state = checkpoint["model_state_dict"]
+        model_state = self.agent.state_dict()
+
+        # Seamless action dimension expansion migration (e.g. 19 -> 24 actions)
+        if "actor_logits.weight" in saved_state and "actor_logits.weight" in model_state:
+            saved_dim = saved_state["actor_logits.weight"].shape[0]
+            curr_dim = model_state["actor_logits.weight"].shape[0]
+            if saved_dim != curr_dim:
+                print(f"[PPO Trainer] Migrating actor network from {saved_dim} to {curr_dim} actions...")
+                min_dim = min(saved_dim, curr_dim)
+                model_state["actor_logits.weight"][:min_dim] = saved_state["actor_logits.weight"][:min_dim]
+                model_state["actor_logits.bias"][:min_dim] = saved_state["actor_logits.bias"][:min_dim]
+                for k in saved_state:
+                    if k not in ("actor_logits.weight", "actor_logits.bias"):
+                        model_state[k] = saved_state[k]
+                self.agent.load_state_dict(model_state)
+                self.iteration = checkpoint.get("iteration", 0)
+                self.global_step = checkpoint.get("global_step", 0)
+                print(f"[PPO Trainer] Successfully migrated and loaded checkpoint from {path} (Iteration: {self.iteration}, Step: {self.global_step})")
+                return
+
+        self.agent.load_state_dict(saved_state)
+        if "optimizer_state_dict" in checkpoint:
+            try:
+                self.optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
+            except Exception:
+                pass
         self.iteration = checkpoint.get("iteration", 0)
         self.global_step = checkpoint.get("global_step", 0)
         print(f"[PPO Trainer] Loaded checkpoint from {path} (Iteration: {self.iteration}, Step: {self.global_step})")
