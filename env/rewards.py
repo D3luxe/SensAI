@@ -608,8 +608,11 @@ class KickoffReward(BaseReward):
             if dist > 1e-4:
                 unit_to_ball = car_to_ball / dist
                 speed_toward = float(np.dot(car.vel, unit_to_ball))
+                fwd = car.get_forward_vector()
+                align = max(0.0, float(np.dot(fwd, unit_to_ball)))
                 if speed_toward > 0:
-                    return self.weight * (speed_toward / CAR_MAX_SPEED)
+                    # Multiplies by align^2 so rushing straight without turning to the ball is heavily penalized
+                    return self.weight * (speed_toward / CAR_MAX_SPEED) * (align ** 2)
         return 0.0
 
 
