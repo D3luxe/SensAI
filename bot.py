@@ -44,23 +44,24 @@ def rotation_to_rot_mat(pitch: float, yaw: float, roll: float) -> np.ndarray:
 
 class SenseiRLBot(BaseAgent):
     def __init__(self, name, team, index):
-        if RLBOT_AVAILABLE:
-            super().__init__(name, team, index)
         self.name = name
         self.team = team
         self.index = index
-        self.model: torch.nn.Module | None = None
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self.obs_builder = DefaultObservationBuilder(symmetric=True)
         self.discrete_parser = DiscreteActionParser()
         self.continuous_actions = False
-        try:
-            self.initialize_agent()
-        except Exception as e:
-            print(f"[SensAI] Agent init error: {e}")
+        self.model: torch.nn.Module | None = None
+        self.initialize_agent()
+        if RLBOT_AVAILABLE:
+            super().__init__(name, team, index)
 
     def get_latest_checkpoint(self) -> Optional[str]:
-        ckpt_dir = os.path.join(os.path.dirname(__file__), "checkpoints")
+        bot_dir = os.path.dirname(os.path.abspath(__file__))
+        ckpt_dir = os.path.join(bot_dir, "checkpoints")
+        latest_file = os.path.join(ckpt_dir, "latest_model.pt")
+        if os.path.exists(latest_file):
+            return latest_file
         if not os.path.exists(ckpt_dir):
             return None
         files = [os.path.join(ckpt_dir, f) for f in os.listdir(ckpt_dir) if f.endswith(".pt")]
@@ -72,7 +73,7 @@ class SenseiRLBot(BaseAgent):
     def initialize_agent(self):
         ckpt_path = self.get_latest_checkpoint()
         obs_dim = 64
-        act_dim = 8
+        act_dim = 19
 
         if ckpt_path:
             try:
@@ -82,13 +83,13 @@ class SenseiRLBot(BaseAgent):
                 self.model = ActorCritic(obs_dim=obs_dim, act_dim=act_dim, continuous_actions=self.continuous_actions).to(self.device)
                 self.model.load_state_dict(ckpt["model_state_dict"])
                 self.model.eval()
-                print(f"[SensAI] Loaded in-game model from {ckpt_path} (Mode: {'Continuous' if self.continuous_actions else 'Discrete RLGym (19 actions)'})")
+                print(f"[SensAI] Successfully loaded in-game model from {ckpt_path} (Mode: {'Continuous' if self.continuous_actions else 'Discrete RLGym (19 actions)'})")
             except Exception as e:
                 print(f"[SensAI] Warning: Could not load weights from {ckpt_path}: {e}")
                 self.model = ActorCritic(obs_dim=obs_dim, act_dim=act_dim, continuous_actions=self.continuous_actions).to(self.device)
                 self.model.eval()
         else:
-            print("[SensAI] Warning: No checkpoint found, initialized untrained network.")
+            print("[SensAI] Warning: No checkpoint found, initialized default ActorCritic network.")
             self.model = ActorCritic(obs_dim=obs_dim, act_dim=act_dim, continuous_actions=self.continuous_actions).to(self.device)
             self.model.eval()
 
