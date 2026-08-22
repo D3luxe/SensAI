@@ -284,21 +284,29 @@ class VelocityReward(BaseReward):
 
 class AerialHeightReward(BaseReward):
     """
-    Rewards aerial challenges ONLY when the ball is airborne (Z > 140 uu) and within challenging range.
+    Rewards jumping and aerial challenges when the ball is airborne (Z > 95 uu) and approaching.
+    Includes immediate launch impulse feedback to bridge the grounded-to-air transition.
     """
     def __init__(self, weight: float = 0.05):
         super().__init__(weight)
 
     def get_reward(self, car: CarState, arena: RocketSimArena, action: np.ndarray, is_goal: bool, scoring_team: Optional[int]) -> float:
-        # Ball must be airborne (> 140 uu) to justify an aerial challenge
-        if arena.ball.pos[2] > 140.0 and not car.on_ground and car.pos[2] > 30.0:
+        # Ball must be elevated (> 95 uu - above car roof) to justify an aerial challenge
+        if arena.ball.pos[2] > 95.0:
             car_to_ball = arena.ball.pos - car.pos
             dist = float(np.linalg.norm(car_to_ball))
-            if dist < 2500.0:
-                dist_factor = max(0.0, 1.0 - (dist / 2500.0))
-                height_norm = min(1.0, (car.pos[2] - 17.0) / 400.0)
-                flip_bonus = 1.5 if car.just_dodged else 1.0
-                return self.weight * height_norm * flip_bonus * dist_factor
+            if dist < 2200.0:
+                dist_factor = max(0.0, 1.0 - (dist / 2200.0))
+                
+                # Case 1: Airborne flight tracking
+                if not car.on_ground and car.pos[2] > 25.0:
+                    height_norm = min(1.0, (car.pos[2] - 17.0) / 350.0)
+                    flip_bonus = 1.5 if car.just_dodged else 1.0
+                    return self.weight * height_norm * flip_bonus * dist_factor
+                
+                # Case 2: Ground launch initiation (immediate feedback when jumping for an elevated ball)
+                if car.on_ground and action[5] > 0.0 and dist < 1200.0:
+                    return self.weight * 0.8 * dist_factor
         return 0.0
 
 
