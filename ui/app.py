@@ -397,8 +397,13 @@ def create_ui():
                         )
                         possession_slider = gr.Slider(
                             0.0, 0.2, value=rew_cfg.get("possession_weight", 0.04), step=0.005,
-                            label="Possession & Dribble Control",
-                            info="Per-step reward for carrying, dribbling, and matching ball speed (<350 uu distance)."
+                            label="Tactical Space Dominance (Time-to-Ball)",
+                            info="Per-step reward for controlling field space when ahead of opponent in time-to-ball (T_self < T_opp)."
+                        )
+                        dribble_slider = gr.Slider(
+                            0.0, 0.2, value=rew_cfg.get("dribble_weight", 0.04), step=0.005,
+                            label="Mechanical Roof Carry & Dribble",
+                            info="Per-step mechanical bonus for balancing the ball on the roof or front bumper with speed matching."
                         )
                         defensive_pos_slider = gr.Slider(
                             0.0, 0.2, value=rew_cfg.get("defensive_position_weight", 0.03), step=0.005,
@@ -706,7 +711,7 @@ def create_ui():
             g_w, c_w, sv_w, as_w, t_w, kft_b, db_w, bs_w, sp_w, bp_w,
             g_spd, t_flip, d_rush,
             bvg_w, s_w, ko_w, f_w, a_w,
-            bb_w, p_w, dp_w, sb_w, v_w
+            bb_w, p_w, dr_w, dp_w, sb_w, v_w
         ):
             rewards = {
                 # Macro Flat Events
@@ -734,6 +739,7 @@ def create_ui():
                 "aerial_height_weight": float(a_w),
                 "behind_ball_weight": float(bb_w),
                 "possession_weight": float(p_w),
+                "dribble_weight": float(dr_w),
                 "defensive_position_weight": float(dp_w),
                 "save_boost_weight": float(sb_w),
                 "velocity_weight": float(v_w),
@@ -757,7 +763,7 @@ def create_ui():
                 goal_speed_multi_slider, touch_aerial_flip_multi_slider, dodge_rush_multi_slider,
                 # Guidance
                 ball_vel_toward_goal_slider, speed_toward_ball_slider, kickoff_slider, face_ball_slider, aerial_height_slider,
-                behind_ball_slider, possession_slider, defensive_pos_slider, save_boost_slider, velocity_slider
+                behind_ball_slider, possession_slider, dribble_slider, defensive_pos_slider, save_boost_slider, velocity_slider
             ],
             outputs=[reward_apply_msg]
         )
@@ -766,12 +772,12 @@ def create_ui():
             # Standardized defaults:
             # 1. Flat: goal=100.0, concede=-100.0, save=50.0, shot_on_target=25.0, touch=10.0, kickoff_bounty=35.0, demo=15.0, boost_steal=10.0, small_pad=2.0, big_pad=5.0
             # 2. Multipliers: goal_spd=1.5, touch_flip=2.5, dodge_rush=1.5
-            # 3. Guidance: bvg=0.08, speed=0.05, kickoff=0.05, face=0.02, aerial=0.05, behind=0.03, poss=0.04, def_pos=0.03, save_boost=0.02, vel=0.02
+            # 3. Guidance: bvg=0.08, speed=0.05, kickoff=0.05, face=0.02, aerial=0.05, behind=0.03, poss=0.04, dribble=0.04, def_pos=0.03, save_boost=0.02, vel=0.02
             return (
                 100.0, -100.0, 50.0, 25.0, 10.0, 35.0, 15.0, 10.0, 2.0, 5.0,
                 1.5, 2.5, 1.5,
                 0.08, 0.05, 0.05, 0.02, 0.05,
-                0.03, 0.04, 0.03, 0.02, 0.02
+                0.03, 0.04, 0.04, 0.03, 0.02, 0.02
             )
 
         reset_rewards_btn.click(
@@ -780,7 +786,7 @@ def create_ui():
                 goal_slider, concede_slider, save_slider, aligned_shot_slider, touch_ball_slider, kickoff_first_touch_slider, demo_bump_slider, boost_steal_slider, small_pad_slider, big_pad_slider,
                 goal_speed_multi_slider, touch_aerial_flip_multi_slider, dodge_rush_multi_slider,
                 ball_vel_toward_goal_slider, speed_toward_ball_slider, kickoff_slider, face_ball_slider, aerial_height_slider,
-                behind_ball_slider, possession_slider, defensive_pos_slider, save_boost_slider, velocity_slider
+                behind_ball_slider, possession_slider, dribble_slider, defensive_pos_slider, save_boost_slider, velocity_slider
             ]
         )
 

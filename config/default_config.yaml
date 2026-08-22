@@ -31,12 +31,13 @@ rewards:
   defensive_position_weight: 0.03
   demo_bump_weight: 15.0
   dodge_rush_multi: 2.0
+  dribble_weight: 0.04
   face_ball_weight: 0.025
   goal_speed_multi: 1.5
   goal_weight: 125.0
   kickoff_first_touch_bonus: 35.0
   kickoff_weight: 0.05
-  possession_weight: 0.03
+  possession_weight: 0.04
   save_boost_weight: 0.02
   save_weight: 50.0
   small_pad_weight: 2.0

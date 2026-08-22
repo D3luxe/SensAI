@@ -365,8 +365,59 @@ class BehindBallReward(BaseReward):
 
 class PossessionReward(BaseReward):
     """
-    Rewards close-proximity dribbling and speed-matching when actively carrying the ball.
-    Strictly gates out stationary ball/car parking to eliminate the standstill exploit.
+    Layer 1: Tactical Time-to-Ball Space Dominance.
+    Calculates time-to-ball (T_reach) for self vs nearest opponent.
+    Rewards uncontested space when T_self < T_opp (teaches patience and field control; eliminates 50/50 side-by-side farming).
+    """
+    def __init__(self, weight: float = 0.04):
+        super().__init__(weight)
+
+    def _get_time_to_ball(self, car: CarState, ball_pos: np.ndarray) -> float:
+        car_to_ball = ball_pos - car.pos
+        dist = float(np.linalg.norm(car_to_ball))
+        if dist < 1e-4:
+            return 0.0
+        unit_to_ball = car_to_ball / dist
+        closing_speed = float(np.dot(car.vel, unit_to_ball))
+        effective_speed = max(150.0, closing_speed + (500.0 if car.boost > 10.0 else 150.0))
+        return dist / effective_speed
+
+    def get_reward(self, car: CarState, arena: RocketSimArena, action: np.ndarray, is_goal: bool, scoring_team: Optional[int]) -> float:
+        ball_speed = float(np.linalg.norm(arena.ball.vel))
+        car_speed = float(np.linalg.norm(car.vel))
+        if ball_speed < 150.0 and car_speed < 150.0:
+            return 0.0
+
+        t_self = self._get_time_to_ball(car, arena.ball.pos)
+
+        # Find nearest opponent time-to-ball
+        opponents = [c for c in arena.cars if c.team != car.team and not c.demoed]
+        if not opponents:
+            return self.weight * 0.5
+
+        t_opp_min = min(self._get_time_to_ball(opp, arena.ball.pos) for opp in opponents)
+
+        # Time-to-ball differential: T_opp - T_self
+        delta_t = t_opp_min - t_self
+
+        # If opponent reaches ball first or 50/50 contest (delta_t <= 0.05s), 0 possession reward
+        if delta_t <= 0.05:
+            return 0.0
+
+        # Uncontested possession scaled by time cushion (up to 1.5s margin)
+        time_cushion = min(1.0, (delta_t - 0.05) / 1.5)
+        
+        # Proximity scaling: higher when within reasonable playing distance (< 2500 uu)
+        dist_to_ball = float(np.linalg.norm(arena.ball.pos - car.pos))
+        dist_factor = max(0.0, 1.0 - (dist_to_ball / 2500.0))
+
+        return self.weight * time_cushion * (0.4 + 0.6 * dist_factor)
+
+
+class DribbleReward(BaseReward):
+    """
+    Layer 2: Mechanical Roof Carry & Close Bumper Dribbling.
+    Rewards balancing the ball on the car roof or pushing it with precision speed-matching.
     """
     def __init__(self, weight: float = 0.04):
         super().__init__(weight)
@@ -374,17 +425,22 @@ class PossessionReward(BaseReward):
     def get_reward(self, car: CarState, arena: RocketSimArena, action: np.ndarray, is_goal: bool, scoring_team: Optional[int]) -> float:
         ball_speed = float(np.linalg.norm(arena.ball.vel))
         car_speed = float(np.linalg.norm(car.vel))
-        
-        # Ball and car must both be actively moving across the pitch (> 200 uu/s) to count as possession
         if ball_speed < 200.0 or car_speed < 200.0:
             return 0.0
 
-        dist = float(np.linalg.norm(car.pos - arena.ball.pos))
-        if dist < 350.0:
-            rel_speed = float(np.linalg.norm(car.vel - arena.ball.vel))
-            speed_match = max(0.0, 1.0 - (rel_speed / 1000.0))
-            dist_factor = max(0.0, 1.0 - (dist / 350.0))
-            return self.weight * dist_factor * (0.5 + 0.5 * speed_match)
+        rel_pos = arena.ball.pos - car.pos
+        horiz_dist = float(np.linalg.norm(rel_pos[:2]))
+        vert_dist = rel_pos[2]
+
+        # Ball must be close horizontally (< 180 uu) and above/on roof (15 < dz < 140 uu)
+        if horiz_dist < 180.0 and 15.0 < vert_dist < 140.0:
+            rel_vel = float(np.linalg.norm(car.vel - arena.ball.vel))
+            speed_match = max(0.0, 1.0 - (rel_vel / 600.0))
+            horiz_factor = max(0.0, 1.0 - (horiz_dist / 180.0))
+            # Roof carry bonus (ball directly atop car Z)
+            roof_bonus = 1.5 if (vert_dist > 35.0 and horiz_dist < 100.0) else 1.0
+            return self.weight * horiz_factor * speed_match * roof_bonus
+
         return 0.0
 
 
@@ -499,6 +555,7 @@ class RewardManager:
             "face_ball": FaceBallReward(weights.get("face_ball_weight", 0.02)),
             "behind_ball": BehindBallReward(weights.get("behind_ball_weight", 0.03)),
             "possession": PossessionReward(weights.get("possession_weight", 0.04)),
+            "dribble": DribbleReward(weights.get("dribble_weight", 0.04)),
             "defensive_position": DefensivePositionReward(weights.get("defensive_position_weight", 0.03)),
             "save_boost": SaveBoostReward(weights.get("save_boost_weight", 0.02)),
             "velocity": VelocityReward(weights.get("velocity_weight", 0.02)),
@@ -529,6 +586,7 @@ class RewardManager:
             "aligned_shot_weight": "aligned_shot",
             "behind_ball_weight": "behind_ball",
             "possession_weight": "possession",
+            "dribble_weight": "dribble",
             "defensive_position_weight": "defensive_position",
             "demo_bump_weight": "demo_bump",
             "boost_steal_weight": "boost_steal",
