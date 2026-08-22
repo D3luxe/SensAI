@@ -876,17 +876,7 @@ class BounceInterceptReward(BaseReward):
         super().__init__(weight)
 
     def get_reward(self, car: CarState, arena: RocketSimArena, action: np.ndarray, is_goal: bool, scoring_team: Optional[int]) -> float:
-        future_pos = None
-        if hasattr(arena, "_rsim_arena") and arena._rsim_arena is not None:
-            try:
-                preds = arena._rsim_arena.get_ball_prediction()
-                if preds and len(preds) > 60:
-                    future_pos = preds[60].pos.as_numpy().astype(np.float32)
-            except Exception:
-                pass
-        elif hasattr(arena, "ball_prediction_slice") and arena.ball_prediction_slice is not None:
-            future_pos = arena.ball_prediction_slice
-
+        future_pos = arena.get_predicted_ball_pos(60) if hasattr(arena, "get_predicted_ball_pos") else None
         if future_pos is None:
             return 0.0
 

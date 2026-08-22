@@ -80,19 +80,9 @@ class DefaultObservationBuilder:
         obs.extend(arena.ball.ang_vel * 0.1) # 3
 
         # 2b. Future Ball Trajectory Prediction (0.5s ahead = 60 ticks @ 120Hz)
-        future_ball_pos = None
-        if hasattr(arena, "_rsim_arena") and arena._rsim_arena is not None:
-            try:
-                preds = arena._rsim_arena.get_ball_prediction()
-                if preds and len(preds) > 60:
-                    future_ball_pos = preds[60].pos.as_numpy().astype(np.float32)
-            except Exception:
-                pass
-        elif hasattr(arena, "ball_prediction_slice") and arena.ball_prediction_slice is not None:
-            future_ball_pos = arena.ball_prediction_slice
-
+        future_ball_pos = arena.get_predicted_ball_pos(60) if hasattr(arena, "get_predicted_ball_pos") else None
         if future_ball_pos is None:
-            # Kinematic ballistic trajectory fallback (dt = 0.5s, g = -650 uu/s^2)
+            # Kinematic ballistic trajectory fallback
             dt = 0.5
             px = arena.ball.pos[0] + arena.ball.vel[0] * dt
             py = arena.ball.pos[1] + arena.ball.vel[1] * dt

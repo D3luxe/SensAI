@@ -624,7 +624,7 @@ def create_ui():
                     with gr.Column():
                         gr.Markdown("### 🏟️ Environment & Simulation")
                         num_envs_slider = gr.Slider(
-                            1, 32, value=env_cfg.get("num_envs", 8), step=1,
+                            1, 128, value=env_cfg.get("num_envs", 64), step=1,
                             label="Vectorized Environments",
                             info="Parallel Rocket League arena instances simulated simultaneously."
                         )

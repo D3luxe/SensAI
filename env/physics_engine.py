@@ -471,7 +471,39 @@ class RocketSimArena:
 
             self._rsim_arena.step(ticks)
             self._sync_from_rsim()
+            self._cached_pred_step = -1  # Invalidate cache on new physics step
             return (self.scored_team is not None), self.scored_team
+
+    def get_predicted_ball_pos(self, slice_idx: int = 60) -> np.ndarray:
+        """Returns cached 0.5s future ball position (calculated once per step per arena)."""
+        if getattr(self, "_cached_pred_step", -1) == self.step_count and getattr(self, "_cached_pred_slice", None) is not None:
+            return self._cached_pred_slice
+
+        pred_pos = None
+        if self._use_rsim and self._rsim_arena is not None:
+            try:
+                preds = self._rsim_arena.get_ball_prediction()
+                if preds and len(preds) > slice_idx:
+                    pred_pos = preds[slice_idx].pos.as_numpy().astype(np.float32)
+            except Exception:
+                pass
+        elif hasattr(self, "ball_prediction_slice") and self.ball_prediction_slice is not None:
+            pred_pos = self.ball_prediction_slice
+
+        if pred_pos is None:
+            dt = slice_idx / 120.0
+            px = self.ball.pos[0] + self.ball.vel[0] * dt
+            py = self.ball.pos[1] + self.ball.vel[1] * dt
+            pz = max(93.0, self.ball.pos[2] + self.ball.vel[2] * dt + 0.5 * (-650.0) * (dt ** 2))
+            if abs(px) > 4000.0:
+                px = np.sign(px) * (4000.0 - (abs(px) - 4000.0) * 0.6)
+            if abs(py) > 5000.0:
+                py = np.sign(py) * (5000.0 - (abs(py) - 5000.0) * 0.6)
+            pred_pos = np.array([px, py, pz], dtype=np.float32)
+
+        self._cached_pred_step = self.step_count
+        self._cached_pred_slice = pred_pos
+        return pred_pos
 
         # Pure Python Fallback Step
         substeps = max(1, int(round(dt * 120.0)))
