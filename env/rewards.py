@@ -217,6 +217,7 @@ class SaveReward(BaseReward):
 class SmallPadReward(BaseReward):
     """
     Rewards running over small boost pads (+12 boost) with a flat event bounty.
+    Tracks both physical pad state transitions and boost delta to ensure high-tank pickups are rewarded.
     """
     def __init__(self, weight: float = 2.0):
         super().__init__(weight)
@@ -229,7 +230,17 @@ class SmallPadReward(BaseReward):
         prev = self._prev_boost.get(car.id, car.boost)
         curr = car.boost
         self._prev_boost[car.id] = curr
-        if curr > prev + 5.0 and curr <= prev + 50.0:
+
+        # Check proximity to any small pad that was just collected
+        car_pos_2d = car.pos[:2]
+        for pad in arena.boost_pads:
+            if not pad.is_big and not pad.is_active and pad.cooldown_timer > (pad.respawn_time - 0.1):
+                dist = float(np.linalg.norm(car_pos_2d - pad.pos[:2]))
+                if dist < 180.0:
+                    return self.weight
+
+        # Fallback boost delta check for small pads (e.g. 5-30 boost increase or topping off tank)
+        if (curr > prev + 5.0 and curr <= prev + 40.0) or (prev >= 88.0 and curr == 100.0 and prev < 100.0):
             return self.weight
         return 0.0
 
@@ -237,6 +248,7 @@ class SmallPadReward(BaseReward):
 class BigPadReward(BaseReward):
     """
     Rewards collecting full boost orbs (+100 boost) with a flat event bounty.
+    Tracks physical pad state transitions to ensure pickups at high boost tanks are reliably rewarded.
     """
     def __init__(self, weight: float = 5.0):
         super().__init__(weight)
@@ -249,7 +261,17 @@ class BigPadReward(BaseReward):
         prev = self._prev_boost.get(car.id, car.boost)
         curr = car.boost
         self._prev_boost[car.id] = curr
-        if curr > prev + 50.0:
+
+        # Check proximity to any big pad that was just collected
+        car_pos_2d = car.pos[:2]
+        for pad in arena.boost_pads:
+            if pad.is_big and not pad.is_active and pad.cooldown_timer > (pad.respawn_time - 0.1):
+                dist = float(np.linalg.norm(car_pos_2d - pad.pos[:2]))
+                if dist < 250.0:
+                    return self.weight
+
+        # Fallback boost delta check for big pads
+        if curr > prev + 40.0:
             return self.weight
         return 0.0
 
@@ -560,9 +582,18 @@ class BoostStealReward(BaseReward):
         curr = car.boost
         self._prev_boost[car.id] = curr
 
-        if curr > prev + 50.0:  # Big pad pickup
-            on_opp_half = (car.pos[1] > 0) if car.team == 0 else (car.pos[1] < 0)
-            if on_opp_half:
+        on_opp_half = (car.pos[1] > 0) if car.team == 0 else (car.pos[1] < 0)
+        if on_opp_half:
+            car_pos_2d = car.pos[:2]
+            for pad in arena.boost_pads:
+                if pad.is_big and not pad.is_active and pad.cooldown_timer > (pad.respawn_time - 0.1):
+                    pad_on_opp_half = (pad.pos[1] > 0) if car.team == 0 else (pad.pos[1] < 0)
+                    if pad_on_opp_half:
+                        dist = float(np.linalg.norm(car_pos_2d - pad.pos[:2]))
+                        if dist < 250.0:
+                            return self.weight
+
+            if curr > prev + 40.0:
                 return self.weight
         return 0.0
 
