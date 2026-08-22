@@ -561,22 +561,29 @@ class BoostStealReward(BaseReward):
 
 class InactivityPenaltyReward(BaseReward):
     """
-    Escalating per-step penalty assessed when a bot sits stationary (>1.0s) without moving.
-    Eliminates mutual standstills, midfield staring, and parking equilibria.
+    Escalating per-step penalty assessed when a bot sits stationary or wiggles in place without meaningful displacement.
+    Eliminates mutual standstills, midfield staring, and parking/wiggling equilibria.
     """
     def __init__(self, weight: float = 0.05, grace_steps: int = 15):
         super().__init__(weight)
         self.grace_steps = grace_steps
         self._idle_ticks: Dict[int, int] = {}
+        self._prev_pos: Dict[int, np.ndarray] = {}
 
     def reset(self, initial_state: RocketSimArena):
         self._idle_ticks = {car.id: 0 for car in initial_state.cars}
+        self._prev_pos = {car.id: car.pos.copy() for car in initial_state.cars}
 
     def get_reward(self, car: CarState, arena: RocketSimArena, action: np.ndarray, is_goal: bool, scoring_team: Optional[int]) -> float:
         car_speed = float(np.linalg.norm(car.vel))
         ticks = self._idle_ticks.get(car.id, 0)
+        
+        prev_p = self._prev_pos.get(car.id, car.pos)
+        displacement = float(np.linalg.norm(car.pos - prev_p))
+        self._prev_pos[car.id] = car.pos.copy()
 
-        if car_speed < 150.0:
+        # Idling or oscillating back and forth in place with low net displacement
+        if car_speed < 150.0 or displacement < 8.0:
             ticks += 1
         else:
             ticks = max(0, ticks - 2)
@@ -584,7 +591,7 @@ class InactivityPenaltyReward(BaseReward):
         self._idle_ticks[car.id] = ticks
 
         if ticks > self.grace_steps:
-            # Escalates up to 4x penalty as prolonged idling continues
+            # Escalates up to 4x penalty as prolonged idling/wiggling continues
             escalation = min(4.0, 1.0 + (ticks - self.grace_steps) / 30.0)
             return -self.weight * escalation
         return 0.0

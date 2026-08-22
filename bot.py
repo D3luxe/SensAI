@@ -263,9 +263,18 @@ class SenseiRLBot(BaseAgent):
                         controller.handbrake = False
                         controller.throttle = 1.0
                         controller.boost = bool(car_state.boost > 0 and dist_to_ball > 300.0 and abs(steer_err) < 0.25)
+                elif local_ball_y < -50.0 and car_speed < 450.0 and is_on_ground:
+                    # Car is facing away from the ball / play: execute rapid powerslide U-turn to re-orient toward the ball
+                    turn_dir = 1.0 if local_ball_x >= 0.0 else -1.0
+                    controller.steer = turn_dir
+                    controller.throttle = 1.0
+                    controller.handbrake = True
+                    controller.boost = False
 
             # Handbrake: only engage for sharp low-to-medium speed turns to prevent involuntary high-speed spinouts
-            if not (dist_to_ball < 800.0 and ball_speed < 450.0 and is_on_ground and abs(steer_err) > 0.35):
+            is_turn_recovery = bool(dist_to_ball > 1e-4 and local_ball_y < -50.0 and car_speed < 450.0 and is_on_ground)
+            is_close_cut = bool(dist_to_ball < 800.0 and ball_speed < 450.0 and is_on_ground and abs(steer_err) > 0.35)
+            if not is_turn_recovery and not is_close_cut:
                 controller.handbrake = bool(act[7] > 0.6 and abs(steer_val) > 0.6 and car_speed < 1400.0 and not is_kickoff)
 
             # Direct 1-to-1 Jump mapping (eliminates involuntary spastic auto-flips)
