@@ -38,6 +38,10 @@ class TouchBallReward(BaseReward):
     def reset(self, initial_state: RocketSimArena):
         self._prev_touches = {car.id: car.ball_touches for car in initial_state.cars}
         self._touch_cooldown = {car.id: 0.0 for car in initial_state.cars}
+        # Strictly gate First-Touch bounty to authentic center-court kickoffs (Ball at 0,0 and motionless)
+        b_pos = initial_state.ball.pos
+        b_vel = initial_state.ball.vel
+        self._is_kickoff_episode = bool(abs(b_pos[0]) < 50.0 and abs(b_pos[1]) < 50.0 and float(np.linalg.norm(b_vel)) < 100.0)
         self._first_touch_claimed = False
 
     def get_reward(self, car: CarState, arena: RocketSimArena, action: np.ndarray, is_goal: bool, scoring_team: Optional[int]) -> float:
@@ -52,8 +56,8 @@ class TouchBallReward(BaseReward):
         if curr > prev and self._touch_cooldown.get(car.id, 0.0) <= 0.0:
             self._touch_cooldown[car.id] = 0.25  # 250ms cooldown prevents grinding 15 touches per second
 
-            # Kickoff First-Touch Bounty (controlled directly by the Kickoff First-Touch Bounty slider)
-            first_bounty = self.first_touch_bonus if not self._first_touch_claimed else 0.0
+            # Kickoff First-Touch Bounty (strictly awarded on authentic center-court kickoffs only)
+            first_bounty = (self.first_touch_bonus if not self._first_touch_claimed else 0.0) if getattr(self, "_is_kickoff_episode", True) else 0.0
             self._first_touch_claimed = True
 
             # Multiplier for jumping, dodging, or aerial hits
