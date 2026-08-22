@@ -265,46 +265,54 @@ class AerialHeightReward(BaseReward):
 class AlignedShotReward(BaseReward):
     """
     Major flat event reward granted strictly upon striking the ball on target toward the opponent net.
-    A shot on target is defined as a hit where the resulting ball trajectory enters the goal if unsaved.
+    Strictly rate-limited with a 3.5s cooldown per shot sequence (eliminates multi-touch dribble farming).
     """
     def __init__(self, weight: float = 25.0):
         super().__init__(weight)
         self._prev_touches: Dict[int, int] = {}
+        self._shot_cooldown: Dict[int, float] = {}
 
     def reset(self, initial_state: RocketSimArena):
         self._prev_touches = {car.id: car.ball_touches for car in initial_state.cars}
+        self._shot_cooldown = {car.id: 0.0 for car in initial_state.cars}
 
     def get_reward(self, car: CarState, arena: RocketSimArena, action: np.ndarray, is_goal: bool, scoring_team: Optional[int]) -> float:
         prev = self._prev_touches.get(car.id, 0)
         curr = car.ball_touches
         self._prev_touches[car.id] = curr
 
-        # Only evaluate on an actual ball contact event!
-        if curr > prev:
-            # 1. Native RocketSim physical goal trajectory prediction if available
-            if hasattr(arena, "_rsim_arena") and arena._rsim_arena is not None:
-                target_heading_positive = (car.team == 0)
-                ball_vy = arena.ball.vel[1]
-                if (target_heading_positive and ball_vy > 100.0) or (not target_heading_positive and ball_vy < -100.0):
-                    if arena._rsim_arena.is_ball_probably_going_in(max_time=3.0):
-                        ball_speed = float(np.linalg.norm(arena.ball.vel))
-                        power_scale = 1.0 + (ball_speed / BALL_MAX_SPEED) * 0.5
-                        return self.weight * power_scale
+        # Update cooldown
+        cd = self._shot_cooldown.get(car.id, 0.0)
+        if cd > 0.0:
+            self._shot_cooldown[car.id] = max(0.0, cd - (1.0 / 15.0))
 
-            # 2. Geometric alignment fallback
-            target_goal_y = ARENA_EXTENT_Y if car.team == 0 else -ARENA_EXTENT_Y
-            target_goal = np.array([0.0, target_goal_y, GOAL_HEIGHT * 0.5], dtype=np.float32)
-            ball_to_goal = target_goal - arena.ball.pos
-            norm_goal = np.linalg.norm(ball_to_goal)
-            if norm_goal > 1e-4:
-                unit_ball_to_goal = ball_to_goal / norm_goal
-                ball_speed = float(np.linalg.norm(arena.ball.vel))
-                if ball_speed > 300.0:
-                    unit_ball_vel = arena.ball.vel / ball_speed
-                    alignment = float(np.dot(unit_ball_vel, unit_ball_to_goal))
-                    if alignment > 0.6:  # Heading directly into the goal frame
-                        power_scale = 1.0 + (ball_speed / BALL_MAX_SPEED) * 0.5
-                        return self.weight * alignment * power_scale
+        # Only evaluate on a fresh ball contact when not in shot cooldown
+        if curr > prev and self._shot_cooldown.get(car.id, 0.0) <= 0.0:
+            target_heading_positive = (car.team == 0)
+            ball_vy = arena.ball.vel[1]
+            ball_speed = float(np.linalg.norm(arena.ball.vel))
+
+            # Must be an actual forward strike (> 600 uu/s) toward opponent half
+            if ((target_heading_positive and ball_vy > 400.0) or (not target_heading_positive and ball_vy < -400.0)) and ball_speed > 600.0:
+                is_goal_bound = False
+                if hasattr(arena, "_rsim_arena") and arena._rsim_arena is not None:
+                    is_goal_bound = arena._rsim_arena.is_ball_probably_going_in(max_time=3.0)
+                else:
+                    target_goal_y = ARENA_EXTENT_Y if car.team == 0 else -ARENA_EXTENT_Y
+                    target_goal = np.array([0.0, target_goal_y, GOAL_HEIGHT * 0.5], dtype=np.float32)
+                    ball_to_goal = target_goal - arena.ball.pos
+                    norm_goal = np.linalg.norm(ball_to_goal)
+                    if norm_goal > 1e-4:
+                        unit_to_goal = ball_to_goal / norm_goal
+                        alignment = float(np.dot(arena.ball.vel / ball_speed, unit_to_goal))
+                        is_goal_bound = (alignment > 0.7)
+
+                if is_goal_bound:
+                    # Lock cooldown for 3.5 seconds to ensure this shot is only rewarded ONCE per attempt
+                    self._shot_cooldown[car.id] = 3.5
+                    power_scale = 1.0 + (ball_speed / BALL_MAX_SPEED) * 0.5
+                    return self.weight * power_scale
+
         return 0.0
 
 
