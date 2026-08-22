@@ -202,8 +202,13 @@ class RocketSimArena:
                     self._rsim_cars.append(self._rsim_arena.add_car(rsim.Team.ORANGE, rsim.CarConfig(rsim.CarConfig.OCTANE)))
 
                 def on_goal_cb(**kwargs):
-                    st = kwargs.get("scoring_team")
-                    self.scored_team = 0 if st == rsim.Team.BLUE else 1
+                    st = kwargs.get("team", kwargs.get("scoring_team"))
+                    if st is not None:
+                        self.scored_team = 0 if (st == rsim.Team.BLUE or st == 0) else 1
+                    else:
+                        # Position-based fallback
+                        b_pos_y = self._rsim_arena.ball.get_state().pos.y
+                        self.scored_team = 0 if b_pos_y > 0 else 1
 
                 def on_touch_cb(**kwargs):
                     car_obj = kwargs.get("car")
