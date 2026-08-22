@@ -64,8 +64,18 @@ class TouchBallReward(BaseReward):
             ball_speed = float(np.linalg.norm(arena.ball.vel))
             power_factor = 0.5 + 0.5 * min(1.0, ball_speed / 1500.0)
 
+            # Impact Alignment: heavily reward hitting the ball squarely with the front bumper or aligned dodge
+            car_to_ball = arena.ball.pos - car.pos
+            dist = float(np.linalg.norm(car_to_ball))
+            bumper_alignment = 1.0
+            if dist > 1e-4:
+                unit_to_ball = car_to_ball / dist
+                fwd = car.get_forward_vector()
+                align = float(np.dot(fwd, unit_to_ball))
+                bumper_alignment = 1.0 + 0.8 * max(0.0, align)  # Up to 1.8x bonus for square nose strikes vs side-swipes
+
             # Base Hit Bounty + Kickoff First-Touch Bounty
-            return (self.weight * aerial_flip_mult * power_factor) + first_bounty
+            return (self.weight * aerial_flip_mult * power_factor * bumper_alignment) + first_bounty
 
         return 0.0
 
@@ -546,24 +556,21 @@ class AlignedShotReward(BaseReward):
             ball_vy = arena.ball.vel[1]
             ball_speed = float(np.linalg.norm(arena.ball.vel))
 
-            # Must be an actual forward strike (> 600 uu/s) toward opponent half
-            if ((target_heading_positive and ball_vy > 400.0) or (not target_heading_positive and ball_vy < -400.0)) and ball_speed > 600.0:
+            # Must be an actual forward strike (> 450 uu/s) toward opponent half
+            if ((target_heading_positive and ball_vy > 300.0) or (not target_heading_positive and ball_vy < -300.0)) and ball_speed > 450.0:
+                target_goal_y = ARENA_EXTENT_Y if car.team == 0 else -ARENA_EXTENT_Y
+                target_goal = np.array([0.0, target_goal_y, GOAL_HEIGHT * 0.5], dtype=np.float32)
+                ball_to_goal = target_goal - arena.ball.pos
+                norm_goal = np.linalg.norm(ball_to_goal)
                 is_goal_bound = False
-                if hasattr(arena, "_rsim_arena") and arena._rsim_arena is not None:
-                    is_goal_bound = arena._rsim_arena.is_ball_probably_going_in(max_time=3.0)
-                else:
-                    target_goal_y = ARENA_EXTENT_Y if car.team == 0 else -ARENA_EXTENT_Y
-                    target_goal = np.array([0.0, target_goal_y, GOAL_HEIGHT * 0.5], dtype=np.float32)
-                    ball_to_goal = target_goal - arena.ball.pos
-                    norm_goal = np.linalg.norm(ball_to_goal)
-                    if norm_goal > 1e-4:
-                        unit_to_goal = ball_to_goal / norm_goal
-                        alignment = float(np.dot(arena.ball.vel / ball_speed, unit_to_goal))
-                        is_goal_bound = (alignment > 0.7)
+                if norm_goal > 1e-4:
+                    unit_to_goal = ball_to_goal / norm_goal
+                    alignment = float(np.dot(arena.ball.vel / ball_speed, unit_to_goal))
+                    is_goal_bound = (alignment > 0.65)
 
                 if is_goal_bound:
-                    # Lock cooldown for 3.5 seconds to ensure this shot is only rewarded ONCE per attempt
-                    self._shot_cooldown[car.id] = 3.5
+                    # Lock cooldown for 2.5 seconds to ensure this shot is only rewarded ONCE per attempt
+                    self._shot_cooldown[car.id] = 2.5
                     power_scale = 1.0 + (ball_speed / BALL_MAX_SPEED) * 0.5
                     return self.weight * power_scale
 
