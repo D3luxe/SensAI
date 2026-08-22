@@ -24,33 +24,49 @@ class BaseReward:
 class TouchBallReward(BaseReward):
     """
     Rewards making contact with the ball.
-    Scales with aerial_flip_multi when jumping/flipping and awards kickoff_first_touch_bonus on kickoff.
+    Scaled by hit power and aerial flip bonus.
+    Rate-limited with a 0.25s cooldown to eliminate continuous contact / touch grinding exploits.
     """
-    def __init__(self, weight: float = 10.0, first_touch_bonus: float = 35.0, aerial_flip_multi: float = 2.5):
+    def __init__(self, weight: float = 10.0, first_touch_bonus: float = 3.5, first_touch_multi: float = 3.0, aerial_flip_multi: float = 2.0):
         super().__init__(weight)
+        self.first_touch_multi = first_touch_multi
         self.first_touch_bonus = first_touch_bonus
         self.aerial_flip_multi = aerial_flip_multi
         self._prev_touches: Dict[int, int] = {}
+        self._touch_cooldown: Dict[int, float] = {}
         self._first_touch_claimed: bool = False
 
     def reset(self, initial_state: RocketSimArena):
         self._prev_touches = {car.id: car.ball_touches for car in initial_state.cars}
+        self._touch_cooldown = {car.id: 0.0 for car in initial_state.cars}
         self._first_touch_claimed = False
 
     def get_reward(self, car: CarState, arena: RocketSimArena, action: np.ndarray, is_goal: bool, scoring_team: Optional[int]) -> float:
         prev = self._prev_touches.get(car.id, 0)
         curr = car.ball_touches
         self._prev_touches[car.id] = curr
-        if curr > prev:
-            # First touch kickoff bounty
-            first_bonus = self.first_touch_bonus if not self._first_touch_claimed else 0.0
+
+        cd = self._touch_cooldown.get(car.id, 0.0)
+        if cd > 0.0:
+            self._touch_cooldown[car.id] = max(0.0, cd - (1.0 / 15.0))
+
+        if curr > prev and self._touch_cooldown.get(car.id, 0.0) <= 0.0:
+            self._touch_cooldown[car.id] = 0.25  # 250ms cooldown prevents grinding 15 touches per second
+
+            # First touch kickoff bounty (scaled directly by slider weight!)
+            first_bonus = (self.weight * self.first_touch_multi) if not self._first_touch_claimed else 0.0
             self._first_touch_claimed = True
 
-            # Multiplier for jumping, dodging, or flipping into ANY ball (ground or air!)
+            # Multiplier for jumping, dodging, or aerial hits
             is_jump_or_flip = (not car.on_ground) or car.just_dodged or (car.pos[2] > 25.0)
             aerial_flip_mult = self.aerial_flip_multi if is_jump_or_flip else 1.0
 
-            return (self.weight * aerial_flip_mult) + first_bonus
+            # Power scaling: reward solid strikes over gentle grazing
+            ball_speed = float(np.linalg.norm(arena.ball.vel))
+            power_factor = 0.5 + 0.5 * min(1.0, ball_speed / 1500.0)
+
+            return (self.weight * aerial_flip_mult * power_factor) + first_bonus
+
         return 0.0
 
 
