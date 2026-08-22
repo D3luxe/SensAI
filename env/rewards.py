@@ -27,9 +27,8 @@ class TouchBallReward(BaseReward):
     Scaled by hit power and aerial flip bonus.
     Rate-limited with a 0.25s cooldown to eliminate continuous contact / touch grinding exploits.
     """
-    def __init__(self, weight: float = 10.0, first_touch_bonus: float = 3.5, first_touch_multi: float = 3.0, aerial_flip_multi: float = 2.0):
+    def __init__(self, weight: float = 10.0, first_touch_bonus: float = 35.0, aerial_flip_multi: float = 2.0):
         super().__init__(weight)
-        self.first_touch_multi = first_touch_multi
         self.first_touch_bonus = first_touch_bonus
         self.aerial_flip_multi = aerial_flip_multi
         self._prev_touches: Dict[int, int] = {}
@@ -53,8 +52,8 @@ class TouchBallReward(BaseReward):
         if curr > prev and self._touch_cooldown.get(car.id, 0.0) <= 0.0:
             self._touch_cooldown[car.id] = 0.25  # 250ms cooldown prevents grinding 15 touches per second
 
-            # First touch kickoff bounty (scaled directly by slider weight!)
-            first_bonus = (self.weight * self.first_touch_multi) if not self._first_touch_claimed else 0.0
+            # Kickoff First-Touch Bounty (controlled directly by the Kickoff First-Touch Bounty slider)
+            first_bounty = self.first_touch_bonus if not self._first_touch_claimed else 0.0
             self._first_touch_claimed = True
 
             # Multiplier for jumping, dodging, or aerial hits
@@ -65,7 +64,8 @@ class TouchBallReward(BaseReward):
             ball_speed = float(np.linalg.norm(arena.ball.vel))
             power_factor = 0.5 + 0.5 * min(1.0, ball_speed / 1500.0)
 
-            return (self.weight * aerial_flip_mult * power_factor) + first_bonus
+            # Base Hit Bounty + Kickoff First-Touch Bounty
+            return (self.weight * aerial_flip_mult * power_factor) + first_bounty
 
         return 0.0
 
