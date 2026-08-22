@@ -126,6 +126,9 @@ def render_reward_breakdown_plot(blue_rewards: Dict[str, float], orange_rewards:
         "big_pad": "Big Boost Orbs (+100)",
         "save_boost": "Boost Tank Retention",
         "aerial_height": "Aerial Jump / Height",
+        "ground_to_air_setup": "Ground-to-Air Setup Pop",
+        "wall_aerial_launch": "Wall Aerial Launch",
+        "air_dribble_carry": "Air-Dribble Carry",
         "velocity": "General Driving Speed",
         "inactivity_penalty": "Inactivity & Standstill Penalty",
     }

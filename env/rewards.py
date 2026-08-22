@@ -384,7 +384,7 @@ class AerialHeightReward(BaseReward):
 class GroundToAirSetupReward(BaseReward):
     """
     Rewards popping a ground ball upward into the air (self-pass setup).
-    Triggers when a grounded car impacts a low ball and imparts strong upward vertical velocity (dz > +350 uu/s).
+    Triggers when a grounded car impacts a low ball and imparts upward vertical velocity (d_vz > +250 uu/s).
     """
     def __init__(self, weight: float = 8.0):
         super().__init__(weight)
@@ -404,12 +404,12 @@ class GroundToAirSetupReward(BaseReward):
         if cd > 0.0:
             self._setup_cooldown[car.id] = max(0.0, cd - (1.0 / 15.0))
 
-        # Must be on ground/low near ball, ball was low (Z < 180), and imparted vertical pop
-        if cd <= 0.0 and car.pos[2] < 60.0 and arena.ball.pos[2] < 180.0:
+        # Must be on ground/low near ball, ball was low (Z < 200), and imparted vertical pop
+        if cd <= 0.0 and car.pos[2] < 80.0 and arena.ball.pos[2] < 220.0:
             dist = float(np.linalg.norm(arena.ball.pos - car.pos))
-            if dist < 220.0 and d_vz > 350.0:
-                self._setup_cooldown[car.id] = 2.5
-                pop_scale = min(1.5, d_vz / 600.0)
+            if dist < 280.0 and d_vz > 250.0:
+                self._setup_cooldown[car.id] = 2.0
+                pop_scale = min(1.5, max(0.5, d_vz / 500.0))
                 return self.weight * pop_scale
 
         return 0.0
@@ -417,7 +417,7 @@ class GroundToAirSetupReward(BaseReward):
 
 class WallAerialLaunchReward(BaseReward):
     """
-    Rewards popping the ball off the sidewall and immediately launching off the wall into an aerial pursuit.
+    Rewards popping the ball off the sidewall and launching off the wall into an aerial pursuit.
     """
     def __init__(self, weight: float = 12.0):
         super().__init__(weight)
@@ -439,18 +439,19 @@ class WallAerialLaunchReward(BaseReward):
         if cd > 0.0:
             self._wall_cooldown[car.id] = max(0.0, cd - (1.0 / 15.0))
 
-        # Detect wall touch: car on sidewall (|x| > 3400, z > 250) touches ball
-        if curr_t > prev_t and abs(car.pos[0]) > 3400.0 and car.pos[2] > 250.0:
-            self._wall_touch_timer[car.id] = 0.6  # 600ms window to jump off wall
+        # Detect wall touch: car on/near wall (|x| > 3000 or |y| > 4500, z > 140) touches ball
+        is_on_wall = (abs(car.pos[0]) > 3000.0 or abs(car.pos[1]) > 4500.0) and car.pos[2] > 140.0
+        if curr_t > prev_t and is_on_wall:
+            self._wall_touch_timer[car.id] = 0.8  # 800ms window to jump off wall
 
         t_timer = self._wall_touch_timer.get(car.id, 0.0)
         if t_timer > 0.0:
             self._wall_touch_timer[car.id] = max(0.0, t_timer - (1.0 / 15.0))
-            # If bot jumps off wall during this window towards the ball into midfield
-            if action[5] > 0.0 and cd <= 0.0:
+            # If bot jumps or launches into the air off the wall towards the ball
+            if (action[5] > 0.0 or not car.on_ground) and cd <= 0.0:
                 dist = float(np.linalg.norm(arena.ball.pos - car.pos))
-                if dist < 800.0:
-                    self._wall_cooldown[car.id] = 3.5
+                if dist < 1000.0:
+                    self._wall_cooldown[car.id] = 3.0
                     self._wall_touch_timer[car.id] = 0.0
                     return self.weight
 
@@ -460,20 +461,20 @@ class WallAerialLaunchReward(BaseReward):
 class AirDribbleCarryReward(BaseReward):
     """
     Rewards airborne velocity matching and ball carrying towards the opponent goal (Air-Dribble).
-    Active when both car and ball are elevated (Z > 220 uu), in close proximity, and moving goal-bound.
+    Active when both car and ball are elevated (Z > 140 uu), in close proximity (< 450 uu), and moving goal-bound.
     """
     def __init__(self, weight: float = 0.06):
         super().__init__(weight)
 
     def get_reward(self, car: CarState, arena: RocketSimArena, action: np.ndarray, is_goal: bool, scoring_team: Optional[int]) -> float:
-        # Both car and ball must be genuinely airborne
-        if not car.on_ground and car.pos[2] > 200.0 and arena.ball.pos[2] > 220.0:
+        # Both car and ball must be elevated in the air (> 140 uu)
+        if not car.on_ground and car.pos[2] > 140.0 and arena.ball.pos[2] > 160.0:
             car_to_ball = arena.ball.pos - car.pos
             dist = float(np.linalg.norm(car_to_ball))
-            if dist < 250.0:
-                # Relative speed matching (soft touch / carry)
+            if dist < 450.0:
+                # Relative speed matching (soft touch / control)
                 rel_speed = float(np.linalg.norm(car.vel - arena.ball.vel))
-                speed_match = max(0.0, 1.0 - (rel_speed / 450.0))
+                speed_match = max(0.2, 1.0 - (rel_speed / 600.0))
                 
                 # Goal direction alignment
                 target_goal_y = ARENA_EXTENT_Y if car.team == 0 else -ARENA_EXTENT_Y
@@ -483,10 +484,10 @@ class AirDribbleCarryReward(BaseReward):
                 if norm_goal > 1e-4:
                     unit_goal = ball_to_goal / norm_goal
                     ball_vy_goal = float(np.dot(arena.ball.vel, unit_goal))
-                    goal_factor = max(0.0, min(1.0, ball_vy_goal / 1200.0))
+                    goal_factor = max(0.0, min(1.0, ball_vy_goal / 1000.0))
                     
-                    dist_factor = max(0.0, 1.0 - (dist / 250.0))
-                    height_factor = min(1.2, car.pos[2] / 500.0)
+                    dist_factor = max(0.0, 1.0 - (dist / 450.0))
+                    height_factor = min(1.3, car.pos[2] / 400.0)
                     
                     return self.weight * speed_match * (0.3 + 0.7 * goal_factor) * dist_factor * height_factor
 
