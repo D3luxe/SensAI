@@ -20,6 +20,7 @@ try:
         print(f"[RocketSim] Init note: {e}")
         ROCKETSIM_AVAILABLE = False
 except ImportError:
+    rsim = None
     ROCKETSIM_AVAILABLE = False
 
 # Arena Constants (Unreal Units)

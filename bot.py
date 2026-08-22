@@ -25,14 +25,11 @@ from env.actions import DiscreteActionParser, ContinuousActionParser
 from env.physics_engine import (
     CarState, BallState, BoostPad,
     ARENA_EXTENT_X, ARENA_EXTENT_Y, ARENA_HEIGHT_Z,
-    CAR_MAX_SPEED, BALL_MAX_SPEED, GOAL_HEIGHT,
-    ROCKETSIM_AVAILABLE, rsim
+    CAR_MAX_SPEED, BALL_MAX_SPEED, GOAL_HEIGHT
 )
 
 
 def rotation_to_rot_mat(pitch: float, yaw: float, roll: float) -> np.ndarray:
-    if ROCKETSIM_AVAILABLE and hasattr(rsim, "Angle"):
-        return rsim.Angle(yaw, pitch, roll).as_rot_mat().as_numpy().astype(np.float32)
     cy, sy = math.cos(yaw), math.sin(yaw)
     cp, sp = math.cos(pitch), math.sin(pitch)
     cr, sr = math.cos(roll), math.sin(roll)
