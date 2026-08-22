@@ -231,7 +231,9 @@ class SenseiRLBot(BaseAgent):
             # Attack Commitment (ensures bots strike through kickoffs and open stationary balls)
             ball_pos = ball_state.pos
             ball_speed = float(np.linalg.norm(ball_state.vel))
+            car_speed = float(np.linalg.norm(car_state.vel))
             is_kickoff = (abs(ball_pos[0]) < 50.0 and abs(ball_pos[1]) < 50.0 and ball_speed < 100.0)
+            steer_err = 0.0
             
             car_to_ball = ball_pos - car_state.pos
             dist_to_ball = float(np.linalg.norm(car_to_ball))
@@ -247,16 +249,24 @@ class SenseiRLBot(BaseAgent):
                     controller.steer = steer_err
                     controller.throttle = 1.0
                     controller.boost = bool(car_state.boost > 0 and abs(steer_err) < 0.5)
-                elif dist_to_ball < 700.0 and ball_speed < 350.0 and is_on_ground:
-                    # Stagnant ball in close proximity: steer directly into ball and strike rather than parking beside it
-                    steer_err = float(np.clip(local_ball_x / max(100.0, abs(local_ball_y)), -1.0, 1.0))
+                elif dist_to_ball < 800.0 and ball_speed < 450.0 and is_on_ground:
+                    # Stagnant/slow ball in close proximity: steer directly into ball
+                    steer_err = float(np.clip(local_ball_x / max(80.0, abs(local_ball_y)), -1.0, 1.0))
                     controller.steer = steer_err
-                    controller.throttle = 1.0
-                    controller.boost = bool(car_state.boost > 0 and dist_to_ball > 300.0 and abs(steer_err) < 0.3)
+                    
+                    # Sharp cut / powerslide: if turning sharply towards close ball, tap handbrake & modulate speed to collapse turning radius
+                    if abs(steer_err) > 0.35:
+                        controller.handbrake = True
+                        controller.boost = False
+                        controller.throttle = 0.2 if car_speed > 600.0 else 1.0
+                    else:
+                        controller.handbrake = False
+                        controller.throttle = 1.0
+                        controller.boost = bool(car_state.boost > 0 and dist_to_ball > 300.0 and abs(steer_err) < 0.25)
 
             # Handbrake: only engage for sharp low-to-medium speed turns to prevent involuntary high-speed spinouts
-            car_speed = float(np.linalg.norm(car_state.vel))
-            controller.handbrake = bool(act[7] > 0.6 and abs(steer_val) > 0.6 and car_speed < 1400.0 and not is_kickoff)
+            if not (dist_to_ball < 800.0 and ball_speed < 450.0 and is_on_ground and abs(steer_err) > 0.35):
+                controller.handbrake = bool(act[7] > 0.6 and abs(steer_val) > 0.6 and car_speed < 1400.0 and not is_kickoff)
 
             # Direct 1-to-1 Jump mapping (eliminates involuntary spastic auto-flips)
             controller.jump = bool(act[5] > 0.0)
