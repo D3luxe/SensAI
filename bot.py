@@ -32,15 +32,14 @@ from env.physics_engine import (
 
 def rotation_to_rot_mat(pitch: float, yaw: float, roll: float) -> np.ndarray:
     if ROCKETSIM_AVAILABLE and hasattr(rsim, "Angle"):
-        # RocketSim Angle constructor takes (yaw, pitch, roll)
         return rsim.Angle(yaw, pitch, roll).as_rot_mat().as_numpy().astype(np.float32)
-    cp, sp = math.cos(pitch), math.sin(pitch)
     cy, sy = math.cos(yaw), math.sin(yaw)
+    cp, sp = math.cos(pitch), math.sin(pitch)
     cr, sr = math.cos(roll), math.sin(roll)
-    fwd = np.array([cp * cy, cp * sy, sp], dtype=np.float32)
-    right = np.array([cy * sp * sr - sy * cr, sy * sp * sr + cy * cr, -cp * sr], dtype=np.float32)
-    up = np.array([-cy * sp * cr - sy * sr, -sy * sp * cr + cy * sr, cp * cr], dtype=np.float32)
-    return np.array([fwd, right, up], dtype=np.float32)
+    Rx = np.array([[1, 0, 0], [0, cr, -sr], [0, sr, cr]], dtype=np.float32)
+    Ry = np.array([[cp, 0, sp], [0, 1, 0], [-sp, 0, cp]], dtype=np.float32)
+    Rz = np.array([[cy, sy, 0], [-sy, cy, 0], [0, 0, 1]], dtype=np.float32)
+    return (Rx @ Ry @ Rz).astype(np.float32)
 
 
 class SenseiRLBot(BaseAgent):
@@ -55,6 +54,10 @@ class SenseiRLBot(BaseAgent):
         self.obs_builder = DefaultObservationBuilder(symmetric=True)
         self.discrete_parser = DiscreteActionParser()
         self.continuous_actions = False
+        try:
+            self.initialize_agent()
+        except Exception as e:
+            print(f"[SensAI] Agent init error: {e}")
 
     def get_latest_checkpoint(self) -> Optional[str]:
         ckpt_dir = os.path.join(os.path.dirname(__file__), "checkpoints")
@@ -92,153 +95,166 @@ class SenseiRLBot(BaseAgent):
     def get_output(self, packet: GameTickPacket) -> SimpleControllerState:
         controller = SimpleControllerState()
 
-        if not packet.game_info.is_round_active:
+        # Guard: check match state (allow kickoff and freeplay play)
+        if getattr(packet.game_info, "is_match_ended", False):
             return controller
 
-        # Extract self car
-        my_car = packet.game_cars[self.index]
-        is_on_ground = bool(my_car.has_wheel_contact)
-        has_jump = is_on_ground or (not getattr(my_car, "jumped", False))
-        has_flip = not getattr(my_car, "double_jumped", False)
+        try:
+            if self.model is None:
+                self.initialize_agent()
 
-        car_rot_mat = rotation_to_rot_mat(
-            my_car.physics.rotation.pitch,
-            my_car.physics.rotation.yaw,
-            my_car.physics.rotation.roll
-        )
+            if packet.num_cars <= self.index:
+                return controller
 
-        car_state = CarState(
-            id=self.index,
-            team=self.team,
-            pos=np.array([my_car.physics.location.x, my_car.physics.location.y, my_car.physics.location.z], dtype=np.float32),
-            vel=np.array([my_car.physics.velocity.x, my_car.physics.velocity.y, my_car.physics.velocity.z], dtype=np.float32),
-            rot=np.array([my_car.physics.rotation.pitch, my_car.physics.rotation.yaw, my_car.physics.rotation.roll], dtype=np.float32),
-            rot_mat=car_rot_mat,
-            ang_vel=np.array([my_car.physics.angular_velocity.x, my_car.physics.angular_velocity.y, my_car.physics.angular_velocity.z], dtype=np.float32),
-            boost=float(my_car.boost),
-            on_ground=is_on_ground,
-            has_jump=has_jump,
-            has_flip=has_flip
-        )
+            # Extract self car
+            my_car = packet.game_cars[self.index]
+            is_on_ground = bool(my_car.has_wheel_contact)
+            has_jump = is_on_ground or (not getattr(my_car, "jumped", False))
+            has_flip = not getattr(my_car, "double_jumped", False)
 
-        # Extract ball
-        b_phys = packet.game_ball.physics
-        ball_state = BallState(
-            pos=np.array([b_phys.location.x, b_phys.location.y, b_phys.location.z], dtype=np.float32),
-            vel=np.array([b_phys.velocity.x, b_phys.velocity.y, b_phys.velocity.z], dtype=np.float32),
-            ang_vel=np.array([b_phys.angular_velocity.x, b_phys.angular_velocity.y, b_phys.angular_velocity.z], dtype=np.float32)
-        )
+            car_rot_mat = rotation_to_rot_mat(
+                my_car.physics.rotation.pitch,
+                my_car.physics.rotation.yaw,
+                my_car.physics.rotation.roll
+            )
 
-        # Build dummy arena struct for obs builder
-        class MockArena:
-            def __init__(self, ball, cars):
-                self.ball = ball
-                self.cars = cars
-                self.boost_pads = BoostPad.create_standard_pads()
+            car_state = CarState(
+                id=self.index,
+                team=self.team,
+                pos=np.array([my_car.physics.location.x, my_car.physics.location.y, my_car.physics.location.z], dtype=np.float32),
+                vel=np.array([my_car.physics.velocity.x, my_car.physics.velocity.y, my_car.physics.velocity.z], dtype=np.float32),
+                rot=np.array([my_car.physics.rotation.pitch, my_car.physics.rotation.yaw, my_car.physics.rotation.roll], dtype=np.float32),
+                rot_mat=car_rot_mat,
+                ang_vel=np.array([my_car.physics.angular_velocity.x, my_car.physics.angular_velocity.y, my_car.physics.angular_velocity.z], dtype=np.float32),
+                boost=float(my_car.boost),
+                on_ground=is_on_ground,
+                has_jump=has_jump,
+                has_flip=has_flip
+            )
 
-        # Find opponent
-        opponents = []
-        for i in range(packet.num_cars):
-            if i != self.index:
-                opp_car = packet.game_cars[i]
-                opp_on_ground = bool(opp_car.has_wheel_contact)
-                opp_jump = opp_on_ground or (not getattr(opp_car, "jumped", False))
-                opp_flip = not getattr(opp_car, "double_jumped", False)
-                opp_rot_mat = rotation_to_rot_mat(
-                    opp_car.physics.rotation.pitch,
-                    opp_car.physics.rotation.yaw,
-                    opp_car.physics.rotation.roll
-                )
-                opponents.append(CarState(
-                    id=i,
-                    team=opp_car.team,
-                    pos=np.array([opp_car.physics.location.x, opp_car.physics.location.y, opp_car.physics.location.z], dtype=np.float32),
-                    vel=np.array([opp_car.physics.velocity.x, opp_car.physics.velocity.y, opp_car.physics.velocity.z], dtype=np.float32),
-                    rot=np.array([opp_car.physics.rotation.pitch, opp_car.physics.rotation.yaw, opp_car.physics.rotation.roll], dtype=np.float32),
-                    rot_mat=opp_rot_mat,
-                    ang_vel=np.array([opp_car.physics.angular_velocity.x, opp_car.physics.angular_velocity.y, opp_car.physics.angular_velocity.z], dtype=np.float32),
-                    boost=float(opp_car.boost),
-                    on_ground=opp_on_ground,
-                    has_jump=opp_jump,
-                    has_flip=opp_flip
-                ))
+            # Extract ball
+            b_phys = packet.game_ball.physics
+            ball_state = BallState(
+                pos=np.array([b_phys.location.x, b_phys.location.y, b_phys.location.z], dtype=np.float32),
+                vel=np.array([b_phys.velocity.x, b_phys.velocity.y, b_phys.velocity.z], dtype=np.float32),
+                ang_vel=np.array([b_phys.angular_velocity.x, b_phys.angular_velocity.y, b_phys.angular_velocity.z], dtype=np.float32)
+            )
 
-        arena = MockArena(ball_state, [car_state] + opponents)
-        obs = self.obs_builder.build_obs(car_state, arena)
+            # Build dummy arena struct for obs builder
+            class MockArena:
+                def __init__(self, ball, cars):
+                    self.ball = ball
+                    self.cars = cars
+                    self.boost_pads = BoostPad.create_standard_pads()
 
-        # Model Inference
-        with torch.no_grad():
-            obs_tensor = torch.tensor(obs, dtype=torch.float32, device=self.device).unsqueeze(0)
-            action, _, _, _ = self.model.get_action_and_value(obs_tensor, deterministic=True)
+            # Find opponent
+            opponents = []
+            for i in range(packet.num_cars):
+                if i != self.index:
+                    opp_car = packet.game_cars[i]
+                    opp_on_ground = bool(opp_car.has_wheel_contact)
+                    opp_jump = opp_on_ground or (not getattr(opp_car, "jumped", False))
+                    opp_flip = not getattr(opp_car, "double_jumped", False)
+                    opp_rot_mat = rotation_to_rot_mat(
+                        opp_car.physics.rotation.pitch,
+                        opp_car.physics.rotation.yaw,
+                        opp_car.physics.rotation.roll
+                    )
+                    opponents.append(CarState(
+                        id=i,
+                        team=opp_car.team,
+                        pos=np.array([opp_car.physics.location.x, opp_car.physics.location.y, opp_car.physics.location.z], dtype=np.float32),
+                        vel=np.array([opp_car.physics.velocity.x, opp_car.physics.velocity.y, opp_car.physics.velocity.z], dtype=np.float32),
+                        rot=np.array([opp_car.physics.rotation.pitch, opp_car.physics.rotation.yaw, opp_car.physics.rotation.roll], dtype=np.float32),
+                        rot_mat=opp_rot_mat,
+                        ang_vel=np.array([opp_car.physics.angular_velocity.x, opp_car.physics.angular_velocity.y, opp_car.physics.angular_velocity.z], dtype=np.float32),
+                        boost=float(opp_car.boost),
+                        on_ground=opp_on_ground,
+                        has_jump=opp_jump,
+                        has_flip=opp_flip
+                    ))
+
+            arena = MockArena(ball_state, [car_state] + opponents)
+            obs = self.obs_builder.build_obs(car_state, arena)
+
+            # Model Inference
+            with torch.no_grad():
+                obs_tensor = torch.tensor(obs, dtype=torch.float32, device=self.device).unsqueeze(0)
+                action, _, _, _ = self.model.get_action_and_value(obs_tensor, deterministic=True)
+                if self.continuous_actions:
+                    act = action.squeeze(0).cpu().numpy()
+                else:
+                    act_idx = int(action.squeeze().cpu().item())
+                    act = self.discrete_parser.parse_actions(act_idx)
+
+            # Action Mapping
+            # [throttle, steer, pitch, yaw, roll, jump, boost, handbrake]
+            raw_throttle = float(act[0])
+            steer_val = float(np.clip(act[1], -1.0, 1.0))
+
             if self.continuous_actions:
-                act = action.squeeze(0).cpu().numpy()
+                # Continuous deadband
+                if raw_throttle > 0.05:
+                    controller.throttle = 1.0
+                elif raw_throttle < -0.35:
+                    controller.throttle = -1.0
+                else:
+                    controller.throttle = 0.0
             else:
-                act_idx = int(action.squeeze().cpu().item())
-                act = self.discrete_parser.parse_actions(act_idx)
+                # Discrete lookup table already contains exact discrete values
+                controller.throttle = raw_throttle
 
-        # Action Mapping
-        # [throttle, steer, pitch, yaw, roll, jump, boost, handbrake]
-        raw_throttle = float(act[0])
-        steer_val = float(np.clip(act[1], -1.0, 1.0))
-
-        if self.continuous_actions:
-            # Continuous deadband
-            if raw_throttle > 0.05:
-                controller.throttle = 1.0
-            elif raw_throttle < -0.35:
-                controller.throttle = -1.0
-            else:
-                controller.throttle = 0.0
-        else:
-            # Discrete lookup table already contains exact discrete values
-            controller.throttle = raw_throttle
-
-        controller.steer = steer_val
-        controller.pitch = float(np.clip(act[2], -1.0, 1.0))
-        controller.yaw = float(np.clip(act[3], -1.0, 1.0))
-        controller.roll = float(np.clip(act[4], -1.0, 1.0))
-        controller.boost = bool(act[6] > 0.0 and (raw_throttle > 0.0 or not is_on_ground))
-
-        # Attack Commitment (ensures bots strike through kickoffs and open stationary balls)
-        ball_pos = ball_state.pos
-        ball_speed = float(np.linalg.norm(ball_state.vel))
-        is_kickoff = (abs(ball_pos[0]) < 50.0 and abs(ball_pos[1]) < 50.0 and ball_speed < 100.0)
-        
-        car_to_ball = ball_pos - car_state.pos
-        dist_to_ball = float(np.linalg.norm(car_to_ball))
-        if dist_to_ball > 1e-4:
-            fwd = car_state.get_forward_vector()
-            right = car_state.get_right_vector()
-            local_ball_x = float(np.dot(car_to_ball, right))
-            local_ball_y = float(np.dot(car_to_ball, fwd))
-
-            if is_kickoff:
-                # Steer directly into kickoff ball and rush with full boost
-                steer_err = float(np.clip(local_ball_x / max(150.0, abs(local_ball_y)), -1.0, 1.0))
-                controller.steer = steer_err
-                controller.throttle = 1.0
-                controller.boost = bool(car_state.boost > 0 and abs(steer_err) < 0.5)
-            elif dist_to_ball < 700.0 and ball_speed < 350.0 and is_on_ground:
-                # Stagnant ball in close proximity: steer directly into ball and strike rather than parking beside it
-                steer_err = float(np.clip(local_ball_x / max(100.0, abs(local_ball_y)), -1.0, 1.0))
-                controller.steer = steer_err
-                controller.throttle = 1.0
-                controller.boost = bool(car_state.boost > 0 and dist_to_ball > 300.0 and abs(steer_err) < 0.3)
-
-        # Handbrake: only engage for sharp low-to-medium speed turns to prevent involuntary high-speed spinouts
-        car_speed = float(np.linalg.norm(car_state.vel))
-        controller.handbrake = bool(act[7] > 0.6 and abs(steer_val) > 0.6 and car_speed < 1400.0 and not is_kickoff)
-
-        # Direct 1-to-1 Jump mapping (eliminates involuntary spastic auto-flips)
-        controller.jump = bool(act[5] > 0.0)
-
-        # In-air vs on-ground orientation stabilization
-        if is_on_ground:
-            # On ground: steering only (prevent residual pitch/roll from causing awkward aerial twitches on minor bumps)
-            controller.pitch = 0.0
-            controller.roll = 0.0
-        else:
+            controller.steer = steer_val
             controller.pitch = float(np.clip(act[2], -1.0, 1.0))
+            controller.yaw = float(np.clip(act[3], -1.0, 1.0))
             controller.roll = float(np.clip(act[4], -1.0, 1.0))
+            controller.boost = bool(act[6] > 0.0 and (raw_throttle > 0.0 or not is_on_ground))
+
+            # Attack Commitment (ensures bots strike through kickoffs and open stationary balls)
+            ball_pos = ball_state.pos
+            ball_speed = float(np.linalg.norm(ball_state.vel))
+            is_kickoff = (abs(ball_pos[0]) < 50.0 and abs(ball_pos[1]) < 50.0 and ball_speed < 100.0)
+            
+            car_to_ball = ball_pos - car_state.pos
+            dist_to_ball = float(np.linalg.norm(car_to_ball))
+            if dist_to_ball > 1e-4:
+                fwd = car_state.get_forward_vector()
+                right = car_state.get_right_vector()
+                local_ball_x = float(np.dot(car_to_ball, right))
+                local_ball_y = float(np.dot(car_to_ball, fwd))
+
+                if is_kickoff:
+                    # Steer directly into kickoff ball and rush with full boost
+                    steer_err = float(np.clip(local_ball_x / max(150.0, abs(local_ball_y)), -1.0, 1.0))
+                    controller.steer = steer_err
+                    controller.throttle = 1.0
+                    controller.boost = bool(car_state.boost > 0 and abs(steer_err) < 0.5)
+                elif dist_to_ball < 700.0 and ball_speed < 350.0 and is_on_ground:
+                    # Stagnant ball in close proximity: steer directly into ball and strike rather than parking beside it
+                    steer_err = float(np.clip(local_ball_x / max(100.0, abs(local_ball_y)), -1.0, 1.0))
+                    controller.steer = steer_err
+                    controller.throttle = 1.0
+                    controller.boost = bool(car_state.boost > 0 and dist_to_ball > 300.0 and abs(steer_err) < 0.3)
+
+            # Handbrake: only engage for sharp low-to-medium speed turns to prevent involuntary high-speed spinouts
+            car_speed = float(np.linalg.norm(car_state.vel))
+            controller.handbrake = bool(act[7] > 0.6 and abs(steer_val) > 0.6 and car_speed < 1400.0 and not is_kickoff)
+
+            # Direct 1-to-1 Jump mapping (eliminates involuntary spastic auto-flips)
+            controller.jump = bool(act[5] > 0.0)
+
+            # In-air vs on-ground orientation stabilization
+            if is_on_ground:
+                # On ground: steering only (prevent residual pitch/roll from causing awkward aerial twitches on minor bumps)
+                controller.pitch = 0.0
+                controller.roll = 0.0
+            else:
+                controller.pitch = float(np.clip(act[2], -1.0, 1.0))
+                controller.roll = float(np.clip(act[4], -1.0, 1.0))
+
+        except Exception as e:
+            import traceback
+            print(f"[SensAI] Error in get_output: {e}")
+            traceback.print_exc()
 
         return controller
