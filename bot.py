@@ -237,19 +237,36 @@ class SenseiRLBot(BaseAgent):
             # Smooth steering transition (filters discrete bang-bang wheel chatter at 120Hz)
             self.current_steer = 0.7 * steer_val + 0.3 * self.current_steer
             controller.steer = float(np.clip(self.current_steer, -1.0, 1.0))
-            controller.yaw = float(np.clip(act[3], -1.0, 1.0))
-            controller.jump = bool(act[5] > 0.0)
+            # Directional Flip / Dodge Detection (Jump + non-zero pitch/yaw/roll)
+            is_dodge = bool(act[5] > 0.0 and (abs(act[2]) > 0.1 or abs(act[3]) > 0.1 or abs(act[4]) > 0.1))
+
+            if is_dodge:
+                # 120Hz 4-stage substep cadence for authentic Rocket League double-jump dodges:
+                # Substeps 0-1: First jump initiation
+                # Substeps 2-3: Jump release (resets double-jump gate)
+                # Substeps 4-5: Second jump trigger (fires directional flip/dodge with pitch/yaw/roll)
+                # Substeps 6-7: Complete flip
+                if self.ticks_since_last_action in (0, 1, 4, 5):
+                    controller.jump = True
+                else:
+                    controller.jump = False
+
+                controller.pitch = float(np.clip(act[2], -1.0, 1.0))
+                controller.yaw = float(np.clip(act[3], -1.0, 1.0))
+                controller.roll = float(np.clip(act[4], -1.0, 1.0))
+            else:
+                controller.jump = bool(act[5] > 0.0)
+                if is_on_ground:
+                    controller.pitch = 0.0
+                    controller.roll = 0.0
+                    controller.yaw = 0.0
+                else:
+                    controller.pitch = float(np.clip(act[2], -1.0, 1.0))
+                    controller.roll = float(np.clip(act[4], -1.0, 1.0))
+                    controller.yaw = float(np.clip(act[3], -1.0, 1.0))
+
             controller.boost = bool(act[6] > 0.0 and (raw_throttle > 0.0 or not is_on_ground))
             controller.handbrake = bool(act[7] > 0.5)
-
-            # In-air vs on-ground orientation stabilization
-            if is_on_ground:
-                # On ground: steering only (prevent residual pitch/roll from causing aerial twitches)
-                controller.pitch = 0.0
-                controller.roll = 0.0
-            else:
-                controller.pitch = float(np.clip(act[2], -1.0, 1.0))
-                controller.roll = float(np.clip(act[4], -1.0, 1.0))
 
             self.tick_count += 1
             ball_pos = ball_state.pos
