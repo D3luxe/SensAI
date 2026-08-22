@@ -178,15 +178,12 @@ class SaveReward(BaseReward):
         return 0.0
 
 
-class BoostManagementReward(BaseReward):
+class SmallPadReward(BaseReward):
     """
-    Standard RLGym Dual-Action Boost Architecture:
-    1. Event Bounty: Flat +2.0 pts for small pads (0.4x weight), +5.0 pts for big orbs (1.0x weight).
-    2. SaveBoost Curve: sqrt(boost / 100) micro-guidance for maintaining reserves.
+    Rewards running over small boost pads (+12 boost) with a flat event bounty.
     """
-    def __init__(self, weight: float = 5.0, save_weight: float = 0.02):
+    def __init__(self, weight: float = 2.0):
         super().__init__(weight)
-        self.save_weight = save_weight
         self._prev_boost: Dict[int, float] = {}
 
     def reset(self, initial_state: RocketSimArena):
@@ -196,20 +193,40 @@ class BoostManagementReward(BaseReward):
         prev = self._prev_boost.get(car.id, car.boost)
         curr = car.boost
         self._prev_boost[car.id] = curr
+        if curr > prev + 5.0 and curr <= prev + 50.0:
+            return self.weight
+        return 0.0
 
-        rew = 0.0
 
-        # 1. Event Pickup Bounty
-        if curr > prev + 5.0:
-            if curr > prev + 50.0:  # Big 100 Orb
-                rew += 1.0 * self.weight
-            else:  # Small 12 Pad
-                rew += 0.4 * self.weight
+class BigPadReward(BaseReward):
+    """
+    Rewards collecting full boost orbs (+100 boost) with a flat event bounty.
+    """
+    def __init__(self, weight: float = 5.0):
+        super().__init__(weight)
+        self._prev_boost: Dict[int, float] = {}
 
-        # 2. SaveBoost Non-Linear Tank Retention
-        rew += math.sqrt(max(0.0, curr / 100.0)) * self.save_weight
+    def reset(self, initial_state: RocketSimArena):
+        self._prev_boost = {car.id: car.boost for car in initial_state.cars}
 
-        return rew
+    def get_reward(self, car: CarState, arena: RocketSimArena, action: np.ndarray, is_goal: bool, scoring_team: Optional[int]) -> float:
+        prev = self._prev_boost.get(car.id, car.boost)
+        curr = car.boost
+        self._prev_boost[car.id] = curr
+        if curr > prev + 50.0:
+            return self.weight
+        return 0.0
+
+
+class SaveBoostReward(BaseReward):
+    """
+    Rewards maintaining healthy boost tank reserves using the concave sqrt(boost / 100) curve.
+    """
+    def __init__(self, weight: float = 0.02):
+        super().__init__(weight)
+
+    def get_reward(self, car: CarState, arena: RocketSimArena, action: np.ndarray, is_goal: bool, scoring_team: Optional[int]) -> float:
+        return math.sqrt(max(0.0, car.boost / 100.0)) * self.weight
 
 
 class VelocityReward(BaseReward):
@@ -459,6 +476,8 @@ class RewardManager:
                 first_touch_bonus=weights.get("kickoff_first_touch_bonus", 35.0),
                 aerial_flip_multi=weights.get("touch_aerial_flip_multi", 2.5)
             ),
+            "small_pad": SmallPadReward(weights.get("small_pad_weight", 2.0)),
+            "big_pad": BigPadReward(weights.get("big_pad_weight", 5.0)),
             "demo_bump": DemoBumpReward(weights.get("demo_bump_weight", 15.0)),
             "boost_steal": BoostStealReward(weights.get("boost_steal_weight", 10.0)),
 
@@ -473,7 +492,7 @@ class RewardManager:
             "behind_ball": BehindBallReward(weights.get("behind_ball_weight", 0.03)),
             "possession": PossessionReward(weights.get("possession_weight", 0.04)),
             "defensive_position": DefensivePositionReward(weights.get("defensive_position_weight", 0.03)),
-            "boost_management": BoostManagementReward(weights.get("boost_management_weight", 5.0)),
+            "save_boost": SaveBoostReward(weights.get("save_boost_weight", 0.02)),
             "velocity": VelocityReward(weights.get("velocity_weight", 0.02)),
             "aerial_height": AerialHeightReward(weights.get("aerial_height_weight", 0.05)),
         }
@@ -494,7 +513,9 @@ class RewardManager:
             "face_ball_weight": "face_ball",
             "goal_weight": "goal",
             "save_weight": "save",
-            "boost_management_weight": "boost_management",
+            "small_pad_weight": "small_pad",
+            "big_pad_weight": "big_pad",
+            "save_boost_weight": "save_boost",
             "velocity_weight": "velocity",
             "aerial_height_weight": "aerial_height",
             "aligned_shot_weight": "aligned_shot",

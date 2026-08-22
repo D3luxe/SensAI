@@ -121,7 +121,9 @@ def render_reward_breakdown_plot(blue_rewards: Dict[str, float], orange_rewards:
         "kickoff": "Kickoff Speed Rush",
         "demo_bump": "Bumps & Demolitions",
         "boost_steal": "Opponent Boost Steals",
-        "boost_management": "Boost Management",
+        "small_pad": "Small Boost Pads (+12)",
+        "big_pad": "Big Boost Orbs (+100)",
+        "save_boost": "Boost Tank Retention",
         "aerial_height": "Aerial Jump / Height",
         "velocity": "General Driving Speed",
     }
