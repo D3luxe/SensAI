@@ -194,6 +194,131 @@ def build_status_card_html(status_info: dict, feedback_msg: str = "") -> str:
     return html
 
 
+def build_full_diagnostic_export() -> tuple[str, str]:
+    """
+    Assembles a comprehensive, single-source-of-truth diagnostic summary of the entire bot training system.
+    Returns:
+        (formatted_overview_markdown, copy_paste_export_string)
+    """
+    mgr = TrainingProcessManager.get_instance()
+    status = mgr.get_status_info()
+    running = status.get("running", False)
+    paused = status.get("paused", False)
+    pid = status.get("pid", "None")
+    elapsed = status.get("elapsed_seconds", 0)
+    elapsed_str = format_elapsed_time(elapsed)
+    metrics = status.get("metrics", {})
+
+    # 1. System & Engine
+    try:
+        from env.physics_engine import ROCKETSIM_AVAILABLE
+    except Exception:
+        ROCKETSIM_AVAILABLE = False
+    
+    engine_str = "C++ RocketSim (High Speed Bullet Physics ~5000+ SPS)" if ROCKETSIM_AVAILABLE else "Pure-Python Fallback (~1100 SPS)"
+
+    # 2. Configs
+    default_cfg = load_yaml_config("config/default_config.yaml")
+    hp = default_cfg.get("hyperparameters", {})
+    env = default_cfg.get("environment", {})
+    rew = default_cfg.get("rewards", {})
+    
+    # Overlay live config
+    if os.path.exists("config/live_config.json"):
+        try:
+            with open("config/live_config.json", "r") as f:
+                ld = json.load(f)
+                if "rewards" in ld and isinstance(ld["rewards"], dict):
+                    rew.update(ld["rewards"])
+                if "learning_rate" in ld:
+                    hp["learning_rate"] = float(ld["learning_rate"])
+                if "ent_coef" in ld:
+                    hp["ent_coef"] = float(ld["ent_coef"])
+                if "clip_range" in ld:
+                    hp["clip_range"] = float(ld["clip_range"])
+        except Exception:
+            pass
+
+    # 3. Telemetry & AI Coach
+    telem = extract_rolling_telemetry("logs/history.jsonl", window=8)
+    coach_report = generate_ai_coach_diagnostics(telem, active_rewards=rew)
+
+    # 4. Checkpoint Files
+    ckpts = glob.glob("checkpoints/*.pt")
+    ckpt_info = []
+    for c in sorted(ckpts, key=os.path.getmtime, reverse=True)[:6]:
+        size_mb = os.path.getsize(c) / (1024 * 1024)
+        mtime = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(os.path.getmtime(c)))
+        ckpt_info.append(f"- `{os.path.basename(c)}` ({size_mb:.1f} MB, modified {mtime})")
+    ckpts_str = "\n".join(ckpt_info) if ckpt_info else "*(No checkpoint files found)*"
+
+    # 5. Recent Logs Tail
+    log_tail = mgr.get_logs(max_lines=20)
+    log_tail_str = "".join(log_tail).strip() if log_tail else "*(No console output recorded yet)*"
+
+    # Formatted Markdown Overview for UI Display
+    run_state_badge = "🟢 RUNNING" if (running and not paused) else ("⏸️ PAUSED" if (running and paused) else "🛑 STOPPED")
+    
+    overview_md = f"""
+### 📊 SensAI Live Diagnostic Dashboard
+
+| Metric / Parameter | Current Value | Metric / Parameter | Current Value |
+| :--- | :--- | :--- | :--- |
+| **Process Status** | `{run_state_badge}` | **Training Speed** | `{metrics.get('sps', 0):,} SPS` |
+| **Process PID** | `{pid}` | **Elapsed Runtime** | `{elapsed_str}` |
+| **Physics Engine** | `{engine_str}` | **Learning Rate** | `{hp.get('learning_rate', 3e-4)}` |
+| **Current Iteration** | `{metrics.get('iteration', 0):,}` | **Mean Reward** | `{metrics.get('mean_reward', 0.0):+.2f} pts` |
+| **Global Timesteps** | `{metrics.get('global_step', 0):,}` | **Policy Entropy** | `{metrics.get('entropy', 0.0):.4f}` |
+| **Policy Loss** | `{metrics.get('policy_loss', 0.0):.5f}` | **Value Loss** | `{metrics.get('value_loss', 0.0):.4f}` |
+| **Ball Touches / Rollout** | `{metrics.get('ball_touches', 0.0):.1f}` | **Goals / Rollout** | `{metrics.get('goals', 0)}` |
+
+---
+
+### 🧠 AI Coach Behavioral Diagnosis
+{coach_report}
+
+---
+
+### 💾 Available Checkpoints
+{ckpts_str}
+"""
+
+    # Comprehensive Snapshot for AI Assistant (Copy-Paste string)
+    snapshot = {
+        "timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),
+        "process_status": {
+            "running": running,
+            "paused": paused,
+            "pid": pid,
+            "elapsed_seconds": elapsed,
+            "elapsed_formatted": elapsed_str,
+            "physics_engine": engine_str,
+        },
+        "convergence_metrics": {
+            "iteration": metrics.get("iteration", 0),
+            "global_step": metrics.get("global_step", 0),
+            "sps": metrics.get("sps", 0),
+            "mean_reward": metrics.get("mean_reward", 0.0),
+            "policy_loss": metrics.get("policy_loss", 0.0),
+            "value_loss": metrics.get("value_loss", 0.0),
+            "entropy": metrics.get("entropy", 0.0),
+            "ball_touches_per_rollout": metrics.get("ball_touches", 0.0),
+            "goals_per_rollout": metrics.get("goals", 0),
+        },
+        "hyperparameters": hp,
+        "environment": env,
+        "active_reward_weights": rew,
+        "behavioral_telemetry": telem,
+        "recent_checkpoints": [os.path.basename(c) for c in ckpts[:6]],
+        "recent_console_tail": log_tail_str.split("\n")[-15:] if log_tail_str else []
+    }
+
+    export_json = json.dumps(snapshot, indent=2)
+    export_box = f"```json\n{export_json}\n```"
+
+    return overview_md, export_box
+
+
 def create_ui():
     mgr = TrainingProcessManager.get_instance()
     default_cfg = load_yaml_config("config/default_config.yaml")
@@ -252,8 +377,8 @@ def create_ui():
                         interactive=not init_status["running"]
                     )
                     pause_btn = gr.Button(
-                        "▶️ Resume Training" if init_status["paused"] else "⏸️ Pause Training",
-                        variant="secondary",
+                        "⏸️ Pause Training" if not init_status.get("paused", False) else "▶️ Resume Training",
+                        variant="primary" if init_status.get("paused", False) else "secondary",
                         interactive=init_status["running"]
                     )
                     stop_btn = gr.Button(
@@ -348,87 +473,86 @@ def create_ui():
                             info="🔗 Connected to [Goal Scored]: Multiplies goal reward by up to (1 + multiplier)x for high-speed supersonic laser shots."
                         )
                         touch_aerial_flip_multi_slider = gr.Slider(
-                            1.0, 5.0, value=rew_cfg.get("touch_aerial_flip_multi", 2.5), step=0.1,
-                            label="Jump / Flip / Aerial Strike Multiplier",
-                            info="🔗 Connected to [Ball Contact]: Multiplies base hit reward when jumping, front-flipping, speed-flipping, or aerial striking ANY ball (ground or air)."
+                            0.0, 5.0, value=rew_cfg.get("touch_aerial_flip_multi", 2.5), step=0.1,
+                            label="Aerial & Flip Strike Multiplier",
+                            info="🔗 Connected to [Ball Contact]: Multiplies touch reward when jumping, aerial dodging, or flipping into the ball."
                         )
                     with gr.Column():
                         dodge_rush_multi_slider = gr.Slider(
-                            1.0, 3.0, value=rew_cfg.get("dodge_rush_multi", 1.5), step=0.1,
-                            label="Dodge & Speed-Flip Impulse Multiplier",
-                            info="🔗 Connected to [Speed Toward Ball]: Multiplies closing speed reward when executing a front-flip or speed-flip directly toward the ball."
+                            0.0, 3.0, value=rew_cfg.get("dodge_rush_multi", 1.5), step=0.1,
+                            label="Dodge Rush Velocity Multiplier",
+                            info="🔗 Connected to [Speed Toward Ball]: Multiplies closing speed reward when speed-flipping/dodging forward towards the ball."
                         )
 
-                # SECTION 3: DIRECTIONAL GUIDANCE
-                gr.Markdown("### 🎯 3. Positional Flow & Directional Guidance (Micro-Scaled Per-Step Rate)")
+                # SECTION 3: CONTINUOUS GUIDANCE REWARDS (PER-STEP)
+                gr.Markdown("### 🎯 3. Continuous Guidance Rewards (Micro-Scaled Per-Step)")
                 with gr.Row():
                     with gr.Column():
                         ball_vel_toward_goal_slider = gr.Slider(
                             0.0, 0.5, value=rew_cfg.get("ball_vel_toward_goal_weight", 0.08), step=0.01,
-                            label="Ball Velocity Toward Opponent Goal",
-                            info="Per-step reward for propelling the ball toward the opponent net (penalizes hitting toward own goal)."
+                            label="Ball Velocity Toward Opponent Goal (Per-Step)",
+                            info="Rewards propelling the ball toward the opponent net. Encourages offensive pressure."
                         )
                         speed_toward_ball_slider = gr.Slider(
-                            0.0, 0.3, value=rew_cfg.get("speed_toward_ball_weight", 0.05), step=0.01,
-                            label="Speed Toward Ball (Front Bumper)",
-                            info="Per-step reward for closing distance to the ball with the nose pointing at the ball."
+                            0.0, 0.5, value=rew_cfg.get("speed_toward_ball_weight", 0.05), step=0.01,
+                            label="Speed Toward Ball Through Front Bumper (Per-Step)",
+                            info="Rewards closing distance directly toward the ball through the car's nose."
                         )
                         kickoff_slider = gr.Slider(
-                            0.0, 0.3, value=rew_cfg.get("kickoff_weight", 0.05), step=0.01,
-                            label="Kickoff Speed Rush Weight",
-                            info="Per-step bonus for accelerating at max velocity during the initial kickoff rush."
+                            0.0, 0.5, value=rew_cfg.get("kickoff_weight", 0.05), step=0.01,
+                            label="Kickoff Speed Rush (Per-Step)",
+                            info="Early kickoff acceleration bonus to teach fast kickoffs."
                         )
                         face_ball_slider = gr.Slider(
-                            0.0, 0.1, value=rew_cfg.get("face_ball_weight", 0.02), step=0.005,
-                            label="Face Ball Alignment (Velocity-Gated)",
-                            info="Per-step reward for aligning the nose with the ball while actively driving toward it (>350 uu/s)."
+                            0.0, 0.2, value=rew_cfg.get("face_ball_weight", 0.02), step=0.005,
+                            label="Facing / Tracking Ball Alignment (Per-Step)",
+                            info="Rewards aligning car nose to face the ball when actively moving."
                         )
                         aerial_height_slider = gr.Slider(
-                            0.0, 0.3, value=rew_cfg.get("aerial_height_weight", 0.05), step=0.01,
-                            label="Airborne Ball Intercept Height",
-                            info="Per-step bonus for aerial rising when challenging high airborne balls (Z > 140 uu)."
+                            0.0, 0.5, value=rew_cfg.get("aerial_height_weight", 0.05), step=0.01,
+                            label="Airborne Ball Intercept Height (Per-Step)",
+                            info="Rewards challenging elevated balls in the air."
                         )
-
+                        velocity_slider = gr.Slider(
+                            0.0, 0.2, value=rew_cfg.get("velocity_weight", 0.02), step=0.005,
+                            label="General Driving Forward Speed (Per-Step)",
+                            info="Encourages positive forward momentum, penalizes reversing away."
+                        )
                     with gr.Column():
                         behind_ball_slider = gr.Slider(
                             0.0, 0.2, value=rew_cfg.get("behind_ball_weight", 0.03), step=0.005,
-                            label="Goal-Side Rotation (Behind Ball)",
-                            info="Per-step reward for staying between the ball and defending goal; stops defensive over-committing."
+                            label="Goal-Side Rotation & Positioning (Per-Step)",
+                            info="Rewards staying between the ball and your defending net. Teaches proper defensive rotations."
                         )
                         possession_slider = gr.Slider(
                             0.0, 0.2, value=rew_cfg.get("possession_weight", 0.04), step=0.005,
-                            label="Tactical Space Dominance (Time-to-Ball)",
-                            info="Per-step reward for controlling field space when ahead of opponent in time-to-ball (T_self < T_opp)."
+                            label="Tactical Space Dominance (Per-Step)",
+                            info="Rewards maintaining uncontested field control when reaching the ball before the opponent."
                         )
                         dribble_slider = gr.Slider(
                             0.0, 0.2, value=rew_cfg.get("dribble_weight", 0.04), step=0.005,
-                            label="Mechanical Roof Carry & Dribble",
-                            info="Per-step mechanical bonus for balancing the ball on the roof or front bumper with speed matching."
+                            label="Roof Carry & Close Bumper Dribble (Per-Step)",
+                            info="Rewards balancing the ball atop the car roof or pushing with precision speed-matching."
                         )
                         defensive_pos_slider = gr.Slider(
                             0.0, 0.2, value=rew_cfg.get("defensive_position_weight", 0.03), step=0.005,
-                            label="Defensive Line Goalkeeping",
-                            info="Per-step reward for positioning along the line between defending net and ball when defending."
+                            label="Defensive Third Coverage (Per-Step)",
+                            info="Rewards shadowing the ball in the defensive third to prevent breakaways."
                         )
                         save_boost_slider = gr.Slider(
-                            0.0, 0.1, value=rew_cfg.get("save_boost_weight", 0.02), step=0.005,
-                            label="Boost Tank Retention (SaveBoost sqrt Curve)",
-                            info="Per-step concave reward: sqrt(boost / 100) encouraging maintaining healthy tank reserves without hoarding."
-                        )
-                        velocity_slider = gr.Slider(
-                            0.0, 0.1, value=rew_cfg.get("velocity_weight", 0.02), step=0.005,
-                            label="Forward Driving Speed",
-                            info="Per-step reward for maintaining forward kinetic speed through the front bumper (penalizes reversing)."
+                            0.0, 0.2, value=rew_cfg.get("save_boost_weight", 0.02), step=0.005,
+                            label="Boost Tank Retention (Per-Step)",
+                            info="Rewards preserving boost reserves using a concave square root curve."
                         )
                         inactivity_penalty_slider = gr.Slider(
-                            0.0, 0.2, value=rew_cfg.get("inactivity_penalty_weight", 0.05), step=0.005,
-                            label="Inactivity & Standstill Penalty",
-                            info="Escalating per-step penalty assessed when a bot sits stationary (>1.0s) without moving. Eliminates mutual standstills and parking exploits."
+                            0.0, 0.5, value=rew_cfg.get("inactivity_penalty_weight", 0.05), step=0.01,
+                            label="Inactivity & Standstill Penalty (Per-Step Deduction)",
+                            info="Penalizes sitting stationary or wiggling in place for >1s. Eliminates midfield staring and mutual standstills."
                         )
 
                 with gr.Row():
-                    apply_rewards_btn = gr.Button("⚡ Apply Live Reward Weights to Active Run", variant="primary")
-                    reset_rewards_btn = gr.Button("🔄 Reset to Standardized Recommended Defaults")
+                    apply_rewards_btn = gr.Button("⚡ Apply Live Reward Weights", variant="primary")
+                    reset_rewards_btn = gr.Button("🔄 Reset to Standard Balanced Weights", variant="secondary")
 
                 reward_apply_msg = gr.Markdown("")
 
@@ -438,65 +562,66 @@ def create_ui():
             with gr.TabItem("⚙️ Hyperparameters & Environment"):
                 with gr.Row():
                     with gr.Column():
-                        gr.Markdown("#### 🧠 PPO Algorithm Hyperparameters")
+                        gr.Markdown("### 🧠 PPO Hyperparameters")
                         lr_input = gr.Number(
-                            value=hp_cfg.get("learning_rate", 0.0003),
-                            label="Learning Rate",
-                            info="Adam optimizer step size (e.g. 0.0003). Higher learns faster but may destabilize; lower converges steadily."
+                            value=hp_cfg.get("learning_rate", 3e-4),
+                            label="Learning Rate (Live Tunable)",
+                            info="PPO Policy and Value network step size. Can be changed on the fly."
                         )
-                        live_lr_btn = gr.Button("⚡ Apply Learning Rate Live")
+                        live_lr_btn = gr.Button("⚡ Apply Live Learning Rate", variant="primary")
+
                         ent_coef_slider = gr.Slider(
-                            0.0, 0.1, value=hp_cfg.get("ent_coef", 0.01), step=0.001,
-                            label="Entropy Coefficient (Exploration)",
-                            info="Encourages action exploration. High values prevent premature convergence; decays as policy matures."
+                            0.0, 0.05, value=hp_cfg.get("ent_coef", 0.01), step=0.001,
+                            label="Entropy Coefficient (Live Tunable)",
+                            info="Controls exploration bonus. Higher values encourage discovering new mechanics."
                         )
                         clip_range_slider = gr.Slider(
                             0.05, 0.4, value=hp_cfg.get("clip_range", 0.2), step=0.01,
-                            label="PPO Clip Range (Epsilon)",
-                            info="Limits policy ratio changes per update (e.g. 0.2). Prevents overly aggressive policy shifts."
+                            label="PPO Clip Range (Live Tunable)",
+                            info="Surrogate clipping bounds (epsilon)."
                         )
                         gamma_slider = gr.Slider(
-                            0.90, 0.999, value=hp_cfg.get("gamma", 0.99), step=0.001,
+                            0.9, 0.999, value=hp_cfg.get("gamma", 0.99), step=0.001,
                             label="Discount Factor (Gamma)",
-                            info="Discount factor (γ) for future rewards. High values (0.99) encourage long-term strategy."
+                            info="How much future rewards are valued vs immediate points."
                         )
                         gae_lambda_slider = gr.Slider(
-                            0.80, 0.99, value=hp_cfg.get("gae_lambda", 0.95), step=0.01,
+                            0.8, 1.0, value=hp_cfg.get("gae_lambda", 0.95), step=0.01,
                             label="GAE Lambda",
-                            info="Generalized Advantage Estimation smoothing factor (λ). 0.95 is standard gold standard for PPO."
+                            info="Generalized Advantage Estimation variance vs bias trade-off."
                         )
                         batch_size_input = gr.Number(
-                            value=hp_cfg.get("batch_size", 2048), precision=0,
-                            label="Rollout Batch Size",
-                            info="Total steps collected across all environments before triggering a PPO gradient update."
+                            value=hp_cfg.get("batch_size", 8192), precision=0,
+                            label="Rollout Buffer Batch Size",
+                            info="Total steps collected across all environments per iteration."
                         )
                         mini_batch_input = gr.Number(
-                            value=hp_cfg.get("mini_batch_size", 256), precision=0,
+                            value=hp_cfg.get("mini_batch_size", 512), precision=0,
                             label="Mini-Batch Size",
-                            info="Sub-sample batch size for each gradient step. Should divide evenly into batch size."
+                            info="Gradient update chunk size."
                         )
                         n_epochs_input = gr.Number(
-                            value=hp_cfg.get("n_epochs", 4), precision=0,
-                            label="Optimization Epochs per Iteration",
-                            info="Number of passes over the collected rollout buffer during each PPO update iteration."
+                            value=hp_cfg.get("n_epochs", 10), precision=0,
+                            label="Epochs per Iteration",
+                            info="Number of optimization passes per rollout."
                         )
 
                     with gr.Column():
-                        gr.Markdown("#### 🏟️ Simulation & Environment Settings")
+                        gr.Markdown("### 🏟️ Environment & Simulation")
                         num_envs_slider = gr.Slider(
-                            1, 64, value=env_cfg.get("num_envs", 16), step=1,
-                            label="Parallel Vectorized Environments",
-                            info="Number of matches running simultaneously in parallel. Higher values scale experience throughput."
+                            1, 32, value=env_cfg.get("num_envs", 8), step=1,
+                            label="Vectorized Environments",
+                            info="Parallel Rocket League arena instances simulated simultaneously."
                         )
                         tick_skip_slider = gr.Slider(
-                            1, 15, value=env_cfg.get("tick_skip", 8), step=1,
-                            label="Tick Skip (Physics sub-steps)",
-                            info="Physics steps per bot decision (e.g. 8 ticks = ~15 actions/sec). Standard for Rocket League AI."
+                            1, 8, value=env_cfg.get("tick_skip", 8), step=1,
+                            label="Tick Skip (Action Repeat)",
+                            info="120Hz physics substeps per agent decision (8 skip ≈ 15 decisions/sec)."
                         )
                         max_steps_input = gr.Number(
-                            value=env_cfg.get("max_episode_steps", 1500), precision=0,
-                            label="Max Steps per Episode",
-                            info="Maximum episode length before forced kickoff reset (unless a goal ends it sooner)."
+                            value=env_cfg.get("max_episode_steps", 750), precision=0,
+                            label="Max Episode Steps (per Arena)",
+                            info="Maximum length before resetting if no goal is scored (750 steps ≈ 50s game time)."
                         )
                         game_mode_dropdown = gr.Dropdown(
                             ["1v1", "2v2", "3v3"], value=env_cfg.get("game_mode", "1v1"),
@@ -606,7 +731,7 @@ def create_ui():
                 )
 
             # ---------------------------------------------------------
-            # TAB 5: BOT MATCH VISUALIZER & ARENA REPLAY
+            # TAB 6: BOT MATCH VISUALIZER & EVALUATION
             # ---------------------------------------------------------
             with gr.TabItem("🎮 Bot Match Visualizer & Evaluation"):
                 gr.Markdown(
@@ -650,6 +775,32 @@ def create_ui():
                                 visualizer_plot = gr.Plot(label="Top-Down Rocket League Field Trajectory")
                             with gr.TabItem("📊 Match Reward Breakdown"):
                                 reward_breakdown_plot = gr.Plot(label="Points Earned by Reward Category")
+
+            # ---------------------------------------------------------
+            # TAB 7: 🔬 DIAGNOSTICS & AI SNAPSHOT EXPORT
+            # ---------------------------------------------------------
+            with gr.TabItem("🔬 Diagnostics & AI Export"):
+                gr.Markdown(
+                    """
+                    ### 🔬 Comprehensive Diagnostics & AI Assistant Export
+                    Provides a unified single-pane-of-glass snapshot containing all process info, active reward weights, hyperparameters, convergence metrics, behavioral telemetry, and console output.
+                    
+                    **💡 How to use:** Click **'🔄 Refresh Diagnostic Snapshot'**, then click the copy icon on the text box below to paste directly into your conversation with Antigravity!
+                    """
+                )
+                with gr.Row():
+                    refresh_snapshot_btn = gr.Button("🔄 Refresh Diagnostic Snapshot", variant="primary")
+
+                with gr.Row():
+                    with gr.Column(scale=1):
+                        diag_overview_md = gr.Markdown(value="*Click 'Refresh Diagnostic Snapshot' to generate live overview.*")
+                    with gr.Column(scale=1):
+                        diag_export_raw = gr.Code(
+                            label="📋 Complete Diagnostic Snapshot (Copy & Paste to Assistant)",
+                            language="markdown",
+                            lines=22,
+                            interactive=False
+                        )
 
         # -------------------------------------------------------------
         # EVENT HANDLERS & CALLBACKS
@@ -998,6 +1149,16 @@ def create_ui():
             fn=on_refresh_diagnostics,
             inputs=[diag_window_slider],
             outputs=[diag_coach_report, diag_action_plot, diag_position_plot]
+        )
+
+        # Comprehensive Diagnostics Export Callback
+        def on_refresh_full_diagnostics():
+            overview_md, export_box = build_full_diagnostic_export()
+            return overview_md, export_box
+
+        refresh_snapshot_btn.click(
+            fn=on_refresh_full_diagnostics,
+            outputs=[diag_overview_md, diag_export_raw]
         )
 
     return demo
