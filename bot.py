@@ -25,11 +25,14 @@ from env.actions import DiscreteActionParser, ContinuousActionParser
 from env.physics_engine import (
     CarState, BallState, BoostPad,
     ARENA_EXTENT_X, ARENA_EXTENT_Y, ARENA_HEIGHT_Z,
-    CAR_MAX_SPEED, BALL_MAX_SPEED, GOAL_HEIGHT
+    CAR_MAX_SPEED, BALL_MAX_SPEED, GOAL_HEIGHT,
+    ROCKETSIM_AVAILABLE, rsim
 )
 
 
 def rotation_to_rot_mat(pitch: float, yaw: float, roll: float) -> np.ndarray:
+    if ROCKETSIM_AVAILABLE and hasattr(rsim, "Angle"):
+        return rsim.Angle(pitch, yaw, roll).as_rot_mat().as_numpy().astype(np.float32)
     cp, sp = math.cos(pitch), math.sin(pitch)
     cy, sy = math.cos(yaw), math.sin(yaw)
     cr, sr = math.cos(roll), math.sin(roll)
@@ -203,13 +206,23 @@ class SenseiRLBot(BaseAgent):
         car_to_ball = ball_pos - car_state.pos
         dist_to_ball = float(np.linalg.norm(car_to_ball))
         if dist_to_ball > 1e-4:
-            unit_to_ball = car_to_ball / dist_to_ball
-            fwd_align = float(np.dot(car_state.get_forward_vector(), unit_to_ball))
-            # If on kickoff or facing an open stationary ball directly ahead (< 600 uu)
-            if (is_kickoff and fwd_align > 0.3) or (dist_to_ball < 600.0 and fwd_align > 0.6 and ball_speed < 350.0 and is_on_ground):
+            fwd = car_state.get_forward_vector()
+            right = car_state.get_right_vector()
+            local_ball_x = float(np.dot(car_to_ball, right))
+            local_ball_y = float(np.dot(car_to_ball, fwd))
+
+            if is_kickoff:
+                # Steer directly into kickoff ball and rush with full boost
+                steer_err = float(np.clip(local_ball_x / max(150.0, abs(local_ball_y)), -1.0, 1.0))
+                controller.steer = steer_err
                 controller.throttle = 1.0
-                if is_kickoff:
-                    controller.boost = bool(car_state.boost > 0)
+                controller.boost = bool(car_state.boost > 0 and abs(steer_err) < 0.5)
+            elif dist_to_ball < 700.0 and ball_speed < 350.0 and is_on_ground:
+                # Stagnant ball in close proximity: steer directly into ball and strike rather than parking beside it
+                steer_err = float(np.clip(local_ball_x / max(100.0, abs(local_ball_y)), -1.0, 1.0))
+                controller.steer = steer_err
+                controller.throttle = 1.0
+                controller.boost = bool(car_state.boost > 0 and dist_to_ball > 300.0 and abs(steer_err) < 0.3)
 
         # Handbrake: only engage for sharp low-to-medium speed turns to prevent involuntary high-speed spinouts
         car_speed = float(np.linalg.norm(car_state.vel))
