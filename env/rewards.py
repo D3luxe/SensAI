@@ -100,10 +100,11 @@ class SpeedTowardBallReward(BaseReward):
 
 class FaceBallReward(BaseReward):
     """
-    Rewards aligning the car nose directly towards the ball ONLY when actively moving fast toward it (>350 uu/s).
-    Completely eliminates the standstill 'stare-from-the-midfield' exploit.
+    Rewards aligning the car nose directly towards the ball.
+    Provides smooth continuous orientation gradient both at speed and from a dead stop.
+    Eliminates standstill gridlocks and rewards tightening turns toward the ball.
     """
-    def __init__(self, weight: float = 0.02):
+    def __init__(self, weight: float = 0.025):
         super().__init__(weight)
 
     def get_reward(self, car: CarState, arena: RocketSimArena, action: np.ndarray, is_goal: bool, scoring_team: Optional[int]) -> float:
@@ -113,16 +114,18 @@ class FaceBallReward(BaseReward):
             return 0.0
         unit_to_ball = car_to_ball / dist
 
-        # Strict velocity gate: must be driving towards the ball (>350 uu/s) to earn alignment reward
-        speed_toward = float(np.dot(car.vel, unit_to_ball))
-        if speed_toward < 350.0:
-            return 0.0
-
         fwd = car.get_forward_vector()
-        alignment = max(0.0, float(np.dot(fwd, unit_to_ball)))
-        norm_speed = min(1.0, speed_toward / CAR_MAX_SPEED)
+        alignment = float(np.dot(fwd, unit_to_ball))  # Range [-1.0, 1.0]
 
-        return self.weight * alignment * norm_speed
+        if alignment > 0.0:
+            # Proximity factor: stronger alignment incentive when closer to the ball
+            dist_factor = 0.5 + 0.5 * max(0.0, 1.0 - (dist / 3000.0))
+            return self.weight * (alignment ** 2) * dist_factor
+        elif alignment < -0.4 and dist < 1500.0:
+            # Gentle penalty for facing completely away from ball at close range (stops blind reversing / orbiting)
+            return self.weight * alignment * 0.4
+
+        return 0.0
 
 
 class BallVelocityToGoalReward(BaseReward):
@@ -320,6 +323,7 @@ class SaveBoostReward(BaseReward):
 class VelocityReward(BaseReward):
     """
     Rewards maintaining forward speed through the front bumper. Discourages reversing.
+    When close to the ball (< 1200 uu), gates reward by ball alignment to eliminate high-speed donut orbiting.
     """
     def __init__(self, weight: float = 0.02):
         super().__init__(weight)
@@ -327,7 +331,24 @@ class VelocityReward(BaseReward):
     def get_reward(self, car: CarState, arena: RocketSimArena, action: np.ndarray, is_goal: bool, scoring_team: Optional[int]) -> float:
         fwd = car.get_forward_vector()
         fwd_speed = float(np.dot(car.vel, fwd))
-        return self.weight * (fwd_speed / CAR_MAX_SPEED)
+        if fwd_speed <= 0.0:
+            return 0.0
+
+        norm_speed = fwd_speed / CAR_MAX_SPEED
+
+        # Orbiting elimination: if close to the ball (< 1200 uu), velocity must be directed generally toward the ball
+        car_to_ball = arena.ball.pos - car.pos
+        dist = float(np.linalg.norm(car_to_ball))
+        if dist < 1200.0 and dist > 1e-4:
+            unit_to_ball = car_to_ball / dist
+            alignment = float(np.dot(fwd, unit_to_ball))
+            if alignment < 0.2:
+                # Driving fast tangent/perpendicular to close ball earns 0 (kills orbiting reward loop)
+                return 0.0
+            align_scale = max(0.2, alignment)
+            return self.weight * norm_speed * align_scale
+
+        return self.weight * norm_speed
 
 
 class AerialHeightReward(BaseReward):
