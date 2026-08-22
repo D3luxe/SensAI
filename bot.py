@@ -57,13 +57,16 @@ class SenseiRLBot(BaseAgent):
         self.team = team
         self.index = index
         self.tick_count = 0
+        self.tick_skip = 8
+        self.ticks_since_last_action = 0
+        self.prev_action: np.ndarray | None = None
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self.obs_builder = DefaultObservationBuilder(symmetric=True)
         self.discrete_parser = DiscreteActionParser()
         self.continuous_actions = False
         self.model: torch.nn.Module | None = None
         self.initialize_agent()
-        log_debug(f"[INIT] SenseiRLBot init: name={name}, team={team}, index={index}, device={self.device}")
+        log_debug(f"[INIT] SenseiRLBot init: name={name}, team={team}, index={index}, device={self.device}, tick_skip={self.tick_skip}")
         if RLBOT_AVAILABLE:
             super().__init__(name, team, index)
 
@@ -192,18 +195,25 @@ class SenseiRLBot(BaseAgent):
                         has_flip=opp_flip
                     ))
 
-            arena = MockArena(ball_state, [car_state] + opponents)
-            obs = self.obs_builder.build_obs(car_state, arena)
+            self.ticks_since_last_action += 1
+            if self.ticks_since_last_action >= self.tick_skip or self.prev_action is None:
+                self.ticks_since_last_action = 0
+                arena = MockArena(ball_state, [car_state] + opponents)
+                obs = self.obs_builder.build_obs(car_state, arena)
 
-            # Model Inference
-            with torch.no_grad():
-                obs_tensor = torch.tensor(obs, dtype=torch.float32, device=self.device).unsqueeze(0)
-                action, _, _, _ = self.model.get_action_and_value(obs_tensor, deterministic=True)
-                if self.continuous_actions:
-                    act = action.squeeze(0).cpu().numpy()
-                else:
-                    act_idx = int(action.squeeze().cpu().item())
-                    act = self.discrete_parser.parse_actions(act_idx)
+                # Model Inference at 15Hz
+                with torch.no_grad():
+                    obs_tensor = torch.tensor(obs, dtype=torch.float32, device=self.device).unsqueeze(0)
+                    action, _, _, _ = self.model.get_action_and_value(obs_tensor, deterministic=True)
+                    if self.continuous_actions:
+                        act = action.squeeze(0).cpu().numpy()
+                    else:
+                        act_idx = int(action.squeeze().cpu().item())
+                        act = self.discrete_parser.parse_actions(act_idx)
+                self.prev_action = act
+            else:
+                # Hold previous action across the 8 physics substeps
+                act = self.prev_action
 
             # Direct 1-to-1 Neural Policy Mapping
             # [throttle, steer, pitch, yaw, roll, jump, boost, handbrake]
