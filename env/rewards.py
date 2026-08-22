@@ -73,6 +73,7 @@ class TouchBallReward(BaseReward):
 class SpeedTowardBallReward(BaseReward):
     """
     Micro-scaled per-step reward for closing distance to the ball through the front bumper.
+    Includes anti-overshoot mechanics to encourage powersliding/decelerating on wide-angle approaches.
     """
     def __init__(self, weight: float = 0.05, dodge_rush_multi: float = 1.5):
         super().__init__(weight)
@@ -91,6 +92,18 @@ class SpeedTowardBallReward(BaseReward):
 
         speed_toward = float(np.dot(car.vel, unit_to_ball))
         norm_speed = speed_toward / CAR_MAX_SPEED
+
+        # Anti-Overshoot Dynamics: when close to ball (< 900 uu) and angle is wide (fwd_align < 0.7),
+        # car must slow down or powerslide to tighten turning radius rather than blasting past in a wide orbit
+        if dist < 900.0 and fwd_align < 0.7:
+            car_speed = float(np.linalg.norm(car.vel))
+            if car_speed > 1500.0:
+                # Excess speed causes inevitable overshoot - damp the forward reward
+                overshoot_ratio = min(1.0, (car_speed - 1500.0) / (CAR_MAX_SPEED - 1500.0))
+                norm_speed *= max(0.1, 1.0 - 0.8 * overshoot_ratio)
+            # Powerslide bonus for tightening turn into ball
+            if action[7] > 0.5:
+                fwd_align = min(1.0, fwd_align + 0.3)
 
         # Flip / Dodge forward boost: rewards front-flipping / speed-flipping directly toward the ball
         dodge_mult = self.dodge_rush_multi if (car.just_dodged and fwd_align > 0.5) else 1.0
@@ -201,9 +214,9 @@ class GoalReward(BaseReward):
 
 class SaveReward(BaseReward):
     """
-    Major defensive reward for making a goal-line save / clear.
-    Strictly rate-limited with a 3.5s cooldown per defensive sequence (eliminates in-box touch farming).
-    Requires the ball to be in the danger zone and actively cleared away from the net.
+    Major defensive reward for making goal-line saves and defensive sidewall/corner clears.
+    Strictly rate-limited with a 2.5s cooldown per defensive sequence.
+    Rewards clearing the ball out of the defensive danger zone or hooking it to the sidewall away from net.
     """
     def __init__(self, weight: float = 50.0):
         super().__init__(weight)
@@ -224,21 +237,30 @@ class SaveReward(BaseReward):
         if cd > 0.0:
             self._save_cooldown[car.id] = max(0.0, cd - (1.0 / 15.0))
 
-        if curr > prev and self._save_cooldown.get(car.id, 0.0) <= 0.0:
+        if curr > prev and cd <= 0.0:
             defending_y = -ARENA_EXTENT_Y if car.team == 0 else ARENA_EXTENT_Y
             dist_to_defend = abs(arena.ball.pos[1] - defending_y)
+            in_defensive_half = (arena.ball.pos[1] < 0.0) if car.team == 0 else (arena.ball.pos[1] > 0.0)
 
-            # Ball must be in defensive danger zone (< 2000 uu from defending goal)
-            if dist_to_defend < 2000.0 and abs(arena.ball.pos[0]) < GOAL_HALF_WIDTH * 1.5:
-                # The touch must propel the ball AWAY from the defending goal (positive Vy for Blue, negative Vy for Orange)
-                ball_vy = arena.ball.vel[1]
-                is_clearing = (ball_vy > 250.0) if car.team == 0 else (ball_vy < -250.0)
+            ball_vy = arena.ball.vel[1]
+            ball_vx = arena.ball.vel[0]
+            ball_speed = float(np.linalg.norm(arena.ball.vel))
+            
+            is_upfield_clear = (ball_vy > 250.0) if car.team == 0 else (ball_vy < -250.0)
+            is_sidewall_clear = (abs(ball_vx) > 380.0) and (is_upfield_clear or abs(ball_vy) < 250.0)
 
-                if is_clearing:
-                    self._save_cooldown[car.id] = 3.5
-                    ball_speed = float(np.linalg.norm(arena.ball.vel))
+            # Case 1: Critical Goal-Line Danger Zone Save (< 2200 uu from defending goal)
+            if dist_to_defend < 2200.0 and abs(arena.ball.pos[0]) < GOAL_HALF_WIDTH * 2.0:
+                if is_upfield_clear or is_sidewall_clear:
+                    self._save_cooldown[car.id] = 2.5
                     power_scale = 1.0 + (ball_speed / BALL_MAX_SPEED) * 0.5
                     return self.weight * power_scale
+
+            # Case 2: Defensive Half Sidewall / Hook Clear (teaches cutting across rolling balls rather than stuttering)
+            elif in_defensive_half and (is_upfield_clear or is_sidewall_clear) and ball_speed > 350.0:
+                self._save_cooldown[car.id] = 2.5
+                power_scale = 0.6 + min(0.4, ball_speed / 2000.0)
+                return self.weight * 0.6 * power_scale
 
         return 0.0
 
