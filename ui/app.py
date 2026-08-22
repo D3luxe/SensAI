@@ -431,6 +431,16 @@ def create_ui():
                             label="Shot on Target (Goal-Bound Hit)",
                             info="Major flat event bounty granted when striking the ball directly on-target into the opponent net (would score if unsaved)."
                         )
+                        ground_to_air_setup_slider = gr.Slider(
+                            0.0, 30.0, value=rew_cfg.get("ground_to_air_setup_weight", 8.0), step=1.0,
+                            label="Ground-to-Air Setup Pop Bounty",
+                            info="Flat bounty awarded when popping a ground ball upward with high vertical velocity into a self-pass."
+                        )
+                        wall_aerial_launch_slider = gr.Slider(
+                            0.0, 30.0, value=rew_cfg.get("wall_aerial_launch_weight", 12.0), step=1.0,
+                            label="Wall-to-Air Launch Bounty",
+                            info="Flat bounty awarded for popping the ball off the sidewall and jumping off the wall into mid-air pursuit."
+                        )
                     with gr.Column():
                         touch_ball_slider = gr.Slider(
                             0.0, 50.0, value=rew_cfg.get("touch_ball_weight", 10.0), step=1.0,
@@ -512,6 +522,11 @@ def create_ui():
                             0.0, 0.5, value=rew_cfg.get("aerial_height_weight", 0.05), step=0.01,
                             label="Airborne Ball Intercept Height (Per-Step)",
                             info="Rewards challenging elevated balls in the air."
+                        )
+                        air_dribble_carry_slider = gr.Slider(
+                            0.0, 0.2, value=rew_cfg.get("air_dribble_carry_weight", 0.06), step=0.005,
+                            label="Air-Dribble Velocity Matching & Carry (Per-Step)",
+                            info="Rewards continuous speed-matching and guidance toward the opponent net while airborne with the ball."
                         )
                         velocity_slider = gr.Slider(
                             0.0, 0.2, value=rew_cfg.get("velocity_weight", 0.02), step=0.005,
@@ -864,9 +879,9 @@ def create_ui():
 
         # Apply Live Rewards
         def on_apply_rewards(
-            g_w, c_w, sv_w, as_w, t_w, kft_b, db_w, bs_w, sp_w, bp_w,
+            g_w, c_w, sv_w, as_w, g2a_w, wal_w, t_w, kft_b, db_w, bs_w, sp_w, bp_w,
             g_spd, t_flip, d_rush,
-            bvg_w, s_w, ko_w, f_w, a_w,
+            bvg_w, s_w, ko_w, f_w, a_w, adc_w,
             bb_w, p_w, dr_w, dp_w, sb_w, v_w, inact_w
         ):
             rewards = {
@@ -875,6 +890,8 @@ def create_ui():
                 "concede_weight": float(c_w),
                 "save_weight": float(sv_w),
                 "aligned_shot_weight": float(as_w),
+                "ground_to_air_setup_weight": float(g2a_w),
+                "wall_aerial_launch_weight": float(wal_w),
                 "touch_ball_weight": float(t_w),
                 "kickoff_first_touch_bonus": float(kft_b),
                 "demo_bump_weight": float(db_w),
@@ -893,6 +910,7 @@ def create_ui():
                 "kickoff_weight": float(ko_w),
                 "face_ball_weight": float(f_w),
                 "aerial_height_weight": float(a_w),
+                "air_dribble_carry_weight": float(adc_w),
                 "behind_ball_weight": float(bb_w),
                 "possession_weight": float(p_w),
                 "dribble_weight": float(dr_w),
@@ -915,11 +933,11 @@ def create_ui():
             fn=on_apply_rewards,
             inputs=[
                 # Flat Events
-                goal_slider, concede_slider, save_slider, aligned_shot_slider, touch_ball_slider, kickoff_first_touch_slider, demo_bump_slider, boost_steal_slider, small_pad_slider, big_pad_slider,
+                goal_slider, concede_slider, save_slider, aligned_shot_slider, ground_to_air_setup_slider, wall_aerial_launch_slider, touch_ball_slider, kickoff_first_touch_slider, demo_bump_slider, boost_steal_slider, small_pad_slider, big_pad_slider,
                 # Multipliers
                 goal_speed_multi_slider, touch_aerial_flip_multi_slider, dodge_rush_multi_slider,
                 # Guidance
-                ball_vel_toward_goal_slider, speed_toward_ball_slider, kickoff_slider, face_ball_slider, aerial_height_slider,
+                ball_vel_toward_goal_slider, speed_toward_ball_slider, kickoff_slider, face_ball_slider, aerial_height_slider, air_dribble_carry_slider,
                 behind_ball_slider, possession_slider, dribble_slider, defensive_pos_slider, save_boost_slider, velocity_slider, inactivity_penalty_slider
             ],
             outputs=[reward_apply_msg]
@@ -927,22 +945,19 @@ def create_ui():
 
         def on_reset_rewards():
             # Standardized defaults:
-            # 1. Flat: goal=100.0, concede=-100.0, save=50.0, shot_on_target=25.0, touch=10.0, kickoff_bounty=35.0, demo=15.0, boost_steal=10.0, small_pad=2.0, big_pad=5.0
-            # 2. Multipliers: goal_spd=1.5, touch_flip=2.5, dodge_rush=1.5
-            # 3. Guidance: bvg=0.08, speed=0.05, kickoff=0.05, face=0.02, aerial=0.05, behind=0.03, poss=0.04, dribble=0.04, def_pos=0.03, save_boost=0.02, vel=0.02, inact=0.05
             return (
-                100.0, -100.0, 50.0, 25.0, 10.0, 35.0, 15.0, 10.0, 2.0, 5.0,
+                100.0, -100.0, 50.0, 25.0, 8.0, 12.0, 10.0, 35.0, 15.0, 10.0, 2.0, 5.0,
                 1.5, 2.5, 1.5,
-                0.08, 0.05, 0.05, 0.02, 0.05,
+                0.08, 0.05, 0.05, 0.02, 0.05, 0.06,
                 0.03, 0.04, 0.04, 0.03, 0.02, 0.02, 0.05
             )
 
         reset_rewards_btn.click(
             fn=on_reset_rewards,
             outputs=[
-                goal_slider, concede_slider, save_slider, aligned_shot_slider, touch_ball_slider, kickoff_first_touch_slider, demo_bump_slider, boost_steal_slider, small_pad_slider, big_pad_slider,
+                goal_slider, concede_slider, save_slider, aligned_shot_slider, ground_to_air_setup_slider, wall_aerial_launch_slider, touch_ball_slider, kickoff_first_touch_slider, demo_bump_slider, boost_steal_slider, small_pad_slider, big_pad_slider,
                 goal_speed_multi_slider, touch_aerial_flip_multi_slider, dodge_rush_multi_slider,
-                ball_vel_toward_goal_slider, speed_toward_ball_slider, kickoff_slider, face_ball_slider, aerial_height_slider,
+                ball_vel_toward_goal_slider, speed_toward_ball_slider, kickoff_slider, face_ball_slider, aerial_height_slider, air_dribble_carry_slider,
                 behind_ball_slider, possession_slider, dribble_slider, defensive_pos_slider, save_boost_slider, velocity_slider, inactivity_penalty_slider
             ]
         )

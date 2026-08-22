@@ -381,6 +381,118 @@ class AerialHeightReward(BaseReward):
         return 0.0
 
 
+class GroundToAirSetupReward(BaseReward):
+    """
+    Rewards popping a ground ball upward into the air (self-pass setup).
+    Triggers when a grounded car impacts a low ball and imparts strong upward vertical velocity (dz > +350 uu/s).
+    """
+    def __init__(self, weight: float = 8.0):
+        super().__init__(weight)
+        self._prev_ball_vz = 0.0
+        self._setup_cooldown: Dict[int, float] = {}
+
+    def reset(self, initial_state: RocketSimArena):
+        self._prev_ball_vz = initial_state.ball.vel[2]
+        self._setup_cooldown = {car.id: 0.0 for car in initial_state.cars}
+
+    def get_reward(self, car: CarState, arena: RocketSimArena, action: np.ndarray, is_goal: bool, scoring_team: Optional[int]) -> float:
+        curr_vz = arena.ball.vel[2]
+        d_vz = curr_vz - self._prev_ball_vz
+        self._prev_ball_vz = curr_vz
+
+        cd = self._setup_cooldown.get(car.id, 0.0)
+        if cd > 0.0:
+            self._setup_cooldown[car.id] = max(0.0, cd - (1.0 / 15.0))
+
+        # Must be on ground/low near ball, ball was low (Z < 180), and imparted vertical pop
+        if cd <= 0.0 and car.pos[2] < 60.0 and arena.ball.pos[2] < 180.0:
+            dist = float(np.linalg.norm(arena.ball.pos - car.pos))
+            if dist < 220.0 and d_vz > 350.0:
+                self._setup_cooldown[car.id] = 2.5
+                pop_scale = min(1.5, d_vz / 600.0)
+                return self.weight * pop_scale
+
+        return 0.0
+
+
+class WallAerialLaunchReward(BaseReward):
+    """
+    Rewards popping the ball off the sidewall and immediately launching off the wall into an aerial pursuit.
+    """
+    def __init__(self, weight: float = 12.0):
+        super().__init__(weight)
+        self._wall_touch_timer: Dict[int, float] = {}
+        self._wall_cooldown: Dict[int, float] = {}
+        self._prev_touches: Dict[int, int] = {}
+
+    def reset(self, initial_state: RocketSimArena):
+        self._wall_touch_timer = {car.id: 0.0 for car in initial_state.cars}
+        self._wall_cooldown = {car.id: 0.0 for car in initial_state.cars}
+        self._prev_touches = {car.id: car.ball_touches for car in initial_state.cars}
+
+    def get_reward(self, car: CarState, arena: RocketSimArena, action: np.ndarray, is_goal: bool, scoring_team: Optional[int]) -> float:
+        prev_t = self._prev_touches.get(car.id, 0)
+        curr_t = car.ball_touches
+        self._prev_touches[car.id] = curr_t
+
+        cd = self._wall_cooldown.get(car.id, 0.0)
+        if cd > 0.0:
+            self._wall_cooldown[car.id] = max(0.0, cd - (1.0 / 15.0))
+
+        # Detect wall touch: car on sidewall (|x| > 3400, z > 250) touches ball
+        if curr_t > prev_t and abs(car.pos[0]) > 3400.0 and car.pos[2] > 250.0:
+            self._wall_touch_timer[car.id] = 0.6  # 600ms window to jump off wall
+
+        t_timer = self._wall_touch_timer.get(car.id, 0.0)
+        if t_timer > 0.0:
+            self._wall_touch_timer[car.id] = max(0.0, t_timer - (1.0 / 15.0))
+            # If bot jumps off wall during this window towards the ball into midfield
+            if action[5] > 0.0 and cd <= 0.0:
+                dist = float(np.linalg.norm(arena.ball.pos - car.pos))
+                if dist < 800.0:
+                    self._wall_cooldown[car.id] = 3.5
+                    self._wall_touch_timer[car.id] = 0.0
+                    return self.weight
+
+        return 0.0
+
+
+class AirDribbleCarryReward(BaseReward):
+    """
+    Rewards airborne velocity matching and ball carrying towards the opponent goal (Air-Dribble).
+    Active when both car and ball are elevated (Z > 220 uu), in close proximity, and moving goal-bound.
+    """
+    def __init__(self, weight: float = 0.06):
+        super().__init__(weight)
+
+    def get_reward(self, car: CarState, arena: RocketSimArena, action: np.ndarray, is_goal: bool, scoring_team: Optional[int]) -> float:
+        # Both car and ball must be genuinely airborne
+        if not car.on_ground and car.pos[2] > 200.0 and arena.ball.pos[2] > 220.0:
+            car_to_ball = arena.ball.pos - car.pos
+            dist = float(np.linalg.norm(car_to_ball))
+            if dist < 250.0:
+                # Relative speed matching (soft touch / carry)
+                rel_speed = float(np.linalg.norm(car.vel - arena.ball.vel))
+                speed_match = max(0.0, 1.0 - (rel_speed / 450.0))
+                
+                # Goal direction alignment
+                target_goal_y = ARENA_EXTENT_Y if car.team == 0 else -ARENA_EXTENT_Y
+                target_goal = np.array([0.0, target_goal_y, GOAL_HEIGHT * 0.5], dtype=np.float32)
+                ball_to_goal = target_goal - arena.ball.pos
+                norm_goal = np.linalg.norm(ball_to_goal)
+                if norm_goal > 1e-4:
+                    unit_goal = ball_to_goal / norm_goal
+                    ball_vy_goal = float(np.dot(arena.ball.vel, unit_goal))
+                    goal_factor = max(0.0, min(1.0, ball_vy_goal / 1200.0))
+                    
+                    dist_factor = max(0.0, 1.0 - (dist / 250.0))
+                    height_factor = min(1.2, car.pos[2] / 500.0)
+                    
+                    return self.weight * speed_match * (0.3 + 0.7 * goal_factor) * dist_factor * height_factor
+
+        return 0.0
+
+
 class AlignedShotReward(BaseReward):
     """
     Major flat event reward granted strictly upon striking the ball on target toward the opponent net.
@@ -711,6 +823,8 @@ class RewardManager:
             "big_pad": BigPadReward(weights.get("big_pad_weight", 5.0)),
             "demo_bump": DemoBumpReward(weights.get("demo_bump_weight", 15.0)),
             "boost_steal": BoostStealReward(weights.get("boost_steal_weight", 10.0)),
+            "ground_to_air_setup": GroundToAirSetupReward(weights.get("ground_to_air_setup_weight", 8.0)),
+            "wall_aerial_launch": WallAerialLaunchReward(weights.get("wall_aerial_launch_weight", 12.0)),
 
             # Micro-Scaled Per-Step Guidance (~0.01 - 0.08 pts/step)
             "ball_vel_toward_goal": BallVelocityToGoalReward(weights.get("ball_vel_toward_goal_weight", 0.08)),
@@ -723,6 +837,7 @@ class RewardManager:
             "behind_ball": BehindBallReward(weights.get("behind_ball_weight", 0.03)),
             "possession": PossessionReward(weights.get("possession_weight", 0.04)),
             "dribble": DribbleReward(weights.get("dribble_weight", 0.04)),
+            "air_dribble_carry": AirDribbleCarryReward(weights.get("air_dribble_carry_weight", 0.06)),
             "defensive_position": DefensivePositionReward(weights.get("defensive_position_weight", 0.03)),
             "save_boost": SaveBoostReward(weights.get("save_boost_weight", 0.02)),
             "velocity": VelocityReward(weights.get("velocity_weight", 0.02)),
@@ -755,6 +870,9 @@ class RewardManager:
             "behind_ball_weight": "behind_ball",
             "possession_weight": "possession",
             "dribble_weight": "dribble",
+            "air_dribble_carry_weight": "air_dribble_carry",
+            "ground_to_air_setup_weight": "ground_to_air_setup",
+            "wall_aerial_launch_weight": "wall_aerial_launch",
             "defensive_position_weight": "defensive_position",
             "demo_bump_weight": "demo_bump",
             "boost_steal_weight": "boost_steal",

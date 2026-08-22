@@ -21,28 +21,31 @@ logging:
 model:
   continuous_actions: false
 rewards:
-  aerial_height_weight: 0.05
+  aerial_height_weight: 0.15
   aligned_shot_weight: 25.0
   ball_vel_toward_goal_weight: 0.08
   behind_ball_weight: 0.03
-  big_pad_weight: 7.0
-  boost_steal_weight: 10.0
+  big_pad_weight: 10.0
+  boost_steal_weight: 11.0
   concede_weight: -100.0
   defensive_position_weight: 0.03
-  demo_bump_weight: 15.0
-  dodge_rush_multi: 2.0
+  demo_bump_weight: 3.0
+  dodge_rush_multi: 2.2
   dribble_weight: 0.04
   face_ball_weight: 0.025
   goal_speed_multi: 1.5
-  goal_weight: 125.0
-  inactivity_penalty_weight: 0.05
+  goal_weight: 200.0
+  inactivity_penalty_weight: 0.06
   kickoff_first_touch_bonus: 35.0
-  kickoff_weight: 0.05
-  possession_weight: 0.03
-  save_boost_weight: 0.025
-  save_weight: 50.0
-  small_pad_weight: 3.0
-  speed_toward_ball_weight: 0.05
-  touch_aerial_flip_multi: 2.5
-  touch_ball_weight: 1.0
-  velocity_weight: 0.035
+  kickoff_weight: 0.06
+  possession_weight: 0.045
+  save_boost_weight: 0.07
+  save_weight: 40.0
+  small_pad_weight: 5.0
+  speed_toward_ball_weight: 0.06
+  touch_aerial_flip_multi: 3.5
+  touch_ball_weight: 2.0
+  velocity_weight: 0.04
+  ground_to_air_setup_weight: 8.0
+  wall_aerial_launch_weight: 12.0
+  air_dribble_carry_weight: 0.06
