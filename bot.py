@@ -242,18 +242,18 @@ class SenseiRLBot(BaseAgent):
 
             if is_dodge:
                 # 120Hz 4-stage substep cadence for authentic Rocket League double-jump dodges:
-                # Substeps 0-1: First jump initiation
-                # Substeps 2-3: Jump release (resets double-jump gate)
-                # Substeps 4-5: Second jump trigger (fires directional flip/dodge with pitch/yaw/roll)
-                # Substeps 6-7: Complete flip
-                if self.ticks_since_last_action in (0, 1, 4, 5):
-                    controller.jump = True
+                # Ground flip: jump (0,1) -> release (2,3) -> dodge (4,5) -> finish (6,7)
+                # Air dodge: immediate dodge (0,1,2) -> finish
+                if is_on_ground:
+                    controller.jump = bool(self.ticks_since_last_action in (0, 1, 4, 5))
                 else:
-                    controller.jump = False
+                    controller.jump = bool(self.ticks_since_last_action in (0, 1, 2))
 
                 controller.pitch = float(np.clip(act[2], -1.0, 1.0))
                 controller.yaw = float(np.clip(act[3], -1.0, 1.0))
                 controller.roll = float(np.clip(act[4], -1.0, 1.0))
+                # Pass immediate steering vector for sharp directional dodge registration
+                controller.steer = float(np.clip(act[3] if abs(act[3]) > 0.1 else (act[4] if abs(act[4]) > 0.1 else steer_val), -1.0, 1.0))
             else:
                 controller.jump = bool(act[5] > 0.0)
                 if is_on_ground:

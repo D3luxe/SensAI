@@ -66,11 +66,11 @@ class DiscreteActionParser:
             # ── JUMPS & FLIPS ──
             [ 1.0,  0.0,  0.0,  0.0,  0.0, 1, 0, 0],  # 12: Jump / Hop Forward
             [ 1.0,  0.0, -1.0,  0.0,  0.0, 1, 0, 0],  # 13: Front Flip / Speed Dodge
-            [ 1.0, -1.0, -1.0, -1.0,  0.0, 1, 0, 0],  # 14: Left Diagonal Flip
-            [ 1.0,  1.0, -1.0,  1.0,  0.0, 1, 0, 0],  # 15: Right Diagonal Flip
+            [ 1.0, -1.0, -1.0, -1.0, -1.0, 1, 0, 0],  # 14: Left Diagonal Flip (Pitch -1, Yaw -1, Roll -1)
+            [ 1.0,  1.0, -1.0,  1.0,  1.0, 1, 0, 0],  # 15: Right Diagonal Flip (Pitch -1, Yaw +1, Roll +1)
             [-1.0,  0.0,  1.0,  0.0,  0.0, 1, 0, 0],  # 16: Back Flip
-            [ 0.0, -1.0,  0.0,  0.0, -1.0, 1, 0, 0],  # 17: Side Dodge Left
-            [ 0.0,  1.0,  0.0,  0.0,  1.0, 1, 0, 0],  # 18: Side Dodge Right
+            [ 0.0, -1.0,  0.0, -1.0, -1.0, 1, 0, 0],  # 17: Side Dodge Left (Yaw -1, Roll -1)
+            [ 0.0,  1.0,  0.0,  1.0,  1.0, 1, 0, 0],  # 18: Side Dodge Right (Yaw +1, Roll +1)
 
             # ── 3D AERIAL FLIGHT & AIR-ROLL ──
             [ 1.0,  0.0,  1.0,  0.0,  0.0, 0, 1, 0],  # 19: Fast Aerial Climb (Nose UP + Boost)
