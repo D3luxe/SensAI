@@ -263,11 +263,11 @@ class RocketSimArena:
             spawn_mode = "kickoff"
             if random_kickoff:
                 roll = np.random.rand()
-                if roll < 0.30:
+                if roll < 0.50:
                     spawn_mode = "kickoff"
-                elif roll < 0.55:
+                elif roll < 0.80:
                     spawn_mode = "striking"
-                elif roll < 0.75:
+                elif roll < 0.95:
                     spawn_mode = "contested"
                 else:
                     spawn_mode = "wall_play"

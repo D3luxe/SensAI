@@ -477,7 +477,8 @@ class BehindBallReward(BaseReward):
         if dist_car_to_net < dist_ball_to_net:
             dist = float(np.linalg.norm(arena.ball.pos - car.pos))
             car_speed = float(np.linalg.norm(car.vel))
-            if dist < 2500.0 and car_speed > 300.0:
+            # Require car to be generally centered/on-pitch (not riding high up on the sidewall when ball is on floor)
+            if dist < 2500.0 and car_speed > 300.0 and car.pos[2] < 400.0:
                 return self.weight
         return 0.0
 

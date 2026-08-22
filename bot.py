@@ -60,6 +60,7 @@ class SenseiRLBot(BaseAgent):
         self.tick_skip = 8
         self.ticks_since_last_action = 0
         self.prev_action: np.ndarray | None = None
+        self.current_steer = 0.0
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self.obs_builder = DefaultObservationBuilder(symmetric=True)
         self.discrete_parser = DiscreteActionParser()
@@ -230,7 +231,9 @@ class SenseiRLBot(BaseAgent):
             else:
                 controller.throttle = raw_throttle
 
-            controller.steer = steer_val
+            # Smooth steering transition (filters discrete bang-bang wheel chatter at 120Hz)
+            self.current_steer = 0.7 * steer_val + 0.3 * self.current_steer
+            controller.steer = float(np.clip(self.current_steer, -1.0, 1.0))
             controller.yaw = float(np.clip(act[3], -1.0, 1.0))
             controller.jump = bool(act[5] > 0.0)
             controller.boost = bool(act[6] > 0.0 and (raw_throttle > 0.0 or not is_on_ground))
