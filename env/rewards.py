@@ -353,28 +353,30 @@ class VelocityReward(BaseReward):
 
 class AerialHeightReward(BaseReward):
     """
-    Rewards jumping and aerial challenges when the ball is airborne (Z > 95 uu) and approaching.
-    Includes immediate launch impulse feedback to bridge the grounded-to-air transition.
+    Rewards jumping and aerial challenges when the ball is genuinely airborne (Z > 180 uu) and approaching.
+    Strictly gates ground jump feedback so bots cannot farm points bunny-hopping beside ground balls.
     """
     def __init__(self, weight: float = 0.05):
         super().__init__(weight)
 
     def get_reward(self, car: CarState, arena: RocketSimArena, action: np.ndarray, is_goal: bool, scoring_team: Optional[int]) -> float:
-        # Ball must be elevated (> 95 uu - above car roof) to justify an aerial challenge
-        if arena.ball.pos[2] > 95.0:
+        # Ball must be genuinely airborne (> 180 uu - well above car height) to justify an aerial challenge
+        if arena.ball.pos[2] > 180.0:
             car_to_ball = arena.ball.pos - car.pos
             dist = float(np.linalg.norm(car_to_ball))
-            if dist < 2200.0:
+            if dist < 2200.0 and dist > 1e-4:
+                unit_to_ball = car_to_ball / dist
+                speed_toward = float(np.dot(car.vel, unit_to_ball))
                 dist_factor = max(0.0, 1.0 - (dist / 2200.0))
                 
-                # Case 1: Airborne flight tracking
-                if not car.on_ground and car.pos[2] > 25.0:
-                    height_norm = min(1.0, (car.pos[2] - 17.0) / 350.0)
+                # Case 1: Airborne flight tracking towards elevated ball
+                if not car.on_ground and car.pos[2] > 35.0 and speed_toward > 100.0:
+                    height_norm = min(1.0, (car.pos[2] - 17.0) / 400.0)
                     flip_bonus = 1.5 if car.just_dodged else 1.0
                     return self.weight * height_norm * flip_bonus * dist_factor
                 
-                # Case 2: Ground launch initiation (immediate feedback when jumping for an elevated ball)
-                if car.on_ground and action[5] > 0.0 and dist < 1200.0:
+                # Case 2: Ground launch initiation (only when actively rushing an airborne ball at high speed)
+                if car.on_ground and action[5] > 0.0 and speed_toward > 450.0 and dist < 1200.0:
                     return self.weight * 0.8 * dist_factor
         return 0.0
 
@@ -647,8 +649,8 @@ class BoostStealReward(BaseReward):
 
 class InactivityPenaltyReward(BaseReward):
     """
-    Escalating per-step penalty assessed when a bot sits stationary or wiggles in place without meaningful displacement.
-    Eliminates mutual standstills, midfield staring, and parking/wiggling equilibria.
+    Escalating per-step penalty assessed when a bot sits stationary, wiggles, or hops in place without meaningful horizontal displacement.
+    Eliminates mutual standstills, midfield staring, hopping traps, and parking equilibria.
     """
     def __init__(self, weight: float = 0.05, grace_steps: int = 15):
         super().__init__(weight)
@@ -661,15 +663,15 @@ class InactivityPenaltyReward(BaseReward):
         self._prev_pos = {car.id: car.pos.copy() for car in initial_state.cars}
 
     def get_reward(self, car: CarState, arena: RocketSimArena, action: np.ndarray, is_goal: bool, scoring_team: Optional[int]) -> float:
-        car_speed = float(np.linalg.norm(car.vel))
+        horiz_speed = float(np.linalg.norm(car.vel[:2]))
         ticks = self._idle_ticks.get(car.id, 0)
         
         prev_p = self._prev_pos.get(car.id, car.pos)
-        displacement = float(np.linalg.norm(car.pos - prev_p))
+        horiz_disp = float(np.linalg.norm(car.pos[:2] - prev_p[:2]))
         self._prev_pos[car.id] = car.pos.copy()
 
-        # Idling or oscillating back and forth in place with low net displacement
-        if car_speed < 150.0 or displacement < 8.0:
+        # Idling, oscillating, or hopping in place with low net horizontal speed/displacement
+        if horiz_speed < 160.0 or horiz_disp < 10.0:
             ticks += 1
         else:
             ticks = max(0, ticks - 2)
@@ -677,7 +679,7 @@ class InactivityPenaltyReward(BaseReward):
         self._idle_ticks[car.id] = ticks
 
         if ticks > self.grace_steps:
-            # Escalates up to 4x penalty as prolonged idling/wiggling continues
+            # Escalates up to 4x penalty as prolonged idling/hopping continues
             escalation = min(4.0, 1.0 + (ticks - self.grace_steps) / 30.0)
             return -self.weight * escalation
         return 0.0
