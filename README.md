@@ -1,4 +1,4 @@
-# 🏎️⚽ SenseiBot - Rocket League ML Bot Studio & Training Environment
+# 🏎️⚽ SensAI - Rocket League ML Bot Studio & Training Environment
 
 A complete Reinforcement Learning training environment and management dashboard for Rocket League bots, featuring **Vectorized Proximal Policy Optimization (PPO)**, a headless **3D Rocket League physics simulator**, **real-time dynamic parameter adjustment**, and an interactive **Gradio GUI**.
 

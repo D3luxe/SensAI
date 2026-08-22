@@ -6,7 +6,7 @@ from ui.app import create_ui
 
 if __name__ == "__main__":
     print("=" * 60)
-    print("      LAUNCHING SENSEIBOT ROCKET LEAGUE ML STUDIO     ")
+    print("      LAUNCHING SENSAI ROCKET LEAGUE ML STUDIO     ")
     print("=" * 60)
 
     # Ensure required directories exist
@@ -31,7 +31,7 @@ if __name__ == "__main__":
         )
     except OSError:
         # Fallback to automatic free port selection if 7860 is occupied
-        print(f"[SenseiBot Studio] Port {port} is occupied. Finding an available port...")
+        print(f"[SensAI Studio] Port {port} is occupied. Finding an available port...")
         demo.launch(
             server_name="127.0.0.1",
             server_port=None,

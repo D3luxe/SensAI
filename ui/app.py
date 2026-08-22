@@ -221,10 +221,10 @@ def create_ui():
 
     init_status = mgr.get_status_info()
 
-    with gr.Blocks(title="SenseiBot - Rocket League ML Studio", css=CUSTOM_CSS) as demo:
+    with gr.Blocks(title="SensAI - Rocket League ML Studio", css=CUSTOM_CSS) as demo:
         gr.Markdown(
             """
-            # 🏎️⚽ SenseiBot - Rocket League ML Studio
+            # 🏎️⚽ SensAI - Rocket League ML Studio
             ### High-Performance Headless Reinforcement Learning with Vectorized PPO & Live Tuning
             """
         )

@@ -1,5 +1,5 @@
 """
-RLBot In-Game Agent Wrapper for SenseiBot.
+RLBot In-Game Agent Wrapper for SensAI.
 Converts live Rocket League GameTickPacket data into model observations and returns controller inputs.
 """
 
@@ -66,13 +66,13 @@ class SenseiRLBot(BaseAgent):
                 self.model = ActorCritic(obs_dim=obs_dim, act_dim=act_dim, continuous_actions=self.continuous_actions).to(self.device)
                 self.model.load_state_dict(ckpt["model_state_dict"])
                 self.model.eval()
-                print(f"[SenseiRLBot] Loaded in-game model from {chosen_path} (Mode: {'Continuous' if self.continuous_actions else 'Discrete RLGym (19 actions)'})")
+                print(f"[SensAI] Loaded in-game model from {chosen_path} (Mode: {'Continuous' if self.continuous_actions else 'Discrete RLGym (19 actions)'})")
             except Exception as e:
-                print(f"[SenseiRLBot] Warning: Could not load weights from {chosen_path}: {e}")
+                print(f"[SensAI] Warning: Could not load weights from {chosen_path}: {e}")
                 self.model = ActorCritic(obs_dim=obs_dim, act_dim=act_dim, continuous_actions=self.continuous_actions).to(self.device)
                 self.model.eval()
         else:
-            print("[SenseiRLBot] No checkpoint found, initializing with default model weights.")
+            print("[SensAI] No checkpoint found, initializing with default model weights.")
             self.model = ActorCritic(obs_dim=obs_dim, act_dim=act_dim, continuous_actions=self.continuous_actions).to(self.device)
             self.model.eval()
 
