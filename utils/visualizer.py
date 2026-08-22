@@ -88,18 +88,24 @@ def draw_rocket_league_pitch(ax):
 
 
 def load_model(model_path: Optional[str], device: str = "cpu") -> Optional[ActorCritic]:
-    if model_path and os.path.exists(model_path):
-        try:
-            ckpt = torch.load(model_path, map_location=device)
-            obs_dim = ckpt.get("obs_dim", 64)
-            continuous = ckpt.get("continuous_actions", True)
-            act_dim = ckpt.get("act_dim", 8 if continuous else 19)
-            model = ActorCritic(obs_dim=obs_dim, act_dim=act_dim, continuous_actions=continuous).to(device)
-            model.load_state_dict(ckpt["model_state_dict"])
-            model.eval()
-            return model
-        except Exception as e:
-            print(f"[Visualizer] Could not load model {model_path}: {e}")
+    if model_path:
+        norm_path = os.path.normpath(model_path.strip().strip('"').strip("'"))
+        if os.path.exists(norm_path):
+            for attempt in range(3):
+                try:
+                    ckpt = torch.load(norm_path, map_location=device)
+                    obs_dim = ckpt.get("obs_dim", 64)
+                    continuous = ckpt.get("continuous_actions", False)
+                    act_dim = ckpt.get("act_dim", 8 if continuous else 19)
+                    model = ActorCritic(obs_dim=obs_dim, act_dim=act_dim, continuous_actions=continuous).to(device)
+                    model.load_state_dict(ckpt["model_state_dict"])
+                    model.eval()
+                    return model
+                except Exception as e:
+                    if attempt == 2:
+                        print(f"[Visualizer] Could not load model {norm_path}: {e}")
+                    import time
+                    time.sleep(0.05)
     return None
 
 
@@ -196,7 +202,8 @@ def simulate_match(
     3. Match statistics dict.
     """
     arena = RocketSimArena(num_players=2, game_mode="1v1")
-    arena.reset(random_kickoff=True)
+    # For full match replay visualization, always start from a standard competitive kickoff
+    arena.reset(random_kickoff=False)
 
     obs_builder = DefaultObservationBuilder(symmetric=True)
     action_parser = ContinuousActionParser()
