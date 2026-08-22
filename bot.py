@@ -205,13 +205,12 @@ class SenseiRLBot(BaseAgent):
                     act_idx = int(action.squeeze().cpu().item())
                     act = self.discrete_parser.parse_actions(act_idx)
 
-            # Action Mapping
+            # Direct 1-to-1 Neural Policy Mapping
             # [throttle, steer, pitch, yaw, roll, jump, boost, handbrake]
             raw_throttle = float(act[0])
             steer_val = float(np.clip(act[1], -1.0, 1.0))
 
             if self.continuous_actions:
-                # Continuous deadband
                 if raw_throttle > 0.05:
                     controller.throttle = 1.0
                 elif raw_throttle < -0.35:
@@ -219,71 +218,17 @@ class SenseiRLBot(BaseAgent):
                 else:
                     controller.throttle = 0.0
             else:
-                # Discrete lookup table already contains exact discrete values
                 controller.throttle = raw_throttle
 
             controller.steer = steer_val
-            controller.pitch = float(np.clip(act[2], -1.0, 1.0))
             controller.yaw = float(np.clip(act[3], -1.0, 1.0))
-            controller.roll = float(np.clip(act[4], -1.0, 1.0))
-            controller.boost = bool(act[6] > 0.0 and (raw_throttle > 0.0 or not is_on_ground))
-
-            # Attack Commitment (ensures bots strike through kickoffs and open stationary balls)
-            ball_pos = ball_state.pos
-            ball_speed = float(np.linalg.norm(ball_state.vel))
-            car_speed = float(np.linalg.norm(car_state.vel))
-            is_kickoff = (abs(ball_pos[0]) < 50.0 and abs(ball_pos[1]) < 50.0 and ball_speed < 100.0)
-            steer_err = 0.0
-            
-            car_to_ball = ball_pos - car_state.pos
-            dist_to_ball = float(np.linalg.norm(car_to_ball))
-            if dist_to_ball > 1e-4:
-                fwd = car_state.get_forward_vector()
-                right = car_state.get_right_vector()
-                local_ball_x = float(np.dot(car_to_ball, right))
-                local_ball_y = float(np.dot(car_to_ball, fwd))
-
-                if is_kickoff:
-                    # Steer directly into kickoff ball and rush with full boost
-                    steer_err = float(np.clip(local_ball_x / max(150.0, abs(local_ball_y)), -1.0, 1.0))
-                    controller.steer = steer_err
-                    controller.throttle = 1.0
-                    controller.boost = bool(car_state.boost > 0 and abs(steer_err) < 0.5)
-                elif dist_to_ball < 750.0 and is_on_ground:
-                    # Close proximity ball (open net strike / breakaways / stagnant balls): steer directly into ball and boom it
-                    steer_err = float(np.clip(local_ball_x / max(60.0, abs(local_ball_y)), -1.0, 1.0))
-                    controller.steer = steer_err
-                    
-                    # Sharp cut / powerslide: if turning sharply towards close ball, tap handbrake & modulate speed to collapse turning radius
-                    if abs(steer_err) > 0.40 and ball_speed < 450.0:
-                        controller.handbrake = True
-                        controller.boost = False
-                        controller.throttle = 0.2 if car_speed > 600.0 else 1.0
-                    else:
-                        controller.handbrake = False
-                        controller.throttle = 1.0
-                        # Boost through contact if pointed on target
-                        controller.boost = bool(car_state.boost > 0 and abs(steer_err) < 0.35)
-                elif local_ball_y < -50.0 and car_speed < 450.0 and is_on_ground:
-                    # Car is facing away from the ball / play: execute rapid powerslide U-turn to re-orient toward the ball
-                    turn_dir = 1.0 if local_ball_x >= 0.0 else -1.0
-                    controller.steer = turn_dir
-                    controller.throttle = 1.0
-                    controller.handbrake = True
-                    controller.boost = False
-
-            # Handbrake: only engage for sharp low-to-medium speed turns to prevent involuntary high-speed spinouts
-            is_turn_recovery = bool(dist_to_ball > 1e-4 and local_ball_y < -50.0 and car_speed < 450.0 and is_on_ground)
-            is_close_cut = bool(dist_to_ball < 750.0 and is_on_ground and abs(steer_err) > 0.40 and ball_speed < 450.0)
-            if not is_turn_recovery and not is_close_cut:
-                controller.handbrake = bool(act[7] > 0.6 and abs(steer_val) > 0.6 and car_speed < 1400.0 and not is_kickoff)
-
-            # Direct 1-to-1 Jump mapping (eliminates involuntary spastic auto-flips)
             controller.jump = bool(act[5] > 0.0)
+            controller.boost = bool(act[6] > 0.0 and (raw_throttle > 0.0 or not is_on_ground))
+            controller.handbrake = bool(act[7] > 0.5)
 
             # In-air vs on-ground orientation stabilization
             if is_on_ground:
-                # On ground: steering only (prevent residual pitch/roll from causing awkward aerial twitches on minor bumps)
+                # On ground: steering only (prevent residual pitch/roll from causing aerial twitches)
                 controller.pitch = 0.0
                 controller.roll = 0.0
             else:

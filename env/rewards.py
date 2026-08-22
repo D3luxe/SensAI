@@ -127,11 +127,26 @@ class FaceBallReward(BaseReward):
 
 class BallVelocityToGoalReward(BaseReward):
     """
-    Rewards propelling the ball toward the opponent net at high speed.
+    Rewards actively accelerating / propelling the ball toward the opponent net (delta velocity toward goal).
     Penalizes sending the ball towards defending net (own-goal prevention).
+    Awards 0 reward for passive rolling / escorting without impact.
     """
     def __init__(self, weight: float = 0.08):
         super().__init__(weight)
+        self._prev_vel_toward_goal: Dict[int, float] = {}
+
+    def reset(self, initial_state: RocketSimArena):
+        self._prev_vel_toward_goal = {}
+        for car in initial_state.cars:
+            target_goal_y = ARENA_EXTENT_Y if car.team == 0 else -ARENA_EXTENT_Y
+            target_goal = np.array([0.0, target_goal_y, GOAL_HEIGHT * 0.5], dtype=np.float32)
+            ball_to_goal = target_goal - initial_state.ball.pos
+            dist = float(np.linalg.norm(ball_to_goal))
+            if dist > 1e-4:
+                unit = ball_to_goal / dist
+                self._prev_vel_toward_goal[car.id] = float(np.dot(initial_state.ball.vel, unit))
+            else:
+                self._prev_vel_toward_goal[car.id] = 0.0
 
     def get_reward(self, car: CarState, arena: RocketSimArena, action: np.ndarray, is_goal: bool, scoring_team: Optional[int]) -> float:
         target_goal_y = ARENA_EXTENT_Y if car.team == 0 else -ARENA_EXTENT_Y
@@ -143,11 +158,22 @@ class BallVelocityToGoalReward(BaseReward):
             return 0.0
         unit_ball_to_goal = ball_to_goal / dist
 
-        ball_speed_toward_goal = float(np.dot(arena.ball.vel, unit_ball_to_goal))
-        norm_ball_speed = ball_speed_toward_goal / BALL_MAX_SPEED
+        curr_vel_toward_goal = float(np.dot(arena.ball.vel, unit_ball_to_goal))
+        prev_vel = self._prev_vel_toward_goal.get(car.id, curr_vel_toward_goal)
+        self._prev_vel_toward_goal[car.id] = curr_vel_toward_goal
 
-        # Symmetric reward/penalty
-        return self.weight * norm_ball_speed
+        # Delta velocity toward goal: only rewards actively accelerating the ball toward the net
+        d_vel = curr_vel_toward_goal - prev_vel
+
+        # If ball is accelerated toward opponent net
+        if d_vel > 20.0:
+            norm_d_vel = min(1.0, d_vel / 1500.0)
+            return self.weight * norm_d_vel
+        elif d_vel < -150.0 and curr_vel_toward_goal < 0.0:
+            # Own-goal deflection penalty
+            return -self.weight * 0.5
+
+        return 0.0
 
 
 class GoalReward(BaseReward):
