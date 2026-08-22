@@ -91,14 +91,34 @@ def load_model(model_path: Optional[str], device: str = "cpu") -> Optional[Actor
     if model_path:
         norm_path = os.path.normpath(model_path.strip().strip('"').strip("'"))
         if os.path.exists(norm_path):
+            discrete_parser = DiscreteActionParser()
             for attempt in range(3):
                 try:
                     ckpt = torch.load(norm_path, map_location=device)
                     obs_dim = ckpt.get("obs_dim", 64)
                     continuous = ckpt.get("continuous_actions", False)
-                    act_dim = ckpt.get("act_dim", 8 if continuous else 19)
+                    act_dim = ckpt.get("act_dim", 8 if continuous else discrete_parser.action_dim)
                     model = ActorCritic(obs_dim=obs_dim, act_dim=act_dim, continuous_actions=continuous).to(device)
-                    model.load_state_dict(ckpt["model_state_dict"])
+                    
+                    saved_state = ckpt["model_state_dict"]
+                    model_state = model.state_dict()
+                    
+                    # Support seamless migration if checkpoint has fewer/more actions (e.g. 19 -> 24)
+                    if "actor_logits.weight" in saved_state and "actor_logits.weight" in model_state:
+                        saved_dim = saved_state["actor_logits.weight"].shape[0]
+                        curr_dim = model_state["actor_logits.weight"].shape[0]
+                        if saved_dim != curr_dim:
+                            min_dim = min(saved_dim, curr_dim)
+                            model_state["actor_logits.weight"][:min_dim] = saved_state["actor_logits.weight"][:min_dim]
+                            model_state["actor_logits.bias"][:min_dim] = saved_state["actor_logits.bias"][:min_dim]
+                            for k in saved_state:
+                                if k not in ("actor_logits.weight", "actor_logits.bias"):
+                                    model_state[k] = saved_state[k]
+                            model.load_state_dict(model_state)
+                            model.eval()
+                            return model
+
+                    model.load_state_dict(saved_state)
                     model.eval()
                     return model
                 except Exception as e:
