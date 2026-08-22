@@ -42,17 +42,31 @@ def rotation_to_rot_mat(pitch: float, yaw: float, roll: float) -> np.ndarray:
     return (Rx @ Ry @ Rz).astype(np.float32)
 
 
+def log_debug(msg: str):
+    try:
+        bot_dir = os.path.dirname(os.path.abspath(__file__))
+        log_dir = os.path.join(bot_dir, "logs")
+        os.makedirs(log_dir, exist_ok=True)
+        log_file = os.path.join(log_dir, "rlbot_live.log")
+        with open(log_file, "a", encoding="utf-8") as f:
+            f.write(f"{msg}\n")
+    except Exception:
+        pass
+
+
 class SenseiRLBot(BaseAgent):
     def __init__(self, name, team, index):
         self.name = name
         self.team = team
         self.index = index
+        self.tick_count = 0
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self.obs_builder = DefaultObservationBuilder(symmetric=True)
         self.discrete_parser = DiscreteActionParser()
         self.continuous_actions = False
         self.model: torch.nn.Module | None = None
         self.initialize_agent()
+        log_debug(f"[INIT] SenseiRLBot init: name={name}, team={team}, index={index}, device={self.device}")
         if RLBOT_AVAILABLE:
             super().__init__(name, team, index)
 
@@ -83,13 +97,19 @@ class SenseiRLBot(BaseAgent):
                 self.model = ActorCritic(obs_dim=obs_dim, act_dim=act_dim, continuous_actions=self.continuous_actions).to(self.device)
                 self.model.load_state_dict(ckpt["model_state_dict"])
                 self.model.eval()
-                print(f"[SensAI] Successfully loaded in-game model from {ckpt_path} (Mode: {'Continuous' if self.continuous_actions else 'Discrete RLGym (19 actions)'})")
+                msg = f"[SensAI] Successfully loaded in-game model from {ckpt_path} (Mode: {'Continuous' if self.continuous_actions else 'Discrete RLGym (19 actions)'})"
+                print(msg)
+                log_debug(f"[INIT] {msg}")
             except Exception as e:
-                print(f"[SensAI] Warning: Could not load weights from {ckpt_path}: {e}")
+                msg = f"[SensAI] Warning: Could not load weights from {ckpt_path}: {e}"
+                print(msg)
+                log_debug(f"[INIT_ERROR] {msg}")
                 self.model = ActorCritic(obs_dim=obs_dim, act_dim=act_dim, continuous_actions=self.continuous_actions).to(self.device)
                 self.model.eval()
         else:
-            print("[SensAI] Warning: No checkpoint found, initialized default ActorCritic network.")
+            msg = "[SensAI] Warning: No checkpoint found, initialized default ActorCritic network."
+            print(msg)
+            log_debug(f"[INIT_WARN] {msg}")
             self.model = ActorCritic(obs_dim=obs_dim, act_dim=act_dim, continuous_actions=self.continuous_actions).to(self.device)
             self.model.eval()
 
@@ -253,9 +273,18 @@ class SenseiRLBot(BaseAgent):
                 controller.pitch = float(np.clip(act[2], -1.0, 1.0))
                 controller.roll = float(np.clip(act[4], -1.0, 1.0))
 
+            self.tick_count += 1
+            if self.tick_count <= 10 or self.tick_count % 120 == 0 or is_kickoff:
+                log_debug(
+                    f"[TICK {self.tick_count}] pos=({car_state.pos[0]:.0f}, {car_state.pos[1]:.0f}) "
+                    f"ball=({ball_pos[0]:.0f}, {ball_pos[1]:.0f}) kickoff={is_kickoff} -> "
+                    f"throttle={controller.throttle:.2f} steer={controller.steer:.2f} boost={controller.boost}"
+                )
+
         except Exception as e:
             import traceback
-            print(f"[SensAI] Error in get_output: {e}")
-            traceback.print_exc()
+            err_msg = f"[SensAI] Error in get_output: {e}\n{traceback.format_exc()}"
+            print(err_msg)
+            log_debug(f"[TICK_ERROR] {err_msg}")
 
         return controller
