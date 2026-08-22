@@ -37,24 +37,26 @@ class TestRocketLeagueEnvironment(unittest.TestCase):
 
         obs_builder = DefaultObservationBuilder(symmetric=True)
         obs0 = obs_builder.build_obs(arena.cars[0], arena)
-        self.assertEqual(len(obs0), 64)
+        self.assertEqual(len(obs0), obs_builder.obs_dim)
         self.assertFalse(np.isnan(obs0).any())
 
         rew_manager = RewardManager()
         rew, rew_dict = rew_manager.get_reward(arena.cars[0], arena, np.zeros(8), False, None)
         self.assertIsInstance(rew, float)
         self.assertIn("touch_ball", rew_dict)
+        self.assertIn("bounce_intercept", rew_dict)
+        self.assertIn("wall_faceplant_penalty", rew_dict)
 
     def test_vectorized_env(self):
         vec_env = VectorizedRocketEnv(num_envs=4, game_mode="1v1", tick_skip=4)
         obs = vec_env.reset()
-        self.assertEqual(obs.shape, (4, 2, 64))
+        self.assertEqual(obs.shape, (4, 2, vec_env.obs_dim))
 
         actions = np.zeros((4, 2, 8), dtype=np.float32)
         actions[:, :, 0] = 1.0  # Full throttle
         next_obs, rews, dones, infos = vec_env.step(actions)
 
-        self.assertEqual(next_obs.shape, (4, 2, 64))
+        self.assertEqual(next_obs.shape, (4, 2, vec_env.obs_dim))
         self.assertEqual(rews.shape, (4, 2))
         self.assertEqual(len(infos), 4)
 

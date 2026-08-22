@@ -217,23 +217,26 @@ class PPOTrainer:
         saved_state = checkpoint["model_state_dict"]
         model_state = self.agent.state_dict()
 
-        # Seamless action dimension expansion migration (e.g. 19 -> 24 actions)
-        if "actor_logits.weight" in saved_state and "actor_logits.weight" in model_state:
-            saved_dim = saved_state["actor_logits.weight"].shape[0]
-            curr_dim = model_state["actor_logits.weight"].shape[0]
-            if saved_dim != curr_dim:
-                print(f"[PPO Trainer] Migrating actor network from {saved_dim} to {curr_dim} actions...")
-                min_dim = min(saved_dim, curr_dim)
-                model_state["actor_logits.weight"][:min_dim] = saved_state["actor_logits.weight"][:min_dim]
-                model_state["actor_logits.bias"][:min_dim] = saved_state["actor_logits.bias"][:min_dim]
-                for k in saved_state:
-                    if k not in ("actor_logits.weight", "actor_logits.bias"):
-                        model_state[k] = saved_state[k]
-                self.agent.load_state_dict(model_state)
-                self.iteration = checkpoint.get("iteration", 0)
-                self.global_step = checkpoint.get("global_step", 0)
-                print(f"[PPO Trainer] Successfully migrated and loaded checkpoint from {path} (Iteration: {self.iteration}, Step: {self.global_step})")
-                return
+        # Seamless dimension expansion migration (e.g. 64 -> 70 obs_dim, 19 -> 24 act_dim)
+        migrated = False
+        for k in list(saved_state.keys()):
+            if k in model_state:
+                saved_param = saved_state[k]
+                curr_param = model_state[k]
+                if saved_param.shape != curr_param.shape:
+                    migrated = True
+                    slices = tuple(slice(0, min(s, c)) for s, c in zip(saved_param.shape, curr_param.shape))
+                    curr_param[slices] = saved_param[slices]
+                    model_state[k] = curr_param
+                else:
+                    model_state[k] = saved_param
+
+        if migrated:
+            self.agent.load_state_dict(model_state)
+            self.iteration = checkpoint.get("iteration", 0)
+            self.global_step = checkpoint.get("global_step", 0)
+            print(f"[PPO Trainer] Successfully migrated weights to new dimensions (Obs: {self.obs_builder.obs_dim}, Act: {self.agent.act_dim}) from {path} (Iter: {self.iteration})")
+            return
 
         self.agent.load_state_dict(saved_state)
         if "optimizer_state_dict" in checkpoint:

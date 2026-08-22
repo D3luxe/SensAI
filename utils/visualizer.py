@@ -95,30 +95,33 @@ def load_model(model_path: Optional[str], device: str = "cpu") -> Optional[Actor
             for attempt in range(3):
                 try:
                     ckpt = torch.load(norm_path, map_location=device)
-                    obs_dim = ckpt.get("obs_dim", 64)
+                    obs_builder = DefaultObservationBuilder(symmetric=True)
+                    obs_dim = obs_builder.obs_dim
                     continuous = ckpt.get("continuous_actions", False)
-                    act_dim = ckpt.get("act_dim", 8 if continuous else discrete_parser.action_dim)
+                    act_dim = 8 if continuous else discrete_parser.action_dim
                     model = ActorCritic(obs_dim=obs_dim, act_dim=act_dim, continuous_actions=continuous).to(device)
                     
                     saved_state = ckpt["model_state_dict"]
                     model_state = model.state_dict()
                     
-                    # Support seamless migration if checkpoint has fewer/more actions (e.g. 19 -> 24)
-                    if "actor_logits.weight" in saved_state and "actor_logits.weight" in model_state:
-                        saved_dim = saved_state["actor_logits.weight"].shape[0]
-                        curr_dim = model_state["actor_logits.weight"].shape[0]
-                        if saved_dim != curr_dim:
-                            min_dim = min(saved_dim, curr_dim)
-                            model_state["actor_logits.weight"][:min_dim] = saved_state["actor_logits.weight"][:min_dim]
-                            model_state["actor_logits.bias"][:min_dim] = saved_state["actor_logits.bias"][:min_dim]
-                            for k in saved_state:
-                                if k not in ("actor_logits.weight", "actor_logits.bias"):
-                                    model_state[k] = saved_state[k]
-                            model.load_state_dict(model_state)
-                            model.eval()
-                            return model
+                    # Universal dimension migration (obs_dim 64 -> 70, act_dim 19 -> 24)
+                    migrated = False
+                    for k in list(saved_state.keys()):
+                        if k in model_state:
+                            saved_param = saved_state[k]
+                            curr_param = model_state[k]
+                            if saved_param.shape != curr_param.shape:
+                                migrated = True
+                                slices = tuple(slice(0, min(s, c)) for s, c in zip(saved_param.shape, curr_param.shape))
+                                curr_param[slices] = saved_param[slices]
+                                model_state[k] = curr_param
+                            else:
+                                model_state[k] = saved_param
 
-                    model.load_state_dict(saved_state)
+                    if migrated:
+                        model.load_state_dict(model_state)
+                    else:
+                        model.load_state_dict(saved_state)
                     model.eval()
                     return model
                 except Exception as e:

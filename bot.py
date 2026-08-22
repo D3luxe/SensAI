@@ -90,19 +90,38 @@ class SenseiRLBot(BaseAgent):
 
     def initialize_agent(self):
         ckpt_path = self.get_latest_checkpoint()
-        obs_dim = 64
+        obs_dim = self.obs_builder.obs_dim
         act_dim = self.discrete_parser.action_dim
 
         if ckpt_path:
             try:
                 ckpt = torch.load(ckpt_path, map_location=self.device)
                 self.continuous_actions = ckpt.get("continuous_actions", False)
-                ckpt_act_dim = ckpt.get("act_dim", 8 if self.continuous_actions else self.discrete_parser.action_dim)
+                ckpt_act_dim = 8 if self.continuous_actions else self.discrete_parser.action_dim
                 self.model = ActorCritic(obs_dim=obs_dim, act_dim=ckpt_act_dim, continuous_actions=self.continuous_actions).to(self.device)
-                self.model.load_state_dict(ckpt["model_state_dict"])
+                
+                saved_state = ckpt["model_state_dict"]
+                model_state = self.model.state_dict()
+                migrated = False
+                for k in list(saved_state.keys()):
+                    if k in model_state:
+                        saved_param = saved_state[k]
+                        curr_param = model_state[k]
+                        if saved_param.shape != curr_param.shape:
+                            migrated = True
+                            slices = tuple(slice(0, min(s, c)) for s, c in zip(saved_param.shape, curr_param.shape))
+                            curr_param[slices] = saved_param[slices]
+                            model_state[k] = curr_param
+                        else:
+                            model_state[k] = saved_param
+
+                if migrated:
+                    self.model.load_state_dict(model_state)
+                else:
+                    self.model.load_state_dict(saved_state)
                 self.model.eval()
                 self.loaded_ckpt_mtime = os.path.getmtime(ckpt_path) if os.path.exists(ckpt_path) else 0.0
-                msg = f"[SensAI] Successfully loaded in-game model from {ckpt_path} (Mode: {'Continuous' if self.continuous_actions else f'Discrete RLGym ({ckpt_act_dim} actions)'})"
+                msg = f"[SensAI] Successfully loaded in-game model from {ckpt_path} (Mode: {'Continuous' if self.continuous_actions else f'Discrete RLGym ({ckpt_act_dim} actions)'}, ObsDim: {obs_dim})"
                 print(msg)
                 log_debug(f"[INIT] {msg}")
             except Exception as e:
@@ -174,11 +193,24 @@ class SenseiRLBot(BaseAgent):
                 ang_vel=np.array([b_phys.angular_velocity.x, b_phys.angular_velocity.y, b_phys.angular_velocity.z], dtype=np.float32)
             )
 
+            # Extract future ball trajectory from RLBot
+            ball_prediction_slice = None
+            if RLBOT_AVAILABLE and hasattr(self, "get_ball_prediction_struct"):
+                try:
+                    pred_struct = self.get_ball_prediction_struct()
+                    if pred_struct is not None and getattr(pred_struct, "num_slices", 0) > 30:
+                        slice_idx = min(30, pred_struct.num_slices - 1)
+                        loc = pred_struct.slices[slice_idx].physics.location
+                        ball_prediction_slice = np.array([loc.x, loc.y, loc.z], dtype=np.float32)
+                except Exception:
+                    pass
+
             # Build dummy arena struct for obs builder
             class MockArena:
-                def __init__(self, ball, cars):
+                def __init__(self, ball, cars, ball_pred=None):
                     self.ball = ball
                     self.cars = cars
+                    self.ball_prediction_slice = ball_pred
                     self.boost_pads = BoostPad.create_standard_pads()
 
             # Find opponent
@@ -211,7 +243,7 @@ class SenseiRLBot(BaseAgent):
             self.ticks_since_last_action += 1
             if self.ticks_since_last_action >= self.tick_skip or self.prev_action is None:
                 self.ticks_since_last_action = 0
-                arena = MockArena(ball_state, [car_state] + opponents)
+                arena = MockArena(ball_state, [car_state] + opponents, ball_pred=ball_prediction_slice)
                 obs = self.obs_builder.build_obs(car_state, arena)
 
                 # Model Inference at 15Hz

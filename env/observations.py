@@ -20,7 +20,7 @@ class DefaultObservationBuilder:
     """
     def __init__(self, symmetric: bool = True):
         self.symmetric = symmetric
-        self.obs_dim = 64
+        self.obs_dim = 70
 
     def build_obs(self, car: CarState, arena: RocketSimArena) -> np.ndarray:
         obs = []
@@ -79,14 +79,53 @@ class DefaultObservationBuilder:
         obs.extend(ball_vel_norm)            # 3
         obs.extend(arena.ball.ang_vel * 0.1) # 3
 
-        # 3. Relative Features in Car Local Frame (13 features)
+        # 2b. Future Ball Trajectory Prediction (0.5s ahead = 60 ticks @ 120Hz)
+        future_ball_pos = None
+        if hasattr(arena, "_rsim_arena") and arena._rsim_arena is not None:
+            try:
+                preds = arena._rsim_arena.get_ball_prediction()
+                if preds and len(preds) > 60:
+                    future_ball_pos = preds[60].pos.as_numpy().astype(np.float32)
+            except Exception:
+                pass
+        elif hasattr(arena, "ball_prediction_slice") and arena.ball_prediction_slice is not None:
+            future_ball_pos = arena.ball_prediction_slice
+
+        if future_ball_pos is None:
+            # Kinematic ballistic trajectory fallback (dt = 0.5s, g = -650 uu/s^2)
+            dt = 0.5
+            px = arena.ball.pos[0] + arena.ball.vel[0] * dt
+            py = arena.ball.pos[1] + arena.ball.vel[1] * dt
+            pz = max(93.0, arena.ball.pos[2] + arena.ball.vel[2] * dt + 0.5 * (-650.0) * (dt ** 2))
+            if abs(px) > 4000.0:
+                px = np.sign(px) * (4000.0 - (abs(px) - 4000.0) * 0.6)
+            if abs(py) > 5000.0:
+                py = np.sign(py) * (5000.0 - (abs(py) - 5000.0) * 0.6)
+            future_ball_pos = np.array([px, py, pz], dtype=np.float32)
+
+        future_ball_pos_norm = np.array([
+            (future_ball_pos[0] * inv) / ARENA_EXTENT_X,
+            (future_ball_pos[1] * inv) / ARENA_EXTENT_Y,
+            future_ball_pos[2] / ARENA_HEIGHT_Z
+        ], dtype=np.float32)
+
+        obs.extend(future_ball_pos_norm)     # 3
+
+        # 3. Relative Features in Car Local Frame (16 features)
         rel_ball_pos = (arena.ball.pos - car.pos) * np.array([inv, inv, 1.0], dtype=np.float32)
         rel_ball_vel = (arena.ball.vel - car.vel) * np.array([inv, inv, 1.0], dtype=np.float32)
+        rel_future_ball_pos = (future_ball_pos - car.pos) * np.array([inv, inv, 1.0], dtype=np.float32)
 
         local_ball_pos = np.array([
             np.dot(rel_ball_pos, fwd) / 2000.0,
             np.dot(rel_ball_pos, right) / 2000.0,
             np.dot(rel_ball_pos, up) / 2000.0
+        ], dtype=np.float32)
+
+        local_future_ball_pos = np.array([
+            np.dot(rel_future_ball_pos, fwd) / 2000.0,
+            np.dot(rel_future_ball_pos, right) / 2000.0,
+            np.dot(rel_future_ball_pos, up) / 2000.0
         ], dtype=np.float32)
 
         local_ball_vel = np.array([
@@ -123,6 +162,7 @@ class DefaultObservationBuilder:
         ], dtype=np.float32)
 
         obs.extend(local_ball_pos)           # 3
+        obs.extend(local_future_ball_pos)    # 3
         obs.extend(local_ball_vel)           # 3
         obs.append(dist_ball)                # 1
         obs.extend(local_target_goal)        # 3

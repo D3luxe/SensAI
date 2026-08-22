@@ -840,6 +840,71 @@ class InactivityPenaltyReward(BaseReward):
         return 0.0
 
 
+class WallFaceplantPenalty(BaseReward):
+    """
+    Penalizes slamming into perimeter sidewalls/backboards at high speed when the ball
+    is rebounding high above or behind the car without contact.
+    """
+    def __init__(self, weight: float = 0.04):
+        super().__init__(weight)
+
+    def get_reward(self, car: CarState, arena: RocketSimArena, action: np.ndarray, is_goal: bool, scoring_team: Optional[int]) -> float:
+        is_near_wall_x = abs(car.pos[0]) > 3900.0
+        is_near_wall_y = abs(car.pos[1]) > 4950.0
+
+        if (is_near_wall_x or is_near_wall_y) and car.on_ground:
+            speed_into_wall = 0.0
+            if is_near_wall_x:
+                speed_into_wall = car.vel[0] * np.sign(car.pos[0])
+            elif is_near_wall_y:
+                speed_into_wall = car.vel[1] * np.sign(car.pos[1])
+
+            if speed_into_wall > 400.0 and arena.ball.pos[2] > 200.0:
+                dist_to_ball = float(np.linalg.norm(arena.ball.pos - car.pos))
+                if dist_to_ball > 350.0:
+                    penalty_scale = min(1.0, speed_into_wall / 1500.0)
+                    return -self.weight * penalty_scale
+
+        return 0.0
+
+
+class BounceInterceptReward(BaseReward):
+    """
+    Rewards anticipating ball bounce landing points and wall rebounds (0.5s trajectory forecasting).
+    """
+    def __init__(self, weight: float = 0.04):
+        super().__init__(weight)
+
+    def get_reward(self, car: CarState, arena: RocketSimArena, action: np.ndarray, is_goal: bool, scoring_team: Optional[int]) -> float:
+        future_pos = None
+        if hasattr(arena, "_rsim_arena") and arena._rsim_arena is not None:
+            try:
+                preds = arena._rsim_arena.get_ball_prediction()
+                if preds and len(preds) > 60:
+                    future_pos = preds[60].pos.as_numpy().astype(np.float32)
+            except Exception:
+                pass
+        elif hasattr(arena, "ball_prediction_slice") and arena.ball_prediction_slice is not None:
+            future_pos = arena.ball_prediction_slice
+
+        if future_pos is None:
+            return 0.0
+
+        # If ball is high, fast, or bouncing
+        if arena.ball.pos[2] > 200.0 or abs(arena.ball.vel[2]) > 250.0 or abs(arena.ball.vel[0]) > 600.0:
+            car_to_future = future_pos - car.pos
+            dist = float(np.linalg.norm(car_to_future))
+            if 1e-4 < dist < 3000.0:
+                unit = car_to_future / dist
+                speed_toward_future = float(np.dot(car.vel, unit))
+                if speed_toward_future > 250.0:
+                    fwd = car.get_forward_vector()
+                    align = max(0.0, float(np.dot(fwd, unit)))
+                    return self.weight * (speed_toward_future / CAR_MAX_SPEED) * (align ** 1.5)
+
+        return 0.0
+
+
 class RewardManager:
     """
     Manages all reward functions and exposes dynamic runtime weight updates.
@@ -884,6 +949,8 @@ class RewardManager:
             "save_boost": SaveBoostReward(weights.get("save_boost_weight", 0.02)),
             "velocity": VelocityReward(weights.get("velocity_weight", 0.02)),
             "aerial_height": AerialHeightReward(weights.get("aerial_height_weight", 0.05)),
+            "bounce_intercept": BounceInterceptReward(weights.get("bounce_intercept_weight", 0.04)),
+            "wall_faceplant_penalty": WallFaceplantPenalty(weights.get("wall_faceplant_penalty_weight", 0.04)),
             "inactivity_penalty": InactivityPenaltyReward(weights.get("inactivity_penalty_weight", 0.05)),
         }
 
@@ -918,6 +985,8 @@ class RewardManager:
             "defensive_position_weight": "defensive_position",
             "demo_bump_weight": "demo_bump",
             "boost_steal_weight": "boost_steal",
+            "bounce_intercept_weight": "bounce_intercept",
+            "wall_faceplant_penalty_weight": "wall_faceplant_penalty",
             "inactivity_penalty_weight": "inactivity_penalty",
         }
 
