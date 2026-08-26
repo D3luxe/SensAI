@@ -71,14 +71,8 @@ class RocketLeagueEnv:
         is_goal = False
         scoring_team = None
 
-        # Execute physics sub-ticks
-        dt = (1.0 / 120.0)
-        for _ in range(self.tick_skip):
-            goal, team = self.arena.step(parsed_actions, dt=dt)
-            if goal:
-                is_goal = True
-                scoring_team = team
-                break
+        # Execute physics sub-ticks (full tick_skip interval)
+        is_goal, scoring_team = self.arena.step(parsed_actions, dt=float(self.tick_skip) / 120.0)
 
         # Calculate rewards and observations
         obs = []

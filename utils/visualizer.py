@@ -279,7 +279,7 @@ def simulate_match(
                 obs_t = torch.tensor(obs0, dtype=torch.float32, device=device).unsqueeze(0)
                 act0, _, _, _ = blue_model.get_action_and_value(obs_t, deterministic=True)
                 if blue_model.continuous_actions:
-                    act0 = act0.squeeze(0).cpu().numpy()
+                    act0 = action_parser.parse_actions(act0.squeeze(0).cpu().numpy())
                 else:
                     act0_idx = int(act0.squeeze().cpu().item())
                     act0 = DiscreteActionParser().parse_actions(act0_idx)
@@ -296,7 +296,7 @@ def simulate_match(
                 obs_t1 = torch.tensor(obs1, dtype=torch.float32, device=device).unsqueeze(0)
                 act1, _, _, _ = orange_model.get_action_and_value(obs_t1, deterministic=True)
                 if orange_model.continuous_actions:
-                    act1 = act1.squeeze(0).cpu().numpy()
+                    act1 = action_parser.parse_actions(act1.squeeze(0).cpu().numpy())
                 else:
                     act1_idx = int(act1.squeeze().cpu().item())
                     act1 = DiscreteActionParser().parse_actions(act1_idx)
