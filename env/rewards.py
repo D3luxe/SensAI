@@ -282,11 +282,18 @@ class TacticalAerialReward(BaseReward):
         return d / effective
 
     def get_reward(self, car: CarState, arena: RocketSimArena, action: np.ndarray, is_goal: bool, scoring_team: Optional[int]) -> float:
-        if arena.ball.pos[2] > 180.0:
-            car_to_ball = arena.ball.pos - car.pos
-            dist = float(np.linalg.norm(car_to_ball))
+        # Determine Aerial Intercept Target: Aim for the future meeting point in the air
+        target_pos = arena.ball.pos
+        if hasattr(arena, "get_predicted_ball_pos"):
+            pred_pos = arena.get_predicted_ball_pos(45)  # ~0.375s ahead flight intercept
+            if pred_pos is not None and pred_pos[2] > 160.0:
+                target_pos = pred_pos
+
+        if target_pos[2] > 180.0:
+            car_to_target = target_pos - car.pos
+            dist = float(np.linalg.norm(car_to_target))
             if 1e-4 < dist < 2800.0:
-                unit_to_ball = car_to_ball / dist
+                unit_to_target = car_to_target / dist
                 dist_factor = max(0.0, 1.0 - (dist / 2800.0))
 
                 defending_y = -ARENA_EXTENT_Y if car.team == 0 else ARENA_EXTENT_Y
@@ -300,10 +307,10 @@ class TacticalAerialReward(BaseReward):
                 # Opponent time-to-ball contest
                 tactical_mult = 1.0
                 if not is_threat:
-                    t_self = self._get_time_to_ball(car, arena.ball.pos)
+                    t_self = self._get_time_to_ball(car, target_pos)
                     opponents = [c for c in arena.cars if c.team != car.team and not c.demoed]
                     if opponents:
-                        t_opp_min = min(self._get_time_to_ball(opp, arena.ball.pos) for opp in opponents)
+                        t_opp_min = min(self._get_time_to_ball(opp, target_pos) for opp in opponents)
                         if t_opp_min < t_self - 0.8:
                             return 0.0  # Late overcommit whiff
                         if t_self <= t_opp_min + 0.2:
@@ -318,7 +325,7 @@ class TacticalAerialReward(BaseReward):
 
                     # Air dribble carry bonus (close flight beside elevated ball)
                     air_carry = 0.0
-                    if dist < 400.0 and car.pos[2] > 140.0 and arena.ball.pos[2] > 160.0:
+                    if dist < 400.0 and car.pos[2] > 140.0 and target_pos[2] > 160.0:
                         rel_vel = float(np.linalg.norm(car.vel - arena.ball.vel))
                         carry_match = max(0.0, 1.0 - (rel_vel / 800.0))
                         air_carry = self.air_carry_weight * carry_match
@@ -356,7 +363,11 @@ class TacticalPositionReward(BaseReward):
         dist_to_ball = float(np.linalg.norm(arena.ball.pos - car.pos))
         defending_y = -ARENA_EXTENT_Y if car.team == 0 else ARENA_EXTENT_Y
         dist_car_to_net = abs(car.pos[1] - defending_y)
-        dist_ball_to_net = abs(arena.ball.pos[1] - defending_y)
+        
+        # Trajectory-Aware Defense: Account for both current and predicted ball position on clears
+        pred_pos = arena.get_predicted_ball_pos(60) if hasattr(arena, "get_predicted_ball_pos") else None
+        pred_ball_y = pred_pos[1] if pred_pos is not None else arena.ball.pos[1]
+        dist_ball_to_net = min(abs(arena.ball.pos[1] - defending_y), abs(pred_ball_y - defending_y))
         in_goal_box = (dist_car_to_net < 1800.0) and (abs(car.pos[0]) < 1200.0)
 
         # 1. Contested 50/50 Challenge Engine
