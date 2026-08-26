@@ -150,6 +150,14 @@ class FaceBallReward(BaseReward):
         alignment = float(np.dot(fwd, unit_to_ball))  # Range [-1.0, 1.0]
 
         if alignment > 0.0:
+            # Suppress alignment farming during pure tangential orbiting around ball without closing in
+            if dist < 650.0:
+                speed_closing = float(np.dot(car.vel, unit_to_ball))
+                car_speed = float(np.linalg.norm(car.vel))
+                if speed_closing < 80.0 and car_speed > 250.0:
+                    # Car is driving around the ball in a circle (tangential orbit) - penalize orbit
+                    return -self.weight * 0.5
+
             # Proximity factor: stronger alignment incentive when closer to the ball
             dist_factor = 0.5 + 0.5 * max(0.0, 1.0 - (dist / 3000.0))
             return self.weight * (alignment ** 2) * dist_factor
@@ -825,8 +833,17 @@ class InactivityPenaltyReward(BaseReward):
         horiz_disp = float(np.linalg.norm(car.pos[:2] - prev_p[:2]))
         self._prev_pos[car.id] = car.pos.copy()
 
-        # Idling, oscillating, or hopping in place with low net horizontal speed/displacement
-        if horiz_speed < 160.0 or horiz_disp < 10.0:
+        # Ball proximity and orientation check: allow patient ball-control and bounce pacing
+        dist_to_ball = float(np.linalg.norm(arena.ball.pos - car.pos))
+        fwd = car.get_forward_vector()
+        unit_to_ball = (arena.ball.pos - car.pos) / max(1e-4, dist_to_ball)
+        align = float(np.dot(fwd, unit_to_ball))
+
+        if dist_to_ball < 700.0 and align > 0.4:
+            # Within 700 uu of ball and facing it: exempt from inactivity penalty
+            ticks = max(0, ticks - 3)
+        elif horiz_speed < 160.0 or horiz_disp < 10.0:
+            # Idling, oscillating, or hopping in place with low net horizontal speed/displacement
             ticks += 1
         else:
             ticks = max(0, ticks - 2)
