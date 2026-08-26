@@ -239,14 +239,30 @@ class LocomotionReward(BaseReward):
         if action[6] > 0.0 and car_speed < 2150.0 and speed_toward > 800.0 and best_align > 0.4:
             boost_rush = 0.05 * min(1.0, speed_toward / 1600.0)
 
-        # Kickoff Sprint Acceleration Rush & Speed-Flip Pulse
+        # Precision Cross-Track Error & Collision Corridor
+        fwd_cross = float(np.linalg.norm(np.cross(car_to_target, fwd)))
+        is_on_collision_course = (fwd_cross < 110.0 and fwd_align > 0.7)
+
+        # Kickoff Sprint Acceleration Rush & Collision Aiming
         kickoff_bonus = 0.0
         is_center_ball = (abs(arena.ball.pos[0]) < 50.0 and abs(arena.ball.pos[1]) < 50.0 and float(np.linalg.norm(arena.ball.vel)) < 80.0)
-        if is_center_ball and dist > 400.0:
-            if speed_toward > 500.0 and best_align > 0.5:
-                kickoff_bonus += 0.05 * min(1.5, speed_toward / 1400.0)
-            if car.just_dodged and best_align > 0.6:
-                kickoff_bonus += 0.08  # Speed-flip acceleration pulse
+        if is_center_ball and dist > 250.0:
+            # Reward closing speed scaled by how accurately the car's nose is aimed along the collision track
+            collision_factor = max(0.0, 1.0 - (fwd_cross / 280.0))
+            if speed_toward > 500.0 and fwd_align > 0.6:
+                kickoff_bonus += 0.06 * collision_factor * min(1.5, speed_toward / 1400.0)
+
+            # Active Kickoff Steering Correction: Teach turning inward toward (0,0) from off-center spawns
+            if fwd_cross > 50.0:
+                right = car.get_right_vector()
+                lat_offset = float(np.dot(right, unit_to_target))
+                is_steering_toward = (action[1] > 0.05 and lat_offset > 0.05) or (action[1] < -0.05 and lat_offset < -0.05)
+                if is_steering_toward:
+                    kickoff_bonus += 0.04  # Steering correction bonus
+
+            # Speed-flip acceleration pulse only granted if aimed inside the collision corridor
+            if car.just_dodged and is_on_collision_course:
+                kickoff_bonus += 0.10
 
         # Bounce Anticipation Bonus: rewards closing speed toward airborne intercept point
         bounce_anticipation = 0.0
@@ -255,7 +271,13 @@ class LocomotionReward(BaseReward):
 
         dodge_mult = self.dodge_rush_multi if (car.just_dodged and best_align > 0.5) else 1.0
 
-        align_factor = max(0.2, best_align)
+        # When closing in on ground target, sharpen alignment with cross-track accuracy
+        if dist < 1600.0 and fwd_align > 0.0:
+            precision_factor = max(0.1, 1.0 - (fwd_cross / 350.0))
+            align_factor = max(0.1, (fwd_align ** 2) * precision_factor)
+        else:
+            align_factor = max(0.2, best_align)
+
         return (self.weight * norm_speed * align_factor * dodge_mult) + turn_bonus + boost_rush + kickoff_bonus + bounce_anticipation
 
 
