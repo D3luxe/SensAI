@@ -109,6 +109,15 @@ class TouchBallReward(BaseReward):
                 if car.just_dodged and (abs(action[3]) > 0.1 or abs(action[4]) > 0.1 or action[2] > 0.5):
                     directional_bounty = self.directional_dodge_bounty
 
+            # Anti-Own-Goal Trajectory Penalty:
+            # If in defensive half and hit propels ball rapidly towards own defending net
+            defending_y = -ARENA_EXTENT_Y if car.team == 0 else ARENA_EXTENT_Y
+            in_defensive_half = (arena.ball.pos[1] < 0.0) if car.team == 0 else (arena.ball.pos[1] > 0.0)
+            ball_vy_to_net = -arena.ball.vel[1] if car.team == 0 else arena.ball.vel[1]
+            if in_defensive_half and ball_vy_to_net > 300.0 and abs(arena.ball.pos[0]) < GOAL_HALF_WIDTH * 2.5:
+                # Severe own-goal deflection penalty
+                return -30.0
+
             # Base Hit Bounty + Kickoff First-Touch + High Aerial Bounty + Directional Dodge Bounty
             return (self.weight * aerial_flip_mult * power_factor * bumper_alignment) + first_bounty + high_aerial_bounty + directional_bounty
 
@@ -119,6 +128,7 @@ class SpeedTowardBallReward(BaseReward):
     """
     Micro-scaled per-step reward for closing distance to the ball through the front bumper.
     Includes anti-overshoot mechanics to encourage powersliding/decelerating on wide-angle approaches.
+    Dampens reward when on the wrong side of the ball in the defensive third to prevent own-goal pushing.
     """
     def __init__(self, weight: float = 0.05, dodge_rush_multi: float = 1.5):
         super().__init__(weight)
@@ -139,6 +149,14 @@ class SpeedTowardBallReward(BaseReward):
 
         speed_toward = float(np.dot(car.vel, unit_to_ball))
         norm_speed = speed_toward / CAR_MAX_SPEED
+
+        # Wrong-Side Defensive Check: if car is between the ball and opponent net in defensive half,
+        # suppress forward rush to force car to rotate around to the goal side instead of pushing into net
+        defending_y = -ARENA_EXTENT_Y if car.team == 0 else ARENA_EXTENT_Y
+        dist_car_to_net = abs(car.pos[1] - defending_y)
+        dist_ball_to_net = abs(arena.ball.pos[1] - defending_y)
+        if dist_car_to_net > dist_ball_to_net and dist_ball_to_net < 3200.0:
+            norm_speed *= 0.15
 
         # Anti-Overshoot Dynamics: when close to ball (< 900 uu) and angle is wide
         if dist < 900.0 and best_align < 0.7:
@@ -393,13 +411,18 @@ class BigPadReward(BaseReward):
 class SaveBoostReward(BaseReward):
     """
     Rewards maintaining healthy boost tank reserves using the concave sqrt(boost / 100) curve.
-    Strictly motion-gated: only active when actively moving (> 250 uu/s) to eliminate standstill parking.
+    Strictly penalizes burning boost while already at supersonic speed (>= 2150 uu/s).
     """
     def __init__(self, weight: float = 0.02):
         super().__init__(weight)
 
     def get_reward(self, car: CarState, arena: RocketSimArena, action: np.ndarray, is_goal: bool, scoring_team: Optional[int]) -> float:
         car_speed = float(np.linalg.norm(car.vel))
+
+        # Supersonic Boost Waste Penalty: burning boost at max speed wastes 100% of fuel for 0 speed gain
+        if action[6] > 0.0 and car_speed >= 2150.0 and car.on_ground:
+            return -self.weight * 1.5
+
         if car_speed < 250.0:
             return 0.0
         return math.sqrt(max(0.0, car.boost / 100.0)) * self.weight
@@ -801,28 +824,54 @@ class PossessionReward(BaseReward):
 
 class DribbleReward(BaseReward):
     """
-    Layer 2: Mechanical Roof Carry & Close Bumper Dribbling.
-    Rewards balancing the ball on the car roof or pushing it with precision speed-matching.
+    Layer 2: Mechanical Roof Carry & Roof Flick Strike Engine.
+    Rewards balancing the ball on the car roof and executing powerful flicks into the opponent net.
     """
-    def __init__(self, weight: float = 0.04):
+    def __init__(self, weight: float = 0.04, flick_bounty: float = 30.0):
         super().__init__(weight)
+        self.flick_bounty = flick_bounty
+        self._prev_carrying: Dict[int, bool] = {}
+        self._flick_cooldown: Dict[int, float] = {}
+
+    def reset(self, initial_state: RocketSimArena):
+        self._prev_carrying = {car.id: False for car in initial_state.cars}
+        self._flick_cooldown = {car.id: 0.0 for car in initial_state.cars}
 
     def get_reward(self, car: CarState, arena: RocketSimArena, action: np.ndarray, is_goal: bool, scoring_team: Optional[int]) -> float:
+        cd = self._flick_cooldown.get(car.id, 0.0)
+        if cd > 0.0:
+            self._flick_cooldown[car.id] = max(0.0, cd - (1.0 / 15.0))
+
+        rel_pos = arena.ball.pos - car.pos
+        horiz_dist = float(np.linalg.norm(rel_pos[:2]))
+        vert_dist = rel_pos[2]
+        was_carrying = self._prev_carrying.get(car.id, False)
+
+        is_carrying = (horiz_dist < 180.0 and 15.0 < vert_dist < 140.0)
+        self._prev_carrying[car.id] = is_carrying
+
+        # Roof Flick Detection: was carrying on roof and executes a jump/dodge that launches ball forward/upward
+        if was_carrying and car.just_dodged and cd <= 0.0:
+            target_goal_y = ARENA_EXTENT_Y if car.team == 0 else -ARENA_EXTENT_Y
+            target_dir = 1.0 if target_goal_y > 0 else -1.0
+            ball_vy_forward = arena.ball.vel[1] * target_dir
+            ball_vz = arena.ball.vel[2]
+            ball_speed = float(np.linalg.norm(arena.ball.vel))
+            
+            if (ball_vy_forward > 500.0 or ball_vz > 400.0) and ball_speed > 800.0:
+                self._flick_cooldown[car.id] = 2.5
+                flick_power = min(1.5, max(1.0, ball_speed / 1500.0))
+                return self.flick_bounty * flick_power
+
         ball_speed = float(np.linalg.norm(arena.ball.vel))
         car_speed = float(np.linalg.norm(car.vel))
         if ball_speed < 200.0 or car_speed < 200.0:
             return 0.0
 
-        rel_pos = arena.ball.pos - car.pos
-        horiz_dist = float(np.linalg.norm(rel_pos[:2]))
-        vert_dist = rel_pos[2]
-
-        # Ball must be close horizontally (< 180 uu) and above/on roof (15 < dz < 140 uu)
-        if horiz_dist < 180.0 and 15.0 < vert_dist < 140.0:
+        if is_carrying:
             rel_vel = float(np.linalg.norm(car.vel - arena.ball.vel))
             speed_match = max(0.0, 1.0 - (rel_vel / 600.0))
             horiz_factor = max(0.0, 1.0 - (horiz_dist / 180.0))
-            # Roof carry bonus (ball directly atop car Z)
             roof_bonus = 1.5 if (vert_dist > 35.0 and horiz_dist < 100.0) else 1.0
             return self.weight * horiz_factor * speed_match * roof_bonus
 
@@ -1074,7 +1123,10 @@ class RewardManager:
             "face_ball": FaceBallReward(weights.get("face_ball_weight", 0.02)),
             "behind_ball": BehindBallReward(weights.get("behind_ball_weight", 0.03)),
             "possession": PossessionReward(weights.get("possession_weight", 0.04)),
-            "dribble": DribbleReward(weights.get("dribble_weight", 0.04)),
+            "dribble": DribbleReward(
+                weight=weights.get("dribble_weight", 0.04),
+                flick_bounty=weights.get("flick_bounty", 30.0)
+            ),
             "air_dribble_carry": AirDribbleCarryReward(weights.get("air_dribble_carry_weight", 0.06)),
             "defensive_position": DefensivePositionReward(weights.get("defensive_position_weight", 0.03)),
             "save_boost": SaveBoostReward(weights.get("save_boost_weight", 0.02)),
@@ -1150,6 +1202,10 @@ class RewardManager:
         # Speed toward ball specific params
         if "dodge_rush_multi" in new_weights and "speed_toward_ball" in self.rewards:
             self.rewards["speed_toward_ball"].dodge_rush_multi = float(new_weights["dodge_rush_multi"])
+
+        # Dribble flick specific params
+        if "flick_bounty" in new_weights and "dribble" in self.rewards:
+            self.rewards["dribble"].flick_bounty = float(new_weights["flick_bounty"])
 
     def get_reward(self, car: CarState, arena: RocketSimArena, action: np.ndarray, is_goal: bool, scoring_team: Optional[int]) -> Tuple[float, Dict[str, float]]:
         total = 0.0

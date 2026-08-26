@@ -203,12 +203,35 @@ class DefaultObservationBuilder:
         else:
             obs.extend([0.0] * 14)
 
-        # 5. Big Boost Pads (6 features)
-        big_pads = [pad for pad in arena.boost_pads if pad.is_big][:6]
-        for pad in big_pads:
-            obs.append(1.0 if pad.is_active else 0.0)
-        while len(big_pads) < 6:
-            obs.append(1.0)
+        # 5. Active Boost Pad Spatial Vectors (6 features)
+        # Local relative vector (fwd, right, dist) to nearest active small pad & nearest active big orb
+        small_pads = [p for p in arena.boost_pads if not p.is_big and p.is_active]
+        if small_pads:
+            nearest_sm = min(small_pads, key=lambda p: np.linalg.norm(p.pos[:2] - car.pos[:2]))
+            rel_sm = (nearest_sm.pos - car.pos) * np.array([inv, inv, 1.0], dtype=np.float32)
+            dist_sm = float(np.linalg.norm(rel_sm))
+            local_sm = np.array([
+                np.dot(rel_sm, fwd) / 2000.0,
+                np.dot(rel_sm, right) / 2000.0,
+                dist_sm / 4000.0
+            ], dtype=np.float32)
+            obs.extend(local_sm)
+        else:
+            obs.extend([0.0, 0.0, 1.0])
+
+        big_pads = [p for p in arena.boost_pads if p.is_big and p.is_active]
+        if big_pads:
+            nearest_bg = min(big_pads, key=lambda p: np.linalg.norm(p.pos[:2] - car.pos[:2]))
+            rel_bg = (nearest_bg.pos - car.pos) * np.array([inv, inv, 1.0], dtype=np.float32)
+            dist_bg = float(np.linalg.norm(rel_bg))
+            local_bg = np.array([
+                np.dot(rel_bg, fwd) / 3000.0,
+                np.dot(rel_bg, right) / 3000.0,
+                dist_bg / 6000.0
+            ], dtype=np.float32)
+            obs.extend(local_bg)
+        else:
+            obs.extend([0.0, 0.0, 1.0])
 
         res = np.array(obs, dtype=np.float32)
         return np.nan_to_num(res, nan=0.0, posinf=1.0, neginf=-1.0)
