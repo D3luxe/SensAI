@@ -224,8 +224,16 @@ class RocketSimArena:
                 self._rsim_arena.set_goal_score_callback(on_goal_cb)
                 self._rsim_arena.set_ball_touch_callback(on_touch_cb)
                 self._use_rsim = True
-            except Exception as e:
+            except Exception:
                 self._use_rsim = False
+
+        # Pre-allocated vectorized boost pad coordinates for fast SIMD distance lookups
+        self._sm_pad_indices = np.array([i for i, p in enumerate(self.boost_pads) if not p.is_big], dtype=int)
+        self._bg_pad_indices = np.array([i for i, p in enumerate(self.boost_pads) if p.is_big], dtype=int)
+        self._small_pad_pos_3d = np.array([self.boost_pads[i].pos for i in self._sm_pad_indices], dtype=np.float32)
+        self._big_pad_pos_3d = np.array([self.boost_pads[i].pos for i in self._bg_pad_indices], dtype=np.float32)
+        self._small_pad_active = np.array([self.boost_pads[i].is_active for i in self._sm_pad_indices], dtype=bool)
+        self._big_pad_active = np.array([self.boost_pads[i].is_active for i in self._bg_pad_indices], dtype=bool)
 
         self._init_cars()
 
@@ -497,6 +505,12 @@ class RocketSimArena:
                 p_state = r_pads[i].get_state()
                 pad.is_active = bool(p_state.is_active)
                 pad.cooldown_timer = float(p_state.cooldown)
+
+        if hasattr(self, "_sm_pad_indices"):
+            for idx, pad_i in enumerate(self._sm_pad_indices):
+                self._small_pad_active[idx] = self.boost_pads[pad_i].is_active
+            for idx, pad_i in enumerate(self._bg_pad_indices):
+                self._big_pad_active[idx] = self.boost_pads[pad_i].is_active
 
     def step(self, actions: List[np.ndarray], dt: float = 1.0 / 15.0) -> Tuple[bool, Optional[int]]:
         """

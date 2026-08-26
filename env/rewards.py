@@ -200,17 +200,20 @@ class FaceBallReward(BaseReward):
         alignment = float(np.dot(fwd, unit_to_ball))  # Range [-1.0, 1.0]
 
         if alignment > 0.0:
-            # Suppress alignment farming during pure tangential orbiting around ball without closing in
-            if dist < 650.0:
-                speed_closing = float(np.dot(car.vel, unit_to_ball))
-                car_speed = float(np.linalg.norm(car.vel))
-                if speed_closing < 80.0 and car_speed > 250.0:
-                    # Car is driving around the ball in a circle (tangential orbit) - penalize orbit
-                    return -self.weight * 0.5
-
             # Proximity factor: stronger alignment incentive when closer to the ball
             dist_factor = 0.5 + 0.5 * max(0.0, 1.0 - (dist / 3000.0))
-            return self.weight * (alignment ** 2) * dist_factor
+            align_reward = self.weight * (alignment ** 2) * dist_factor
+
+            # Side-on turn-in & powerslide cut bonus: rewards actively rotating nose into the ball
+            if alignment < 0.7 and dist < 1200.0:
+                # If steering or powersliding to tighten alignment into ball
+                right = car.get_right_vector()
+                lateral_align = float(np.dot(right, unit_to_ball))
+                is_turning_toward = (action[1] > 0.1 and lateral_align > 0.1) or (action[1] < -0.1 and lateral_align < -0.1)
+                if is_turning_toward or action[7] > 0.5:
+                    align_reward += 0.03
+
+            return align_reward
         elif alignment < -0.4 and dist < 1500.0:
             # Check if car is actively rotating back towards defending net
             defending_y = -ARENA_EXTENT_Y if car.team == 0 else ARENA_EXTENT_Y
@@ -224,6 +227,14 @@ class FaceBallReward(BaseReward):
 
             # Gentle penalty for facing completely away from ball at close range when NOT retreating
             return self.weight * alignment * 0.4
+
+        # Side-on dead zone (alignment in [-0.4, 0.0]): reward initiating turn toward ball
+        if dist < 1200.0:
+            right = car.get_right_vector()
+            lateral_align = float(np.dot(right, unit_to_ball))
+            is_turning_toward = (action[1] > 0.1 and lateral_align > 0.1) or (action[1] < -0.1 and lateral_align < -0.1)
+            if is_turning_toward or action[7] > 0.5:
+                return 0.03
 
         return 0.0
 
@@ -382,14 +393,17 @@ class SmallPadReward(BaseReward):
             return self.weight
 
         # Low-Boost Pad Routing Guidance: subtle reward for heading towards active small pads when boost is starved (< 40)
-        if car.boost < 40.0 and car.on_ground:
-            small_pads = [p for p in arena.boost_pads if not p.is_big and p.is_active]
-            if small_pads:
-                nearest_sm = min(small_pads, key=lambda p: np.linalg.norm(p.pos[:2] - car.pos[:2]))
-                rel_sm = nearest_sm.pos[:2] - car.pos[:2]
-                dist_sm = float(np.linalg.norm(rel_sm))
-                if 1e-4 < dist_sm < 1500.0:
-                    unit_sm = rel_sm / dist_sm
+        if car.boost < 40.0 and car.on_ground and hasattr(arena, "_small_pad_pos_3d") and hasattr(arena, "_small_pad_active"):
+            sm_act = arena._small_pad_active
+            if sm_act.any():
+                act_pos = arena._small_pad_pos_3d[sm_act]
+                diff = act_pos[:, :2] - car.pos[:2]
+                d2 = diff[:, 0] * diff[:, 0] + diff[:, 1] * diff[:, 1]
+                min_i = int(np.argmin(d2))
+                dist_sm_sq = float(d2[min_i])
+                if 1.0 < dist_sm_sq < 2250000.0:  # 1500^2 = 2.25e6
+                    dist_sm = math.sqrt(dist_sm_sq)
+                    unit_sm = diff[min_i] / dist_sm
                     fwd_2d = car.get_forward_vector()[:2]
                     fwd_2d_norm = float(np.linalg.norm(fwd_2d))
                     if fwd_2d_norm > 1e-4:
@@ -839,7 +853,20 @@ class PossessionReward(BaseReward):
         # Time-to-ball differential: T_opp - T_self
         delta_t = t_opp_min - t_self
 
-        # If opponent reaches ball first or 50/50 contest (delta_t <= 0.05s), 0 possession reward
+        # Contested 50/50 situation: both cars within close proximity to ball
+        dist_to_ball = float(np.linalg.norm(arena.ball.pos - car.pos))
+        if opponents and dist_to_ball < 900.0:
+            opp_dist_to_ball = min(float(np.linalg.norm(arena.ball.pos - opp.pos)) for opp in opponents)
+            if opp_dist_to_ball < 900.0:
+                # Active 50/50 Contest: reward bold challenge/jump, penalize freezing/stuttering
+                unit_to_ball = (arena.ball.pos - car.pos) / max(1e-4, dist_to_ball)
+                speed_toward = float(np.dot(car.vel, unit_to_ball))
+                if speed_toward > 500.0 or action[5] > 0.0 or car.just_dodged:
+                    return 0.06  # 50/50 Challenge Commitment Bonus
+                elif car_speed < 180.0:
+                    return -0.04  # 50/50 Hesitation / Standoff Penalty
+
+        # If opponent reaches ball first or 50/50 contest without commitment (delta_t <= 0.05s), 0 possession reward
         if delta_t <= 0.05:
             return 0.0
 
@@ -847,7 +874,6 @@ class PossessionReward(BaseReward):
         time_cushion = min(1.0, (delta_t - 0.05) / 1.5)
         
         # Proximity scaling: higher when within reasonable playing distance (< 2500 uu)
-        dist_to_ball = float(np.linalg.norm(arena.ball.pos - car.pos))
         dist_factor = max(0.0, 1.0 - (dist_to_ball / 2500.0))
 
         return self.weight * time_cushion * (0.4 + 0.6 * dist_factor)
