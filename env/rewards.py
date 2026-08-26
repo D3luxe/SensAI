@@ -225,23 +225,35 @@ class LocomotionReward(BaseReward):
         if dist_car_to_net > dist_ball_to_net and dist_ball_to_net < 3000.0:
             norm_speed *= 0.15
 
-        # Side-on turn-in bonus: active steering/powerslide into the target
+        # Precision Cross-Track Error & Collision Corridor
+        fwd_cross = float(np.linalg.norm(np.cross(car_to_target, fwd)))
+        is_on_collision_course = (fwd_cross < 110.0 and fwd_align > 0.7)
+
+        # Side-on & Close-Range Powerslide Snap-Aim Cut Bonus
         turn_bonus = 0.0
-        if dist < 1200.0 and best_align < 0.7:
+        if dist < 1200.0 and best_align < 0.85:
             right = car.get_right_vector()
             lat_align = float(np.dot(right, unit_to_target))
             is_turning = (action[1] > 0.1 and lat_align > 0.1) or (action[1] < -0.1 and lat_align < -0.1)
-            if is_turning or action[7] > 0.5:
+            is_powersliding = bool(action[7] > 0.5)
+            if is_powersliding and is_turning:
+                turn_bonus = 0.05  # Sharp handbrake cut into ball
+            elif is_turning or is_powersliding:
                 turn_bonus = 0.03
+
+        # Close-Range Bumper Contact Lock & Fly-By Whiff Penalty
+        contact_bonus = 0.0
+        whiff_penalty = 0.0
+        if dist < 500.0:
+            if fwd_align > 0.85 and fwd_cross < 75.0 and speed_toward > 300.0:
+                contact_bonus = 0.06 * min(1.5, speed_toward / 1000.0)  # Direct bumper impact lock
+            elif car_speed > 600.0 and (fwd_cross > 120.0 or fwd_align < 0.3):
+                whiff_penalty = -0.04  # Penalize flying past the ball without making contact
 
         # Boost Acceleration Rush: active incentive for boosting towards target
         boost_rush = 0.0
         if action[6] > 0.0 and car_speed < 2150.0 and speed_toward > 800.0 and best_align > 0.4:
             boost_rush = 0.05 * min(1.0, speed_toward / 1600.0)
-
-        # Precision Cross-Track Error & Collision Corridor
-        fwd_cross = float(np.linalg.norm(np.cross(car_to_target, fwd)))
-        is_on_collision_course = (fwd_cross < 110.0 and fwd_align > 0.7)
 
         # Kickoff Sprint Acceleration Rush & Collision Aiming
         kickoff_bonus = 0.0
@@ -288,7 +300,7 @@ class LocomotionReward(BaseReward):
         else:
             align_factor = fwd_align ** 2
 
-        return (self.weight * norm_speed * align_factor * dodge_mult) + turn_bonus + boost_rush + kickoff_bonus + bounce_anticipation + orbit_penalty
+        return (self.weight * norm_speed * align_factor * dodge_mult) + turn_bonus + boost_rush + kickoff_bonus + bounce_anticipation + orbit_penalty + contact_bonus + whiff_penalty
 
 
 # ==============================================================================
