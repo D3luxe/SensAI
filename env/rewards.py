@@ -176,7 +176,17 @@ class FaceBallReward(BaseReward):
             dist_factor = 0.5 + 0.5 * max(0.0, 1.0 - (dist / 3000.0))
             return self.weight * (alignment ** 2) * dist_factor
         elif alignment < -0.4 and dist < 1500.0:
-            # Gentle penalty for facing completely away from ball at close range (stops blind reversing / orbiting)
+            # Check if car is actively rotating back towards defending net
+            defending_y = -ARENA_EXTENT_Y if car.team == 0 else ARENA_EXTENT_Y
+            net_vec = np.array([0.0, defending_y, 0.0], dtype=np.float32) - car.pos
+            net_dist = float(np.linalg.norm(net_vec))
+            if net_dist > 1e-4:
+                speed_to_net = float(np.dot(car.vel, net_vec / net_dist))
+                if speed_to_net > 300.0:
+                    # Car is retreating to defense / net - exempt from facing-away penalty
+                    return 0.0
+
+            # Gentle penalty for facing completely away from ball at close range when NOT retreating
             return self.weight * alignment * 0.4
 
         return 0.0
@@ -894,8 +904,13 @@ class InactivityPenaltyReward(BaseReward):
         unit_to_ball = (arena.ball.pos - car.pos) / max(1e-4, dist_to_ball)
         align = float(np.dot(fwd, unit_to_ball))
 
-        if dist_to_ball < 700.0 and align > 0.4:
-            # Within 700 uu of ball and facing it: exempt from inactivity penalty
+        # Goal box check: allow patient goalkeeping in net
+        defending_y = -ARENA_EXTENT_Y if car.team == 0 else ARENA_EXTENT_Y
+        dist_to_defend_net = abs(car.pos[1] - defending_y)
+        in_goal_box = (dist_to_defend_net < 1800.0) and (abs(car.pos[0]) < 1200.0)
+
+        if (dist_to_ball < 700.0 and align > 0.4) or in_goal_box:
+            # Within 700 uu of ball and facing it, OR holding goalkeeper stance in goal box: exempt
             ticks = max(0, ticks - 3)
         elif horiz_speed < 160.0 or horiz_disp < 10.0:
             # Idling, oscillating, or hopping in place with low net horizontal speed/displacement
