@@ -171,7 +171,13 @@ class SpeedTowardBallReward(BaseReward):
         # Flip / Dodge boost: rewards front-flipping, speed-flipping, and backflipping directly toward the ball
         dodge_mult = self.dodge_rush_multi if (car.just_dodged and best_align > 0.5) else 1.0
 
-        return self.weight * norm_speed * (0.3 + 0.7 * best_align) * dodge_mult
+        # Boost-Assisted Rush Bonus: active incentive for spending boost to accelerate towards the ball
+        boost_rush_bonus = 0.0
+        car_speed = float(np.linalg.norm(car.vel))
+        if action[6] > 0.0 and car_speed < 2150.0 and speed_toward > 800.0 and best_align > 0.4:
+            boost_rush_bonus = 0.06 * min(1.0, speed_toward / 1600.0)
+
+        return (self.weight * norm_speed * (0.3 + 0.7 * best_align) * dodge_mult) + boost_rush_bonus
 
 
 class FaceBallReward(BaseReward):
@@ -374,6 +380,24 @@ class SmallPadReward(BaseReward):
         # Fallback boost delta check for small pads (e.g. 5-30 boost increase or topping off tank)
         if (curr > prev + 5.0 and curr <= prev + 40.0) or (prev >= 88.0 and curr == 100.0 and prev < 100.0):
             return self.weight
+
+        # Low-Boost Pad Routing Guidance: subtle reward for heading towards active small pads when boost is starved (< 40)
+        if car.boost < 40.0 and car.on_ground:
+            small_pads = [p for p in arena.boost_pads if not p.is_big and p.is_active]
+            if small_pads:
+                nearest_sm = min(small_pads, key=lambda p: np.linalg.norm(p.pos[:2] - car.pos[:2]))
+                rel_sm = nearest_sm.pos[:2] - car.pos[:2]
+                dist_sm = float(np.linalg.norm(rel_sm))
+                if 1e-4 < dist_sm < 1500.0:
+                    unit_sm = rel_sm / dist_sm
+                    fwd_2d = car.get_forward_vector()[:2]
+                    fwd_2d_norm = float(np.linalg.norm(fwd_2d))
+                    if fwd_2d_norm > 1e-4:
+                        align_sm = float(np.dot(fwd_2d / fwd_2d_norm, unit_sm))
+                        if align_sm > 0.6:
+                            pad_prox = max(0.0, 1.0 - (dist_sm / 1500.0))
+                            return 0.03 * align_sm * pad_prox
+
         return 0.0
 
 
@@ -382,7 +406,7 @@ class BigPadReward(BaseReward):
     Rewards collecting full boost orbs (+100 boost) with a flat event bounty.
     Tracks physical pad state transitions to ensure pickups at high boost tanks are reliably rewarded.
     """
-    def __init__(self, weight: float = 5.0):
+    def __init__(self, weight: float = 18.0):
         super().__init__(weight)
         self._prev_boost: Dict[int, float] = {}
 
@@ -412,6 +436,7 @@ class SaveBoostReward(BaseReward):
     """
     Rewards maintaining healthy boost tank reserves using the concave sqrt(boost / 100) curve.
     Strictly penalizes burning boost while already at supersonic speed (>= 2150 uu/s).
+    Assesses a subtle starvation vulnerability penalty when stranded on empty tanks (0 boost).
     """
     def __init__(self, weight: float = 0.02):
         super().__init__(weight)
@@ -422,6 +447,12 @@ class SaveBoostReward(BaseReward):
         # Supersonic Boost Waste Penalty: burning boost at max speed wastes 100% of fuel for 0 speed gain
         if action[6] > 0.0 and car_speed >= 2150.0 and car.on_ground:
             return -self.weight * 1.5
+
+        # Zero-Boost Starvation Vulnerability: penalty for sitting stranded on empty tank in open play
+        if car.boost < 1.0 and car.on_ground:
+            dist_to_ball = float(np.linalg.norm(arena.ball.pos - car.pos))
+            if dist_to_ball > 800.0:
+                return -self.weight * 0.8
 
         if car_speed < 250.0:
             return 0.0
@@ -974,10 +1005,10 @@ class BoostStealReward(BaseReward):
 
 class InactivityPenaltyReward(BaseReward):
     """
-    Escalating per-step penalty assessed when a bot sits stationary, wiggles, or hops in place without meaningful horizontal displacement.
-    Eliminates mutual standstills, midfield staring, hopping traps, and parking equilibria.
+    Escalating per-step penalty assessed when a bot sits stationary in open field (> 1400 uu from ball) without moving.
+    Eliminates mutual standstills and parking equilibria while fully exempting all ball control, powerslide cuts, shadow defense, and goalkeeping.
     """
-    def __init__(self, weight: float = 0.05, grace_steps: int = 15):
+    def __init__(self, weight: float = 0.05, grace_steps: int = 45):
         super().__init__(weight)
         self.grace_steps = grace_steps
         self._idle_ticks: Dict[int, int] = {}
@@ -995,22 +1026,19 @@ class InactivityPenaltyReward(BaseReward):
         horiz_disp = float(np.linalg.norm(car.pos[:2] - prev_p[:2]))
         self._prev_pos[car.id] = car.pos.copy()
 
-        # Ball proximity and orientation check: allow patient ball-control and bounce pacing
+        # Ball proximity check: allow patient ball-control, bounce pacing, cuts, and shadow-defense
         dist_to_ball = float(np.linalg.norm(arena.ball.pos - car.pos))
-        fwd = car.get_forward_vector()
-        unit_to_ball = (arena.ball.pos - car.pos) / max(1e-4, dist_to_ball)
-        align = float(np.dot(fwd, unit_to_ball))
 
         # Goal box check: allow patient goalkeeping in net
         defending_y = -ARENA_EXTENT_Y if car.team == 0 else ARENA_EXTENT_Y
         dist_to_defend_net = abs(car.pos[1] - defending_y)
         in_goal_box = (dist_to_defend_net < 1800.0) and (abs(car.pos[0]) < 1200.0)
 
-        if (dist_to_ball < 700.0 and align > 0.4) or in_goal_box:
-            # Within 700 uu of ball and facing it, OR holding goalkeeper stance in goal box: exempt
+        if dist_to_ball < 1400.0 or in_goal_box:
+            # Within 1400 uu of ball (active play) OR holding goalkeeper stance in goal box: fully exempt
             ticks = max(0, ticks - 3)
         elif horiz_speed < 160.0 or horiz_disp < 10.0:
-            # Idling, oscillating, or hopping in place with low net horizontal speed/displacement
+            # Idling in open field far from ball with low net horizontal speed/displacement
             ticks += 1
         else:
             ticks = max(0, ticks - 2)
@@ -1018,7 +1046,7 @@ class InactivityPenaltyReward(BaseReward):
         self._idle_ticks[car.id] = ticks
 
         if ticks > self.grace_steps:
-            # Escalates up to 4x penalty as prolonged idling/hopping continues
+            # Escalates up to 4x penalty as prolonged idling in open field continues
             escalation = min(4.0, 1.0 + (ticks - self.grace_steps) / 30.0)
             return -self.weight * escalation
         return 0.0
