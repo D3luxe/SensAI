@@ -195,6 +195,7 @@ class SenseiRLBot(BaseAgent):
 
             # Extract future ball trajectory from RLBot
             ball_prediction_slice = None
+            pred_struct = None
             if RLBOT_AVAILABLE and hasattr(self, "get_ball_prediction_struct"):
                 try:
                     pred_struct = self.get_ball_prediction_struct()
@@ -207,11 +208,42 @@ class SenseiRLBot(BaseAgent):
 
             # Build dummy arena struct for obs builder
             class MockArena:
-                def __init__(self, ball, cars, ball_pred=None):
+                def __init__(self, ball, cars, ball_pred=None, raw_pred_struct=None):
                     self.ball = ball
                     self.cars = cars
                     self.ball_prediction_slice = ball_pred
+                    self._pred_struct = raw_pred_struct
                     self.boost_pads = BoostPad.create_standard_pads()
+
+                def get_shot_threat(self, team: int):
+                    defending_goal_y = -ARENA_EXTENT_Y if team == 0 else ARENA_EXTENT_Y
+                    ball_vy = self.ball.vel[1]
+                    is_moving_to_net = (ball_vy < -100.0) if team == 0 else (ball_vy > 100.0)
+                    if not is_moving_to_net:
+                        return False, 0.0, 0.0
+
+                    if self._pred_struct is not None and getattr(self._pred_struct, "num_slices", 0) > 0:
+                        num = min(self._pred_struct.num_slices, 120)
+                        for i in range(num):
+                            loc = self._pred_struct.slices[i].physics.location
+                            if (team == 0 and loc.y <= -5120.0) or (team == 1 and loc.y >= 5120.0):
+                                if abs(loc.x) < 950.0 and 0.0 < loc.z < 680.0:
+                                    threat_intensity = max(0.1, 1.0 - (i / 120.0))
+                                    entry_z_norm = min(1.0, max(0.0, loc.z / GOAL_HEIGHT))
+                                    return True, threat_intensity, entry_z_norm
+
+                    dy = defending_goal_y - self.ball.pos[1]
+                    if abs(ball_vy) > 1e-4:
+                        dt = dy / ball_vy
+                        if 0.05 < dt < 3.0:
+                            pred_x = self.ball.pos[0] + self.ball.vel[0] * dt
+                            pred_z = self.ball.pos[2] + self.ball.vel[2] * dt + 0.5 * (-650.0) * (dt ** 2)
+                            if abs(pred_x) < 950.0 and 0.0 < pred_z < 680.0:
+                                threat_intensity = max(0.1, 1.0 - (dt / 3.0))
+                                entry_z_norm = min(1.0, max(0.0, pred_z / GOAL_HEIGHT))
+                                return True, threat_intensity, entry_z_norm
+
+                    return False, 0.0, 0.0
 
             # Find opponent
             opponents = []
@@ -243,7 +275,7 @@ class SenseiRLBot(BaseAgent):
             self.ticks_since_last_action += 1
             if self.ticks_since_last_action >= self.tick_skip or self.prev_action is None:
                 self.ticks_since_last_action = 0
-                arena = MockArena(ball_state, [car_state] + opponents, ball_pred=ball_prediction_slice)
+                arena = MockArena(ball_state, [car_state] + opponents, ball_pred=ball_prediction_slice, raw_pred_struct=pred_struct)
                 obs = self.obs_builder.build_obs(car_state, arena)
 
                 # Model Inference at 15Hz

@@ -20,7 +20,7 @@ class DefaultObservationBuilder:
     """
     def __init__(self, symmetric: bool = True):
         self.symmetric = symmetric
-        self.obs_dim = 70
+        self.obs_dim = 72
 
     def build_obs(self, car: CarState, arena: RocketSimArena) -> np.ndarray:
         obs = []
@@ -157,6 +157,11 @@ class DefaultObservationBuilder:
         obs.append(dist_ball)                # 1
         obs.extend(local_target_goal)        # 3
         obs.extend(local_defend_goal)        # 3
+
+        # 3b. Defending Goal Threat Sensor (2 features: Threat Intensity, Threat Entry Height)
+        is_threat, threat_intensity, threat_z = arena.get_shot_threat(car.team) if hasattr(arena, "get_shot_threat") else (False, 0.0, 0.0)
+        obs.append(float(threat_intensity))  # 1
+        obs.append(float(threat_z))          # 1
 
         # 4. Opponents / Other Players (14 features for primary opponent)
         opponents = [c for c in arena.cars if c.team != car.team]

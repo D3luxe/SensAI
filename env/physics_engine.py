@@ -385,7 +385,59 @@ class RocketSimArena:
 
         half_players = self.num_players // 2
         self.ball.reset()
-        spawn_idx = np.random.randint(len(kickoff_spawns_team0)) if random_kickoff else 0
+        # 20% chance for Goalkeeper Aerial Defense Scenario during training
+        if random_kickoff and np.random.random() < 0.20 and half_players == 1:
+            defending_team = np.random.randint(2)
+            attacking_team = 1 - defending_team
+            def_y = -4800.0 if defending_team == 0 else 4800.0
+            att_y = 500.0 if defending_team == 0 else -500.0
+            def_yaw = math.pi / 2 if defending_team == 0 else -math.pi / 2
+            att_yaw = -math.pi / 2 if defending_team == 0 else math.pi / 2
+            
+            # Defending car in goalmouth
+            def_car = self.cars[defending_team]
+            def_car.pos = np.array([np.random.uniform(-300.0, 300.0), def_y, 17.0], dtype=np.float32)
+            def_car.vel = np.zeros(3, dtype=np.float32)
+            def_car.rot = np.array([0.0, def_yaw, 0.0], dtype=np.float32)
+            def_car.boost = float(np.random.uniform(40.0, 80.0))
+            def_car.on_ground = True
+            def_car.has_jump = True
+            def_car.has_flip = True
+            def_car.ball_touches = 0
+
+            # Attacking car trailing the shot
+            att_car = self.cars[attacking_team]
+            att_car.pos = np.array([np.random.uniform(-600.0, 600.0), att_y, 17.0], dtype=np.float32)
+            att_car.vel = np.array([0.0, (-600.0 if defending_team == 0 else 600.0), 0.0], dtype=np.float32)
+            att_car.rot = np.array([0.0, att_yaw, 0.0], dtype=np.float32)
+            att_car.boost = float(np.random.uniform(33.0, 60.0))
+            att_car.on_ground = True
+            att_car.has_jump = True
+            att_car.has_flip = True
+            att_car.ball_touches = 0
+
+            # Ball floating / arcing towards defending goal
+            ball_y = np.random.uniform(-2500.0, -1500.0) if defending_team == 0 else np.random.uniform(1500.0, 2500.0)
+            ball_vy = np.random.uniform(-1400.0, -900.0) if defending_team == 0 else np.random.uniform(900.0, 1400.0)
+            self.ball.pos = np.array([np.random.uniform(-400.0, 400.0), ball_y, np.random.uniform(250.0, 500.0)], dtype=np.float32)
+            self.ball.vel = np.array([np.random.uniform(-200.0, 200.0), ball_vy, np.random.uniform(300.0, 650.0)], dtype=np.float32)
+            self.ball.ang_vel = np.zeros(3, dtype=np.float32)
+
+            if self._use_rsim and self._rsim_arena:
+                b_s = self._rsim_arena.ball.get_state()
+                b_s.pos = rsim.Vec(float(self.ball.pos[0]), float(self.ball.pos[1]), float(self.ball.pos[2]))
+                b_s.vel = rsim.Vec(float(self.ball.vel[0]), float(self.ball.vel[1]), float(self.ball.vel[2]))
+                self._rsim_arena.ball.set_state(b_s)
+
+                for c_i, c_obj in enumerate(self.cars):
+                    rc = self._rsim_cars[c_i]
+                    rc_s = rc.get_state()
+                    rc_s.pos = rsim.Vec(float(c_obj.pos[0]), float(c_obj.pos[1]), float(c_obj.pos[2]))
+                    rc_s.vel = rsim.Vec(float(c_obj.vel[0]), float(c_obj.vel[1]), float(c_obj.vel[2]))
+                    rc_s.rot_mat = rsim.RotMat.from_angles(float(c_obj.rot[0]), float(c_obj.rot[1]), float(c_obj.rot[2]))
+                    rc_s.boost = float(c_obj.boost)
+                    rc.set_state(rc_s)
+            return
 
         for i in range(half_players):
             idx = (spawn_idx + i) % len(kickoff_spawns_team0)
@@ -539,6 +591,46 @@ class RocketSimArena:
         self._cached_pred_step = self.step_count
         self._cached_pred_slice = pred_pos
         return pred_pos
+
+    def get_shot_threat(self, team: int) -> Tuple[bool, float, float]:
+        """
+        Returns (is_threat, threat_intensity [0.0-1.0], entry_z_norm [0.0-1.0]).
+        Calculates exact goal threat on the defending net from RocketSim C++ prediction or raycast.
+        """
+        defending_goal_y = -ARENA_EXTENT_Y if team == 0 else ARENA_EXTENT_Y
+        ball_vy = self.ball.vel[1]
+        is_moving_to_net = (ball_vy < -100.0) if team == 0 else (ball_vy > 100.0)
+        if not is_moving_to_net:
+            return False, 0.0, 0.0
+
+        # Check RocketSim native prediction
+        if self._use_rsim and self._rsim_arena is not None:
+            try:
+                preds = self._rsim_arena.get_ball_prediction()
+                if preds:
+                    for i, s in enumerate(preds):
+                        pos = s.pos
+                        if (team == 0 and pos.y <= -5120.0) or (team == 1 and pos.y >= 5120.0):
+                            if abs(pos.x) < 950.0 and 0.0 < pos.z < 680.0:
+                                threat_intensity = max(0.1, 1.0 - (i / 120.0))
+                                entry_z_norm = min(1.0, max(0.0, pos.z / GOAL_HEIGHT))
+                                return True, threat_intensity, entry_z_norm
+            except Exception:
+                pass
+
+        # Ballistic raycast fallback for long-range floating lobs
+        dy = defending_goal_y - self.ball.pos[1]
+        if abs(ball_vy) > 1e-4:
+            dt = dy / ball_vy
+            if 0.05 < dt < 3.0:
+                pred_x = self.ball.pos[0] + self.ball.vel[0] * dt
+                pred_z = self.ball.pos[2] + self.ball.vel[2] * dt + 0.5 * (-650.0) * (dt ** 2)
+                if abs(pred_x) < 950.0 and 0.0 < pred_z < 680.0:
+                    threat_intensity = max(0.1, 1.0 - (dt / 3.0))
+                    entry_z_norm = min(1.0, max(0.0, pred_z / GOAL_HEIGHT))
+                    return True, threat_intensity, entry_z_norm
+
+        return False, 0.0, 0.0
 
         # Pure Python Fallback Step
         substeps = max(1, int(round(dt * 120.0)))
