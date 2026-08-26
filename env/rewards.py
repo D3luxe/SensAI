@@ -27,10 +27,19 @@ class TouchBallReward(BaseReward):
     Scaled by hit power and aerial flip bonus.
     Rate-limited with a 0.25s cooldown to eliminate continuous contact / touch grinding exploits.
     """
-    def __init__(self, weight: float = 10.0, first_touch_bonus: float = 35.0, aerial_flip_multi: float = 2.0):
+    def __init__(
+        self,
+        weight: float = 10.0,
+        first_touch_bonus: float = 35.0,
+        aerial_flip_multi: float = 2.0,
+        directional_dodge_bounty: float = 15.0,
+        kickoff_boost_eff_multi: float = 1.4
+    ):
         super().__init__(weight)
         self.first_touch_bonus = first_touch_bonus
         self.aerial_flip_multi = aerial_flip_multi
+        self.directional_dodge_bounty = directional_dodge_bounty
+        self.kickoff_boost_eff_multi = kickoff_boost_eff_multi
         self._prev_touches: Dict[int, int] = {}
         self._touch_cooldown: Dict[int, float] = {}
         self._first_touch_claimed: bool = False
@@ -59,7 +68,7 @@ class TouchBallReward(BaseReward):
             # Kickoff First-Touch Bounty (strictly awarded on authentic center-court kickoffs only)
             first_bounty = 0.0
             if getattr(self, "_is_kickoff_episode", True) and not self._first_touch_claimed:
-                boost_eff_multi = 1.4 if car.boost >= 10.0 else 1.0
+                boost_eff_multi = self.kickoff_boost_eff_multi if car.boost >= 10.0 else 1.0
                 first_bounty = self.first_touch_bonus * boost_eff_multi
             self._first_touch_claimed = True
 
@@ -75,7 +84,7 @@ class TouchBallReward(BaseReward):
             car_to_ball = arena.ball.pos - car.pos
             dist = float(np.linalg.norm(car_to_ball))
             bumper_alignment = 1.0
-            directional_dodge_bounty = 0.0
+            directional_bounty = 0.0
             if dist > 1e-4:
                 unit_to_ball = car_to_ball / dist
                 fwd = car.get_forward_vector()
@@ -84,10 +93,10 @@ class TouchBallReward(BaseReward):
 
                 # Directional Dodge Strike Bounty: heavily reward diagonal and side flips into off-center balls
                 if car.just_dodged and (abs(action[3]) > 0.1 or abs(action[4]) > 0.1):
-                    directional_dodge_bounty = 15.0
+                    directional_bounty = self.directional_dodge_bounty
 
             # Base Hit Bounty + Kickoff First-Touch Bounty + Directional Dodge Bounty
-            return (self.weight * aerial_flip_mult * power_factor * bumper_alignment) + first_bounty + directional_dodge_bounty
+            return (self.weight * aerial_flip_mult * power_factor * bumper_alignment) + first_bounty + directional_bounty
 
         return 0.0
 
@@ -602,8 +611,10 @@ class KickoffReward(BaseReward):
     Rewards rushing the ball at maximum speed specifically on kickoffs.
     Includes flip acceleration bounties and inline boost pad routing bonuses.
     """
-    def __init__(self, weight: float = 0.05):
+    def __init__(self, weight: float = 0.05, flip_bounty: float = 15.0, pad_bounty: float = 10.0):
         super().__init__(weight)
+        self.flip_bounty = flip_bounty
+        self.pad_bounty = pad_bounty
         self._kickoff_ticks: Dict[int, int] = {}
         self._kickoff_flip_claimed: Dict[int, bool] = {}
         self._kickoff_pad_claimed: Dict[int, bool] = {}
@@ -633,17 +644,17 @@ class KickoffReward(BaseReward):
                 if speed_toward > 0:
                     reward += self.weight * (speed_toward / CAR_MAX_SPEED) * (align ** 2)
 
-                # Kickoff Inline Small Pad Route Bounty (+10.0 pts)
+                # Kickoff Inline Small Pad Route Bounty
                 prev_b = self._prev_boost.get(car.id, car.boost)
                 self._prev_boost[car.id] = car.boost
                 if not self._kickoff_pad_claimed.get(car.id, False) and (car.boost > prev_b + 5.0):
                     self._kickoff_pad_claimed[car.id] = True
-                    reward += 10.0
+                    reward += self.pad_bounty
 
-                # Kickoff Speed Flip Acceleration Bounty (+15.0 pts)
+                # Kickoff Speed Flip Acceleration Bounty
                 if not self._kickoff_flip_claimed.get(car.id, False) and car.just_dodged and align > 0.65 and speed_toward > 900.0:
                     self._kickoff_flip_claimed[car.id] = True
-                    reward += 15.0
+                    reward += self.flip_bounty
 
                 return reward
         return 0.0
@@ -956,7 +967,9 @@ class RewardManager:
             "touch_ball": TouchBallReward(
                 weight=weights.get("touch_ball_weight", 10.0),
                 first_touch_bonus=weights.get("kickoff_first_touch_bonus", 35.0),
-                aerial_flip_multi=weights.get("touch_aerial_flip_multi", 2.5)
+                aerial_flip_multi=weights.get("touch_aerial_flip_multi", 2.5),
+                directional_dodge_bounty=weights.get("directional_dodge_bounty", 15.0),
+                kickoff_boost_eff_multi=weights.get("kickoff_boost_eff_multi", 1.4)
             ),
             "small_pad": SmallPadReward(weights.get("small_pad_weight", 2.0)),
             "big_pad": BigPadReward(weights.get("big_pad_weight", 5.0)),
@@ -971,7 +984,11 @@ class RewardManager:
                 weight=weights.get("speed_toward_ball_weight", 0.05),
                 dodge_rush_multi=weights.get("dodge_rush_multi", 1.5)
             ),
-            "kickoff": KickoffReward(weights.get("kickoff_weight", 0.05)),
+            "kickoff": KickoffReward(
+                weight=weights.get("kickoff_weight", 0.05),
+                flip_bounty=weights.get("kickoff_flip_bounty", 15.0),
+                pad_bounty=weights.get("kickoff_pad_bounty", 10.0)
+            ),
             "face_ball": FaceBallReward(weights.get("face_ball_weight", 0.02)),
             "behind_ball": BehindBallReward(weights.get("behind_ball_weight", 0.03)),
             "possession": PossessionReward(weights.get("possession_weight", 0.04)),
@@ -1037,6 +1054,16 @@ class RewardManager:
             self.rewards["touch_ball"].first_touch_bonus = float(new_weights["kickoff_first_touch_bonus"])
         if "touch_aerial_flip_multi" in new_weights and "touch_ball" in self.rewards:
             self.rewards["touch_ball"].aerial_flip_multi = float(new_weights["touch_aerial_flip_multi"])
+        if "directional_dodge_bounty" in new_weights and "touch_ball" in self.rewards:
+            self.rewards["touch_ball"].directional_dodge_bounty = float(new_weights["directional_dodge_bounty"])
+        if "kickoff_boost_eff_multi" in new_weights and "touch_ball" in self.rewards:
+            self.rewards["touch_ball"].kickoff_boost_eff_multi = float(new_weights["kickoff_boost_eff_multi"])
+
+        # Kickoff specific params
+        if "kickoff_flip_bounty" in new_weights and "kickoff" in self.rewards:
+            self.rewards["kickoff"].flip_bounty = float(new_weights["kickoff_flip_bounty"])
+        if "kickoff_pad_bounty" in new_weights and "kickoff" in self.rewards:
+            self.rewards["kickoff"].pad_bounty = float(new_weights["kickoff_pad_bounty"])
 
         # Speed toward ball specific params
         if "dodge_rush_multi" in new_weights and "speed_toward_ball" in self.rewards:

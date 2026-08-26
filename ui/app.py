@@ -441,6 +441,21 @@ def create_ui():
                             label="Wall-to-Air Launch Bounty",
                             info="Flat bounty awarded for popping the ball off the sidewall and jumping off the wall into mid-air pursuit."
                         )
+                        kickoff_flip_slider = gr.Slider(
+                            0.0, 50.0, value=rew_cfg.get("kickoff_flip_bounty", 15.0), step=1.0,
+                            label="Kickoff Speed Flip Acceleration Bounty",
+                            info="Flat bounty awarded when executing an accelerating front/diagonal speed flip towards the center ball on kickoff."
+                        )
+                        kickoff_pad_slider = gr.Slider(
+                            0.0, 30.0, value=rew_cfg.get("kickoff_pad_bounty", 10.0), step=1.0,
+                            label="Kickoff Inline Boost Pad Routing Bounty",
+                            info="Flat bounty awarded when collecting the small boost pad directly along the kickoff lane."
+                        )
+                        directional_dodge_slider = gr.Slider(
+                            0.0, 50.0, value=rew_cfg.get("directional_dodge_bounty", 15.0), step=1.0,
+                            label="Directional Dodge Cut Strike Bounty",
+                            info="Flat bounty awarded when executing a diagonal or side dodge into off-center balls."
+                        )
                     with gr.Column():
                         touch_ball_slider = gr.Slider(
                             0.0, 50.0, value=rew_cfg.get("touch_ball_weight", 10.0), step=1.0,
@@ -493,6 +508,11 @@ def create_ui():
                             label="Dodge Rush Velocity Multiplier",
                             info="🔗 Connected to [Speed Toward Ball]: Multiplies closing speed reward when speed-flipping/dodging forward towards the ball."
                         )
+                        kickoff_boost_eff_multi_slider = gr.Slider(
+                            1.0, 3.0, value=rew_cfg.get("kickoff_boost_eff_multi", 1.4), step=0.1,
+                            label="Kickoff Boost Conservation Multiplier",
+                            info="🔗 Connected to [Kickoff First-Touch]: Multiplies first-touch bounty when reaching the ball with >= 10 boost in reserve."
+                        )
 
                 # SECTION 3: CONTINUOUS GUIDANCE REWARDS (PER-STEP)
                 gr.Markdown("### 🎯 3. Continuous Guidance Rewards (Micro-Scaled Per-Step)")
@@ -512,6 +532,11 @@ def create_ui():
                             0.0, 0.5, value=rew_cfg.get("kickoff_weight", 0.05), step=0.01,
                             label="Kickoff Speed Rush (Per-Step)",
                             info="Early kickoff acceleration bonus to teach fast kickoffs."
+                        )
+                        bounce_intercept_slider = gr.Slider(
+                            0.0, 0.5, value=rew_cfg.get("bounce_intercept_weight", 0.04), step=0.01,
+                            label="0.5s Ball Bounce Trajectory Forecasting & Intercept (Per-Step)",
+                            info="Rewards tracking and positioning for predicted 0.5s future bounce landing points and wall rebounds."
                         )
                         face_ball_slider = gr.Slider(
                             0.0, 0.2, value=rew_cfg.get("face_ball_weight", 0.02), step=0.005,
@@ -559,10 +584,15 @@ def create_ui():
                             label="Boost Tank Retention (Per-Step)",
                             info="Rewards preserving boost reserves using a concave square root curve."
                         )
+                        wall_faceplant_penalty_slider = gr.Slider(
+                            0.0, 0.5, value=rew_cfg.get("wall_faceplant_penalty_weight", 0.04), step=0.01,
+                            label="Wall Faceplant & Perimeter Crash Penalty (Per-Step Deduction)",
+                            info="Penalizes driving directly into perimeter sidewalls/backboards at speed when the ball is high or bouncing."
+                        )
                         inactivity_penalty_slider = gr.Slider(
                             0.0, 0.5, value=rew_cfg.get("inactivity_penalty_weight", 0.05), step=0.01,
                             label="Inactivity & Standstill Penalty (Per-Step Deduction)",
-                            info="Penalizes sitting stationary or wiggling in place for >1s. Eliminates midfield staring and mutual standstills."
+                            info="Penalizes sitting stationary or wiggling in place for >1s. Exempts close-range ball-control setups."
                         )
 
                 with gr.Row():
@@ -879,10 +909,10 @@ def create_ui():
 
         # Apply Live Rewards
         def on_apply_rewards(
-            g_w, c_w, sv_w, as_w, g2a_w, wal_w, t_w, kft_b, db_w, bs_w, sp_w, bp_w,
-            g_spd, t_flip, d_rush,
-            bvg_w, s_w, ko_w, f_w, a_w, adc_w,
-            bb_w, p_w, dr_w, dp_w, sb_w, v_w, inact_w
+            g_w, c_w, sv_w, as_w, g2a_w, wal_w, ko_flp, ko_pad, dd_w, t_w, kft_b, db_w, bs_w, sp_w, bp_w,
+            g_spd, t_flip, d_rush, ko_beff,
+            bvg_w, s_w, ko_w, bnc_w, f_w, a_w, adc_w,
+            bb_w, p_w, dr_w, dp_w, sb_w, wfp_w, v_w, inact_w
         ):
             rewards = {
                 # Macro Flat Events
@@ -892,6 +922,9 @@ def create_ui():
                 "aligned_shot_weight": float(as_w),
                 "ground_to_air_setup_weight": float(g2a_w),
                 "wall_aerial_launch_weight": float(wal_w),
+                "kickoff_flip_bounty": float(ko_flp),
+                "kickoff_pad_bounty": float(ko_pad),
+                "directional_dodge_bounty": float(dd_w),
                 "touch_ball_weight": float(t_w),
                 "kickoff_first_touch_bonus": float(kft_b),
                 "demo_bump_weight": float(db_w),
@@ -903,11 +936,13 @@ def create_ui():
                 "goal_speed_multi": float(g_spd),
                 "touch_aerial_flip_multi": float(t_flip),
                 "dodge_rush_multi": float(d_rush),
+                "kickoff_boost_eff_multi": float(ko_beff),
 
                 # Micro Guidance
                 "ball_vel_toward_goal_weight": float(bvg_w),
                 "speed_toward_ball_weight": float(s_w),
                 "kickoff_weight": float(ko_w),
+                "bounce_intercept_weight": float(bnc_w),
                 "face_ball_weight": float(f_w),
                 "aerial_height_weight": float(a_w),
                 "air_dribble_carry_weight": float(adc_w),
@@ -916,11 +951,11 @@ def create_ui():
                 "dribble_weight": float(dr_w),
                 "defensive_position_weight": float(dp_w),
                 "save_boost_weight": float(sb_w),
+                "wall_faceplant_penalty_weight": float(wfp_w),
                 "velocity_weight": float(v_w),
                 "inactivity_penalty_weight": float(inact_w),
             }
             mgr.update_live_config({"rewards": rewards})
-            # Also persist to default_config.yaml so they reload permanently
             try:
                 base_cfg = load_yaml_config("config/default_config.yaml")
                 base_cfg["rewards"] = rewards
@@ -933,12 +968,12 @@ def create_ui():
             fn=on_apply_rewards,
             inputs=[
                 # Flat Events
-                goal_slider, concede_slider, save_slider, aligned_shot_slider, ground_to_air_setup_slider, wall_aerial_launch_slider, touch_ball_slider, kickoff_first_touch_slider, demo_bump_slider, boost_steal_slider, small_pad_slider, big_pad_slider,
+                goal_slider, concede_slider, save_slider, aligned_shot_slider, ground_to_air_setup_slider, wall_aerial_launch_slider, kickoff_flip_slider, kickoff_pad_slider, directional_dodge_slider, touch_ball_slider, kickoff_first_touch_slider, demo_bump_slider, boost_steal_slider, small_pad_slider, big_pad_slider,
                 # Multipliers
-                goal_speed_multi_slider, touch_aerial_flip_multi_slider, dodge_rush_multi_slider,
+                goal_speed_multi_slider, touch_aerial_flip_multi_slider, dodge_rush_multi_slider, kickoff_boost_eff_multi_slider,
                 # Guidance
-                ball_vel_toward_goal_slider, speed_toward_ball_slider, kickoff_slider, face_ball_slider, aerial_height_slider, air_dribble_carry_slider,
-                behind_ball_slider, possession_slider, dribble_slider, defensive_pos_slider, save_boost_slider, velocity_slider, inactivity_penalty_slider
+                ball_vel_toward_goal_slider, speed_toward_ball_slider, kickoff_slider, bounce_intercept_slider, face_ball_slider, aerial_height_slider, air_dribble_carry_slider,
+                behind_ball_slider, possession_slider, dribble_slider, defensive_pos_slider, save_boost_slider, wall_faceplant_penalty_slider, velocity_slider, inactivity_penalty_slider
             ],
             outputs=[reward_apply_msg]
         )
@@ -946,19 +981,19 @@ def create_ui():
         def on_reset_rewards():
             # Standardized defaults:
             return (
-                100.0, -100.0, 50.0, 25.0, 8.0, 12.0, 10.0, 35.0, 15.0, 10.0, 2.0, 5.0,
-                1.5, 2.5, 1.5,
-                0.08, 0.05, 0.05, 0.02, 0.05, 0.06,
-                0.03, 0.04, 0.04, 0.03, 0.02, 0.02, 0.05
+                100.0, -100.0, 50.0, 25.0, 8.0, 12.0, 15.0, 10.0, 15.0, 10.0, 35.0, 15.0, 10.0, 2.0, 5.0,
+                1.5, 2.5, 1.5, 1.4,
+                0.08, 0.05, 0.05, 0.04, 0.02, 0.05, 0.06,
+                0.03, 0.04, 0.04, 0.03, 0.02, 0.04, 0.02, 0.05
             )
 
         reset_rewards_btn.click(
             fn=on_reset_rewards,
             outputs=[
-                goal_slider, concede_slider, save_slider, aligned_shot_slider, ground_to_air_setup_slider, wall_aerial_launch_slider, touch_ball_slider, kickoff_first_touch_slider, demo_bump_slider, boost_steal_slider, small_pad_slider, big_pad_slider,
-                goal_speed_multi_slider, touch_aerial_flip_multi_slider, dodge_rush_multi_slider,
-                ball_vel_toward_goal_slider, speed_toward_ball_slider, kickoff_slider, face_ball_slider, aerial_height_slider, air_dribble_carry_slider,
-                behind_ball_slider, possession_slider, dribble_slider, defensive_pos_slider, save_boost_slider, velocity_slider, inactivity_penalty_slider
+                goal_slider, concede_slider, save_slider, aligned_shot_slider, ground_to_air_setup_slider, wall_aerial_launch_slider, kickoff_flip_slider, kickoff_pad_slider, directional_dodge_slider, touch_ball_slider, kickoff_first_touch_slider, demo_bump_slider, boost_steal_slider, small_pad_slider, big_pad_slider,
+                goal_speed_multi_slider, touch_aerial_flip_multi_slider, dodge_rush_multi_slider, kickoff_boost_eff_multi_slider,
+                ball_vel_toward_goal_slider, speed_toward_ball_slider, kickoff_slider, bounce_intercept_slider, face_ball_slider, aerial_height_slider, air_dribble_carry_slider,
+                behind_ball_slider, possession_slider, dribble_slider, defensive_pos_slider, save_boost_slider, wall_faceplant_penalty_slider, velocity_slider, inactivity_penalty_slider
             ]
         )
 
