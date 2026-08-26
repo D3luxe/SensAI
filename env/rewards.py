@@ -168,7 +168,7 @@ class BallStrikeReward(BaseReward):
                 air_bounty = self.high_aerial_bounty
             elif was_carrying and car.just_dodged and ball_speed > 700.0:
                 air_bounty = self.flick_bounty
-            elif car.just_dodged and (abs(action[3]) > 0.1 or abs(action[4]) > 0.1 or action[2] > 0.5):
+            elif car.just_dodged and (abs(action[2]) > 0.3 or abs(action[3]) > 0.3 or abs(action[4]) > 0.3):
                 air_bounty = self.directional_dodge_bounty
 
             return (self.weight * power_factor * bumper_alignment) + first_bounty + xg_bounty + air_bounty
@@ -333,7 +333,7 @@ class TacticalAerialReward(BaseReward):
             if pred_pos is not None and pred_pos[2] > 160.0:
                 target_pos = pred_pos
 
-        if target_pos[2] > 180.0:
+        if target_pos[2] > 280.0:
             car_to_target = target_pos - car.pos
             dist = float(np.linalg.norm(car_to_target))
             if 1e-4 < dist < 2800.0:
