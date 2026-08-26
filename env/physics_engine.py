@@ -528,7 +528,7 @@ class RocketSimArena:
                 for i, r_car in enumerate(self._rsim_cars):
                     act = actions[i] if i < len(actions) else np.zeros(8, dtype=np.float32)
                     r_car.set_controls(rsim.CarControls(
-                        throttle=float(act[0]), steer=-float(act[1]), pitch=float(act[2]),
+                        throttle=float(act[0]), steer=-float(act[1]), pitch=-float(act[2]),
                         yaw=-float(act[3]), roll=float(act[4]), jump=bool(act[5] > 0.5),
                         boost=bool(act[6] > 0.3), handbrake=bool(act[7] > 0.5)
                     ))
@@ -538,7 +538,7 @@ class RocketSimArena:
                 for i, r_car in enumerate(self._rsim_cars):
                     act = actions[i] if i < len(actions) else np.zeros(8, dtype=np.float32)
                     r_car.set_controls(rsim.CarControls(
-                        throttle=float(act[0]), steer=-float(act[1]), pitch=float(act[2]),
+                        throttle=float(act[0]), steer=-float(act[1]), pitch=-float(act[2]),
                         yaw=-float(act[3]), roll=float(act[4]), jump=False if dodge_flags[i] else bool(act[5] > 0.5),
                         boost=bool(act[6] > 0.3), handbrake=bool(act[7] > 0.5)
                     ))
@@ -548,7 +548,7 @@ class RocketSimArena:
                 for i, r_car in enumerate(self._rsim_cars):
                     act = actions[i] if i < len(actions) else np.zeros(8, dtype=np.float32)
                     r_car.set_controls(rsim.CarControls(
-                        throttle=float(act[0]), steer=-float(act[1]), pitch=float(act[2]),
+                        throttle=float(act[0]), steer=-float(act[1]), pitch=-float(act[2]),
                         yaw=-float(act[3]), roll=float(act[4]), jump=bool(act[5] > 0.5),
                         boost=bool(act[6] > 0.3), handbrake=bool(act[7] > 0.5)
                     ))
@@ -557,7 +557,7 @@ class RocketSimArena:
                 for i, r_car in enumerate(self._rsim_cars):
                     act = actions[i] if i < len(actions) else np.zeros(8, dtype=np.float32)
                     r_car.set_controls(rsim.CarControls(
-                        throttle=float(act[0]), steer=-float(act[1]), pitch=float(act[2]),
+                        throttle=float(act[0]), steer=-float(act[1]), pitch=-float(act[2]),
                         yaw=-float(act[3]), roll=float(act[4]), jump=bool(act[5] > 0.5),
                         boost=bool(act[6] > 0.3), handbrake=bool(act[7] > 0.5)
                     ))

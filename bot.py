@@ -317,7 +317,7 @@ class SenseiRLBot(BaseAgent):
             has_strong_dodge_stick = (abs(act[2]) > stick_threshold or abs(act[3]) > stick_threshold or abs(act[4]) > stick_threshold)
             is_dodge = bool(act[5] > jump_threshold and has_strong_dodge_stick)
 
-            if is_dodge:
+            if is_dodge and (has_jump or has_flip):
                 # 120Hz 4-stage substep cadence for authentic Rocket League double-jump dodges:
                 # Ground flip: jump (0,1) -> release (2,3) -> dodge (4,5) -> finish (6,7)
                 # Air dodge: immediate dodge (0,1,2) -> finish
@@ -326,19 +326,18 @@ class SenseiRLBot(BaseAgent):
                 else:
                     controller.jump = bool(self.ticks_since_last_action in (0, 1, 2))
 
-                # RLBot SimpleControllerState: pitch -1 is nose UP, pitch +1 is nose DOWN (invert model pitch)
-                controller.pitch = -float(np.clip(act[2], -1.0, 1.0))
+                # Canonical 1-to-1 mapping matching standard RLBot gamepad conventions
+                controller.pitch = float(np.clip(act[2], -1.0, 1.0))
                 controller.yaw = float(np.clip(act[3], -1.0, 1.0))
                 controller.roll = float(np.clip(act[4], -1.0, 1.0))
             else:
-                controller.jump = bool(act[5] > jump_threshold)
+                controller.jump = bool(act[5] > jump_threshold and has_jump)
                 if is_on_ground:
                     controller.pitch = 0.0
                     controller.roll = 0.0
                     controller.yaw = 0.0
                 else:
-                    # RLBot SimpleControllerState: pitch -1 is nose UP, pitch +1 is nose DOWN
-                    controller.pitch = -float(np.clip(act[2], -1.0, 1.0))
+                    controller.pitch = float(np.clip(act[2], -1.0, 1.0))
                     controller.roll = float(np.clip(act[4], -1.0, 1.0))
                     controller.yaw = float(np.clip(act[3], -1.0, 1.0))
 
