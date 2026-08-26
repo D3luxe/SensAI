@@ -152,17 +152,9 @@ class CarState:
         return np.array([cp * cy, cp * sy, sp], dtype=np.float32)
 
     def get_right_vector(self) -> np.ndarray:
-        if self.rot_mat is not None:
-            return self.rot_mat[1].copy()
-        p, y, r = self.rot
-        cp, sp = math.cos(p), math.sin(p)
-        cy, sy = math.cos(y), math.sin(y)
-        cr, sr = math.cos(r), math.sin(r)
-        return np.array([
-            cy * sp * sr - sy * cr,
-            sy * sp * sr + cy * cr,
-            -cp * sr
-        ], dtype=np.float32)
+        fwd = self.get_forward_vector()
+        up = self.get_up_vector()
+        return np.cross(fwd, up).astype(np.float32)
 
     def get_up_vector(self) -> np.ndarray:
         if self.rot_mat is not None:
@@ -536,9 +528,9 @@ class RocketSimArena:
                 for i, r_car in enumerate(self._rsim_cars):
                     act = actions[i] if i < len(actions) else np.zeros(8, dtype=np.float32)
                     r_car.set_controls(rsim.CarControls(
-                        throttle=float(act[0]), steer=float(act[1]), pitch=float(act[2]),
-                        yaw=float(act[3]), roll=float(act[4]), jump=bool(act[5] > 0.0),
-                        boost=bool(act[6] > 0.0), handbrake=bool(act[7] > 0.5)
+                        throttle=float(act[0]), steer=-float(act[1]), pitch=float(act[2]),
+                        yaw=-float(act[3]), roll=float(act[4]), jump=bool(act[5] > 0.5),
+                        boost=bool(act[6] > 0.3), handbrake=bool(act[7] > 0.5)
                     ))
                 self._rsim_arena.step(4)
 
@@ -546,9 +538,9 @@ class RocketSimArena:
                 for i, r_car in enumerate(self._rsim_cars):
                     act = actions[i] if i < len(actions) else np.zeros(8, dtype=np.float32)
                     r_car.set_controls(rsim.CarControls(
-                        throttle=float(act[0]), steer=float(act[1]), pitch=float(act[2]),
-                        yaw=float(act[3]), roll=float(act[4]), jump=False if dodge_flags[i] else bool(act[5] > 0.0),
-                        boost=bool(act[6] > 0.0), handbrake=bool(act[7] > 0.5)
+                        throttle=float(act[0]), steer=-float(act[1]), pitch=float(act[2]),
+                        yaw=-float(act[3]), roll=float(act[4]), jump=False if dodge_flags[i] else bool(act[5] > 0.5),
+                        boost=bool(act[6] > 0.3), handbrake=bool(act[7] > 0.5)
                     ))
                 self._rsim_arena.step(2)
 
@@ -556,18 +548,18 @@ class RocketSimArena:
                 for i, r_car in enumerate(self._rsim_cars):
                     act = actions[i] if i < len(actions) else np.zeros(8, dtype=np.float32)
                     r_car.set_controls(rsim.CarControls(
-                        throttle=float(act[0]), steer=float(act[1]), pitch=float(act[2]),
-                        yaw=float(act[3]), roll=float(act[4]), jump=bool(act[5] > 0.0),
-                        boost=bool(act[6] > 0.0), handbrake=bool(act[7] > 0.5)
+                        throttle=float(act[0]), steer=-float(act[1]), pitch=float(act[2]),
+                        yaw=-float(act[3]), roll=float(act[4]), jump=bool(act[5] > 0.5),
+                        boost=bool(act[6] > 0.3), handbrake=bool(act[7] > 0.5)
                     ))
                 self._rsim_arena.step(total_ticks - 6)
             else:
                 for i, r_car in enumerate(self._rsim_cars):
                     act = actions[i] if i < len(actions) else np.zeros(8, dtype=np.float32)
                     r_car.set_controls(rsim.CarControls(
-                        throttle=float(act[0]), steer=float(act[1]), pitch=float(act[2]),
-                        yaw=float(act[3]), roll=float(act[4]), jump=bool(act[5] > 0.0),
-                        boost=bool(act[6] > 0.0), handbrake=bool(act[7] > 0.5)
+                        throttle=float(act[0]), steer=-float(act[1]), pitch=float(act[2]),
+                        yaw=-float(act[3]), roll=float(act[4]), jump=bool(act[5] > 0.5),
+                        boost=bool(act[6] > 0.3), handbrake=bool(act[7] > 0.5)
                     ))
                 self._rsim_arena.step(total_ticks)
 
