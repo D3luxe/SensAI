@@ -269,16 +269,26 @@ class LocomotionReward(BaseReward):
         if is_airborne and dist < 1600.0 and speed_toward > 500.0 and best_align > 0.5:
             bounce_anticipation = 0.04 * min(1.0, speed_toward / 1400.0)
 
+        # Anti-Orbit Centrifugal Penalty: Penalize high-speed tangential looping around the ball
+        orbit_penalty = 0.0
+        if dist < 2500.0 and car_speed > 600.0:
+            radial_vel = max(0.0, speed_toward)
+            tangential_vel = math.sqrt(max(0.0, car_speed ** 2 - radial_vel ** 2))
+            if tangential_vel > 700.0 and radial_vel < 250.0:
+                orbit_penalty = -0.035  # Active donut loop breaker
+
         dodge_mult = self.dodge_rush_multi if (car.just_dodged and best_align > 0.5) else 1.0
 
-        # When closing in on ground target, sharpen alignment with cross-track accuracy
-        if dist < 1600.0 and fwd_align > 0.0:
+        # Strict alignment gating: zero forward driving reward if pointing away/perpendicular to target
+        if fwd_align <= 0.0:
+            align_factor = 0.0
+        elif dist < 1600.0:
             precision_factor = max(0.1, 1.0 - (fwd_cross / 350.0))
-            align_factor = max(0.1, (fwd_align ** 2) * precision_factor)
+            align_factor = (fwd_align ** 2) * precision_factor
         else:
-            align_factor = max(0.2, best_align)
+            align_factor = fwd_align ** 2
 
-        return (self.weight * norm_speed * align_factor * dodge_mult) + turn_bonus + boost_rush + kickoff_bonus + bounce_anticipation
+        return (self.weight * norm_speed * align_factor * dodge_mult) + turn_bonus + boost_rush + kickoff_bonus + bounce_anticipation + orbit_penalty
 
 
 # ==============================================================================
@@ -405,26 +415,34 @@ class TacticalPositionReward(BaseReward):
                 elif car_speed < 180.0:
                     return -0.04  # 50/50 Hesitation Standoff Penalty
 
-        # 2. Defensive Goal-Side Rotation
+        # 2. Defensive Goal-Side Shadowing & Recovery
         pos_reward = 0.0
         if dist_car_to_net < dist_ball_to_net and car.pos[2] < 400.0:
-            car_speed = float(np.linalg.norm(car.vel))
-            if car_speed > 250.0:
-                pos_reward = self.weight
+            unit_to_defending_goal = np.array([0.0, -1.0 if car.team == 0 else 1.0, 0.0], dtype=np.float32)
+            speed_retreating = float(np.dot(car.vel, unit_to_defending_goal))
+            fwd_defending = float(np.dot(car.get_forward_vector(), unit_to_defending_goal))
 
-        # 3. Open-Field Inactivity Drain
+            # Reward active goalkeeper stance or purposeful retreat into net
+            if in_goal_box:
+                pos_reward = self.weight * 0.5
+            elif speed_retreating > 300.0 and fwd_defending > 0.3 and dist_ball_to_net < 4200.0:
+                pos_reward = self.weight * min(1.0, speed_retreating / 1200.0)
+
+        # 3. Open-Field Inactivity & Non-Progression Drain
         horiz_speed = float(np.linalg.norm(car.vel[:2]))
         ticks = self._idle_ticks.get(car.id, 0)
         prev_p = self._prev_pos.get(car.id, car.pos)
         horiz_disp = float(np.linalg.norm(car.pos[:2] - prev_p[:2]))
         self._prev_pos[car.id] = car.pos.copy()
 
-        if dist_to_ball < 1400.0 or in_goal_box:
+        # If ball is stagnant in center or far away and car is just looping/stagnant, increment ticks
+        is_closing = (float(np.dot(car.vel, (arena.ball.pos - car.pos))) > 200.0)
+        if dist_to_ball < 1200.0 or in_goal_box:
             ticks = max(0, ticks - 3)
-        elif horiz_speed < 160.0 or horiz_disp < 10.0:
+        elif horiz_speed < 160.0 or horiz_disp < 10.0 or not is_closing:
             ticks += 1
         else:
-            ticks = max(0, ticks - 2)
+            ticks = max(0, ticks - 1)
 
         self._idle_ticks[car.id] = ticks
         if ticks > self.grace_steps:
