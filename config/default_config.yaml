@@ -1,14 +1,14 @@
 environment:
   game_mode: 1v1
   max_episode_steps: 3000
-  num_envs: 64
+  num_envs: 128
   tick_skip: 8
 hyperparameters:
   batch_size: 8192
   clip_range: 0.2
-  ent_coef: 0.01
+  ent_coef: 0.02
   gae_lambda: 0.95
-  gamma: 0.99
+  gamma: 0.995
   learning_rate: 0.0003
   mini_batch_size: 1024
   n_epochs: 4
@@ -21,38 +21,34 @@ logging:
 model:
   continuous_actions: false
 rewards:
-  aerial_height_weight: 0.5
-  air_dribble_carry_weight: 0.2
-  aligned_shot_weight: 40.0
-  ball_vel_toward_goal_weight: 0.25
-  behind_ball_weight: 0.03
-  big_pad_weight: 18.0
-  boost_steal_weight: 11.0
-  bounce_intercept_weight: 0.2
-  concede_weight: -100.0
-  defensive_position_weight: 0.03
-  demo_bump_weight: 3.0
-  directional_dodge_bounty: 20.0
-  dodge_rush_multi: 2.2
-  dribble_weight: 0.04
-  face_ball_weight: 0.025
-  flick_bounty: 30.0
-  goal_speed_multi: 1.5
+  # Module 1: Match Macro Events
   goal_weight: 250.0
-  ground_to_air_setup_weight: 6.0
-  inactivity_penalty_weight: 0.05
-  kickoff_boost_eff_multi: 1.4
-  kickoff_first_touch_bonus: 35.0
-  kickoff_flip_bounty: 20.0
-  kickoff_pad_bounty: 15.0
-  kickoff_weight: 0.06
-  possession_weight: 0.055
-  save_boost_weight: 0.02
-  save_weight: 40.0
-  small_pad_weight: 6.0
-  speed_toward_ball_weight: 0.05
-  touch_aerial_flip_multi: 3.5
+  concede_weight: -100.0
+  save_weight: 50.0
+  goal_speed_multi: 1.5
+
+  # Module 2: Ball Strike & xG Shot Engine
   touch_ball_weight: 12.0
-  velocity_weight: 0.04
-  wall_aerial_launch_weight: 14.0
-  wall_faceplant_penalty_weight: 0.04
+  aligned_shot_weight: 40.0
+  high_aerial_bounty: 25.0
+  flick_bounty: 30.0
+  directional_dodge_bounty: 15.0
+  kickoff_first_touch_bonus: 35.0
+
+  # Module 3: 3D Locomotion & Powerslide
+  speed_toward_ball_weight: 0.06
+  dodge_rush_multi: 1.6
+
+  # Module 4: Context-Aware Tactical Aerials
+  aerial_height_weight: 0.08
+  air_dribble_carry_weight: 0.06
+
+  # Module 5: Tactical Positioning & 50/50s
+  behind_ball_weight: 0.04
+  inactivity_penalty_weight: 0.05
+
+  # Module 6: Boost Economy & Shields
+  small_pad_weight: 6.0
+  big_pad_weight: 18.0
+  boost_steal_weight: 10.0
+  save_boost_weight: 0.02

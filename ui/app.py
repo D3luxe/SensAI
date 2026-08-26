@@ -400,205 +400,59 @@ def create_ui():
             with gr.TabItem("🎛️ Live Reward Weights"):
                 gr.Markdown(
                     """
-                    > **💡 Standardized Reward Architecture:** 
-                    > * **🏆 Flat Macro Events:** High-impact point payouts (50–100+ pts) awarded immediately when executing game-winning actions (Goals, Saves, First Touch).
-                    > * **⚡ Tactical Multipliers:** Dynamically amplify base event rewards (e.g. up to 2.5x for jump/flip strikes or supersonic shots).
-                    > * **🎯 Continuous Guidance (Per-Step):** Micro-scaled (~0.01–0.08 pts/step) so 500 steps of passive driving never overshadows scoring a goal.
+                    > **🏆 Consolidated 6-Module Hierarchical Reward System:** 
+                    > * **1. Match Macro Events:** Primary match win/loss outcomes (Goals, Saves).
+                    > * **2. Ball Strike & xG Shot Engine:** Atomic touch impact, instant xG shot-on-target bounties, flicks, and aerial strikes.
+                    > * **3. 3D Locomotion & Powerslide:** Smooth momentum, turn-in cuts, and boost acceleration rush.
+                    > * **4. Context-Aware Aerials:** High-percentage airborne climbs with boost feasibility gates & shields.
+                    > * **5. Tactical Positioning & 50/50s:** Goal-side rotation, active 50/50 challenge commitment, and idle drain.
+                    > * **6. Boost Economy & Shields:** Small/Big pad collection, opponent steals, and offensive attack immunity.
                     """
                 )
 
-                # SECTION 1: MACRO EVENTS
-                gr.Markdown("### 🏆 1. Match-Winning & Macro Game Events (Flat Point Bonuses)")
+                # MODULE 1 & 2
                 with gr.Row():
                     with gr.Column():
-                        goal_slider = gr.Slider(
-                            0.0, 300.0, value=rew_cfg.get("goal_weight", 100.0), step=5.0,
-                            label="Goal Scored Reward (Base Flat Bonus)",
-                            info="Major flat reward granted when the ball enters the opponent goal. The primary objective of the match."
-                        )
-                        concede_slider = gr.Slider(
-                            -300.0, 0.0, value=rew_cfg.get("concede_weight", -100.0), step=5.0,
-                            label="Goal Conceded Penalty (Flat Deduction)",
-                            info="Penalty applied when the opponent scores in your net. Teaches defensive urgency and shot blocking."
-                        )
-                        save_slider = gr.Slider(
-                            0.0, 150.0, value=rew_cfg.get("save_weight", 50.0), step=5.0,
-                            label="Defensive Save & Goal-Line Clear",
-                            info="Flat bonus for touching/clearing the ball when it is within the defensive danger zone in front of net."
-                        )
-                        aligned_shot_slider = gr.Slider(
-                            0.0, 100.0, value=rew_cfg.get("aligned_shot_weight", 25.0), step=5.0,
-                            label="Shot on Target (Goal-Bound Hit)",
-                            info="Major flat event bounty granted when striking the ball directly on-target into the opponent net (would score if unsaved)."
-                        )
-                        ground_to_air_setup_slider = gr.Slider(
-                            0.0, 30.0, value=rew_cfg.get("ground_to_air_setup_weight", 8.0), step=1.0,
-                            label="Ground-to-Air Setup Pop Bounty",
-                            info="Flat bounty awarded when popping a ground ball upward with high vertical velocity into a self-pass."
-                        )
-                        wall_aerial_launch_slider = gr.Slider(
-                            0.0, 30.0, value=rew_cfg.get("wall_aerial_launch_weight", 12.0), step=1.0,
-                            label="Wall-to-Air Launch Bounty",
-                            info="Flat bounty awarded for popping the ball off the sidewall and jumping off the wall into mid-air pursuit."
-                        )
-                        kickoff_flip_slider = gr.Slider(
-                            0.0, 50.0, value=rew_cfg.get("kickoff_flip_bounty", 15.0), step=1.0,
-                            label="Kickoff Speed Flip Acceleration Bounty",
-                            info="Flat bounty awarded when executing an accelerating front/diagonal speed flip towards the center ball on kickoff."
-                        )
-                        kickoff_pad_slider = gr.Slider(
-                            0.0, 30.0, value=rew_cfg.get("kickoff_pad_bounty", 10.0), step=1.0,
-                            label="Kickoff Inline Boost Pad Routing Bounty",
-                            info="Flat bounty awarded when collecting the small boost pad directly along the kickoff lane."
-                        )
-                        directional_dodge_slider = gr.Slider(
-                            0.0, 50.0, value=rew_cfg.get("directional_dodge_bounty", 15.0), step=1.0,
-                            label="Directional Dodge Cut Strike Bounty",
-                            info="Flat bounty awarded when executing a diagonal or side dodge into off-center balls."
-                        )
-                        flick_bounty_slider = gr.Slider(
-                            0.0, 60.0, value=rew_cfg.get("flick_bounty", 30.0), step=5.0,
-                            label="Roof Flick Strike & Pop Bounty",
-                            info="Major flat bounty awarded when jumping and dodging from a roof carry to launch a high-speed flick towards the opponent net."
-                        )
-                    with gr.Column():
-                        touch_ball_slider = gr.Slider(
-                            0.0, 50.0, value=rew_cfg.get("touch_ball_weight", 10.0), step=1.0,
-                            label="Ball Contact Base Hit Reward",
-                            info="Flat reward granted every time the car makes physical contact with the ball."
-                        )
-                        kickoff_first_touch_slider = gr.Slider(
-                            0.0, 100.0, value=rew_cfg.get("kickoff_first_touch_bonus", 35.0), step=5.0,
-                            label="Kickoff First-Touch Bounty",
-                            info="Massive flat bounty granted to the first bot that impacts the ball on kickoff. Heavily drives kickoff aggression."
-                        )
-                        demo_bump_slider = gr.Slider(
-                            0.0, 50.0, value=rew_cfg.get("demo_bump_weight", 15.0), step=1.0,
-                            label="Demolitions & Heavy Bumps",
-                            info="Flat bonus for high-speed bumps and demolitions against opponent cars. Promotes physical awareness."
-                        )
-                        boost_steal_slider = gr.Slider(
-                            0.0, 50.0, value=rew_cfg.get("boost_steal_weight", 10.0), step=1.0,
-                            label="Opponent Big Boost Steal",
-                            info="Flat bonus for collecting 100 boost pads in the opponent half to starve their boost reserves."
-                        )
-                        small_pad_slider = gr.Slider(
-                            0.0, 10.0, value=rew_cfg.get("small_pad_weight", 2.0), step=0.5,
-                            label="Small Boost Pad Pickup (+12 Boost)",
-                            info="Flat bounty granted immediately upon running over a small boost pad on rotation."
-                        )
-                        big_pad_slider = gr.Slider(
-                            0.0, 25.0, value=rew_cfg.get("big_pad_weight", 5.0), step=1.0,
-                            label="Big Boost Orb Pickup (+100 Boost)",
-                            info="Flat bounty granted immediately upon collecting a full 100-boost orb."
-                        )
+                        gr.Markdown("### 🥅 Module 1: Match Macro Events")
+                        goal_slider = gr.Slider(0.0, 400.0, value=rew_cfg.get("goal_weight", 250.0), step=10.0, label="Goal Scored Reward (+pts)", info="Primary objective payout.")
+                        concede_slider = gr.Slider(-300.0, 0.0, value=rew_cfg.get("concede_weight", -100.0), step=10.0, label="Goal Conceded Penalty (-pts)", info="Defensive urgency deduction.")
+                        save_slider = gr.Slider(0.0, 150.0, value=rew_cfg.get("save_weight", 50.0), step=5.0, label="Goal-Line Save Bounty (+pts)", info="Clearing dangerous shots off the goal line.")
+                        goal_speed_multi_slider = gr.Slider(1.0, 3.0, value=rew_cfg.get("goal_speed_multi", 1.5), step=0.1, label="Goal Shot Speed Multiplier", info="Scales goal reward for high-speed laser shots.")
 
-                # SECTION 2: ACTION MULTIPLIERS
-                gr.Markdown("### ⚡ 2. Tactical Action Multipliers (Scales Base Events)")
-                with gr.Row():
                     with gr.Column():
-                        goal_speed_multi_slider = gr.Slider(
-                            0.0, 3.0, value=rew_cfg.get("goal_speed_multi", 1.5), step=0.1,
-                            label="Goal Shot Speed Multiplier",
-                            info="🔗 Connected to [Goal Scored]: Multiplies goal reward by up to (1 + multiplier)x for high-speed supersonic laser shots."
-                        )
-                        touch_aerial_flip_multi_slider = gr.Slider(
-                            0.0, 5.0, value=rew_cfg.get("touch_aerial_flip_multi", 2.5), step=0.1,
-                            label="Aerial & Flip Strike Multiplier",
-                            info="🔗 Connected to [Ball Contact]: Multiplies touch reward when jumping, aerial dodging, or flipping into the ball."
-                        )
-                    with gr.Column():
-                        dodge_rush_multi_slider = gr.Slider(
-                            0.0, 3.0, value=rew_cfg.get("dodge_rush_multi", 1.5), step=0.1,
-                            label="Dodge Rush Velocity Multiplier",
-                            info="🔗 Connected to [Speed Toward Ball]: Multiplies closing speed reward when speed-flipping/dodging forward towards the ball."
-                        )
-                        kickoff_boost_eff_multi_slider = gr.Slider(
-                            1.0, 3.0, value=rew_cfg.get("kickoff_boost_eff_multi", 1.4), step=0.1,
-                            label="Kickoff Boost Conservation Multiplier",
-                            info="🔗 Connected to [Kickoff First-Touch]: Multiplies first-touch bounty when reaching the ball with >= 10 boost in reserve."
-                        )
+                        gr.Markdown("### ⚡ Module 2: Ball Strike & xG Shot Engine")
+                        touch_ball_slider = gr.Slider(0.0, 50.0, value=rew_cfg.get("touch_ball_weight", 12.0), step=1.0, label="Ball Contact Base Hit (+pts)", info="Flat reward granted upon contacting the ball.")
+                        aligned_shot_slider = gr.Slider(0.0, 100.0, value=rew_cfg.get("aligned_shot_weight", 40.0), step=5.0, label="Instant xG Shot on Target Bounty (+pts)", info="Raycast goal-threat bounty awarded at touch instant.")
+                        high_aerial_bounty_slider = gr.Slider(0.0, 60.0, value=rew_cfg.get("high_aerial_bounty", 25.0), step=5.0, label="High Aerial Strike Bounty (+pts)", info="Awarded when striking elevated balls in flight.")
+                        flick_bounty_slider = gr.Slider(0.0, 60.0, value=rew_cfg.get("flick_bounty", 30.0), step=5.0, label="Roof Flick Strike Bounty (+pts)", info="Awarded when popping flicks from roof carries.")
+                        directional_dodge_slider = gr.Slider(0.0, 40.0, value=rew_cfg.get("directional_dodge_bounty", 15.0), step=5.0, label="Directional Dodge Strike Bounty (+pts)", info="Diagonal/side dodge impact bonus.")
+                        kickoff_first_touch_slider = gr.Slider(0.0, 100.0, value=rew_cfg.get("kickoff_first_touch_bonus", 35.0), step=5.0, label="Kickoff First-Touch Bounty (+pts)", info="First contact on center-court kickoffs.")
 
-                # SECTION 3: CONTINUOUS GUIDANCE REWARDS (PER-STEP)
-                gr.Markdown("### 🎯 3. Continuous Guidance Rewards (Micro-Scaled Per-Step)")
+                # MODULE 3 & 4
                 with gr.Row():
                     with gr.Column():
-                        ball_vel_toward_goal_slider = gr.Slider(
-                            0.0, 0.5, value=rew_cfg.get("ball_vel_toward_goal_weight", 0.08), step=0.01,
-                            label="Ball Velocity Toward Opponent Goal (Per-Step)",
-                            info="Rewards propelling the ball toward the opponent net. Encourages offensive pressure."
-                        )
-                        speed_toward_ball_slider = gr.Slider(
-                            0.0, 0.5, value=rew_cfg.get("speed_toward_ball_weight", 0.05), step=0.01,
-                            label="Speed Toward Ball Through Front Bumper (Per-Step)",
-                            info="Rewards closing distance directly toward the ball through the car's nose."
-                        )
-                        kickoff_slider = gr.Slider(
-                            0.0, 0.5, value=rew_cfg.get("kickoff_weight", 0.05), step=0.01,
-                            label="Kickoff Speed Rush (Per-Step)",
-                            info="Early kickoff acceleration bonus to teach fast kickoffs."
-                        )
-                        bounce_intercept_slider = gr.Slider(
-                            0.0, 0.5, value=rew_cfg.get("bounce_intercept_weight", 0.04), step=0.01,
-                            label="0.5s Ball Bounce Trajectory Forecasting & Intercept (Per-Step)",
-                            info="Rewards tracking and positioning for predicted 0.5s future bounce landing points and wall rebounds."
-                        )
-                        face_ball_slider = gr.Slider(
-                            0.0, 0.2, value=rew_cfg.get("face_ball_weight", 0.02), step=0.005,
-                            label="Facing / Tracking Ball Alignment (Per-Step)",
-                            info="Rewards aligning car nose to face the ball when actively moving."
-                        )
-                        aerial_height_slider = gr.Slider(
-                            0.0, 0.5, value=rew_cfg.get("aerial_height_weight", 0.05), step=0.01,
-                            label="Airborne Ball Intercept Height (Per-Step)",
-                            info="Rewards challenging elevated balls in the air."
-                        )
-                        air_dribble_carry_slider = gr.Slider(
-                            0.0, 0.2, value=rew_cfg.get("air_dribble_carry_weight", 0.06), step=0.005,
-                            label="Air-Dribble Velocity Matching & Carry (Per-Step)",
-                            info="Rewards continuous speed-matching and guidance toward the opponent net while airborne with the ball."
-                        )
-                        velocity_slider = gr.Slider(
-                            0.0, 0.2, value=rew_cfg.get("velocity_weight", 0.02), step=0.005,
-                            label="General Driving Forward Speed (Per-Step)",
-                            info="Encourages positive forward momentum, penalizes reversing away."
-                        )
+                        gr.Markdown("### 🏎️ Module 3: 3D Locomotion & Powerslide")
+                        speed_toward_ball_slider = gr.Slider(0.0, 0.2, value=rew_cfg.get("speed_toward_ball_weight", 0.06), step=0.005, label="Navigation & Forward Speed (Per-Step)", info="Continuous forward drive modulated by target alignment.")
+                        dodge_rush_multi_slider = gr.Slider(1.0, 3.0, value=rew_cfg.get("dodge_rush_multi", 1.6), step=0.1, label="Dodge / Speed-Flip Velocity Multiplier", info="Multiplies rush speed when speed-flipping.")
+
                     with gr.Column():
-                        behind_ball_slider = gr.Slider(
-                            0.0, 0.2, value=rew_cfg.get("behind_ball_weight", 0.03), step=0.005,
-                            label="Goal-Side Rotation & Positioning (Per-Step)",
-                            info="Rewards staying between the ball and your defending net. Teaches proper defensive rotations."
-                        )
-                        possession_slider = gr.Slider(
-                            0.0, 0.2, value=rew_cfg.get("possession_weight", 0.04), step=0.005,
-                            label="Tactical Space Dominance (Per-Step)",
-                            info="Rewards maintaining uncontested field control when reaching the ball before the opponent."
-                        )
-                        dribble_slider = gr.Slider(
-                            0.0, 0.2, value=rew_cfg.get("dribble_weight", 0.04), step=0.005,
-                            label="Roof Carry & Close Bumper Dribble (Per-Step)",
-                            info="Rewards balancing the ball atop the car roof or pushing with precision speed-matching."
-                        )
-                        defensive_pos_slider = gr.Slider(
-                            0.0, 0.2, value=rew_cfg.get("defensive_position_weight", 0.03), step=0.005,
-                            label="Defensive Third Coverage (Per-Step)",
-                            info="Rewards shadowing the ball in the defensive third to prevent breakaways."
-                        )
-                        save_boost_slider = gr.Slider(
-                            0.0, 0.2, value=rew_cfg.get("save_boost_weight", 0.02), step=0.005,
-                            label="Boost Tank Retention (Per-Step)",
-                            info="Rewards preserving boost reserves using a concave square root curve."
-                        )
-                        wall_faceplant_penalty_slider = gr.Slider(
-                            0.0, 0.5, value=rew_cfg.get("wall_faceplant_penalty_weight", 0.04), step=0.01,
-                            label="Wall Faceplant & Perimeter Crash Penalty (Per-Step Deduction)",
-                            info="Penalizes driving directly into perimeter sidewalls/backboards at speed when the ball is high or bouncing."
-                        )
-                        inactivity_penalty_slider = gr.Slider(
-                            0.0, 0.5, value=rew_cfg.get("inactivity_penalty_weight", 0.05), step=0.01,
-                            label="Inactivity & Standstill Penalty (Per-Step Deduction)",
-                            info="Penalizes sitting stationary or wiggling in place for >1s. Exempts close-range ball-control setups."
-                        )
+                        gr.Markdown("### 🦅 Module 4: Context-Aware Tactical Aerials")
+                        aerial_height_slider = gr.Slider(0.0, 0.3, value=rew_cfg.get("aerial_height_weight", 0.08), step=0.01, label="Tactical Aerial Flight Climb (Per-Step)", info="Evaluates flight when boost >= 15 & contesting ball.")
+                        air_dribble_carry_slider = gr.Slider(0.0, 0.2, value=rew_cfg.get("air_dribble_carry_weight", 0.06), step=0.005, label="Air Dribble Velocity Matching & Carry (Per-Step)", info="Carrying and speed-matching airborne balls.")
+
+                # MODULE 5 & 6
+                with gr.Row():
+                    with gr.Column():
+                        gr.Markdown("### 🛡️ Module 5: Tactical Positioning & 50/50s")
+                        behind_ball_slider = gr.Slider(0.0, 0.2, value=rew_cfg.get("behind_ball_weight", 0.04), step=0.005, label="Goal-Side Defensive Rotation (Per-Step)", info="Rewards staying goal-side on defense.")
+                        inactivity_penalty_slider = gr.Slider(0.0, 0.2, value=rew_cfg.get("inactivity_penalty_weight", 0.05), step=0.005, label="Open-Field Inactivity Penalty (Per-Step)", info="Penalizes idling in open field without moving.")
+
+                    with gr.Column():
+                        gr.Markdown("### 💎 Module 6: Boost Economy & Shields")
+                        small_pad_slider = gr.Slider(0.0, 20.0, value=rew_cfg.get("small_pad_weight", 6.0), step=1.0, label="Small Boost Pad Pickup (+pts)", info="Collecting small pads (+12 boost).")
+                        big_pad_slider = gr.Slider(0.0, 40.0, value=rew_cfg.get("big_pad_weight", 18.0), step=1.0, label="Big Boost Orb Pickup (+pts)", info="Collecting full 100-boost orbs.")
+                        boost_steal_slider = gr.Slider(0.0, 30.0, value=rew_cfg.get("boost_steal_weight", 10.0), step=1.0, label="Opponent Boost Steal (+pts)", info="Stealing orbs in opponent half.")
+                        save_boost_slider = gr.Slider(0.0, 0.1, value=rew_cfg.get("save_boost_weight", 0.02), step=0.005, label="Boost Tank Retention (Per-Step)", info="Concave sqrt boost reserve retention curve.")
 
                 with gr.Row():
                     apply_rewards_btn = gr.Button("⚡ Apply Live Reward Weights", variant="primary")
@@ -914,52 +768,45 @@ def create_ui():
 
         # Apply Live Rewards
         def on_apply_rewards(
-            g_w, c_w, sv_w, as_w, g2a_w, wal_w, ko_flp, ko_pad, dd_w, flk_b, t_w, kft_b, db_w, bs_w, sp_w, bp_w,
-            g_spd, t_flip, d_rush, ko_beff,
-            bvg_w, s_w, ko_w, bnc_w, f_w, a_w, adc_w,
-            bb_w, p_w, dr_w, dp_w, sb_w, wfp_w, v_w, inact_w
+            g_w, c_w, sv_w, g_spd,
+            t_w, as_w, ha_b, flk_b, dd_w, kft_b,
+            s_w, d_rush,
+            a_w, adc_w,
+            bb_w, inact_w,
+            sp_w, bp_w, bs_w, sb_w
         ):
             rewards = {
-                # Macro Flat Events
+                # Module 1: Match Macro Events
                 "goal_weight": float(g_w),
                 "concede_weight": float(c_w),
                 "save_weight": float(sv_w),
-                "aligned_shot_weight": float(as_w),
-                "ground_to_air_setup_weight": float(g2a_w),
-                "wall_aerial_launch_weight": float(wal_w),
-                "kickoff_flip_bounty": float(ko_flp),
-                "kickoff_pad_bounty": float(ko_pad),
-                "directional_dodge_bounty": float(dd_w),
-                "flick_bounty": float(flk_b),
-                "touch_ball_weight": float(t_w),
-                "kickoff_first_touch_bonus": float(kft_b),
-                "demo_bump_weight": float(db_w),
-                "boost_steal_weight": float(bs_w),
-                "small_pad_weight": float(sp_w),
-                "big_pad_weight": float(bp_w),
-
-                # Action Multipliers
                 "goal_speed_multi": float(g_spd),
-                "touch_aerial_flip_multi": float(t_flip),
-                "dodge_rush_multi": float(d_rush),
-                "kickoff_boost_eff_multi": float(ko_beff),
 
-                # Micro Guidance
-                "ball_vel_toward_goal_weight": float(bvg_w),
+                # Module 2: Ball Strike & xG Shot Engine
+                "touch_ball_weight": float(t_w),
+                "aligned_shot_weight": float(as_w),
+                "high_aerial_bounty": float(ha_b),
+                "flick_bounty": float(flk_b),
+                "directional_dodge_bounty": float(dd_w),
+                "kickoff_first_touch_bonus": float(kft_b),
+
+                # Module 3: 3D Locomotion & Powerslide
                 "speed_toward_ball_weight": float(s_w),
-                "kickoff_weight": float(ko_w),
-                "bounce_intercept_weight": float(bnc_w),
-                "face_ball_weight": float(f_w),
+                "dodge_rush_multi": float(d_rush),
+
+                # Module 4: Context-Aware Tactical Aerials
                 "aerial_height_weight": float(a_w),
                 "air_dribble_carry_weight": float(adc_w),
+
+                # Module 5: Tactical Positioning & 50/50s
                 "behind_ball_weight": float(bb_w),
-                "possession_weight": float(p_w),
-                "dribble_weight": float(dr_w),
-                "defensive_position_weight": float(dp_w),
-                "save_boost_weight": float(sb_w),
-                "wall_faceplant_penalty_weight": float(wfp_w),
-                "velocity_weight": float(v_w),
                 "inactivity_penalty_weight": float(inact_w),
+
+                # Module 6: Boost Economy & Shields
+                "small_pad_weight": float(sp_w),
+                "big_pad_weight": float(bp_w),
+                "boost_steal_weight": float(bs_w),
+                "save_boost_weight": float(sb_w)
             }
             mgr.update_live_config({"rewards": rewards})
             try:
@@ -973,33 +820,47 @@ def create_ui():
         apply_rewards_btn.click(
             fn=on_apply_rewards,
             inputs=[
-                # Flat Events
-                goal_slider, concede_slider, save_slider, aligned_shot_slider, ground_to_air_setup_slider, wall_aerial_launch_slider, kickoff_flip_slider, kickoff_pad_slider, directional_dodge_slider, flick_bounty_slider, touch_ball_slider, kickoff_first_touch_slider, demo_bump_slider, boost_steal_slider, small_pad_slider, big_pad_slider,
-                # Multipliers
-                goal_speed_multi_slider, touch_aerial_flip_multi_slider, dodge_rush_multi_slider, kickoff_boost_eff_multi_slider,
-                # Guidance
-                ball_vel_toward_goal_slider, speed_toward_ball_slider, kickoff_slider, bounce_intercept_slider, face_ball_slider, aerial_height_slider, air_dribble_carry_slider,
-                behind_ball_slider, possession_slider, dribble_slider, defensive_pos_slider, save_boost_slider, wall_faceplant_penalty_slider, velocity_slider, inactivity_penalty_slider
+                # Module 1
+                goal_slider, concede_slider, save_slider, goal_speed_multi_slider,
+                # Module 2
+                touch_ball_slider, aligned_shot_slider, high_aerial_bounty_slider, flick_bounty_slider, directional_dodge_slider, kickoff_first_touch_slider,
+                # Module 3
+                speed_toward_ball_slider, dodge_rush_multi_slider,
+                # Module 4
+                aerial_height_slider, air_dribble_carry_slider,
+                # Module 5
+                behind_ball_slider, inactivity_penalty_slider,
+                # Module 6
+                small_pad_slider, big_pad_slider, boost_steal_slider, save_boost_slider
             ],
             outputs=[reward_apply_msg]
         )
 
         def on_reset_rewards():
-            # Standardized defaults:
             return (
-                100.0, -100.0, 50.0, 25.0, 8.0, 12.0, 15.0, 10.0, 15.0, 30.0, 12.0, 35.0, 15.0, 10.0, 2.0, 5.0,
-                1.5, 2.5, 1.5, 1.4,
-                0.08, 0.05, 0.05, 0.04, 0.02, 0.05, 0.06,
-                0.03, 0.04, 0.04, 0.03, 0.02, 0.04, 0.02, 0.05
+                250.0, -100.0, 50.0, 1.5,
+                12.0, 40.0, 25.0, 30.0, 15.0, 35.0,
+                0.06, 1.6,
+                0.08, 0.06,
+                0.04, 0.05,
+                6.0, 18.0, 10.0, 0.02
             )
 
         reset_rewards_btn.click(
             fn=on_reset_rewards,
             outputs=[
-                goal_slider, concede_slider, save_slider, aligned_shot_slider, ground_to_air_setup_slider, wall_aerial_launch_slider, kickoff_flip_slider, kickoff_pad_slider, directional_dodge_slider, flick_bounty_slider, touch_ball_slider, kickoff_first_touch_slider, demo_bump_slider, boost_steal_slider, small_pad_slider, big_pad_slider,
-                goal_speed_multi_slider, touch_aerial_flip_multi_slider, dodge_rush_multi_slider, kickoff_boost_eff_multi_slider,
-                ball_vel_toward_goal_slider, speed_toward_ball_slider, kickoff_slider, bounce_intercept_slider, face_ball_slider, aerial_height_slider, air_dribble_carry_slider,
-                behind_ball_slider, possession_slider, dribble_slider, defensive_pos_slider, save_boost_slider, wall_faceplant_penalty_slider, velocity_slider, inactivity_penalty_slider
+                # Module 1
+                goal_slider, concede_slider, save_slider, goal_speed_multi_slider,
+                # Module 2
+                touch_ball_slider, aligned_shot_slider, high_aerial_bounty_slider, flick_bounty_slider, directional_dodge_slider, kickoff_first_touch_slider,
+                # Module 3
+                speed_toward_ball_slider, dodge_rush_multi_slider,
+                # Module 4
+                aerial_height_slider, air_dribble_carry_slider,
+                # Module 5
+                behind_ball_slider, inactivity_penalty_slider,
+                # Module 6
+                small_pad_slider, big_pad_slider, boost_steal_slider, save_boost_slider
             ]
         )
 
