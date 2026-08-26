@@ -57,7 +57,10 @@ class TouchBallReward(BaseReward):
             self._touch_cooldown[car.id] = 0.25  # 250ms cooldown prevents grinding 15 touches per second
 
             # Kickoff First-Touch Bounty (strictly awarded on authentic center-court kickoffs only)
-            first_bounty = (self.first_touch_bonus if not self._first_touch_claimed else 0.0) if getattr(self, "_is_kickoff_episode", True) else 0.0
+            first_bounty = 0.0
+            if getattr(self, "_is_kickoff_episode", True) and not self._first_touch_claimed:
+                boost_eff_multi = 1.4 if car.boost >= 10.0 else 1.0
+                first_bounty = self.first_touch_bonus * boost_eff_multi
             self._first_touch_claimed = True
 
             # Multiplier for jumping, dodging, or aerial hits
@@ -597,13 +600,20 @@ class AlignedShotReward(BaseReward):
 class KickoffReward(BaseReward):
     """
     Rewards rushing the ball at maximum speed specifically on kickoffs.
+    Includes flip acceleration bounties and inline boost pad routing bonuses.
     """
     def __init__(self, weight: float = 0.05):
         super().__init__(weight)
         self._kickoff_ticks: Dict[int, int] = {}
+        self._kickoff_flip_claimed: Dict[int, bool] = {}
+        self._kickoff_pad_claimed: Dict[int, bool] = {}
+        self._prev_boost: Dict[int, float] = {}
 
     def reset(self, initial_state: RocketSimArena):
         self._kickoff_ticks = {car.id: 0 for car in initial_state.cars}
+        self._kickoff_flip_claimed = {car.id: False for car in initial_state.cars}
+        self._kickoff_pad_claimed = {car.id: False for car in initial_state.cars}
+        self._prev_boost = {car.id: car.boost for car in initial_state.cars}
 
     def get_reward(self, car: CarState, arena: RocketSimArena, action: np.ndarray, is_goal: bool, scoring_team: Optional[int]) -> float:
         ticks = self._kickoff_ticks.get(car.id, 0)
@@ -618,9 +628,24 @@ class KickoffReward(BaseReward):
                 speed_toward = float(np.dot(car.vel, unit_to_ball))
                 fwd = car.get_forward_vector()
                 align = max(0.0, float(np.dot(fwd, unit_to_ball)))
+                
+                reward = 0.0
                 if speed_toward > 0:
-                    # Multiplies by align^2 so rushing straight without turning to the ball is heavily penalized
-                    return self.weight * (speed_toward / CAR_MAX_SPEED) * (align ** 2)
+                    reward += self.weight * (speed_toward / CAR_MAX_SPEED) * (align ** 2)
+
+                # Kickoff Inline Small Pad Route Bounty (+10.0 pts)
+                prev_b = self._prev_boost.get(car.id, car.boost)
+                self._prev_boost[car.id] = car.boost
+                if not self._kickoff_pad_claimed.get(car.id, False) and (car.boost > prev_b + 5.0):
+                    self._kickoff_pad_claimed[car.id] = True
+                    reward += 10.0
+
+                # Kickoff Speed Flip Acceleration Bounty (+15.0 pts)
+                if not self._kickoff_flip_claimed.get(car.id, False) and car.just_dodged and align > 0.65 and speed_toward > 900.0:
+                    self._kickoff_flip_claimed[car.id] = True
+                    reward += 15.0
+
+                return reward
         return 0.0
 
 

@@ -434,6 +434,7 @@ class RocketSimArena:
             car.on_ground = bool(c_state.is_on_ground)
             car.has_jump = bool(not c_state.has_jumped or c_state.is_on_ground)
             car.has_flip = bool(not c_state.has_flipped and not c_state.is_on_ground)
+            car.just_dodged = bool(c_state.is_flipping or c_state.has_flipped)
             car.is_supersonic = bool(c_state.is_supersonic)
             car.demoed = bool(c_state.is_demoed)
 
@@ -454,22 +455,56 @@ class RocketSimArena:
 
         if self._use_rsim and self._rsim_arena:
             self.scored_team = None
-            ticks = max(1, int(round(dt * 120.0)))
+            total_ticks = max(1, int(round(dt * 120.0)))
+
+            dodge_flags = []
             for i, r_car in enumerate(self._rsim_cars):
                 act = actions[i] if i < len(actions) else np.zeros(8, dtype=np.float32)
-                ctrl = rsim.CarControls(
-                    throttle=float(act[0]),
-                    steer=float(act[1]),
-                    pitch=float(act[2]),
-                    yaw=float(act[3]),
-                    roll=float(act[4]),
-                    jump=bool(act[5] > 0.0),
-                    boost=bool(act[6] > 0.0),
-                    handbrake=bool(act[7] > 0.5)
-                )
-                r_car.set_controls(ctrl)
+                is_on_ground = bool(r_car.get_state().is_on_ground)
+                is_dodge = bool(act[5] > 0.0 and (abs(act[2]) > 0.1 or abs(act[3]) > 0.1 or abs(act[4]) > 0.1) and is_on_ground)
+                dodge_flags.append(is_dodge)
 
-            self._rsim_arena.step(ticks)
+            if any(dodge_flags) and total_ticks >= 8:
+                # 3-phase 8-tick substep execution for authentic RocketSim C++ dodge physics:
+                # Phase 1: Jump initiation (4 ticks to clear suspension)
+                for i, r_car in enumerate(self._rsim_cars):
+                    act = actions[i] if i < len(actions) else np.zeros(8, dtype=np.float32)
+                    r_car.set_controls(rsim.CarControls(
+                        throttle=float(act[0]), steer=float(act[1]), pitch=float(act[2]),
+                        yaw=float(act[3]), roll=float(act[4]), jump=bool(act[5] > 0.0),
+                        boost=bool(act[6] > 0.0), handbrake=bool(act[7] > 0.5)
+                    ))
+                self._rsim_arena.step(4)
+
+                # Phase 2: Jump release gate (2 ticks)
+                for i, r_car in enumerate(self._rsim_cars):
+                    act = actions[i] if i < len(actions) else np.zeros(8, dtype=np.float32)
+                    r_car.set_controls(rsim.CarControls(
+                        throttle=float(act[0]), steer=float(act[1]), pitch=float(act[2]),
+                        yaw=float(act[3]), roll=float(act[4]), jump=False if dodge_flags[i] else bool(act[5] > 0.0),
+                        boost=bool(act[6] > 0.0), handbrake=bool(act[7] > 0.5)
+                    ))
+                self._rsim_arena.step(2)
+
+                # Phase 3: Dodge flip trigger (remaining ticks)
+                for i, r_car in enumerate(self._rsim_cars):
+                    act = actions[i] if i < len(actions) else np.zeros(8, dtype=np.float32)
+                    r_car.set_controls(rsim.CarControls(
+                        throttle=float(act[0]), steer=float(act[1]), pitch=float(act[2]),
+                        yaw=float(act[3]), roll=float(act[4]), jump=bool(act[5] > 0.0),
+                        boost=bool(act[6] > 0.0), handbrake=bool(act[7] > 0.5)
+                    ))
+                self._rsim_arena.step(total_ticks - 6)
+            else:
+                for i, r_car in enumerate(self._rsim_cars):
+                    act = actions[i] if i < len(actions) else np.zeros(8, dtype=np.float32)
+                    r_car.set_controls(rsim.CarControls(
+                        throttle=float(act[0]), steer=float(act[1]), pitch=float(act[2]),
+                        yaw=float(act[3]), roll=float(act[4]), jump=bool(act[5] > 0.0),
+                        boost=bool(act[6] > 0.0), handbrake=bool(act[7] > 0.5)
+                    ))
+                self._rsim_arena.step(total_ticks)
+
             self._sync_from_rsim()
             self._cached_pred_step = -1  # Invalidate cache on new physics step
             return (self.scored_team is not None), self.scored_team
