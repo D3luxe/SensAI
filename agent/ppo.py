@@ -235,7 +235,7 @@ class PPOTrainer:
             self.agent.load_state_dict(model_state)
             self.iteration = checkpoint.get("iteration", 0)
             self.global_step = checkpoint.get("global_step", 0)
-            print(f"[PPO Trainer] Successfully migrated weights to new dimensions (Obs: {self.obs_builder.obs_dim}, Act: {self.agent.act_dim}) from {path} (Iter: {self.iteration})")
+            print(f"[PPO Trainer] Successfully migrated weights to new dimensions (Obs: {self.obs_dim}, Act: {self.act_dim}) from {path} (Iter: {self.iteration})")
             return
 
         self.agent.load_state_dict(saved_state)
