@@ -72,9 +72,21 @@ class TouchBallReward(BaseReward):
                 first_bounty = self.first_touch_bonus * boost_eff_multi
             self._first_touch_claimed = True
 
-            # Multiplier for jumping, dodging, or aerial hits
-            is_jump_or_flip = (not car.on_ground) or car.just_dodged or (car.pos[2] > 25.0)
-            aerial_flip_mult = self.aerial_flip_multi if is_jump_or_flip else 1.0
+            # Multiplier and bounties for jumping, dodging, and authentic high aerial strikes
+            is_airborne_touch = (not car.on_ground) and (car.pos[2] > 120.0) and (arena.ball.pos[2] > 160.0)
+            is_high_aerial = is_airborne_touch and (car.pos[2] > 200.0) and (arena.ball.pos[2] > 240.0)
+            is_dodge = car.just_dodged or (not car.on_ground and car.pos[2] > 25.0)
+
+            aerial_flip_mult = 1.0
+            high_aerial_bounty = 0.0
+            if is_high_aerial:
+                aerial_flip_mult = self.aerial_flip_multi * 1.5
+                high_aerial_bounty = 20.0
+            elif is_airborne_touch:
+                aerial_flip_mult = self.aerial_flip_multi
+                high_aerial_bounty = 10.0
+            elif is_dodge:
+                aerial_flip_mult = max(1.2, self.aerial_flip_multi * 0.6)
 
             # Power scaling: reward solid strikes over gentle grazing
             ball_speed = float(np.linalg.norm(arena.ball.vel))
@@ -97,8 +109,8 @@ class TouchBallReward(BaseReward):
                 if car.just_dodged and (abs(action[3]) > 0.1 or abs(action[4]) > 0.1 or action[2] > 0.5):
                     directional_bounty = self.directional_dodge_bounty
 
-            # Base Hit Bounty + Kickoff First-Touch Bounty + Directional Dodge Bounty
-            return (self.weight * aerial_flip_mult * power_factor * bumper_alignment) + first_bounty + directional_bounty
+            # Base Hit Bounty + Kickoff First-Touch + High Aerial Bounty + Directional Dodge Bounty
+            return (self.weight * aerial_flip_mult * power_factor * bumper_alignment) + first_bounty + high_aerial_bounty + directional_bounty
 
         return 0.0
 
@@ -426,38 +438,74 @@ class VelocityReward(BaseReward):
 
 class AerialHeightReward(BaseReward):
     """
-    Rewards jumping and aerial challenges when the ball is genuinely airborne (Z > 180 uu) and approaching.
-    Strictly gates ground jump feedback so bots cannot farm points bunny-hopping beside ground balls.
+    Context-Aware Tactical Aerial Challenge Reward.
+    Rewards launching and climbing into aerials ONLY when it is the best course of action:
+    1. Boost Level Feasibility: requires car.boost >= 15.0 unless defending immediate shot in net.
+    2. Tactical Time-to-Ball Advantage: rewards beating/challenging opponent; suppresses late overcommit whiffs.
+    3. Ball Height Window: ball genuinely airborne (Z > 200 uu).
+    4. Boost-Tax Shield: compensates SaveBoost loss during active high-percentage flight.
     """
     def __init__(self, weight: float = 0.05):
         super().__init__(weight)
 
+    def _get_time_to_ball(self, c: CarState, b_pos: np.ndarray) -> float:
+        d = float(np.linalg.norm(b_pos - c.pos))
+        if d < 1e-4:
+            return 0.0
+        unit = (b_pos - c.pos) / d
+        closing = float(np.dot(c.vel, unit))
+        effective = max(200.0, closing + (500.0 if c.boost > 10.0 else 100.0))
+        return d / effective
+
     def get_reward(self, car: CarState, arena: RocketSimArena, action: np.ndarray, is_goal: bool, scoring_team: Optional[int]) -> float:
-        # Ball must be genuinely airborne (> 180 uu - well above car height) to justify an aerial challenge
-        if arena.ball.pos[2] > 180.0:
+        # Ball must be genuinely airborne (> 200 uu) to justify an aerial challenge
+        if arena.ball.pos[2] > 200.0:
             car_to_ball = arena.ball.pos - car.pos
             dist = float(np.linalg.norm(car_to_ball))
-            if dist < 2600.0 and dist > 1e-4:
+            if 1e-4 < dist < 2800.0:
                 unit_to_ball = car_to_ball / dist
                 speed_toward = float(np.dot(car.vel, unit_to_ball))
-                dist_factor = max(0.0, 1.0 - (dist / 2600.0))
-                
-                # Detect if defending in the goal box or facing a direct shot threat
+                dist_factor = max(0.0, 1.0 - (dist / 2800.0))
+
+                # Check defending goal threat or defensive box
                 defending_y = -ARENA_EXTENT_Y if car.team == 0 else ARENA_EXTENT_Y
                 in_defensive_box = abs(car.pos[1] - defending_y) < 2200.0
                 is_threat, threat_intensity, threat_z = arena.get_shot_threat(car.team) if hasattr(arena, "get_shot_threat") else (False, 0.0, 0.0)
 
-                # Case 1: Airborne flight tracking towards elevated ball (or jumping in net to save a floater)
+                # Context Check 1: Boost Level Feasibility
+                has_sufficient_boost = (car.boost >= 15.0) or is_threat or in_defensive_box
+                if not has_sufficient_boost and not in_defensive_box:
+                    return 0.0
+
+                # Context Check 2: Player Proximity & Time-to-Ball Advantage
+                tactical_multiplier = 1.0
+                if not is_threat:
+                    t_self = self._get_time_to_ball(car, arena.ball.pos)
+                    opponents = [c for c in arena.cars if c.team != car.team and not c.demoed]
+                    if opponents:
+                        t_opp_min = min(self._get_time_to_ball(opp, arena.ball.pos) for opp in opponents)
+                        # If opponent will beat us by > 0.8s, jumping late is a reckless whiff -> 0 reward
+                        if t_opp_min < t_self - 0.8:
+                            return 0.0
+                        # If we beat or contest opponent in the air -> tactical bonus
+                        if t_self <= t_opp_min + 0.2:
+                            tactical_multiplier = 1.4
+
+                # Case 1: Airborne flight tracking & climb towards elevated ball
                 if not car.on_ground and car.pos[2] > 35.0:
-                    height_norm = min(1.0, (car.pos[2] - 17.0) / 400.0)
-                    flip_bonus = 1.5 if car.just_dodged else 1.0
+                    # Concave takeoff curve gives immediate reinforcement upon launch
+                    height_norm = min(1.3, math.sqrt(max(0.0, (car.pos[2] - 17.0) / 400.0)))
+                    flip_bonus = 1.4 if car.just_dodged else 1.0
                     threat_bonus = 1.8 if (is_threat or in_defensive_box) else 1.0
-                    return self.weight * height_norm * flip_bonus * dist_factor * threat_bonus
-                
-                # Case 2: Ground launch initiation (relaxed when in net defending an elevated shot)
-                min_launch_speed = 0.0 if (is_threat or in_defensive_box) else 400.0
+
+                    # Boost-tax shield (+0.04 pts/step) to offset SaveBoost loss during valid aerial flight
+                    boost_shield = 0.04 if car.boost > 5.0 else 0.0
+                    return (self.weight * height_norm * flip_bonus * dist_factor * threat_bonus * tactical_multiplier) + boost_shield
+
+                # Case 2: Ground launch initiation (requires forward speed unless in defensive goal box)
+                min_launch_speed = 0.0 if (is_threat or in_defensive_box) else 350.0
                 if car.on_ground and action[5] > 0.0 and (speed_toward > min_launch_speed or in_defensive_box) and dist < 1800.0:
-                    return self.weight * 1.0 * dist_factor
+                    return self.weight * 1.2 * dist_factor * tactical_multiplier
         return 0.0
 
 
