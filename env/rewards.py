@@ -80,7 +80,7 @@ class TouchBallReward(BaseReward):
             ball_speed = float(np.linalg.norm(arena.ball.vel))
             power_factor = 0.5 + 0.5 * min(1.0, ball_speed / 1500.0)
 
-            # Impact Alignment: heavily reward hitting the ball squarely with the front bumper or aligned dodge
+            # Impact Alignment: reward hitting the ball squarely with front or rear bumper (backflip hits)
             car_to_ball = arena.ball.pos - car.pos
             dist = float(np.linalg.norm(car_to_ball))
             bumper_alignment = 1.0
@@ -89,10 +89,12 @@ class TouchBallReward(BaseReward):
                 unit_to_ball = car_to_ball / dist
                 fwd = car.get_forward_vector()
                 align = float(np.dot(fwd, unit_to_ball))
-                bumper_alignment = 1.0 + 0.8 * max(0.0, align)  # Up to 1.8x bonus for square nose strikes vs side-swipes
+                rear_align = float(np.dot(-fwd, unit_to_ball))
+                best_impact = max(align, rear_align)
+                bumper_alignment = 1.0 + 0.8 * max(0.0, best_impact)
 
-                # Directional Dodge Strike Bounty: heavily reward diagonal and side flips into off-center balls
-                if car.just_dodged and (abs(action[3]) > 0.1 or abs(action[4]) > 0.1):
+                # Directional Dodge Strike Bounty: diagonal, side, and backflip strikes
+                if car.just_dodged and (abs(action[3]) > 0.1 or abs(action[4]) > 0.1 or action[2] > 0.5):
                     directional_bounty = self.directional_dodge_bounty
 
             # Base Hit Bounty + Kickoff First-Touch Bounty + Directional Dodge Bounty
@@ -117,29 +119,29 @@ class SpeedTowardBallReward(BaseReward):
             return 0.0
         unit_to_ball = car_to_ball / dist
 
-        # Forward alignment multiplier ensures speed towards ball is prioritized through front bumper
+        # Both forward nose alignment and rear alignment are rewarded (enables backflips and reverse pursuits)
         fwd = car.get_forward_vector()
         fwd_align = max(0.0, float(np.dot(fwd, unit_to_ball)))
+        rear_align = max(0.0, float(np.dot(-fwd, unit_to_ball)))
+        best_align = max(fwd_align, rear_align)
 
         speed_toward = float(np.dot(car.vel, unit_to_ball))
         norm_speed = speed_toward / CAR_MAX_SPEED
 
-        # Anti-Overshoot Dynamics: when close to ball (< 900 uu) and angle is wide (fwd_align < 0.7),
-        # car must slow down or powerslide to tighten turning radius rather than blasting past in a wide orbit
-        if dist < 900.0 and fwd_align < 0.7:
+        # Anti-Overshoot Dynamics: when close to ball (< 900 uu) and angle is wide
+        if dist < 900.0 and best_align < 0.7:
             car_speed = float(np.linalg.norm(car.vel))
             if car_speed > 1500.0:
-                # Excess speed causes inevitable overshoot - damp the forward reward
                 overshoot_ratio = min(1.0, (car_speed - 1500.0) / (CAR_MAX_SPEED - 1500.0))
                 norm_speed *= max(0.1, 1.0 - 0.8 * overshoot_ratio)
             # Powerslide bonus for tightening turn into ball
             if action[7] > 0.5:
-                fwd_align = min(1.0, fwd_align + 0.3)
+                best_align = min(1.0, best_align + 0.3)
 
-        # Flip / Dodge forward boost: rewards front-flipping / speed-flipping directly toward the ball
-        dodge_mult = self.dodge_rush_multi if (car.just_dodged and fwd_align > 0.5) else 1.0
+        # Flip / Dodge boost: rewards front-flipping, speed-flipping, and backflipping directly toward the ball
+        dodge_mult = self.dodge_rush_multi if (car.just_dodged and best_align > 0.5) else 1.0
 
-        return self.weight * norm_speed * (0.3 + 0.7 * fwd_align) * dodge_mult
+        return self.weight * norm_speed * (0.3 + 0.7 * best_align) * dodge_mult
 
 
 class FaceBallReward(BaseReward):
@@ -789,6 +791,16 @@ class DefensivePositionReward(BaseReward):
         if 0.0 < proj_dist < line_len:
             perp_dist = float(np.linalg.norm(car_from_net - proj_dist * unit_line))
             alignment_score = max(0.0, 1.0 - (perp_dist / 1500.0))
+            
+            # Backflip retreat recovery bonus (accelerating backwards into defense)
+            net_vec = net_pos - car.pos
+            net_dist = float(np.linalg.norm(net_vec))
+            if net_dist > 1e-4 and car.just_dodged and action[2] > 0.5:
+                unit_to_net = net_vec / net_dist
+                speed_to_net = float(np.dot(car.vel, unit_to_net))
+                if speed_to_net > 400.0:
+                    return self.weight * alignment_score + 0.08
+
             return self.weight * alignment_score
         return 0.0
 
