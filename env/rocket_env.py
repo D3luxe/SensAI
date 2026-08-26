@@ -97,8 +97,8 @@ class RocketLeagueEnv:
         if is_goal and scoring_team is not None:
             self.episode_goals[scoring_team] += 1
 
-        # RLGym Kickoff Stagnation Rule: If ball is untouched on kickoff after 45 steps (3.0s), terminate episode immediately!
-        is_kickoff_stalled = (self.current_step > 45 and abs(self.arena.ball.pos[0]) < 20.0 and abs(self.arena.ball.pos[1]) < 20.0 and np.linalg.norm(self.arena.ball.vel) < 80.0)
+        # RLGym Kickoff Stagnation Rule: If ball is untouched on kickoff after 75 steps (5.0s), terminate episode!
+        is_kickoff_stalled = (self.current_step > 75 and abs(self.arena.ball.pos[0]) < 20.0 and abs(self.arena.ball.pos[1]) < 20.0 and np.linalg.norm(self.arena.ball.vel) < 80.0)
         done = (self.current_step >= self.max_episode_steps) or is_goal or is_kickoff_stalled
         dones = np.array([done] * self.num_players, dtype=bool)
 

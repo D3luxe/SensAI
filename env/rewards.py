@@ -227,10 +227,19 @@ class LocomotionReward(BaseReward):
         if action[6] > 0.0 and car_speed < 2150.0 and speed_toward > 800.0 and best_align > 0.4:
             boost_rush = 0.05 * min(1.0, speed_toward / 1600.0)
 
+        # Kickoff Sprint Acceleration Rush & Speed-Flip Pulse
+        kickoff_bonus = 0.0
+        is_center_ball = (abs(arena.ball.pos[0]) < 50.0 and abs(arena.ball.pos[1]) < 50.0 and float(np.linalg.norm(arena.ball.vel)) < 80.0)
+        if is_center_ball and dist > 400.0:
+            if speed_toward > 500.0 and best_align > 0.5:
+                kickoff_bonus += 0.05 * min(1.5, speed_toward / 1400.0)
+            if car.just_dodged and best_align > 0.6:
+                kickoff_bonus += 0.08  # Speed-flip acceleration pulse
+
         dodge_mult = self.dodge_rush_multi if (car.just_dodged and best_align > 0.5) else 1.0
 
         align_factor = max(0.2, best_align)
-        return (self.weight * norm_speed * align_factor * dodge_mult) + turn_bonus + boost_rush
+        return (self.weight * norm_speed * align_factor * dodge_mult) + turn_bonus + boost_rush + kickoff_bonus
 
 
 # ==============================================================================
