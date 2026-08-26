@@ -298,20 +298,24 @@ class SenseiRLBot(BaseAgent):
             steer_val = float(np.clip(act[1], -1.0, 1.0))
 
             if self.continuous_actions:
-                if raw_throttle > 0.05:
-                    controller.throttle = 1.0
-                elif raw_throttle < -0.35:
-                    controller.throttle = -1.0
+                if raw_throttle > -0.1:
+                    controller.throttle = 1.0   # Forward drive bias
+                elif raw_throttle < -0.6:
+                    controller.throttle = -1.0  # Intentional hard braking
                 else:
                     controller.throttle = 0.0
             else:
                 controller.throttle = raw_throttle
 
-            # Smooth steering transition (filters discrete bang-bang wheel chatter at 120Hz)
+            # Pure wheel steering without interference from aerial yaw/roll
             self.current_steer = 0.7 * steer_val + 0.3 * self.current_steer
             controller.steer = float(np.clip(self.current_steer, -1.0, 1.0))
-            # Directional Flip / Dodge Detection (Jump + non-zero pitch/yaw/roll)
-            is_dodge = bool(act[5] > 0.0 and (abs(act[2]) > 0.1 or abs(act[3]) > 0.1 or abs(act[4]) > 0.1))
+
+            # Directional Flip / Dodge Detection (Requires confident jump + strong stick deflection)
+            jump_threshold = 0.5 if self.continuous_actions else 0.0
+            stick_threshold = 0.4 if self.continuous_actions else 0.1
+            has_strong_dodge_stick = (abs(act[2]) > stick_threshold or abs(act[3]) > stick_threshold or abs(act[4]) > stick_threshold)
+            is_dodge = bool(act[5] > jump_threshold and has_strong_dodge_stick)
 
             if is_dodge:
                 # 120Hz 4-stage substep cadence for authentic Rocket League double-jump dodges:
@@ -322,23 +326,24 @@ class SenseiRLBot(BaseAgent):
                 else:
                     controller.jump = bool(self.ticks_since_last_action in (0, 1, 2))
 
-                controller.pitch = float(np.clip(act[2], -1.0, 1.0))
+                # RLBot SimpleControllerState: pitch -1 is nose UP, pitch +1 is nose DOWN (invert model pitch)
+                controller.pitch = -float(np.clip(act[2], -1.0, 1.0))
                 controller.yaw = float(np.clip(act[3], -1.0, 1.0))
                 controller.roll = float(np.clip(act[4], -1.0, 1.0))
-                # Pass immediate steering vector for sharp directional dodge registration
-                controller.steer = float(np.clip(act[3] if abs(act[3]) > 0.1 else (act[4] if abs(act[4]) > 0.1 else steer_val), -1.0, 1.0))
             else:
-                controller.jump = bool(act[5] > 0.0)
+                controller.jump = bool(act[5] > jump_threshold)
                 if is_on_ground:
                     controller.pitch = 0.0
                     controller.roll = 0.0
                     controller.yaw = 0.0
                 else:
-                    controller.pitch = float(np.clip(act[2], -1.0, 1.0))
+                    # RLBot SimpleControllerState: pitch -1 is nose UP, pitch +1 is nose DOWN
+                    controller.pitch = -float(np.clip(act[2], -1.0, 1.0))
                     controller.roll = float(np.clip(act[4], -1.0, 1.0))
                     controller.yaw = float(np.clip(act[3], -1.0, 1.0))
 
-            controller.boost = bool(act[6] > 0.0 and (raw_throttle > 0.0 or not is_on_ground))
+            boost_threshold = 0.3 if self.continuous_actions else 0.0
+            controller.boost = bool(act[6] > boost_threshold and (controller.throttle > 0.0 or not is_on_ground))
             controller.handbrake = bool(act[7] > 0.5)
 
             self.tick_count += 1

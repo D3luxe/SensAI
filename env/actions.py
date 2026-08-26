@@ -30,14 +30,14 @@ class ContinuousActionParser:
         # Responsive throttle mapping: prioritizes forward driving, prevents accidental reverse from exploration noise
         thr = actions[..., 0]
         parsed_thr = np.zeros_like(thr)
-        parsed_thr[thr > 0.05] = 1.0
-        parsed_thr[thr < -0.35] = -1.0
+        parsed_thr[thr > -0.1] = 1.0   # Forward driving bias (prevents stalling on 0-mean Gaussian noise)
+        parsed_thr[thr < -0.6] = -1.0  # Intentional hard reverse/braking
         actions[..., 0] = parsed_thr
 
-        # Binary threshold for buttons
-        actions[..., 5] = (actions[..., 5] > 0.0).astype(np.float32)
-        actions[..., 6] = (actions[..., 6] > 0.0).astype(np.float32)
-        actions[..., 7] = (actions[..., 7] > 0.5).astype(np.float32)
+        # Confident binary thresholds for controller buttons (eliminates 50% random jitter on 0-mean Gaussian policy)
+        actions[..., 5] = (actions[..., 5] > 0.5).astype(np.float32)  # Jump
+        actions[..., 6] = (actions[..., 6] > 0.3).astype(np.float32)  # Boost
+        actions[..., 7] = (actions[..., 7] > 0.5).astype(np.float32)  # Handbrake
         return np.clip(actions, -1.0, 1.0)
 
 
