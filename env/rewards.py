@@ -190,21 +190,33 @@ class LocomotionReward(BaseReward):
         self.dodge_rush_multi = dodge_rush_multi
 
     def get_reward(self, car: CarState, arena: RocketSimArena, action: np.ndarray, is_goal: bool, scoring_team: Optional[int]) -> float:
-        car_to_ball = arena.ball.pos - car.pos
-        dist = float(np.linalg.norm(car_to_ball))
+        # Determine Navigation Target: Intercept Predicted Bounce when Ball is Airborne
+        is_airborne = (arena.ball.pos[2] > 200.0 or abs(arena.ball.vel[2]) > 250.0)
+        target_pos = arena.ball.pos.copy()
+        if is_airborne and hasattr(arena, "get_predicted_ball_pos"):
+            pred_pos = arena.get_predicted_ball_pos(60)  # 0.5s trajectory forecast
+            if pred_pos is not None:
+                if car.on_ground or car.pos[2] < 120.0:
+                    # Ground car paths to landing bounce spot
+                    target_pos = np.array([pred_pos[0], pred_pos[1], max(93.0, min(pred_pos[2], 220.0))], dtype=np.float32)
+                else:
+                    target_pos = pred_pos
+
+        car_to_target = target_pos - car.pos
+        dist = float(np.linalg.norm(car_to_target))
         if dist < 1e-4:
             return 0.0
-        unit_to_ball = car_to_ball / dist
+        unit_to_target = car_to_target / dist
 
         fwd = car.get_forward_vector()
-        fwd_align = float(np.dot(fwd, unit_to_ball))
-        rear_align = float(np.dot(-fwd, unit_to_ball))
+        fwd_align = float(np.dot(fwd, unit_to_target))
+        rear_align = float(np.dot(-fwd, unit_to_target))
         best_align = max(fwd_align, rear_align)
 
         car_speed = float(np.linalg.norm(car.vel))
         fwd_speed = float(np.dot(car.vel, fwd))
         norm_speed = max(0.0, fwd_speed) / CAR_MAX_SPEED
-        speed_toward = float(np.dot(car.vel, unit_to_ball))
+        speed_toward = float(np.dot(car.vel, unit_to_target))
 
         # Wrong-Side Defensive Check: suppress forward drive if between ball and own net in defensive third
         defending_y = -ARENA_EXTENT_Y if car.team == 0 else ARENA_EXTENT_Y
@@ -213,16 +225,16 @@ class LocomotionReward(BaseReward):
         if dist_car_to_net > dist_ball_to_net and dist_ball_to_net < 3000.0:
             norm_speed *= 0.15
 
-        # Side-on turn-in bonus: active steering/powerslide into the ball
+        # Side-on turn-in bonus: active steering/powerslide into the target
         turn_bonus = 0.0
         if dist < 1200.0 and best_align < 0.7:
             right = car.get_right_vector()
-            lat_align = float(np.dot(right, unit_to_ball))
+            lat_align = float(np.dot(right, unit_to_target))
             is_turning = (action[1] > 0.1 and lat_align > 0.1) or (action[1] < -0.1 and lat_align < -0.1)
             if is_turning or action[7] > 0.5:
                 turn_bonus = 0.03
 
-        # Boost Acceleration Rush: active incentive for boosting towards ball
+        # Boost Acceleration Rush: active incentive for boosting towards target
         boost_rush = 0.0
         if action[6] > 0.0 and car_speed < 2150.0 and speed_toward > 800.0 and best_align > 0.4:
             boost_rush = 0.05 * min(1.0, speed_toward / 1600.0)
@@ -236,10 +248,15 @@ class LocomotionReward(BaseReward):
             if car.just_dodged and best_align > 0.6:
                 kickoff_bonus += 0.08  # Speed-flip acceleration pulse
 
+        # Bounce Anticipation Bonus: rewards closing speed toward airborne intercept point
+        bounce_anticipation = 0.0
+        if is_airborne and dist < 1600.0 and speed_toward > 500.0 and best_align > 0.5:
+            bounce_anticipation = 0.04 * min(1.0, speed_toward / 1400.0)
+
         dodge_mult = self.dodge_rush_multi if (car.just_dodged and best_align > 0.5) else 1.0
 
         align_factor = max(0.2, best_align)
-        return (self.weight * norm_speed * align_factor * dodge_mult) + turn_bonus + boost_rush + kickoff_bonus
+        return (self.weight * norm_speed * align_factor * dodge_mult) + turn_bonus + boost_rush + kickoff_bonus + bounce_anticipation
 
 
 # ==============================================================================
