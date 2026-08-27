@@ -45,8 +45,8 @@ class ActorCritic(nn.Module):
 
         if continuous_actions:
             self.actor_mean = layer_init(nn.Linear(prev_dim, act_dim), std=0.01)
-            # Log std parameter for Gaussian policy: initialized to -0.7 (std ~ 0.5)
-            self.actor_log_std = nn.Parameter(torch.full((1, act_dim), -0.7))
+            # Log std parameter for Gaussian policy: initialized to -1.5 (std ~ 0.22 for fine analog vehicle exploration)
+            self.actor_log_std = nn.Parameter(torch.full((1, act_dim), -1.5))
         else:
             self.actor_logits = layer_init(nn.Linear(prev_dim, act_dim), std=0.01)
 
@@ -59,6 +59,27 @@ class ActorCritic(nn.Module):
             prev_dim = hidden
         critic_layers.append(layer_init(nn.Linear(prev_dim, 1), std=1.0))
         self.critic = nn.Sequential(*critic_layers)
+
+    def debias_symmetric_actions(self):
+        """
+        Re-centers the actor output layer biases for antisymmetric action axes (steer, yaw, roll)
+        to strictly zero, defaults handbrake bias to negative (OFF), and prevents output tanh saturation.
+        """
+        if self.continuous_actions and hasattr(self, "actor_mean"):
+            with torch.no_grad():
+                # Steer (index 1), Yaw (index 3), Roll (index 4)
+                if self.actor_mean.bias is not None:
+                    self.actor_mean.bias.data[1] = 0.0
+                    self.actor_mean.bias.data[3] = 0.0
+                    self.actor_mean.bias.data[4] = 0.0
+                    # Default Handbrake (index 7) bias to -2.0 (OFF unless deliberately triggered)
+                    self.actor_mean.bias.data[7] = -2.0
+
+                # Desaturate actor_mean weights if they exceeded linear analog range
+                weight_norm = self.actor_mean.weight.data.norm(dim=1, keepdim=True)
+                max_norm = 1.5
+                scale = torch.clamp(max_norm / (weight_norm + 1e-6), max=1.0)
+                self.actor_mean.weight.data *= scale
 
     def get_value(self, obs: torch.Tensor) -> torch.Tensor:
         return self.critic(obs)
@@ -74,8 +95,8 @@ class ActorCritic(nn.Module):
 
         if self.continuous_actions:
             action_mean = torch.tanh(self.actor_mean(features))
-            # Clamp log_std to [-3.0, 0.0] so exploration std is strictly bounded within [0.05, 1.00]
-            clamped_log_std = torch.clamp(self.actor_log_std, min=-3.0, max=0.0)
+            # Clamp log_std to [-2.5, -1.2] so exploration std is bounded within [0.08, 0.30] (optimal vehicle control window)
+            clamped_log_std = torch.clamp(self.actor_log_std, min=-2.5, max=-1.2)
             action_log_std = clamped_log_std.expand_as(action_mean)
             action_std = torch.exp(action_log_std)
             dist = Normal(action_mean, action_std)

@@ -152,9 +152,17 @@ class CarState:
         return np.array([cp * cy, cp * sy, sp], dtype=np.float32)
 
     def get_right_vector(self) -> np.ndarray:
-        fwd = self.get_forward_vector()
-        up = self.get_up_vector()
-        return np.cross(fwd, up).astype(np.float32)
+        if self.rot_mat is not None:
+            return self.rot_mat[1].copy()
+        p, y, r = self.rot
+        cp, sp = math.cos(p), math.sin(p)
+        cy, sy = math.cos(y), math.sin(y)
+        cr, sr = math.cos(r), math.sin(r)
+        return np.array([
+            sy * cr - cy * sp * sr,
+            -cy * cr - sy * sp * sr,
+            cp * sr
+        ], dtype=np.float32)
 
     def get_up_vector(self) -> np.ndarray:
         if self.rot_mat is not None:
@@ -479,8 +487,8 @@ class RocketSimArena:
             car = self.cars[i]
             car.pos = c_state.pos.as_numpy().astype(np.float32)
             car.vel = c_state.vel.as_numpy().astype(np.float32)
-            car.rot = np.array([ang.pitch, ang.yaw, ang.roll], dtype=np.float32)
-            car.rot_mat = c_state.rot_mat.as_numpy().astype(np.float32)
+            r_mat = c_state.rot_mat.as_numpy().astype(np.float32)
+            car.rot_mat = np.vstack([r_mat[0], -r_mat[1], r_mat[2]]).astype(np.float32)
             car.ang_vel = c_state.ang_vel.as_numpy().astype(np.float32)
             car.boost = float(c_state.boost)
             car.on_ground = bool(c_state.is_on_ground)
@@ -516,14 +524,17 @@ class RocketSimArena:
             total_ticks = max(1, int(round(dt * 120.0)))
 
             dodge_flags = []
+            fast_aerial_flags = []
             for i, r_car in enumerate(self._rsim_cars):
                 act = actions[i] if i < len(actions) else np.zeros(8, dtype=np.float32)
                 is_on_ground = bool(r_car.get_state().is_on_ground)
-                is_dodge = bool(act[5] > 0.0 and (abs(act[2]) > 0.1 or abs(act[3]) > 0.1 or abs(act[4]) > 0.1) and is_on_ground)
+                is_fast_aerial = bool(act[5] > 0.5 and act[6] > 0.3 and act[2] > 0.1 and is_on_ground)
+                is_dodge = bool(act[5] > 0.0 and (act[2] < -0.1 or abs(act[1]) > 0.1 or abs(act[3]) > 0.1 or abs(act[4]) > 0.1) and is_on_ground and not is_fast_aerial)
                 dodge_flags.append(is_dodge)
+                fast_aerial_flags.append(is_fast_aerial)
 
-            if any(dodge_flags) and total_ticks >= 8:
-                # 3-phase 8-tick substep execution for authentic RocketSim C++ dodge physics:
+            if (any(dodge_flags) or any(fast_aerial_flags)) and total_ticks >= 8:
+                # 3-phase 8-tick substep execution for authentic RocketSim C++ dodge & fast aerial physics:
                 # Phase 1: Jump initiation (4 ticks to clear suspension)
                 for i, r_car in enumerate(self._rsim_cars):
                     act = actions[i] if i < len(actions) else np.zeros(8, dtype=np.float32)
@@ -539,17 +550,21 @@ class RocketSimArena:
                     act = actions[i] if i < len(actions) else np.zeros(8, dtype=np.float32)
                     r_car.set_controls(rsim.CarControls(
                         throttle=float(act[0]), steer=-float(act[1]), pitch=float(act[2]),
-                        yaw=-float(act[3]), roll=-float(act[4]), jump=False if dodge_flags[i] else bool(act[5] > 0.5),
+                        yaw=-float(act[3]), roll=-float(act[4]), jump=False if (dodge_flags[i] or fast_aerial_flags[i]) else bool(act[5] > 0.5),
                         boost=bool(act[6] > 0.3), handbrake=bool(act[7] > 0.5)
                     ))
                 self._rsim_arena.step(2)
 
-                # Phase 3: Dodge flip trigger (remaining ticks)
+                # Phase 3: Dodge flip trigger / Fast Aerial double-jump launch (remaining ticks)
                 for i, r_car in enumerate(self._rsim_cars):
                     act = actions[i] if i < len(actions) else np.zeros(8, dtype=np.float32)
+                    pitch_val = 0.0 if fast_aerial_flags[i] else float(act[2])
+                    steer_val = 0.0 if fast_aerial_flags[i] else -float(act[1])
                     r_car.set_controls(rsim.CarControls(
-                        throttle=float(act[0]), steer=-float(act[1]), pitch=float(act[2]),
-                        yaw=-float(act[3]), roll=-float(act[4]), jump=bool(act[5] > 0.5),
+                        throttle=float(act[0]), steer=steer_val, pitch=pitch_val,
+                        yaw=0.0 if fast_aerial_flags[i] else -float(act[3]),
+                        roll=0.0 if fast_aerial_flags[i] else -float(act[4]),
+                        jump=bool(act[5] > 0.5),
                         boost=bool(act[6] > 0.3), handbrake=bool(act[7] > 0.5)
                     ))
                 self._rsim_arena.step(total_ticks - 6)

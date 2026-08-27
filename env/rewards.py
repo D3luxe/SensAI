@@ -188,6 +188,10 @@ class LocomotionReward(BaseReward):
     def __init__(self, weight: float = 0.06, dodge_rush_multi: float = 1.6):
         super().__init__(weight)
         self.dodge_rush_multi = dodge_rush_multi
+        self.prev_steer: Dict[int, float] = {}
+
+    def reset(self, initial_state: RocketSimArena):
+        self.prev_steer.clear()
 
     def get_reward(self, car: CarState, arena: RocketSimArena, action: np.ndarray, is_goal: bool, scoring_team: Optional[int]) -> float:
         # Determine Navigation Target: Intercept Predicted Bounce when Ball is Airborne
@@ -229,17 +233,24 @@ class LocomotionReward(BaseReward):
         fwd_cross = float(np.linalg.norm(np.cross(car_to_target, fwd)))
         is_on_collision_course = (fwd_cross < 110.0 and fwd_align > 0.7)
 
-        # Side-on & Close-Range Powerslide Snap-Aim Cut Bonus
+        # Tactical Powerslide Turnaround Bounty & Drag Penalty
         turn_bonus = 0.0
-        if dist < 1200.0 and best_align < 0.85:
+        handbrake_drag_penalty = 0.0
+        is_powersliding = bool(action[7] > 0.5)
+
+        if car.on_ground and car_speed > 300.0:
             right = car.get_right_vector()
             lat_align = float(np.dot(right, unit_to_target))
-            is_turning = (action[1] > 0.1 and lat_align > 0.1) or (action[1] < -0.1 and lat_align < -0.1)
-            is_powersliding = bool(action[7] > 0.5)
-            if is_powersliding and is_turning:
-                turn_bonus = 0.05  # Sharp handbrake cut into ball
-            elif is_turning or is_powersliding:
-                turn_bonus = 0.03
+            is_turning_in = (action[1] > 0.2 and lat_align > 0.1) or (action[1] < -0.2 and lat_align < -0.1)
+
+            # 1. Tactical Turnaround Cut: ONLY when facing away (fwd_align < 0.3) and executing a sharp cut into the target
+            if is_powersliding and is_turning_in and fwd_align < 0.3:
+                turn_bonus = 0.05 * (1.0 - max(-1.0, fwd_align))
+
+            # 2. Handbrake Drag Penalty: Penalize dragging handbrake in straightaways or when already facing the target
+            if is_powersliding:
+                if fwd_align > 0.6 or abs(action[1]) < 0.2:
+                    handbrake_drag_penalty = -0.04  # Actively breaks the constant drifting addiction
 
         # Close-Range Bumper Contact Lock & Fly-By Whiff Penalty
         contact_bonus = 0.0
@@ -267,21 +278,43 @@ class LocomotionReward(BaseReward):
             if speed_toward > 400.0:
                 kickoff_bonus += 0.12 * aim_accuracy * min(1.5, speed_toward / 1400.0)
 
-            # Active Inward Steering Gradient for Off-Center & Diagonal Spawns
+        # Smooth Proportional Steering Alignment & Straight-Line Guidance (Active across all ground driving)
+        steer_alignment_bonus = 0.0
+        if car.on_ground and car_speed > 250.0 and fwd_align > 0.0:
             right = car.get_right_vector()
             lat_offset = float(np.dot(right, unit_to_target))
-            if abs(lat_offset) > 0.02:
-                is_correcting = (action[1] > 0.05 and lat_offset > 0.02) or (action[1] < -0.05 and lat_offset < -0.02)
-                if is_correcting:
-                    kickoff_bonus += 0.08  # Substantial reward for steering into the ball
-                elif abs(action[1]) < 0.05:
-                    kickoff_bonus -= 0.03  # Active penalty for driving parallel past the ball
+            target_steer = float(np.clip(lat_offset * 3.5, -1.0, 1.0))
+            steer_match = max(0.0, 1.0 - abs(float(action[1]) - target_steer))
+            steer_alignment_bonus = 0.06 * steer_match
 
-            # Clean speed-flip acceleration pulse only granted if at high speed on collision track
-            if car.just_dodged and aim_accuracy > 0.8 and car_speed > 1000.0:
-                kickoff_bonus += 0.12
-            elif action[5] > 0.5 and car_speed < 700.0 and dist > 1500.0:
-                kickoff_bonus -= 0.05  # Penalize premature low-speed jumps that kill ground sprint traction
+        # High-Speed Steering Chattering & Oscillations Damping (Eliminates Left-Right Fishtailing)
+        steer_chatter_penalty = 0.0
+        curr_steer = float(action[1])
+        prev_steer = self.prev_steer.get(car.id, None)
+        if car.on_ground and car_speed > 700.0 and prev_steer is not None:
+            steer_delta = abs(curr_steer - prev_steer)
+            if steer_delta > 0.9:
+                steer_chatter_penalty = -0.025 * steer_delta
+        self.prev_steer[car.id] = curr_steer
+
+        # Airborne Wheels-Down Recovery & Tumble Damping Engine
+        recovery_bonus = 0.0
+        tumble_penalty = 0.0
+        if not car.on_ground and car.pos[2] > 35.0:
+            up_vec = car.get_up_vector()
+            upright_align = float(up_vec[2])  # Dot product with world +Z [0, 0, 1]
+            
+            # Wheels-Down landing alignment bounty when descending towards surface
+            if car.vel[2] < -50.0:
+                if upright_align > 0.6:
+                    recovery_bonus = 0.05 * upright_align  # Clean 4-wheel touchdown reward
+                elif upright_align < -0.2:
+                    recovery_bonus = -0.04  # Penalize inverted roof collisions and flopping
+
+            # Angular rate tumble damping: penalize high-rate uncontrolled spinning
+            ang_speed = float(np.linalg.norm(car.ang_vel))
+            if not car.just_dodged and ang_speed > 3.5:
+                tumble_penalty = -0.03 * min(1.5, (ang_speed - 3.5) / 2.0)
 
         # Bounce Anticipation Bonus: rewards closing speed toward airborne intercept point
         bounce_anticipation = 0.0
@@ -307,7 +340,7 @@ class LocomotionReward(BaseReward):
         else:
             align_factor = fwd_align ** 2
 
-        return (self.weight * norm_speed * align_factor * dodge_mult) + turn_bonus + boost_rush + kickoff_bonus + bounce_anticipation + orbit_penalty + contact_bonus + whiff_penalty
+        return (self.weight * norm_speed * align_factor * dodge_mult) + turn_bonus + boost_rush + kickoff_bonus + bounce_anticipation + orbit_penalty + contact_bonus + whiff_penalty + recovery_bonus + tumble_penalty + steer_chatter_penalty + handbrake_drag_penalty + steer_alignment_bonus
 
 
 # ==============================================================================
@@ -317,6 +350,7 @@ class TacticalAerialReward(BaseReward):
     """
     Context-Aware Tactical Aerial Engine.
     Evaluates aerial climbs ONLY when feasible (boost >= 15 & beating/challenging opponent, or defending goal threat).
+    Requires nose-to-target alignment (> 0.5) to eliminate backwards flailing.
     Provides built-in Boost-Tax Shield (+0.04) during active flight.
     """
     def __init__(self, weight: float = 0.08, air_carry_weight: float = 0.06):
@@ -367,9 +401,14 @@ class TacticalAerialReward(BaseReward):
                         if t_self <= t_opp_min + 0.2:
                             tactical_mult = 1.4
 
-                # Airborne flight tracking & climb
+                # Airborne flight tracking & climb (Strict Nose-Alignment Gate)
                 if not car.on_ground and car.pos[2] > 35.0:
-                    height_norm = min(1.3, math.sqrt(max(0.0, (car.pos[2] - 17.0) / 400.0)))
+                    fwd = car.get_forward_vector()
+                    fwd_align = float(np.dot(fwd, unit_to_target))
+                    if fwd_align < 0.4:
+                        return 0.0  # Zero reward for backwards/upside-down uncontrolled tumbles
+
+                    height_norm = min(1.3, math.sqrt(max(0.0, (car.pos[2] - 17.0) / 400.0))) * (fwd_align ** 2)
                     flip_bonus = 1.4 if car.just_dodged else 1.0
                     threat_bonus = 1.8 if (is_threat or in_defensive_box) else 1.0
                     boost_shield = 0.04 if car.boost > 5.0 else 0.0

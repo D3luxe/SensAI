@@ -13,6 +13,56 @@ from env.physics_engine import (
     CAR_MAX_SPEED, BALL_MAX_SPEED, GOAL_HEIGHT
 )
 
+# 74-Dimensional Left-Right (X -> -X) Observation Symmetry Reflection Mask
+# Multiplies features by -1.0 for lateral X components, roll, yaw, and relative right offsets
+OBS_MIRROR_MASK_NP = np.array([
+    # 1. Self Car State (22 features)
+    -1.0,  1.0,  1.0,   # car_pos (pos.x negated)
+    -1.0,  1.0,  1.0,   # car_vel (vel.x negated)
+    -1.0,  1.0,  1.0,   # fwd (fwd.x negated)
+     1.0, -1.0, -1.0,   # right (right.y, right.z negated)
+    -1.0,  1.0,  1.0,   # up (up.x negated)
+    -1.0,  1.0, -1.0,   # ang_vel (roll.x, yaw.z negated)
+     1.0,  1.0,  1.0,  1.0,  # boost, on_ground, has_jump, has_flip
+    # 2. Ball State (9 features)
+    -1.0,  1.0,  1.0,   # ball_pos (pos.x negated)
+    -1.0,  1.0,  1.0,   # ball_vel (vel.x negated)
+    -1.0,  1.0, -1.0,   # ball_ang_vel (roll.x, yaw.z negated)
+    # 2b. Future Ball Trajectory Prediction (3 features)
+    -1.0,  1.0,  1.0,   # future_ball_pos (pos.x negated)
+    # 3. Relative Features in Car Local Frame (16 features)
+     1.0, -1.0,  1.0,   # local_ball_pos (right offset negated)
+     1.0, -1.0,  1.0,   # local_future_ball_pos (right offset negated)
+     1.0, -1.0,  1.0,   # local_ball_vel (right vel negated)
+     1.0,             # dist_ball
+     1.0, -1.0,  1.0,   # local_target_goal (right offset negated)
+     1.0, -1.0,  1.0,   # local_defend_goal (right offset negated)
+    # 3b/3c. Sensors (4 features)
+     1.0,  1.0,  1.0,  1.0,  # threat_intensity, threat_z, is_kickoff, is_first_touch
+    # 4. Opponent State (14 features)
+    -1.0,  1.0,  1.0,   # opp_pos (pos.x negated)
+    -1.0,  1.0,  1.0,   # opp_vel (vel.x negated)
+     1.0, -1.0,  1.0,   # local_opp_pos (right offset negated)
+     1.0, -1.0,  1.0,   # local_opp_vel (right vel negated)
+     1.0,  1.0,        # opp_boost, opp_on_ground
+    # 5. Boost Pad Spatial Vectors (6 features)
+     1.0, -1.0,  1.0,   # nearest small pad (fwd, right negated, dist)
+     1.0, -1.0,  1.0    # nearest big orb (fwd, right negated, dist)
+], dtype=np.float32)
+
+# 8-Dimensional Action Reflection Mask: [throttle, steer, pitch, yaw, roll, jump, boost, handbrake]
+ACT_MIRROR_MASK_NP = np.array([1.0, -1.0, 1.0, -1.0, -1.0, 1.0, 1.0, 1.0], dtype=np.float32)
+
+
+def mirror_obs(obs: np.ndarray) -> np.ndarray:
+    """Mirrors a single or batched numpy observation across the X=0 plane."""
+    return obs * OBS_MIRROR_MASK_NP
+
+
+def mirror_act(act: np.ndarray) -> np.ndarray:
+    """Mirrors continuous action vectors (negates steer, yaw, and roll)."""
+    return act * ACT_MIRROR_MASK_NP
+
 
 class DefaultObservationBuilder:
     """

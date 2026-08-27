@@ -27,6 +27,14 @@ def main():
         print(f"Resuming Checkpoint: {args.checkpoint}")
     print("=" * 60)
 
+    # 1. Automatic Pre-Flight Physics & Controls Verification
+    from test_physics_and_controls import verify_physics_and_controls_pipeline
+    try:
+        verify_physics_and_controls_pipeline(verbose=True)
+    except Exception as e:
+        print(f"\n[FATAL] Pre-Flight Physics Verification Failed: {e}")
+        sys.exit(1)
+
     trainer = PPOTrainer(
         config_path=args.config,
         live_config_path=args.live_config,

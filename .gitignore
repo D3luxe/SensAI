@@ -5,5 +5,12 @@ __pycache__/
 .venv/
 venv/
 *.log
+logs/*.log
+logs/*.jsonl
+logs/events.out.tfevents.*
+scratch/
+checkpoints/checkpoint_iter_*.pt
+checkpoints/manual_checkpoint_*.pt
+checkpoints/bak/
 .system_generated/
 runs/

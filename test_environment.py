@@ -81,13 +81,10 @@ class TestRocketLeagueEnvironment(unittest.TestCase):
         self.assertTrue(os.path.exists("logs/metrics.json"))
         self.assertTrue(os.path.exists("logs/history.jsonl"))
 
-    def test_match_visualizer(self):
-        pitch_fig, reward_fig, stats = simulate_match(blue_model_path=None, max_steps=50)
-        self.assertIsNotNone(pitch_fig)
-        self.assertIsNotNone(reward_fig)
-        self.assertIn("blue_goals", stats)
-        self.assertIn("blue_touches", stats)
-        self.assertIn("blue_total_reward", stats)
+    def test_physics_and_controls_preflight(self):
+        from test_physics_and_controls import verify_physics_and_controls_pipeline
+        verified = verify_physics_and_controls_pipeline(verbose=False)
+        self.assertTrue(verified)
 
 
 if __name__ == "__main__":

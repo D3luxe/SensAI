@@ -16,6 +16,7 @@ import torch.optim as optim
 from typing import Dict, Any, Optional
 
 from env.rocket_env import VectorizedRocketEnv
+from env.observations import OBS_MIRROR_MASK_NP, ACT_MIRROR_MASK_NP
 from agent.models import ActorCritic
 
 
@@ -86,6 +87,13 @@ class PPOTrainer:
         self.device = torch.device(device if device else ("cuda" if torch.cuda.is_available() else "cpu"))
         print(f"[PPO Trainer] Initialized on device: {self.device}")
 
+        # Pre-Flight Physics & Controls Verification Pipeline
+        try:
+            from test_physics_and_controls import verify_physics_and_controls_pipeline
+            verify_physics_and_controls_pipeline(verbose=False)
+        except Exception as e:
+            raise RuntimeError(f"[PPO Trainer] Pre-Flight Physics Verification Failed: {e}") from e
+
         # Initialize Vectorized Environment
         self.env = VectorizedRocketEnv(
             num_envs=self.num_envs,
@@ -116,6 +124,10 @@ class PPOTrainer:
         ).to(self.device)
 
         self.optimizer = optim.Adam(self.agent.parameters(), lr=self.lr, eps=1e-5)
+
+        # Left-Right Mirror Augmentation Masks (Strict Bilateral Symmetry)
+        self.obs_mirror_mask = torch.tensor(OBS_MIRROR_MASK_NP, dtype=torch.float32, device=self.device)
+        self.act_mirror_mask = torch.tensor(ACT_MIRROR_MASK_NP, dtype=torch.float32, device=self.device)
 
         # Tensorboard
         self.writer = None
@@ -264,6 +276,7 @@ class PPOTrainer:
                 pass
         self.iteration = checkpoint.get("iteration", 0)
         self.global_step = checkpoint.get("global_step", 0)
+        self.agent.debias_symmetric_actions()
         print(f"[PPO Trainer] Loaded checkpoint from {path} (Iteration: {self.iteration}, Step: {self.global_step})")
 
     def train(self, max_iterations: Optional[int] = None):
@@ -298,6 +311,7 @@ class PPOTrainer:
             episode_rewards_list = []
             episode_touches_list = []
             episode_goals_list = []
+            rollout_touches_total = 0
 
             # 2. Collect Rollout
             for step in range(self.num_steps):
@@ -323,6 +337,7 @@ class PPOTrainer:
                 rew_buf[step] = rew_tensor
 
                 for info in infos:
+                    rollout_touches_total += int(info.get("step_touches", 0))
                     if info.get("is_goal", False) or info.get("step", 0) >= self.max_episode_steps:
                         episode_rewards_list.extend(info.get("episode_rewards", []))
                         episode_touches_list.extend(info.get("episode_touches", []))
@@ -372,38 +387,64 @@ class PPOTrainer:
                     end = start + self.mini_batch_size
                     mb_inds = b_inds[start:end]
 
+                    mb_o = b_obs[mb_inds]
+                    mb_a = b_actions[mb_inds]
+                    mb_lp = b_logprobs[mb_inds]
+                    mb_adv = b_advantages[mb_inds]
+                    mb_ret = b_returns[mb_inds]
+                    mb_val = b_values[mb_inds]
+
+                    if self.continuous_actions:
+                        # Left-Right Sagittal Mirror Augmentation (Enforces strict bilateral symmetry)
+                        mb_o_mirr = mb_o * self.obs_mirror_mask
+                        mb_a_mirr = mb_a * self.act_mirror_mask
+
+                        aug_o = torch.cat([mb_o, mb_o_mirr], dim=0)
+                        aug_a = torch.cat([mb_a, mb_a_mirr], dim=0)
+                        aug_lp = torch.cat([mb_lp, mb_lp], dim=0)
+                        aug_adv = torch.cat([mb_adv, mb_adv], dim=0)
+                        aug_ret = torch.cat([mb_ret, mb_ret], dim=0)
+                        aug_val = torch.cat([mb_val, mb_val], dim=0)
+                    else:
+                        aug_o = mb_o
+                        aug_a = mb_a
+                        aug_lp = mb_lp
+                        aug_adv = mb_adv
+                        aug_ret = mb_ret
+                        aug_val = mb_val
+
                     _, newlogprob, entropy, newvalue = self.agent.get_action_and_value(
-                        b_obs[mb_inds], b_actions[mb_inds]
+                        aug_o, aug_a
                     )
-                    logratio = newlogprob - b_logprobs[mb_inds]
+                    logratio = newlogprob - aug_lp
                     ratio = logratio.exp()
 
                     with torch.no_grad():
                         # Calculate approx_kl for monitoring
                         clipfracs += [((ratio - 1.0).abs() > self.clip_range).float().mean().item()]
 
-                    mb_advantages = b_advantages[mb_inds]
                     # Advantage normalization
-                    mb_advantages = (mb_advantages - mb_advantages.mean()) / (mb_advantages.std() + 1e-8)
+                    norm_adv = (aug_adv - aug_adv.mean()) / (aug_adv.std() + 1e-8)
 
                     # Policy loss
-                    pg_loss1 = -mb_advantages * ratio
-                    pg_loss2 = -mb_advantages * torch.clamp(ratio, 1 - self.clip_range, 1 + self.clip_range)
+                    pg_loss1 = -norm_adv * ratio
+                    pg_loss2 = -norm_adv * torch.clamp(ratio, 1 - self.clip_range, 1 + self.clip_range)
                     pg_loss = torch.max(pg_loss1, pg_loss2).mean()
 
                     # Value loss
                     newvalue = newvalue.view(-1)
-                    v_loss_unclipped = (newvalue - b_returns[mb_inds]) ** 2
-                    v_clipped = b_values[mb_inds] + torch.clamp(
-                        newvalue - b_values[mb_inds],
+                    v_loss_unclipped = (newvalue - aug_ret) ** 2
+                    v_clipped = aug_val + torch.clamp(
+                        newvalue - aug_val,
                         -self.clip_range,
                         self.clip_range,
                     )
-                    v_loss_clipped = (v_clipped - b_returns[mb_inds]) ** 2
+                    v_loss_clipped = (v_clipped - aug_ret) ** 2
                     v_loss = 0.5 * torch.max(v_loss_unclipped, v_loss_clipped).mean()
 
-                    # Entropy loss
-                    entropy_loss = entropy.mean()
+                    # Entropy loss (normalized per-channel for continuous Gaussian actions)
+                    dim_scale = float(self.act_dim) if self.continuous_actions else 1.0
+                    entropy_loss = entropy.mean() / dim_scale
 
                     loss = pg_loss - self.ent_coef * entropy_loss + v_loss * self.vf_coef
 
@@ -418,7 +459,7 @@ class PPOTrainer:
 
             # 5. Metrics Compilation & Behavioral Telemetry
             mean_ep_rew = float(np.mean(episode_rewards_list)) if episode_rewards_list else float(rew_buf.mean().item() * self.num_steps)
-            mean_touches = float(np.mean(episode_touches_list)) if episode_touches_list else 0.0
+            mean_touches = float(np.mean(episode_touches_list)) if episode_touches_list else float(rollout_touches_total)
             total_goals = int(sum(episode_goals_list)) if episode_goals_list else 0
             mean_pg_loss = float(np.mean(pg_losses))
             mean_v_loss = float(np.mean(v_losses))

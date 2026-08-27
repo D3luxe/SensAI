@@ -27,18 +27,23 @@ class ContinuousActionParser:
     def parse_actions(self, raw_actions: np.ndarray) -> np.ndarray:
         actions = np.array(raw_actions, dtype=np.float32).copy()
 
-        # Responsive throttle mapping: prioritizes forward driving, prevents accidental reverse from exploration noise
+        # True continuous analog throttle with deadband around zero to eliminate micro-jitter
         thr = actions[..., 0]
-        parsed_thr = np.zeros_like(thr)
-        parsed_thr[thr > -0.1] = 1.0   # Forward driving bias (prevents stalling on 0-mean Gaussian noise)
-        parsed_thr[thr < -0.6] = -1.0  # Intentional hard reverse/braking
-        actions[..., 0] = parsed_thr
+        thr_deadband = (np.abs(thr) < 0.05)
+        thr[thr_deadband] = 0.0
+        actions[..., 0] = np.clip(thr, -1.0, 1.0)
 
-        # Confident binary thresholds for controller buttons (eliminates 50% random jitter on 0-mean Gaussian policy)
+        # Steering & aerial rotations: pure continuous in [-1.0, 1.0]
+        actions[..., 1] = np.clip(actions[..., 1], -1.0, 1.0)
+        actions[..., 2] = np.clip(actions[..., 2], -1.0, 1.0)
+        actions[..., 3] = np.clip(actions[..., 3], -1.0, 1.0)
+        actions[..., 4] = np.clip(actions[..., 4], -1.0, 1.0)
+
+        # Binary button thresholds for Jump, Boost, and Handbrake
         actions[..., 5] = (actions[..., 5] > 0.5).astype(np.float32)  # Jump
         actions[..., 6] = (actions[..., 6] > 0.3).astype(np.float32)  # Boost
         actions[..., 7] = (actions[..., 7] > 0.5).astype(np.float32)  # Handbrake
-        return np.clip(actions, -1.0, 1.0)
+        return actions
 
 
 class DiscreteActionParser:

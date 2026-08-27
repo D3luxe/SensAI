@@ -15,8 +15,18 @@ try:
     RLBOT_AVAILABLE = True
 except ImportError:
     RLBOT_AVAILABLE = False
+    class SimpleControllerState:
+        def __init__(self):
+            self.steer = 0.0
+            self.throttle = 0.0
+            self.pitch = 0.0
+            self.yaw = 0.0
+            self.roll = 0.0
+            self.jump = False
+            self.boost = False
+            self.handbrake = False
+            self.use_item = False
     BaseAgent = object
-    SimpleControllerState = object
     GameTickPacket = object
 
 from agent.models import ActorCritic
@@ -31,14 +41,14 @@ from env.physics_engine import (
 
 def rotation_to_rot_mat(pitch: float, yaw: float, roll: float) -> np.ndarray:
     """
-    Computes exact 3x3 orthonormal basis matching C++ RocketSim Bullet physics matrix (0.00000009 precision).
+    Computes exact 3x3 orthonormal basis (Row 0: Forward, Row 1: Right, Row 2: Up).
     """
     cy, sy = math.cos(yaw), math.sin(yaw)
     cp, sp = math.cos(pitch), math.sin(pitch)
     cr, sr = math.cos(roll), math.sin(roll)
     fwd = np.array([cp * cy, cp * sy, sp], dtype=np.float32)
+    right = np.array([sy * cr - cy * sp * sr, -cy * cr - sy * sp * sr, cp * sr], dtype=np.float32)
     up = np.array([-cy * sp * cr - sy * sr, -sy * sp * cr + cy * sr, cp * cr], dtype=np.float32)
-    right = np.cross(fwd, up).astype(np.float32)
     return np.vstack([fwd, right, up]).astype(np.float32)
 
 
@@ -119,6 +129,7 @@ class SenseiRLBot(BaseAgent):
                     self.model.load_state_dict(model_state)
                 else:
                     self.model.load_state_dict(saved_state)
+                self.model.debias_symmetric_actions()
                 self.model.eval()
                 self.loaded_ckpt_mtime = os.path.getmtime(ckpt_path) if os.path.exists(ckpt_path) else 0.0
                 msg = f"[SensAI] Successfully loaded in-game model from {ckpt_path} (Mode: {'Continuous' if self.continuous_actions else f'Discrete RLGym ({ckpt_act_dim} actions)'}, ObsDim: {obs_dim})"
@@ -292,60 +303,43 @@ class SenseiRLBot(BaseAgent):
                 # Hold previous action across the 8 physics substeps
                 act = self.prev_action
 
-            # Direct 1-to-1 Neural Policy Mapping
-            # [throttle, steer, pitch, yaw, roll, jump, boost, handbrake]
-            raw_throttle = float(act[0])
-            steer_val = float(np.clip(act[1], -1.0, 1.0))
-
-            if self.continuous_actions:
-                if raw_throttle > -0.1:
-                    controller.throttle = 1.0   # Forward drive bias
-                elif raw_throttle < -0.6:
-                    controller.throttle = -1.0  # Intentional hard braking
-                else:
-                    controller.throttle = 0.0
-            else:
-                controller.throttle = raw_throttle
-
-            # Pure wheel steering without interference from aerial yaw/roll
-            self.current_steer = 0.7 * steer_val + 0.3 * self.current_steer
+            # 1-to-1 Neural Policy Mapping (Zero artificial overrides)
+            # Continuous Action vector: [throttle, steer, pitch, yaw, roll, jump, boost, handbrake]
+            raw_steer = float(np.clip(act[1], -1.0, 1.0))
+            # 120Hz Smooth Steering Filter (Eliminates high-frequency wheel chatter while retaining instant response)
+            self.current_steer = 0.65 * raw_steer + 0.35 * self.current_steer
+            controller.throttle = float(np.clip(act[0], -1.0, 1.0))
             controller.steer = float(np.clip(self.current_steer, -1.0, 1.0))
+            controller.pitch = float(np.clip(act[2], -1.0, 1.0))
+            controller.yaw = float(np.clip(act[3], -1.0, 1.0))
+            controller.roll = float(np.clip(act[4], -1.0, 1.0))
 
-            # Directional Flip / Dodge Detection (Requires confident jump + strong stick deflection + momentum)
+            # Double-Jump & Dodge 120Hz Substep Cadence (Allows natural speed-flips, wave-dashes, and aerials)
             jump_threshold = 0.5 if self.continuous_actions else 0.0
-            stick_threshold = 0.4 if self.continuous_actions else 0.1
-            has_strong_dodge_stick = (abs(act[2]) > stick_threshold or abs(act[3]) > stick_threshold or abs(act[4]) > stick_threshold)
-            is_dodge = bool(act[5] > jump_threshold and has_strong_dodge_stick)
-            car_speed = float(np.linalg.norm(car_state.vel))
-            can_ground_dodge = (not is_on_ground) or (car_speed > 600.0)
+            jump_requested = bool(act[5] > jump_threshold)
 
-            if is_dodge and (has_jump or has_flip) and can_ground_dodge:
-                # 120Hz 4-stage substep cadence for authentic Rocket League double-jump dodges:
-                # Ground flip: jump (0,1) -> release (2,3) -> dodge (4,5) -> finish (6,7)
-                # Air dodge: immediate dodge (0,1,2) -> finish
+            if jump_requested:
                 if is_on_ground:
+                    # Ground flip / jump: jump (ticks 0,1) -> release (ticks 2,3) -> dodge/double-jump (ticks 4,5)
                     controller.jump = bool(self.ticks_since_last_action in (0, 1, 4, 5))
-                else:
-                    controller.jump = bool(self.ticks_since_last_action in (0, 1, 2))
 
-                # Canonical mapping matching standard RLBot gamepad conventions (pitch is inverted between RocketSim and RLBot)
-                controller.pitch = -float(np.clip(act[2], -1.0, 1.0))
-                controller.yaw = float(np.clip(act[3], -1.0, 1.0))
-                controller.roll = float(np.clip(act[4], -1.0, 1.0))
-            else:
-                if is_on_ground:
-                    # Single jump pulse (ticks 0..3): initiates jump, then releases (ticks 4..7) to prevent infinite hopping loops
-                    controller.jump = bool(act[5] > jump_threshold and has_jump and self.ticks_since_last_action in (0, 1, 2, 3))
-                    controller.pitch = 0.0
-                    controller.roll = 0.0
-                    controller.yaw = 0.0
+                    # Fast Aerial Protection ("FeelsBackflipMan" Prevention):
+                    # If pitching nose-up (act[2] > 0.1) and boosting (act[6] > 0.3) for an elevated aerial climb:
+                    # Neutralize pitch & steer on the second jump click (ticks 4, 5) to launch vertically without triggering a backflip!
+                    is_fast_aerial_takeoff = bool(act[2] > 0.1 and act[6] > 0.3)
+                    if is_fast_aerial_takeoff and self.ticks_since_last_action in (4, 5):
+                        controller.pitch = 0.0
+                        controller.steer = 0.0
+                        controller.yaw = 0.0
+                        controller.roll = 0.0
                 else:
-                    controller.pitch = -float(np.clip(act[2], -1.0, 1.0))
-                    controller.roll = float(np.clip(act[4], -1.0, 1.0))
-                    controller.yaw = float(np.clip(act[3], -1.0, 1.0))
+                    # Aerial dodge / jump
+                    controller.jump = bool(self.ticks_since_last_action in (0, 1, 2))
+            else:
+                controller.jump = False
 
             boost_threshold = 0.3 if self.continuous_actions else 0.0
-            controller.boost = bool(act[6] > boost_threshold and (controller.throttle > 0.0 or not is_on_ground))
+            controller.boost = bool(act[6] > boost_threshold)
             controller.handbrake = bool(act[7] > 0.5)
 
             self.tick_count += 1
@@ -355,7 +349,8 @@ class SenseiRLBot(BaseAgent):
                 log_debug(
                     f"[TICK {self.tick_count}] pos=({car_state.pos[0]:.0f}, {car_state.pos[1]:.0f}) "
                     f"ball=({ball_pos[0]:.0f}, {ball_pos[1]:.0f}) kickoff={is_kickoff} -> "
-                    f"throttle={controller.throttle:.2f} steer={controller.steer:.2f} boost={controller.boost}"
+                    f"thr={controller.throttle:.2f} str={controller.steer:+.2f} pit={controller.pitch:+.2f} "
+                    f"yaw={controller.yaw:+.2f} rol={controller.roll:+.2f} jmp={controller.jump} bst={controller.boost}"
                 )
 
         except Exception as e:

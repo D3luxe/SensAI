@@ -78,6 +78,7 @@ class RocketLeagueEnv:
         obs = []
         rewards = []
         info_rewards = {}
+        prev_touches_sum = sum(self.episode_touches)
 
         for i, car in enumerate(self.arena.cars):
             r, r_dict = self.reward_manager.get_reward(car, self.arena, parsed_actions[i], is_goal, scoring_team)
@@ -91,6 +92,8 @@ class RocketLeagueEnv:
         if is_goal and scoring_team is not None:
             self.episode_goals[scoring_team] += 1
 
+        step_touches = max(0, sum(self.episode_touches) - prev_touches_sum)
+
         # RLGym Kickoff Stagnation Rule: If ball is untouched on kickoff after 75 steps (5.0s), terminate episode!
         is_kickoff_stalled = (self.current_step > 75 and abs(self.arena.ball.pos[0]) < 20.0 and abs(self.arena.ball.pos[1]) < 20.0 and np.linalg.norm(self.arena.ball.vel) < 80.0)
         done = (self.current_step >= self.max_episode_steps) or is_goal or is_kickoff_stalled
@@ -100,6 +103,7 @@ class RocketLeagueEnv:
             "is_goal": is_goal,
             "scoring_team": scoring_team,
             "step": self.current_step,
+            "step_touches": step_touches,
             "episode_rewards": list(self.episode_rewards),
             "episode_touches": list(self.episode_touches),
             "episode_goals": list(self.episode_goals),
