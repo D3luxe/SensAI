@@ -20,6 +20,7 @@ import matplotlib.pyplot as plt
 
 from utils.process_manager import TrainingProcessManager
 from utils.visualizer import simulate_match
+from utils.replay_parser import ReplayParser, DEFAULT_DEMO_DIR
 from utils.diagnostics import (
     extract_rolling_telemetry,
     render_action_biases_plot,
@@ -47,31 +48,6 @@ def get_available_checkpoints() -> list:
         return ["checkpoints/latest_model.pt (none saved yet)"]
     return sorted(pts, key=os.path.getmtime, reverse=True)
 
-
-def create_ui():
-    mgr = TrainingProcessManager.get_instance()
-    default_cfg = load_yaml_config("config/default_config.yaml")
-
-    hp_cfg = default_cfg.get("hyperparameters", {})
-    env_cfg = default_cfg.get("environment", {})
-    rew_cfg = default_cfg.get("rewards", {})
-    log_cfg = default_cfg.get("logging", {})
-
-    # Overlay latest live config values so they persist across reloads
-    if os.path.exists("config/live_config.json"):
-        try:
-            with open("config/live_config.json", "r") as f:
-                live_data = json.load(f)
-                if "rewards" in live_data and isinstance(live_data["rewards"], dict):
-                    rew_cfg.update(live_data["rewards"])
-                if "learning_rate" in live_data:
-                    hp_cfg["learning_rate"] = float(live_data["learning_rate"])
-                if "ent_coef" in live_data:
-                    hp_cfg["ent_coef"] = float(live_data["ent_coef"])
-                if "clip_range" in live_data:
-                    hp_cfg["clip_range"] = float(live_data["clip_range"])
-        except Exception:
-            pass
 
 CUSTOM_CSS = """
 /* Futuristic Cyber / Rocket League Dark Theme */
@@ -380,6 +356,7 @@ def create_ui():
     env_cfg = default_cfg.get("environment", {})
     rew_cfg = default_cfg.get("rewards", {})
     log_cfg = default_cfg.get("logging", {})
+    sc_cfg = default_cfg.get("scenarios", {})
 
     # Overlay latest live config values so they persist across reloads
     if os.path.exists("config/live_config.json"):
@@ -388,6 +365,8 @@ def create_ui():
                 live_data = json.load(f)
                 if "rewards" in live_data and isinstance(live_data["rewards"], dict):
                     rew_cfg.update(live_data["rewards"])
+                if "scenarios" in live_data and isinstance(live_data["scenarios"], dict):
+                    sc_cfg.update(live_data["scenarios"])
                 if "learning_rate" in live_data:
                     hp_cfg["learning_rate"] = float(live_data["learning_rate"])
                 if "ent_coef" in live_data:
@@ -399,7 +378,7 @@ def create_ui():
 
     init_status = mgr.get_status_info()
 
-    with gr.Blocks(title="SensAI - Rocket League ML Studio", css=CUSTOM_CSS) as demo:
+    with gr.Blocks(title="SensAI - Rocket League ML Studio") as demo:
         gr.Markdown(
             """
             # 🏎️⚽ SensAI - Rocket League ML Studio
@@ -758,6 +737,78 @@ def create_ui():
                             lines=22,
                             interactive=False
                         )
+
+            # ---------------------------------------------------------
+            # TAB 8: 🎯 SCENARIOS & REPLAY INGESTION
+            # ---------------------------------------------------------
+            with gr.TabItem("🎯 Scenarios & Replays"):
+                gr.Markdown(
+                    """
+                    ### 🎯 Scenario State Setters & Replay Ingestion
+                    Train advanced mechanics (Aerials, Wall Plays, Goalie Saves, Replays) from step 0 by injecting realistic game states directly into RocketSim training environments.
+                    """
+                )
+                parser_inst = ReplayParser()
+                def build_replay_stats_md():
+                    st = parser_inst.get_pool_stats()
+                    return f"""
+                    <div style="background: rgba(30, 41, 59, 0.7); border: 1px solid #334155; border-radius: 8px; padding: 12px 18px; margin-bottom: 12px;">
+                        <h4 style="margin: 0 0 6px 0; color: #38bdf8;">📊 Active Replay Dataset Pool</h4>
+                        <div style="display: flex; gap: 24px; font-size: 0.95rem;">
+                            <span><b>Active Frames:</b> {st['total_frames']:,}</span>
+                            <span><b>Estimated Matches:</b> {st['num_matches']}</span>
+                            <span><b>Pool File Size:</b> {st['file_size_mb']} MB</span>
+                        </div>
+                    </div>
+                    """
+
+                replay_stats_box = gr.HTML(value=build_replay_stats_md())
+
+                with gr.Row():
+                    # Left Column: Replay Ingestion
+                    with gr.Column(scale=1):
+                        gr.Markdown("#### 📁 Replay Scanner & Ingestion")
+                        demo_dir_input = gr.Textbox(
+                            value=DEFAULT_DEMO_DIR,
+                            label="Local Rocket League Demos Directory",
+                            info="Path to your local saved .replay files."
+                        )
+                        with gr.Row():
+                            max_replays_slider = gr.Slider(
+                                10, 1000,
+                                value=int(sc_cfg.get("max_replays_to_ingest", 50)),
+                                step=10,
+                                label="Max Replays to Ingest",
+                                info="Limits batch size to prevent lag with thousands of replays."
+                            )
+                            sort_mode_dropdown = gr.Dropdown(
+                                choices=["Newest First", "Random Sample", "Oldest First"],
+                                value="Newest First",
+                                label="Selection Mode"
+                            )
+                        scan_demos_btn = gr.Button("📂 Scan & Ingest Local Demos", variant="primary")
+                        
+                        gr.Markdown("##### 📤 Or Upload Replay Files Directly:")
+                        replay_upload_box = gr.File(
+                            file_count="multiple",
+                            file_types=[".replay", ".npz", ".json"],
+                            label="Drop .replay, .npz, or .json files here"
+                        )
+                        upload_ingest_btn = gr.Button("📥 Ingest Uploaded Files", variant="secondary")
+                        ingestion_status_box = gr.Markdown("Ready to ingest.")
+
+                    # Right Column: Scenario Probability Weights
+                    with gr.Column(scale=1):
+                        gr.Markdown("#### 🎛️ Training Scenario Distribution")
+                        gr.Markdown("*Configure the frequency of game scenarios generated during environment resets:*")
+                        sc_kickoff_slider = gr.Slider(0.0, 1.0, value=float(sc_cfg.get("kickoff_prob", 0.35)), step=0.05, label="Kickoff Scenarios Ratio", info="Standard competitive kickoff formations.")
+                        sc_replay_slider = gr.Slider(0.0, 1.0, value=float(sc_cfg.get("replay_prob", 0.25)), step=0.05, label="Human Replay States Ratio", info="Authentic match states sampled from ingested replays.")
+                        sc_aerial_slider = gr.Slider(0.0, 1.0, value=float(sc_cfg.get("aerial_prob", 0.15)), step=0.05, label="High Aerial Shots Ratio", info="Floating & rising balls (z: 600-1500) for aerial training.")
+                        sc_wall_slider = gr.Slider(0.0, 1.0, value=float(sc_cfg.get("wall_prob", 0.15)), step=0.05, label="Wall & Backboard Play Ratio", info="Sidewall rolling and backboard rebound situations.")
+                        sc_save_slider = gr.Slider(0.0, 1.0, value=float(sc_cfg.get("save_prob", 0.10)), step=0.05, label="Goalie Save & Shadow Defense Ratio", info="High threat shots on net testing goal line defense.")
+                        
+                        apply_scenarios_btn = gr.Button("💾 Apply Scenario Distribution Live", variant="primary")
+                        scenarios_feedback_box = gr.Markdown("")
 
         # -------------------------------------------------------------
         # EVENT HANDLERS & CALLBACKS
@@ -1121,14 +1172,92 @@ def create_ui():
             outputs=[diag_coach_report, diag_action_plot, diag_position_plot]
         )
 
-        # Comprehensive Diagnostics Export Callback
-        def on_refresh_full_diagnostics():
-            overview_md, export_box = build_full_diagnostic_export()
-            return overview_md, export_box
+        # Scenario & Replay Management Callbacks
+        def on_scan_demos(demo_dir, max_replays, sort_mode):
+            mode_map = {"Newest First": "newest", "Random Sample": "random", "Oldest First": "oldest"}
+            mode = mode_map.get(sort_mode, "newest")
+            
+            p = ReplayParser()
+            count, frames = p.ingest_directory(directory=demo_dir, max_replays=int(max_replays), sort_mode=mode)
+            stats_html = build_replay_stats_md()
+            
+            if count > 0:
+                msg = f"✅ **Successfully ingested {count} replays ({frames:,} new game frames) into training pool!**"
+            else:
+                msg = f"⚠️ No valid `.replay` or dataset files found in `{demo_dir}`."
+            return stats_html, msg
 
-        refresh_snapshot_btn.click(
-            fn=on_refresh_full_diagnostics,
-            outputs=[diag_overview_md, diag_export_raw]
+        scan_demos_btn.click(
+            fn=on_scan_demos,
+            inputs=[demo_dir_input, max_replays_slider, sort_mode_dropdown],
+            outputs=[replay_stats_box, ingestion_status_box]
+        )
+
+        def on_upload_ingest(uploaded_files):
+            if not uploaded_files:
+                return build_replay_stats_md(), "⚠️ No files selected for upload."
+
+            p = ReplayParser()
+            total_frames = 0
+            file_count = 0
+            for f in uploaded_files:
+                fpath = f.name if hasattr(f, "name") else str(f)
+                frames = p._parse_file(fpath)
+                if frames and len(frames["ball_pos"]) > 0:
+                    file_count += 1
+                    total_frames += len(frames["ball_pos"])
+                    if p.states_buffer is not None:
+                        for k in p.states_buffer:
+                            p.states_buffer[k] = np.vstack([p.states_buffer[k], frames[k]])
+                    else:
+                        p.states_buffer = frames
+
+            if file_count > 0:
+                p.save_pool()
+                stats_html = build_replay_stats_md()
+                return stats_html, f"✅ **Successfully parsed & ingested {file_count} files ({total_frames:,} frames)!**"
+            return build_replay_stats_md(), "❌ Failed to extract valid game frames from uploaded files."
+
+        upload_ingest_btn.click(
+            fn=on_upload_ingest,
+            inputs=[replay_upload_box],
+            outputs=[replay_stats_box, ingestion_status_box]
+        )
+
+        def on_apply_scenarios_weights(k_p, rep_p, aer_p, wall_p, save_p):
+            sc_dict = {
+                "kickoff_prob": float(k_p),
+                "replay_prob": float(rep_p),
+                "aerial_prob": float(aer_p),
+                "wall_prob": float(wall_p),
+                "save_prob": float(save_p),
+            }
+            # Update live_config.json
+            live_path = "config/live_config.json"
+            live_data = {}
+            if os.path.exists(live_path):
+                try:
+                    with open(live_path, "r") as f:
+                        live_data = json.load(f)
+                except Exception:
+                    pass
+            live_data["scenarios"] = sc_dict
+            with open(live_path, "w") as f:
+                json.dump(live_data, f, indent=2)
+
+            # Update default_config.yaml
+            def_cfg = load_yaml_config("config/default_config.yaml")
+            def_cfg["scenarios"] = def_cfg.get("scenarios", {})
+            def_cfg["scenarios"].update(sc_dict)
+            save_yaml_config(def_cfg, "config/default_config.yaml")
+
+            tot = sum(sc_dict.values())
+            return f"✅ **Scenario distribution saved & applied live! (Total weight: {tot:.2f})**"
+
+        apply_scenarios_btn.click(
+            fn=on_apply_scenarios_weights,
+            inputs=[sc_kickoff_slider, sc_replay_slider, sc_aerial_slider, sc_wall_slider, sc_save_slider],
+            outputs=[scenarios_feedback_box]
         )
 
     return demo

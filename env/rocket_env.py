@@ -46,6 +46,12 @@ class RocketLeagueEnv:
         self.episode_touches = [0] * self.num_players
         self.episode_goals = [0] * 2
 
+    def update_reward_weights(self, weights: Dict[str, float]):
+        self.reward_manager.update_weights(weights)
+
+    def update_scenarios(self, config_dict: Dict[str, Any]):
+        self.arena.set_scenario_weights(config_dict)
+
     def reset(self, random_kickoff: bool = True) -> np.ndarray:
         self.arena.reset(random_kickoff=random_kickoff)
         self.reward_manager.reset(self.arena)
@@ -150,6 +156,10 @@ class VectorizedRocketEnv:
     def update_reward_weights(self, weights: Dict[str, float]):
         for env in self.envs:
             env.reward_manager.update_weights(weights)
+
+    def update_scenarios(self, config_dict: Dict[str, Any]):
+        for env in self.envs:
+            env.update_scenarios(config_dict)
 
     def reset(self) -> np.ndarray:
         all_obs = []

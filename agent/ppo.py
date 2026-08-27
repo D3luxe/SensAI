@@ -108,6 +108,10 @@ class PPOTrainer:
             self_play=self.self_play
         )
 
+        sc_cfg = self.config.get("scenarios", {})
+        if sc_cfg:
+            self.env.update_scenarios(sc_cfg)
+
         self.obs_dim = self.env.obs_dim
         self.act_dim = self.env.act_dim
         self.num_agents_per_env = self.env.num_players_per_env
@@ -178,6 +182,11 @@ class PPOTrainer:
                 if "rewards" in live and isinstance(live["rewards"], dict):
                     self.env.update_reward_weights(live["rewards"])
                     print(f"[Live Config] Reward weights dynamically updated.")
+
+                # Update scenario distributions
+                if "scenarios" in live and isinstance(live["scenarios"], dict):
+                    self.env.update_scenarios(live["scenarios"])
+                    print(f"[Live Config] Scenario distributions dynamically updated.")
 
                 # Check manual save checkpoint trigger
                 if live.get("save_checkpoint_requested", False):

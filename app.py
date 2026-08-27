@@ -2,7 +2,7 @@ from __future__ import annotations
 import os
 import sys
 import gradio as gr
-from ui.app import create_ui
+from ui.app import create_ui, CUSTOM_CSS
 
 if __name__ == "__main__":
     print("=" * 60)
@@ -27,7 +27,8 @@ if __name__ == "__main__":
             server_port=port,
             share=False,
             show_error=True,
-            theme=theme
+            theme=theme,
+            css=CUSTOM_CSS
         )
     except OSError:
         # Fallback to automatic free port selection if 7860 is occupied
@@ -37,5 +38,6 @@ if __name__ == "__main__":
             server_port=None,
             share=False,
             show_error=True,
-            theme=theme
+            theme=theme,
+            css=CUSTOM_CSS
         )

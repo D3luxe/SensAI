@@ -236,6 +236,12 @@ class RocketSimArena:
         self._big_pad_active = np.array([self.boost_pads[i].is_active for i in self._bg_pad_indices], dtype=bool)
 
         self._init_cars()
+        from env.state_setters import WeightedScenarioSetter
+        self.scenario_setter = WeightedScenarioSetter()
+
+    def set_scenario_weights(self, config_dict: Dict[str, Any]):
+        """Dynamically configures scenario probabilities (kickoffs, aerials, wall, saves, replays)."""
+        self.scenario_setter.update_weights(config_dict)
 
     def _init_cars(self):
         self.cars.clear()
@@ -266,107 +272,11 @@ class RocketSimArena:
         self.scored_team = None
 
         if self._use_rsim and self._rsim_arena:
-            # Native C++ RocketSim Reset
-            half_players = self.num_players // 2
-            spawn_mode = "kickoff"
+            # Execute modular State Setter (Kickoffs, Replays, Aerials, Wall Plays, Goalie Saves)
             if random_kickoff:
-                roll = np.random.rand()
-                if roll < 0.75:
-                    spawn_mode = "kickoff"
-                elif roll < 0.85:
-                    spawn_mode = "striking"
-                elif roll < 0.95:
-                    spawn_mode = "contested"
-                else:
-                    spawn_mode = "wall_play"
-
-            if spawn_mode == "kickoff":
-                self._rsim_arena.reset_kickoff()
-            elif spawn_mode == "striking":
-                # Ball setup
-                bx = float(np.random.uniform(-1500.0, 1500.0))
-                by = float(np.random.uniform(-1000.0, 1000.0))
-                bz = float(np.random.uniform(BALL_RADIUS, 350.0))
-                b_vel_y = float(np.random.uniform(-200.0, 200.0))
-                bs = rsim.BallState()
-                bs.pos = rsim.Vec(bx, by, bz)
-                bs.vel = rsim.Vec(float(np.random.uniform(-200.0, 200.0)), b_vel_y, float(np.random.uniform(0.0, 250.0)))
-                self._rsim_arena.ball.set_state(bs)
-
-                # Blue car (attacker)
-                for i in range(half_players):
-                    offset_dist = float(np.random.uniform(700.0, 1400.0))
-                    cs = rsim.CarState()
-                    cs.pos = rsim.Vec(bx + float(np.random.uniform(-200.0, 200.0)), max(-4800.0, by - offset_dist), 17.0)
-                    cs.vel = rsim.Vec(0.0, float(np.random.uniform(0.0, 300.0)), 0.0)
-                    cs.rot_mat = rsim.Angle(yaw=math.pi / 2, pitch=0.0, roll=0.0).as_rot_mat()
-                    cs.boost = float(np.random.uniform(33.0, 75.0))
-                    self._rsim_cars[i].set_state(cs)
-
-                # Orange car (defender)
-                for i in range(half_players):
-                    cs = rsim.CarState()
-                    cs.pos = rsim.Vec(float(np.random.uniform(-800.0, 800.0)), float(np.random.uniform(3000.0, 4500.0)), 17.0)
-                    cs.vel = rsim.Vec(0.0, 0.0, 0.0)
-                    cs.rot_mat = rsim.Angle(yaw=-math.pi / 2, pitch=0.0, roll=0.0).as_rot_mat()
-                    cs.boost = float(np.random.uniform(33.0, 60.0))
-                    self._rsim_cars[half_players + i].set_state(cs)
-            elif spawn_mode == "contested":
-                # Contested setup
-                bx = float(np.random.uniform(-1000.0, 1000.0))
-                by = float(np.random.uniform(-600.0, 600.0))
-                bs = rsim.BallState()
-                bs.pos = rsim.Vec(bx, by, BALL_RADIUS)
-                bs.vel = rsim.Vec(0.0, 0.0, 0.0)
-                self._rsim_arena.ball.set_state(bs)
-
-                for i in range(half_players):
-                    dist = float(np.random.uniform(800.0, 1300.0))
-                    cs = rsim.CarState()
-                    cs.pos = rsim.Vec(bx, by - dist, 17.0)
-                    cs.vel = rsim.Vec(0.0, float(np.random.uniform(0.0, 200.0)), 0.0)
-                    cs.rot_mat = rsim.Angle(yaw=math.pi / 2, pitch=0.0, roll=0.0).as_rot_mat()
-                    cs.boost = float(np.random.uniform(33.0, 50.0))
-                    self._rsim_cars[i].set_state(cs)
-
-                for i in range(half_players):
-                    dist = float(np.random.uniform(800.0, 1300.0))
-                    cs = rsim.CarState()
-                    cs.pos = rsim.Vec(bx, by + dist, 17.0)
-                    cs.vel = rsim.Vec(0.0, -float(np.random.uniform(0.0, 200.0)), 0.0)
-                    cs.rot_mat = rsim.Angle(yaw=-math.pi / 2, pitch=0.0, roll=0.0).as_rot_mat()
-                    cs.boost = float(np.random.uniform(33.0, 50.0))
-                    self._rsim_cars[half_players + i].set_state(cs)
+                self.scenario_setter.reset(self._rsim_arena, self.num_players)
             else:
-                # Wall & Aerial Play setup (sidewall driving and wall clears)
-                side_sign = 1.0 if np.random.rand() > 0.5 else -1.0
-                wall_x = side_sign * 3800.0
-                ball_y = float(np.random.uniform(-800.0, 800.0))
-                ball_z = float(np.random.uniform(350.0, 750.0))
-
-                bs = rsim.BallState()
-                bs.pos = rsim.Vec(wall_x, ball_y, ball_z)
-                bs.vel = rsim.Vec(0.0, float(np.random.uniform(100.0, 400.0)), float(np.random.uniform(-50.0, 150.0)))
-                self._rsim_arena.ball.set_state(bs)
-
-                # Blue car attacking wall
-                for i in range(half_players):
-                    cs = rsim.CarState()
-                    cs.pos = rsim.Vec(side_sign * 4070.0, ball_y - float(np.random.uniform(400.0, 700.0)), max(100.0, ball_z - 150.0))
-                    cs.vel = rsim.Vec(0.0, float(np.random.uniform(200.0, 500.0)), 0.0)
-                    wall_roll = math.pi / 2 if side_sign > 0 else -math.pi / 2
-                    cs.rot_mat = rsim.Angle(yaw=math.pi / 2, pitch=0.0, roll=wall_roll).as_rot_mat()
-                    cs.boost = float(np.random.uniform(40.0, 80.0))
-                    self._rsim_cars[i].set_state(cs)
-
-                # Orange car defending midfield/net
-                for i in range(half_players):
-                    cs = rsim.CarState()
-                    cs.pos = rsim.Vec(float(np.random.uniform(-600.0, 600.0)), float(np.random.uniform(2500.0, 4000.0)), 17.0)
-                    cs.vel = rsim.Vec(0.0, 0.0, 0.0)
-                    cs.rot_mat = rsim.Angle(yaw=-math.pi / 2, pitch=0.0, roll=0.0).as_rot_mat()
-                    cs.boost = float(np.random.uniform(33.0, 60.0))
-                    self._rsim_cars[half_players + i].set_state(cs)
+                self.scenario_setter.kickoff_setter.reset(self._rsim_arena, self.num_players)
 
             self._sync_from_rsim()
             return
