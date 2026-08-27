@@ -100,6 +100,7 @@ class PlayerToBallVelocityReward(BaseReward):
     Continuous Closing Speed.
     Rewards the player car for moving toward the ball.
     Normalizes by CAR_MAX_SPEED (2300.0 uu/s).
+    Includes a 2.0x sprint multiplier and anti-retreat penalty during active kickoffs.
     """
     def __init__(self, weight: float = 0.8):
         super().__init__(weight)
@@ -112,6 +113,16 @@ class PlayerToBallVelocityReward(BaseReward):
 
         unit_to_ball = car_to_ball / dist
         closing_speed = float(np.dot(car.vel, unit_to_ball))
+
+        # Check if kickoff is active
+        is_kickoff = bool(abs(arena.ball.pos[0]) < 50.0 and abs(arena.ball.pos[1]) < 50.0 and float(np.linalg.norm(arena.ball.vel)) < 100.0)
+        if is_kickoff:
+            if closing_speed > 200.0:
+                # 2.0x sprint multiplier for aggressively challenging the kickoff
+                return self.weight * (closing_speed / CAR_MAX_SPEED) * 2.0
+            elif closing_speed < -100.0:
+                # Anti-retreat penalty: penalize turning away or retreating into own net on kickoff
+                return -0.5
 
         # Normalized closing speed: positive when approaching ball
         normalized_speed = closing_speed / CAR_MAX_SPEED
@@ -126,6 +137,7 @@ class TouchBallReward(BaseReward):
     Atomic Ball Strike Quality.
     Rewarded at the exact moment of ball contact, scaled by touch speed and
     alignment directed towards the opponent's net.
+    Includes an instant +2.5 bounty for winning the kickoff first touch.
     """
     def __init__(self, weight: float = 1.2):
         super().__init__(weight)
@@ -154,7 +166,11 @@ class TouchBallReward(BaseReward):
             else:
                 direction_multiplier = 0.5
 
-            return self.weight * power_factor * direction_multiplier
+            # Kickoff first-touch race bounty
+            is_kickoff_touch = bool(abs(arena.ball.pos[0]) < 200.0 and abs(arena.ball.pos[1]) < 200.0 and all(c.ball_touches <= 1 for c in arena.cars))
+            kickoff_bounty = 2.5 if is_kickoff_touch else 0.0
+
+            return (self.weight * power_factor * direction_multiplier) + kickoff_bounty
 
         return 0.0
 
