@@ -102,10 +102,10 @@ class TestPhysicsAndControls(unittest.TestCase):
             ctrl = bot.get_output(packet)
 
         self.assertAlmostEqual(ctrl.throttle, 0.8, places=4)
-        self.assertAlmostEqual(ctrl.steer, 0.7, delta=0.05, msg="Steer must map correctly to gamepad!")
+        self.assertAlmostEqual(ctrl.steer, -0.7, delta=0.05, msg="Steer must pass through direct 1-to-1!")
         self.assertAlmostEqual(ctrl.pitch, -0.9, places=4, msg="Pitch must pass through un-negated!")
-        self.assertAlmostEqual(ctrl.yaw, -0.6, places=4, msg="Yaw must map correctly to gamepad!")
-        self.assertAlmostEqual(ctrl.roll, -0.5, places=4, msg="Roll must map correctly to gamepad!")
+        self.assertAlmostEqual(ctrl.yaw, 0.6, places=4, msg="Yaw must pass through direct 1-to-1!")
+        self.assertAlmostEqual(ctrl.roll, -0.5, places=4, msg="Roll must pass through direct 1-to-1!")
         self.assertTrue(ctrl.boost)
 
     def test_bilateral_symmetry_masks(self):
