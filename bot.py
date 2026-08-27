@@ -311,44 +311,37 @@ class SenseiRLBot(BaseAgent):
                 # Hold previous action across the 8 physics substeps
                 act = self.prev_action
 
-            # 1-to-1 Standard RLGym/RLBot Controller Mapping (Zero negations, 100% direct pass-through)
-            # Continuous Action vector: [throttle, steer, pitch, yaw, roll, jump, boost, handbrake]
+            # ── Rocket League In-Game Controller Input Mapping ─────────────────────────
+            # Continuous Action Vector: [throttle, steer, pitch, yaw, roll, jump, boost, handbrake]
+            #
+            # RLBot Controller Axes:
+            #  - Throttle: Direct (+1.0 Forward, -1.0 Reverse)
+            #  - Steer:    Direct (+1.0 Steer Right, -1.0 Steer Left)
+            #  - Yaw:      Direct (+1.0 Yaw Right, -1.0 Yaw Left)
+            #  - Roll:     Direct (+1.0 Roll Right, -1.0 Roll Left)
+            #  - Pitch:    Inverted (-1.0 Nose Up / Aerial Climb, +1.0 Nose Down / Front Flip)
             raw_steer = float(np.clip(act[1], -1.0, 1.0))
-            # 120Hz Smooth Steering Filter (Eliminates high-frequency wheel chatter while retaining instant response)
-            self.current_steer = 0.65 * raw_steer + 0.35 * self.current_steer
-            # In RLBot: controller.steer = +1.0 turns Left, -1.0 turns Right in-game
+            self.current_steer = 0.8 * raw_steer + 0.2 * self.current_steer
+
             controller.throttle = float(np.clip(act[0], -1.0, 1.0))
-            controller.steer = -float(np.clip(self.current_steer, -1.0, 1.0))
+            controller.steer = float(np.clip(self.current_steer, -1.0, 1.0))
+            controller.pitch = -float(np.clip(act[2], -1.0, 1.0))
+            controller.yaw = float(np.clip(act[3], -1.0, 1.0))
+            controller.roll = float(np.clip(act[4], -1.0, 1.0))
 
             jump_threshold = 0.5 if self.continuous_actions else 0.0
             jump_requested = bool(act[5] > jump_threshold)
 
-            # Aerial controls: active when airborne or when deliberately jumping/dodging
+            # Ground stabilization: when firmly driving on ground without jump, keep pitch/roll neutral
             if is_on_ground and not jump_requested:
-                # Ground stability: keep air pitch and roll neutral to prevent death-rolls over wall curves and bumps
                 controller.pitch = 0.0
-                controller.yaw = -float(np.clip(act[3], -1.0, 1.0))
                 controller.roll = 0.0
-            else:
-                controller.pitch = float(np.clip(act[2], -1.0, 1.0))
-                controller.yaw = -float(np.clip(act[3], -1.0, 1.0))
-                controller.roll = float(np.clip(act[4], -1.0, 1.0))
 
-            # Double-Jump & Dodge 120Hz Substep Cadence (Allows natural speed-flips, wave-dashes, and aerials)
+            # Jump & Dodge execution
             if jump_requested:
-                if self.ground_dodge_active:
-                    # Ground flip: jump (ticks 0,1) -> release (ticks 2,3) -> dodge click (ticks 4,5)
+                if self.ground_dodge_active or self.fast_aerial_active:
                     controller.jump = bool(self.ticks_since_last_action in (0, 1, 4, 5))
-                elif self.fast_aerial_active:
-                    # Fast aerial climb: jump (ticks 0,1) -> release (ticks 2,3) -> double-jump click (ticks 4,5)
-                    controller.jump = bool(self.ticks_since_last_action in (0, 1, 4, 5))
-                    if self.ticks_since_last_action in (4, 5):
-                        controller.pitch = 0.0
-                        controller.steer = 0.0
-                        controller.yaw = 0.0
-                        controller.roll = 0.0
                 else:
-                    # Aerial dodge / jump
                     controller.jump = bool(self.ticks_since_last_action in (0, 1, 2))
             else:
                 controller.jump = False

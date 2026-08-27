@@ -94,18 +94,22 @@ class TestPhysicsAndControls(unittest.TestCase):
         ball = Struct(physics=Struct(location=Struct(x=0.0, y=0.0, z=91.25), velocity=Struct(x=0, y=0, z=0), angular_velocity=Struct(x=0, y=0, z=0)))
         packet = Struct(num_cars=1, game_cars=[car], game_ball=ball, game_info=Struct(is_match_ended=False))
 
-        # Test with arbitrary test actions
-        test_act = np.array([0.8, -0.7, -0.9, 0.6, -0.5, 1.0, 1.0, 0.0], dtype=np.float32)
+        # Test airborne controller pass-through: [throttle, steer, pitch, yaw, roll, jump, boost, handbrake]
+        test_act = np.array([0.8, -0.7, -0.9, 0.6, -0.5, 0.0, 1.0, 0.0], dtype=np.float32)
         bot.prev_action = test_act
         bot.ticks_since_last_action = 0
-        for _ in range(4):
-            ctrl = bot.get_output(packet)
+        bot.current_steer = -0.7
+        car.has_wheel_contact = False
+        ctrl = bot.get_output(packet)
 
-        self.assertAlmostEqual(ctrl.throttle, 0.8, places=4)
-        self.assertAlmostEqual(ctrl.steer, 0.7, delta=0.05, msg="Steer must turn left when act[1] is negative!")
-        self.assertAlmostEqual(ctrl.pitch, -0.9, places=4, msg="Pitch must pass through un-negated!")
-        self.assertAlmostEqual(ctrl.yaw, -0.6, places=4, msg="Yaw must match steer sign!")
-        self.assertAlmostEqual(ctrl.roll, -0.5, places=4, msg="Roll must pass through un-negated!")
+        # In-Game Rocket League gamepad stick input mapping:
+        # Throttle (+1.0), Steer (+1.0 Right, -1.0 Left), Yaw (+1.0 Right, -1.0 Left), Roll (+1.0 Right, -1.0 Left)
+        # Pitch is -act[2] (-1.0 Nose Up / Aerial Climb, +1.0 Nose Down / Front Flip)
+        self.assertAlmostEqual(ctrl.throttle, 0.8, places=4, msg="Throttle maps direct (+0.8 Forward)!")
+        self.assertAlmostEqual(ctrl.steer, -0.7, delta=0.05, msg="Steer maps direct (act[1]=-0.7 Left maps to ctrl.steer=-0.7 Left)!")
+        self.assertAlmostEqual(ctrl.pitch, 0.9, places=4, msg="Pitch is -act[2] (act[2]=-0.9 Down/Frontflip maps to ctrl.pitch=+0.9 Push Stick Forward)!")
+        self.assertAlmostEqual(ctrl.yaw, 0.6, places=4, msg="Yaw maps direct (act[3]=+0.6 Right maps to ctrl.yaw=+0.6 Right)!")
+        self.assertAlmostEqual(ctrl.roll, -0.5, places=4, msg="Roll maps direct (act[4]=-0.5 Left maps to ctrl.roll=-0.5 Roll Left)!")
         self.assertTrue(ctrl.boost)
 
     def test_bilateral_symmetry_masks(self):
