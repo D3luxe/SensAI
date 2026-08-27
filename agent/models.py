@@ -45,8 +45,8 @@ class ActorCritic(nn.Module):
 
         if continuous_actions:
             self.actor_mean = layer_init(nn.Linear(prev_dim, act_dim), std=0.01)
-            # Log std parameter for Gaussian policy
-            self.actor_log_std = nn.Parameter(torch.zeros(1, act_dim))
+            # Log std parameter for Gaussian policy: initialized to -0.7 (std ~ 0.5)
+            self.actor_log_std = nn.Parameter(torch.full((1, act_dim), -0.7))
         else:
             self.actor_logits = layer_init(nn.Linear(prev_dim, act_dim), std=0.01)
 
@@ -74,7 +74,9 @@ class ActorCritic(nn.Module):
 
         if self.continuous_actions:
             action_mean = torch.tanh(self.actor_mean(features))
-            action_log_std = self.actor_log_std.expand_as(action_mean)
+            # Clamp log_std to [-3.0, 0.0] so exploration std is strictly bounded within [0.05, 1.00]
+            clamped_log_std = torch.clamp(self.actor_log_std, min=-3.0, max=0.0)
+            action_log_std = clamped_log_std.expand_as(action_mean)
             action_std = torch.exp(action_log_std)
             dist = Normal(action_mean, action_std)
 
