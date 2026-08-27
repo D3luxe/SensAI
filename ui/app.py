@@ -21,6 +21,7 @@ import matplotlib.pyplot as plt
 from utils.process_manager import TrainingProcessManager
 from utils.visualizer import simulate_match
 from utils.replay_parser import ReplayParser, DEFAULT_DEMO_DIR
+from utils.test_runner import run_all_unit_tests, get_cached_or_run_tests, format_test_results_markdown
 from utils.diagnostics import (
     extract_rolling_telemetry,
     render_action_biases_plot,
@@ -273,6 +274,10 @@ def build_full_diagnostic_export() -> tuple[str, str]:
     log_tail = mgr.get_logs(max_lines=20)
     log_tail_str = "".join(log_tail).strip() if log_tail else "*(No console output recorded yet)*"
 
+    # 7. Automated Unit Test Suite Diagnostics
+    test_diag = get_cached_or_run_tests()
+    test_md = format_test_results_markdown(test_diag)
+
     # Formatted Markdown Overview for UI Display
     run_state_badge = "🟢 RUNNING" if (running and not paused) else ("⏸️ PAUSED" if (running and paused) else "🛑 STOPPED")
     
@@ -289,6 +294,10 @@ def build_full_diagnostic_export() -> tuple[str, str]:
 | **Policy Loss** | `{metrics.get('policy_loss', 0.0):.5f}` | **Value Loss** | `{metrics.get('value_loss', 0.0):.4f}` |
 | **Ball Touches / Rollout** | `{metrics.get('ball_touches', 0.0):.1f}` | **Goals / Rollout** | `{metrics.get('goals', 0)}` |
 | **Observation Dimensions** | `{model_health.get('obs_dim', 74)} features` | **Action Dimensions** | `{model_health.get('act_dim', 8)} channels` |
+
+---
+
+{test_md}
 
 ---
 
@@ -323,6 +332,14 @@ def build_full_diagnostic_export() -> tuple[str, str]:
             "physics_engine": engine_str,
         },
         "model_health": model_health,
+        "test_suite_diagnostics": {
+            "all_passed": test_diag.get("all_passed", False),
+            "passed_count": test_diag.get("passed", 0),
+            "total_tests": test_diag.get("total_tests", 0),
+            "pass_rate_pct": test_diag.get("pass_rate_pct", 0.0),
+            "duration_seconds": test_diag.get("duration_seconds", 0.0),
+            "subsystems": test_diag.get("subsystems", [])
+        },
         "convergence_metrics": {
             "iteration": metrics.get("iteration", 0),
             "global_step": metrics.get("global_step", 0),
@@ -626,120 +643,7 @@ def create_ui():
                     )
 
             # ---------------------------------------------------------
-            # TAB 4: 🧠 POLICY BIASES & BEHAVIORAL DIAGNOSTICS
-            # ---------------------------------------------------------
-            with gr.TabItem("🧠 Training Biases & Habit Radar"):
-                gr.Markdown(
-                    """
-                    ### 🧠 Policy Biases & Behavioral Radar
-                    Analyzes the bot's action distributions and pitch spatial positioning averaged across recent iterations.
-                    Catches bad habits early (corner trapping, donut spinning, jump reluctance, boost starvation) with actionable tuning advice.
-                    """
-                )
-                with gr.Row():
-                    diag_window_slider = gr.Slider(
-                        1, 25, value=8, step=1,
-                        label="Rolling Average Window (Iterations)",
-                        info="Number of recent iterations to average across."
-                    )
-                    refresh_diag_btn = gr.Button("🔄 Refresh Diagnostics", variant="primary")
-
-                with gr.Row():
-                    with gr.Column(scale=1):
-                        diag_coach_report = gr.Markdown(value="*Click 'Refresh Diagnostics' or run training to view live AI coach analysis.*")
-                    with gr.Column(scale=1):
-                        diag_action_plot = gr.Plot(label="Action & Control Distributions")
-                        diag_position_plot = gr.Plot(label="Pitch Positioning & Vehicle State")
-
-            # ---------------------------------------------------------
-            # TAB 5: CONSOLE LOG STREAM
-            # ---------------------------------------------------------
-            with gr.TabItem("📜 Live Console Logs"):
-                with gr.Row():
-                    refresh_logs_btn = gr.Button("🔄 Refresh Logs")
-                    clear_logs_btn = gr.Button("🧹 Clear Display")
-                console_output = gr.TextArea(
-                    label="Training Process Output (stdout / stderr)",
-                    lines=18,
-                    max_lines=25,
-                    interactive=False,
-                    autoscroll=True
-                )
-
-            # ---------------------------------------------------------
-            # TAB 6: BOT MATCH VISUALIZER & EVALUATION
-            # ---------------------------------------------------------
-            with gr.TabItem("🎮 Bot Match Visualizer & Evaluation"):
-                gr.Markdown(
-                    """
-                    ### 🎯 Headless Simulation Match Replay
-                    Select a trained checkpoint model and simulate a full match on the 2D pitch with trajectory tracing.
-                    """
-                )
-                with gr.Row():
-                    with gr.Column(scale=1):
-                        ckpt_dropdown = gr.Dropdown(
-                            choices=get_available_checkpoints(),
-                            value=get_available_checkpoints()[0],
-                            label="Select Blue Team Checkpoint",
-                            info="Select a trained PyTorch model checkpoint (.pt) for the Blue Team."
-                        )
-                        opponent_mode = gr.Radio(
-                            ["Self-Play (Bot vs Itself)", "Baseline Bot (Chase Ball Heuristic)", "Another Checkpoint"],
-                            value="Self-Play (Bot vs Itself)",
-                            label="Opponent Matchup Type",
-                            info="Choose who the bot plays against in the visualizer."
-                        )
-                        orange_ckpt_dropdown = gr.Dropdown(
-                            choices=get_available_checkpoints(),
-                            value=get_available_checkpoints()[0],
-                            label="Select Orange Team Checkpoint",
-                            visible=False,
-                            info="Select a different checkpoint for the Orange Team."
-                        )
-                        refresh_ckpts_btn = gr.Button("🔄 Scan Checkpoint Directory")
-                        sim_steps_slider = gr.Slider(
-                            100, 1000, value=400, step=50,
-                            label="Simulation Steps",
-                            info="Duration of match simulation (e.g. 400 steps ≈ 26 seconds of gameplay)."
-                        )
-                        run_sim_btn = gr.Button("🕹️ Simulate Match & Render Replay", variant="primary")
-                        sim_stats_box = gr.Markdown("#### Match Results: Click 'Simulate Match' to evaluate.")
-                    with gr.Column(scale=2):
-                        with gr.Tabs():
-                            with gr.TabItem("🗺️ 2D Pitch Trajectories"):
-                                visualizer_plot = gr.Plot(label="Top-Down Rocket League Field Trajectory")
-                            with gr.TabItem("📊 Match Reward Breakdown"):
-                                reward_breakdown_plot = gr.Plot(label="Points Earned by Reward Category")
-
-            # ---------------------------------------------------------
-            # TAB 7: 🔬 DIAGNOSTICS & AI SNAPSHOT EXPORT
-            # ---------------------------------------------------------
-            with gr.TabItem("🔬 Diagnostics & AI Export"):
-                gr.Markdown(
-                    """
-                    ### 🔬 Comprehensive Diagnostics & AI Assistant Export
-                    Provides a unified single-pane-of-glass snapshot containing all process info, active reward weights, hyperparameters, convergence metrics, behavioral telemetry, and console output.
-                    
-                    **💡 How to use:** Click **'🔄 Refresh Diagnostic Snapshot'**, then click the copy icon on the text box below to paste directly into your conversation with Antigravity!
-                    """
-                )
-                with gr.Row():
-                    refresh_snapshot_btn = gr.Button("🔄 Refresh Diagnostic Snapshot", variant="primary")
-
-                with gr.Row():
-                    with gr.Column(scale=1):
-                        diag_overview_md = gr.Markdown(value="*Click 'Refresh Diagnostic Snapshot' to generate live overview.*")
-                    with gr.Column(scale=1):
-                        diag_export_raw = gr.Code(
-                            label="📋 Complete Diagnostic Snapshot (Copy & Paste to Assistant)",
-                            language="markdown",
-                            lines=22,
-                            interactive=False
-                        )
-
-            # ---------------------------------------------------------
-            # TAB 8: 🎯 SCENARIOS & REPLAY INGESTION
+            # TAB 4: 🎯 SCENARIOS & REPLAY INGESTION
             # ---------------------------------------------------------
             with gr.TabItem("🎯 Scenarios & Replays"):
                 gr.Markdown(
@@ -809,6 +713,141 @@ def create_ui():
                         
                         apply_scenarios_btn = gr.Button("💾 Apply Scenario Distribution Live", variant="primary")
                         scenarios_feedback_box = gr.Markdown("")
+
+            # ---------------------------------------------------------
+            # TAB 5: CONSOLE LOG STREAM
+            # ---------------------------------------------------------
+            with gr.TabItem("📜 Live Console Logs"):
+                with gr.Row():
+                    refresh_logs_btn = gr.Button("🔄 Refresh Logs")
+                    clear_logs_btn = gr.Button("🧹 Clear Display")
+                console_output = gr.TextArea(
+                    label="Training Process Output (stdout / stderr)",
+                    lines=18,
+                    max_lines=25,
+                    interactive=False,
+                    autoscroll=True
+                )
+
+            # ---------------------------------------------------------
+            # TAB 6: 🔬 DIAGNOSTIC & EVALUATION HUB (CONSOLIDATED)
+            # ---------------------------------------------------------
+            with gr.TabItem("🔬 Diagnostic & Evaluation Hub"):
+                gr.Markdown(
+                    """
+                    ### 🔬 Unified Diagnostic & Evaluation Hub
+                    Single-pane-of-glass workspace for full system health, automated unit test verification, behavioral biases, and 2D match simulation replays.
+                    """
+                )
+                with gr.Tabs():
+
+                    # Sub-Tab 1: System Snapshot & AI Assistant Export
+                    with gr.TabItem("📋 System Snapshot & AI Export"):
+                        gr.Markdown(
+                            """
+                            #### 📋 Comprehensive Diagnostic Snapshot & AI Assistant Export
+                            Provides real-time process info, active reward weights, hyperparameters, model weights, unit test health, and console output.
+                            """
+                        )
+                        with gr.Row():
+                            refresh_snapshot_btn = gr.Button("🔄 Refresh Diagnostic Snapshot", variant="primary")
+
+                        with gr.Row():
+                            with gr.Column(scale=1):
+                                diag_overview_md = gr.Markdown(value="*Click 'Refresh Diagnostic Snapshot' to generate live overview.*")
+                            with gr.Column(scale=1):
+                                diag_export_raw = gr.Code(
+                                    label="📋 Complete Diagnostic Snapshot (Copy & Paste to Assistant)",
+                                    language="markdown",
+                                    lines=22,
+                                    interactive=False
+                                )
+
+                    # Sub-Tab 2: Automated Unit Tests & Subsystem Health
+                    with gr.TabItem("🧪 Automated Unit Tests & Health"):
+                        gr.Markdown(
+                            """
+                            #### 🧪 Subsystem Unit & Integration Test Verification
+                            Run the full programmatic test suite (Physics, Neural Architecture, Scenarios, Replay Parser) to verify environment and bot integrity.
+                            """
+                        )
+                        with gr.Row():
+                            run_unit_tests_btn = gr.Button("🧪 Run All Unit Tests", variant="primary")
+                        
+                        unit_tests_overview_md = gr.Markdown(value=format_test_results_markdown(get_cached_or_run_tests()))
+                        unit_tests_stdout = gr.Code(
+                            label="Test Runner Output Stream",
+                            language="markdown",
+                            lines=10,
+                            interactive=False
+                        )
+
+                    # Sub-Tab 3: Behavioral Biases & AI Coach
+                    with gr.TabItem("🧠 Behavioral Biases & AI Coach"):
+                        gr.Markdown(
+                            """
+                            #### 🧠 Action Distributions & Pitch Positional Radar
+                            Analyzes controller distributions and spatial heatmap positioning averaged across recent iterations to diagnose bad habits.
+                            """
+                        )
+                        with gr.Row():
+                            diag_window_slider = gr.Slider(
+                                1, 25, value=8, step=1,
+                                label="Rolling Average Window (Iterations)",
+                                info="Number of recent iterations to average across."
+                            )
+                            refresh_diag_btn = gr.Button("🔄 Refresh Diagnostics", variant="primary")
+
+                        with gr.Row():
+                            with gr.Column(scale=1):
+                                diag_coach_report = gr.Markdown(value="*Click 'Refresh Diagnostics' or run training to view live AI coach analysis.*")
+                            with gr.Column(scale=1):
+                                diag_action_plot = gr.Plot(label="Action & Control Distributions")
+                                diag_position_plot = gr.Plot(label="Pitch Positioning & Vehicle State")
+
+                    # Sub-Tab 4: 2D Pitch Match Visualizer & Evaluation
+                    with gr.TabItem("🎮 2D Pitch Match Visualizer"):
+                        gr.Markdown(
+                            """
+                            #### 🎮 Headless Simulation Match Replay
+                            Simulate full matches on the 2D pitch with real-time trajectory tracing and reward breakdown.
+                            """
+                        )
+                        with gr.Row():
+                            with gr.Column(scale=1):
+                                ckpt_dropdown = gr.Dropdown(
+                                    choices=get_available_checkpoints(),
+                                    value=get_available_checkpoints()[0],
+                                    label="Select Blue Team Checkpoint",
+                                    info="Select a trained PyTorch model checkpoint (.pt) for the Blue Team."
+                                )
+                                opponent_mode = gr.Radio(
+                                    ["Self-Play (Bot vs Itself)", "Baseline Bot (Chase Ball Heuristic)", "Another Checkpoint"],
+                                    value="Self-Play (Bot vs Itself)",
+                                    label="Opponent Matchup Type",
+                                    info="Choose who the bot plays against in the visualizer."
+                                )
+                                orange_ckpt_dropdown = gr.Dropdown(
+                                    choices=get_available_checkpoints(),
+                                    value=get_available_checkpoints()[0],
+                                    label="Select Orange Team Checkpoint",
+                                    visible=False,
+                                    info="Select a different checkpoint for the Orange Team."
+                                )
+                                refresh_ckpts_btn = gr.Button("🔄 Scan Checkpoint Directory")
+                                sim_steps_slider = gr.Slider(
+                                    100, 1000, value=400, step=50,
+                                    label="Simulation Steps",
+                                    info="Duration of match simulation (e.g. 400 steps ≈ 26 seconds of gameplay)."
+                                )
+                                run_sim_btn = gr.Button("🕹️ Simulate Match & Render Replay", variant="primary")
+                                sim_stats_box = gr.Markdown("#### Match Results: Click 'Simulate Match' to evaluate.")
+                            with gr.Column(scale=2):
+                                with gr.Tabs():
+                                    with gr.TabItem("🗺️ 2D Pitch Trajectories"):
+                                        visualizer_plot = gr.Plot(label="Top-Down Rocket League Field Trajectory")
+                                    with gr.TabItem("📊 Match Reward Breakdown"):
+                                        reward_breakdown_plot = gr.Plot(label="Points Earned by Reward Category")
 
         # -------------------------------------------------------------
         # EVENT HANDLERS & CALLBACKS
@@ -1258,6 +1297,17 @@ def create_ui():
             fn=on_apply_scenarios_weights,
             inputs=[sc_kickoff_slider, sc_replay_slider, sc_aerial_slider, sc_wall_slider, sc_save_slider],
             outputs=[scenarios_feedback_box]
+        )
+
+        # Unit Tests Runner Callback
+        def on_run_unit_tests():
+            res = run_all_unit_tests(verbose=True)
+            res_md = format_test_results_markdown(res)
+            return res_md, res.get("raw_output", "")
+
+        run_unit_tests_btn.click(
+            fn=on_run_unit_tests,
+            outputs=[unit_tests_overview_md, unit_tests_stdout]
         )
 
     return demo
