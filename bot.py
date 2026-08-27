@@ -323,21 +323,6 @@ class SenseiRLBot(BaseAgent):
                         act_idx = int(action.squeeze().cpu().item())
                         act = self.discrete_parser.parse_actions(act_idx)
                 self.prev_action = act
-
-                if self.dodge_cooldown > 0:
-                    self.dodge_cooldown -= 1
-
-                # Determine if a ground flip or fast aerial is initiated on tick 0
-                jump_threshold = 0.5 if self.continuous_actions else 0.0
-                jump_req = bool(act[5] > jump_threshold)
-                if is_on_ground and self.dodge_cooldown == 0:
-                    self.fast_aerial_active = bool(jump_req and act[2] > 0.1 and act[6] > 0.3)
-                    self.ground_dodge_active = bool(jump_req and not self.fast_aerial_active)
-                    if self.ground_dodge_active:
-                        self.dodge_cooldown = 2
-                elif not is_on_ground:
-                    self.fast_aerial_active = False
-                    self.ground_dodge_active = False
             else:
                 # Hold previous action across the 8 physics substeps
                 act = self.prev_action
@@ -361,36 +346,20 @@ class SenseiRLBot(BaseAgent):
             controller.roll = float(np.clip(act[4], -1.0, 1.0))
 
             jump_threshold = 0.5 if self.continuous_actions else 0.0
-            jump_requested = bool(act[5] > jump_threshold)
+            controller.jump = bool(act[5] > jump_threshold)
 
-            # Ground stabilization & Dodge Takeoff Clearance:
-            # When driving on the ground without jump, OR during Phase 1 (ticks 0..3) of a ground dodge takeoff,
-            # keep pitch and roll neutral so the nose does not bottom out into the turf.
-            if (is_on_ground and not jump_requested) or (self.ground_dodge_active and self.ticks_since_last_action < 4):
+            # Ground stabilization:
+            # When driving on the ground without jumping, keep pitch and roll neutral so the nose does not bottom out.
+            if is_on_ground and not controller.jump:
                 controller.pitch = 0.0
                 controller.roll = 0.0
-
-            # Jump & Dodge execution (Exact 4-2-2 Substep Alignment with RocketSim):
-            # Phase 1 (Ticks 0..3): Hold Jump for 4 ticks (33.3ms) to fully clear suspension.
-            # Phase 2 (Ticks 4..5): Release Jump for 2 ticks (16.7ms).
-            # Phase 3 (Ticks 6..7): Press Jump for 2 ticks with directional pitch/yaw to trigger dodge impulse.
-            if jump_requested and self.dodge_cooldown > 0:
-                if self.ground_dodge_active or self.fast_aerial_active:
-                    controller.jump = bool(self.ticks_since_last_action in (0, 1, 2, 3, 6, 7))
-                else:
-                    controller.jump = bool(self.ticks_since_last_action in (0, 1, 2, 3))
-            elif jump_requested:
-                controller.jump = bool(self.ticks_since_last_action in (0, 1, 2, 3))
-            else:
-                controller.jump = False
 
             boost_threshold = 0.3 if self.continuous_actions else 0.0
             controller.boost = bool(act[6] > boost_threshold)
 
             # Handbrake / Powerslide:
             # Must ONLY be active when on the ground and actively steering.
-            # When airborne, handbrake triggers Rocket League's Air Roll modifier, which
-            # corrupts aerial pitch/yaw/roll stabilization. When driving straight, handbrake ruins grip.
+            # When airborne, handbrake triggers Rocket League's Air Roll modifier.
             if is_on_ground and abs(controller.steer) > 0.15:
                 controller.handbrake = bool(act[7] > 0.2)
             else:

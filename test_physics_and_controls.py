@@ -236,12 +236,10 @@ class TestPhysicsAndControls(unittest.TestCase):
         self.assertEqual(goal_fn.get_reward(car, MockArena(ball_fwd, [car]), np.zeros(8), True, 0), 10.0)
         self.assertEqual(goal_fn.get_reward(car, MockArena(ball_fwd, [car]), np.zeros(8), True, 1), -10.0)
 
-    def test_ground_dodge_substep_timing(self):
+    def test_jump_passthrough_and_ground_stabilization(self):
         """
-        Guarantees that ground dodge adheres to exact 4-2-2 substep timing and suppresses pitch during takeoff:
-        - Ticks 0..3 (Phase 1): jump=True, pitch=0.0 (ground clearance, no nose diving)
-        - Ticks 4..5 (Phase 2): jump=False, pitch active
-        - Ticks 6..7 (Phase 3): jump=True, pitch active (dodge trigger)
+        Guarantees that bot.py passes jump directly (act[5] > 0.5 -> True, <= 0.5 -> False)
+        and stabilizes ground driving by keeping pitch neutral when not jumping.
         """
         bot = SenseiRLBot("TestBot", 0, 0)
 
@@ -259,37 +257,22 @@ class TestPhysicsAndControls(unittest.TestCase):
                 angular_velocity=Struct(x=0.0, y=0.0, z=0.0)
             )
         )
-        ball = Struct(physics=Struct(location=Struct(x=0.0, y=0.0, z=91.25), velocity=Struct(x=0, y=0, z=0), angular_velocity=Struct(x=0, y=0, z=0)))
+        ball = Struct(physics=Struct(location=Struct(x=500.0, y=1000.0, z=91.25), velocity=Struct(x=200.0, y=0.0, z=0.0), angular_velocity=Struct(x=0, y=0, z=0)))
         packet = Struct(num_cars=1, game_cars=[car], game_ball=ball, game_info=Struct(is_match_ended=False))
 
-        # Forward Front Flip Action: [throttle=1.0, steer=0.0, pitch=-1.0, yaw=0.0, roll=0.0, jump=1.0, boost=0.0, handbrake=0.0]
-        test_act = np.array([1.0, 0.0, -1.0, 0.0, 0.0, 1.0, 0.0, 0.0], dtype=np.float32)
+        # 1. Driving on ground without jump: pitch should be stabilized to 0.0
+        bot.prev_action = np.array([1.0, 0.0, -1.0, 0.0, 0.0, 0.0, 0.0, 0.0], dtype=np.float32)
+        bot.ticks_since_last_action = 1
+        ctrl_drive = bot.get_output(packet)
+        self.assertFalse(ctrl_drive.jump, "Jump must be False when act[5] <= 0.5")
+        self.assertAlmostEqual(ctrl_drive.pitch, 0.0, places=4, msg="Pitch must be stabilized to 0.0 on ground when not jumping")
 
-        for t in range(8):
-            bot.prev_action = test_act
-            bot.ground_dodge_active = True
-            bot.dodge_cooldown = 2
-            # Set internal counter so after `+= 1` it evaluates substep `t`
-            if t == 0:
-                bot.ticks_since_last_action = 7
-                # Mock model output to test_act for the decision step
-                bot.model = None  # Force holding prev_action or mock
-                bot.prev_action = test_act
-                # bypass model inference overwrite by setting tick counter directly
-                bot.ticks_since_last_action = -1
-            else:
-                bot.ticks_since_last_action = t - 1
-
-            ctrl = bot.get_output(packet)
-            if t in (0, 1, 2, 3):
-                self.assertTrue(ctrl.jump, f"Substep {t} must hold jump in Phase 1 (Clearance)")
-                self.assertAlmostEqual(ctrl.pitch, 0.0, places=4, msg=f"Substep {t} pitch must be 0.0 in Phase 1 (No nose dive)")
-            elif t in (4, 5):
-                self.assertFalse(ctrl.jump, f"Substep {t} must release jump in Phase 2 (Gate)")
-                self.assertAlmostEqual(ctrl.pitch, 1.0, places=4, msg=f"Substep {t} pitch must be active in Phase 2")
-            elif t in (6, 7):
-                self.assertTrue(ctrl.jump, f"Substep {t} must press jump in Phase 3 (Dodge Trigger)")
-                self.assertAlmostEqual(ctrl.pitch, 1.0, places=4, msg=f"Substep {t} pitch must be active in Phase 3")
+        # 2. Jump requested: jump should be True and pitch active
+        bot.prev_action = np.array([1.0, 0.0, -1.0, 0.0, 0.0, 1.0, 0.0, 0.0], dtype=np.float32)
+        bot.ticks_since_last_action = 1
+        ctrl_jump = bot.get_output(packet)
+        self.assertTrue(ctrl_jump.jump, "Jump must be True when act[5] > 0.5")
+        self.assertAlmostEqual(ctrl_jump.pitch, 1.0, places=4, msg="Pitch must be active when jump is requested")
 
     def test_kickoff_touch_state_tracking(self):
         """
