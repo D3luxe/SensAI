@@ -93,8 +93,8 @@ class ActorCritic(nn.Module):
                     self.actor_mean.bias.data[2] = 0.0
                     self.actor_mean.bias.data[3] = 0.0
                     self.actor_mean.bias.data[4] = 0.0
-                    # Default Handbrake (index 7) bias to -2.0 (OFF unless deliberately triggered)
-                    self.actor_mean.bias.data[7] = -2.0
+                    # Center Handbrake (index 7) bias to 0.0 for natural exploration
+                    self.actor_mean.bias.data[7] = 0.0
 
                 # Desaturate actor_mean weights if they exceeded linear analog range
                 weight_norm = self.actor_mean.weight.data.norm(dim=1, keepdim=True)

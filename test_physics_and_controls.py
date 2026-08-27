@@ -321,7 +321,7 @@ class TestPhysicsAndControls(unittest.TestCase):
         self.assertAlmostEqual(float(model.actor_mean.bias[2].detach()), 0.0, places=5)
         self.assertAlmostEqual(float(model.actor_mean.bias[3].detach()), 0.0, places=5)
         self.assertAlmostEqual(float(model.actor_mean.bias[4].detach()), 0.0, places=5)
-        self.assertAlmostEqual(float(model.actor_mean.bias[7].detach()), -2.0, places=5)
+        self.assertAlmostEqual(float(model.actor_mean.bias[7].detach()), 0.0, places=5)
 
 
 def verify_physics_and_controls_pipeline(verbose: bool = False) -> bool:

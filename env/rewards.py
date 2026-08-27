@@ -236,21 +236,20 @@ class LocomotionReward(BaseReward):
         # Tactical Powerslide Turnaround Bounty & Drag Penalty
         turn_bonus = 0.0
         handbrake_drag_penalty = 0.0
-        is_powersliding = bool(action[7] > 0.5)
+        is_powersliding = bool(action[7] > 0.0)
 
         if car.on_ground and car_speed > 300.0:
             right = car.get_right_vector()
             lat_align = float(np.dot(right, unit_to_target))
             is_turning_in = (action[1] > 0.2 and lat_align > 0.1) or (action[1] < -0.2 and lat_align < -0.1)
 
-            # 1. Tactical Turnaround Cut: ONLY when facing away (fwd_align < 0.3) and executing a sharp cut into the target
-            if is_powersliding and is_turning_in and fwd_align < 0.3:
-                turn_bonus = 0.05 * (1.0 - max(-1.0, fwd_align))
+            # 1. Tactical Turnaround Cut: Active when turning towards the ball to break wide orbit loops
+            if is_powersliding and is_turning_in and fwd_align < 0.6:
+                turn_bonus = 0.06 * (1.0 - max(-1.0, fwd_align))
 
-            # 2. Handbrake Drag Penalty: Penalize dragging handbrake in straightaways or when already facing the target
-            if is_powersliding:
-                if fwd_align > 0.6 or abs(action[1]) < 0.2:
-                    handbrake_drag_penalty = -0.04  # Actively breaks the constant drifting addiction
+            # 2. Handbrake Drag Penalty: Penalize dragging handbrake in straightaways with no steering
+            if is_powersliding and abs(action[1]) < 0.15 and fwd_align > 0.8:
+                handbrake_drag_penalty = -0.03
 
         # Close-Range Bumper Contact Lock & Fly-By Whiff Penalty
         contact_bonus = 0.0

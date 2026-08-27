@@ -386,7 +386,7 @@ class SenseiRLBot(BaseAgent):
 
             boost_threshold = 0.3 if self.continuous_actions else 0.0
             controller.boost = bool(act[6] > boost_threshold)
-            controller.handbrake = bool(act[7] > 0.5)
+            controller.handbrake = bool(act[7] > 0.0)
 
             self.tick_count += 1
             ball_pos = ball_state.pos

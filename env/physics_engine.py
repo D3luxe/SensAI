@@ -451,7 +451,7 @@ class RocketSimArena:
                     r_car.set_controls(rsim.CarControls(
                         throttle=float(act[0]), steer=-float(act[1]), pitch=float(act[2]),
                         yaw=-float(act[3]), roll=-float(act[4]), jump=bool(act[5] > 0.5),
-                        boost=bool(act[6] > 0.3), handbrake=bool(act[7] > 0.5)
+                        boost=bool(act[6] > 0.3), handbrake=bool(act[7] > 0.0)
                     ))
                 self._rsim_arena.step(4)
 
@@ -461,7 +461,7 @@ class RocketSimArena:
                     r_car.set_controls(rsim.CarControls(
                         throttle=float(act[0]), steer=-float(act[1]), pitch=float(act[2]),
                         yaw=-float(act[3]), roll=-float(act[4]), jump=False if (dodge_flags[i] or fast_aerial_flags[i]) else bool(act[5] > 0.5),
-                        boost=bool(act[6] > 0.3), handbrake=bool(act[7] > 0.5)
+                        boost=bool(act[6] > 0.3), handbrake=bool(act[7] > 0.0)
                     ))
                 self._rsim_arena.step(2)
 
@@ -475,7 +475,7 @@ class RocketSimArena:
                         yaw=0.0 if fast_aerial_flags[i] else -float(act[3]),
                         roll=0.0 if fast_aerial_flags[i] else -float(act[4]),
                         jump=bool(act[5] > 0.5),
-                        boost=bool(act[6] > 0.3), handbrake=bool(act[7] > 0.5)
+                        boost=bool(act[6] > 0.3), handbrake=bool(act[7] > 0.0)
                     ))
                 self._rsim_arena.step(total_ticks - 6)
             else:
@@ -484,7 +484,7 @@ class RocketSimArena:
                     r_car.set_controls(rsim.CarControls(
                         throttle=float(act[0]), steer=-float(act[1]), pitch=float(act[2]),
                         yaw=-float(act[3]), roll=-float(act[4]), jump=bool(act[5] > 0.5),
-                        boost=bool(act[6] > 0.3), handbrake=bool(act[7] > 0.5)
+                        boost=bool(act[6] > 0.3), handbrake=bool(act[7] > 0.0)
                     ))
                 self._rsim_arena.step(total_ticks)
 
@@ -602,7 +602,7 @@ class RocketSimArena:
             roll = float(np.clip(act[4], -1.0, 1.0))
             jump = bool(act[5] > 0.0)
             boost = bool(act[6] > 0.0 and car.boost > 0.0)
-            handbrake = bool(act[7] > 0.5)
+            handbrake = bool(act[7] > 0.0)
 
             # Boost consumption & acceleration
             if boost and car.boost > 0:

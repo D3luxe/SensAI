@@ -501,15 +501,15 @@ class PPOTrainer:
             on_ground_flag = obs_np[:, 19]
 
             telemetry = {
-                "throttle_forward_pct": round(float(np.mean(thr_col > 0.5) * 100.0), 1),
-                "throttle_reverse_pct": round(float(np.mean(thr_col < -0.5) * 100.0), 1),
-                "throttle_coast_pct": round(float(np.mean((thr_col >= -0.5) & (thr_col <= 0.5)) * 100.0), 1),
+                "throttle_forward_pct": round(float(np.mean(thr_col > 0.2) * 100.0), 1),
+                "throttle_reverse_pct": round(float(np.mean(thr_col < -0.2) * 100.0), 1),
+                "throttle_coast_pct": round(float(np.mean((thr_col >= -0.2) & (thr_col <= 0.2)) * 100.0), 1),
                 "steer_left_pct": round(float(np.mean(str_col < -0.2) * 100.0), 1),
                 "steer_right_pct": round(float(np.mean(str_col > 0.2) * 100.0), 1),
                 "steer_straight_pct": round(float(np.mean(np.abs(str_col) <= 0.2) * 100.0), 1),
-                "jump_rate_pct": round(float(np.mean(jmp_col > 0.5) * 100.0), 1),
-                "boost_rate_pct": round(float(np.mean(bst_col > 0.5) * 100.0), 1),
-                "handbrake_rate_pct": round(float(np.mean(hnd_col > 0.5) * 100.0), 1),
+                "jump_rate_pct": round(float(np.mean(jmp_col > 0.0) * 100.0), 1),
+                "boost_rate_pct": round(float(np.mean(bst_col > 0.0) * 100.0), 1),
+                "handbrake_rate_pct": round(float(np.mean(hnd_col > 0.0) * 100.0), 1),
                 "ground_time_pct": round(float(np.mean(on_ground_flag > 0.5) * 100.0), 1),
                 "air_time_pct": round(float(np.mean(on_ground_flag <= 0.5) * 100.0), 1),
                 "corner_zone_pct": round(float(np.mean((np.abs(pos_x) > 0.65) & (np.abs(pos_y) > 0.70)) * 100.0), 1),
