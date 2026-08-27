@@ -65,6 +65,24 @@ class PPOTrainer:
         os.makedirs(self.save_dir, exist_ok=True)
         os.makedirs(self.log_dir, exist_ok=True)
 
+        # Hardware Thread & CPU Core Optimization (8 P-Cores + 8 E-Cores for Arrow Lake / Core Ultra 9)
+        num_threads = int(env_cfg.get("num_threads", 16))
+        total_cores = os.cpu_count() or 24
+        if total_cores >= 16:
+            try:
+                import ctypes
+                handle = ctypes.windll.kernel32.GetCurrentProcess()
+                mask_16 = 0xFFFF  # Cores 0 through 15 (8 Lion Cove P-Cores + 8 Skymont E-Cores)
+                ctypes.windll.kernel32.SetProcessAffinityMask(handle, ctypes.c_size_t(mask_16))
+                torch.set_num_threads(num_threads)
+                torch.set_num_interop_threads(min(4, num_threads))
+                print(f"[Hardware Optimizer] Configured Process Affinity to Cores 0-15 (8 P-Cores + 8 E-Cores | {num_threads} PyTorch Threads) for peak throughput & sustained boost.")
+            except Exception as e:
+                torch.set_num_threads(num_threads)
+                print(f"[Hardware Optimizer] PyTorch threads set to {num_threads} (Affinity note: {e})")
+        else:
+            torch.set_num_threads(min(total_cores, num_threads))
+
         self.device = torch.device(device if device else ("cuda" if torch.cuda.is_available() else "cpu"))
         print(f"[PPO Trainer] Initialized on device: {self.device}")
 
