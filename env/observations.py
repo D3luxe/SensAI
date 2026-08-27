@@ -20,7 +20,7 @@ class DefaultObservationBuilder:
     """
     def __init__(self, symmetric: bool = True):
         self.symmetric = symmetric
-        self.obs_dim = 72
+        self.obs_dim = 74
 
     def build_obs(self, car: CarState, arena: RocketSimArena) -> np.ndarray:
         obs = []
@@ -162,6 +162,12 @@ class DefaultObservationBuilder:
         is_threat, threat_intensity, threat_z = arena.get_shot_threat(car.team) if hasattr(arena, "get_shot_threat") else (False, 0.0, 0.0)
         obs.append(float(threat_intensity))  # 1
         obs.append(float(threat_z))          # 1
+
+        # 3c. Explicit Kickoff Awareness Sensor (2 features: is_kickoff, is_first_touch_open)
+        is_center_ball = bool(abs(arena.ball.pos[0]) < 50.0 and abs(arena.ball.pos[1]) < 50.0 and float(np.linalg.norm(arena.ball.vel)) < 80.0)
+        is_first_touch = bool(all(c.ball_touches == 0 for c in arena.cars))
+        obs.append(1.0 if is_center_ball else 0.0)        # 1: Kickoff active flag
+        obs.append(1.0 if is_first_touch else 0.0)       # 1: First-touch race open flag
 
         # 4. Opponents / Other Players (14 features for primary opponent)
         opponents = [c for c in arena.cars if c.team != car.team]
