@@ -386,7 +386,15 @@ class SenseiRLBot(BaseAgent):
 
             boost_threshold = 0.3 if self.continuous_actions else 0.0
             controller.boost = bool(act[6] > boost_threshold)
-            controller.handbrake = bool(act[7] > 0.0)
+
+            # Handbrake / Powerslide:
+            # Must ONLY be active when on the ground and actively steering.
+            # When airborne, handbrake triggers Rocket League's Air Roll modifier, which
+            # corrupts aerial pitch/yaw/roll stabilization. When driving straight, handbrake ruins grip.
+            if is_on_ground and abs(controller.steer) > 0.15:
+                controller.handbrake = bool(act[7] > 0.2)
+            else:
+                controller.handbrake = False
 
             self.tick_count += 1
             ball_pos = ball_state.pos
@@ -396,7 +404,7 @@ class SenseiRLBot(BaseAgent):
                     f"[TICK {self.tick_count}] pos=({car_state.pos[0]:.0f}, {car_state.pos[1]:.0f}) "
                     f"ball=({ball_pos[0]:.0f}, {ball_pos[1]:.0f}) kickoff={is_kickoff} -> "
                     f"thr={controller.throttle:.2f} str={controller.steer:+.2f} pit={controller.pitch:+.2f} "
-                    f"yaw={controller.yaw:+.2f} rol={controller.roll:+.2f} jmp={controller.jump} bst={controller.boost}"
+                    f"yaw={controller.yaw:+.2f} rol={controller.roll:+.2f} jmp={controller.jump} bst={controller.boost} hnd={controller.handbrake}"
                 )
 
         except Exception as e:

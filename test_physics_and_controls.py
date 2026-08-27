@@ -111,6 +111,21 @@ class TestPhysicsAndControls(unittest.TestCase):
         self.assertAlmostEqual(ctrl.yaw, 0.6, places=4, msg="Yaw maps direct (act[3]=+0.6 Right maps to ctrl.yaw=+0.6 Right)!")
         self.assertAlmostEqual(ctrl.roll, -0.5, places=4, msg="Roll maps direct (act[4]=-0.5 Left maps to ctrl.roll=-0.5 Roll Left)!")
         self.assertTrue(ctrl.boost)
+        self.assertFalse(ctrl.handbrake, msg="Airborne car must NEVER activate handbrake (Air Roll conflict)!")
+
+        # Test Ground Handbrake:
+        car.has_wheel_contact = True
+        # 1. Straight driving with handbrake request -> Handbrake must remain False
+        bot.prev_action = np.array([1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.9], dtype=np.float32)
+        bot.current_steer = 0.0
+        ctrl_straight = bot.get_output(packet)
+        self.assertFalse(ctrl_straight.handbrake, msg="Driving straight must NOT trigger handbrake (full forward traction)!")
+
+        # 2. Sharp turn with handbrake request -> Handbrake must activate
+        bot.prev_action = np.array([1.0, 0.8, 0.0, 0.0, 0.0, 0.0, 0.0, 0.9], dtype=np.float32)
+        bot.current_steer = 0.8
+        ctrl_turn = bot.get_output(packet)
+        self.assertTrue(ctrl_turn.handbrake, msg="Sharp ground turn with handbrake request must trigger powerslide!")
 
     def test_bilateral_symmetry_masks(self):
         """
