@@ -407,9 +407,9 @@ class PPOTrainer:
             mean_entropy = float(np.mean(entropy_losses))
             sps = int(self.total_actors * self.num_steps / (time.time() - iter_start_time))
 
-            # Compute rollout behavioral telemetry
+            # Compute rollout behavioral telemetry using actual parsed actions
             if self.continuous_actions:
-                act_np = b_actions.cpu().numpy()
+                act_np = self.env.envs[0].action_parser.parse_actions(b_actions.cpu().numpy())
             else:
                 act_indices = b_actions.cpu().numpy().astype(int)
                 act_np = self.env.envs[0].action_parser.parse_actions(act_indices)
@@ -427,14 +427,14 @@ class PPOTrainer:
             on_ground_flag = obs_np[:, 19]
 
             telemetry = {
-                "throttle_forward_pct": round(float(np.mean(thr_col > 0.05) * 100.0), 1),
-                "throttle_reverse_pct": round(float(np.mean(thr_col < -0.35) * 100.0), 1),
-                "throttle_coast_pct": round(float(np.mean((thr_col >= -0.35) & (thr_col <= 0.05)) * 100.0), 1),
+                "throttle_forward_pct": round(float(np.mean(thr_col > 0.5) * 100.0), 1),
+                "throttle_reverse_pct": round(float(np.mean(thr_col < -0.5) * 100.0), 1),
+                "throttle_coast_pct": round(float(np.mean((thr_col >= -0.5) & (thr_col <= 0.5)) * 100.0), 1),
                 "steer_left_pct": round(float(np.mean(str_col < -0.2) * 100.0), 1),
                 "steer_right_pct": round(float(np.mean(str_col > 0.2) * 100.0), 1),
                 "steer_straight_pct": round(float(np.mean(np.abs(str_col) <= 0.2) * 100.0), 1),
-                "jump_rate_pct": round(float(np.mean(jmp_col > 0.0) * 100.0), 1),
-                "boost_rate_pct": round(float(np.mean(bst_col > 0.0) * 100.0), 1),
+                "jump_rate_pct": round(float(np.mean(jmp_col > 0.5) * 100.0), 1),
+                "boost_rate_pct": round(float(np.mean(bst_col > 0.5) * 100.0), 1),
                 "handbrake_rate_pct": round(float(np.mean(hnd_col > 0.5) * 100.0), 1),
                 "ground_time_pct": round(float(np.mean(on_ground_flag > 0.5) * 100.0), 1),
                 "air_time_pct": round(float(np.mean(on_ground_flag <= 0.5) * 100.0), 1),
