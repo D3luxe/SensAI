@@ -91,9 +91,8 @@ class TestPhysicsAndControls(unittest.TestCase):
                 angular_velocity=Struct(x=0.0, y=0.0, z=0.0)
             )
         )
-        ball = Struct(physics=Struct(location=Struct(x=0.0, y=0.0, z=91.25), velocity=Struct(x=0, y=0, z=0), angular_velocity=Struct(x=0, y=0, z=0)))
+        ball = Struct(physics=Struct(location=Struct(x=500.0, y=1000.0, z=91.25), velocity=Struct(x=200.0, y=300.0, z=0.0), angular_velocity=Struct(x=0, y=0, z=0)))
         packet = Struct(num_cars=1, game_cars=[car], game_ball=ball, game_info=Struct(is_match_ended=False))
-
         # Test airborne controller pass-through: [throttle, steer, pitch, yaw, roll, jump, boost, handbrake]
         test_act = np.array([0.8, -0.7, -0.9, 0.6, -0.5, 0.0, 1.0, 0.0], dtype=np.float32)
         bot.prev_action = test_act

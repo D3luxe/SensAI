@@ -6,7 +6,7 @@ environment:
 hyperparameters:
   batch_size: 8192
   clip_range: 0.2
-  ent_coef: 0.012
+  ent_coef: 0.015
   gae_lambda: 0.95
   gamma: 0.995
   learning_rate: 0.0003
@@ -23,14 +23,14 @@ model:
   continuous_actions: true
   use_layer_norm: true
 rewards:
-  goal_weight: 10.0
-  concede_weight: -10.0
-  save_weight: 3.0
-  ball_to_goal_weight: 1.5
-  player_to_ball_weight: 0.8
-  touch_weight: 1.2
+  ball_to_goal_weight: 1.6
   boost_gain_weight: 0.6
   boost_lose_weight: 0.3
+  concede_weight: -10.0
+  goal_weight: 10.0
+  player_to_ball_weight: 0.7
+  save_weight: 3.0
+  touch_weight: 1.3
 scenarios:
   aerial_prob: 0.15
   kickoff_prob: 0.5

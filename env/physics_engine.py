@@ -497,7 +497,9 @@ class RocketSimArena:
                 self._rsim_arena.step(total_ticks)
 
             self._sync_from_rsim()
-            self._cached_pred_step = -1  # Invalidate cache on new physics step
+            self._cached_pred_step = -1
+            self._cached_rsim_preds = None
+            self._cached_threat = {}
             return (self.scored_team is not None), self.scored_team
 
     def get_predicted_ball_pos(self, slice_idx: int = 60) -> np.ndarray:
@@ -508,7 +510,9 @@ class RocketSimArena:
         pred_pos = None
         if self._use_rsim and self._rsim_arena is not None:
             try:
-                preds = self._rsim_arena.get_ball_prediction()
+                if self._cached_rsim_preds is None:
+                    self._cached_rsim_preds = self._rsim_arena.get_ball_prediction()
+                preds = self._cached_rsim_preds
                 if preds and len(preds) > slice_idx:
                     pred_pos = preds[slice_idx].pos.as_numpy().astype(np.float32)
             except Exception:
@@ -536,16 +540,24 @@ class RocketSimArena:
         Returns (is_threat, threat_intensity [0.0-1.0], entry_z_norm [0.0-1.0]).
         Calculates exact goal threat on the defending net from RocketSim C++ prediction or raycast.
         """
+        if hasattr(self, "_cached_threat") and team in self._cached_threat:
+            return self._cached_threat[team]
+
         defending_goal_y = -ARENA_EXTENT_Y if team == 0 else ARENA_EXTENT_Y
         ball_vy = self.ball.vel[1]
         is_moving_to_net = (ball_vy < -100.0) if team == 0 else (ball_vy > 100.0)
         if not is_moving_to_net:
-            return False, 0.0, 0.0
+            res = (False, 0.0, 0.0)
+            if hasattr(self, "_cached_threat"):
+                self._cached_threat[team] = res
+            return res
 
         # Check RocketSim native prediction
         if self._use_rsim and self._rsim_arena is not None:
             try:
-                preds = self._rsim_arena.get_ball_prediction()
+                if getattr(self, "_cached_rsim_preds", None) is None:
+                    self._cached_rsim_preds = self._rsim_arena.get_ball_prediction()
+                preds = self._cached_rsim_preds
                 if preds:
                     for i, s in enumerate(preds):
                         pos = s.pos
@@ -553,7 +565,10 @@ class RocketSimArena:
                             if abs(pos.x) < 950.0 and 0.0 < pos.z < 680.0:
                                 threat_intensity = max(0.1, 1.0 - (i / 120.0))
                                 entry_z_norm = min(1.0, max(0.0, pos.z / GOAL_HEIGHT))
-                                return True, threat_intensity, entry_z_norm
+                                res = (True, threat_intensity, entry_z_norm)
+                                if hasattr(self, "_cached_threat"):
+                                    self._cached_threat[team] = res
+                                return res
             except Exception:
                 pass
 
@@ -567,9 +582,15 @@ class RocketSimArena:
                 if abs(pred_x) < 950.0 and 0.0 < pred_z < 680.0:
                     threat_intensity = max(0.1, 1.0 - (dt / 3.0))
                     entry_z_norm = min(1.0, max(0.0, pred_z / GOAL_HEIGHT))
-                    return True, threat_intensity, entry_z_norm
+                    res = (True, threat_intensity, entry_z_norm)
+                    if hasattr(self, "_cached_threat"):
+                        self._cached_threat[team] = res
+                    return res
 
-        return False, 0.0, 0.0
+        res = (False, 0.0, 0.0)
+        if hasattr(self, "_cached_threat"):
+            self._cached_threat[team] = res
+        return res
 
         # Pure Python Fallback Step
         substeps = max(1, int(round(dt * 120.0)))
