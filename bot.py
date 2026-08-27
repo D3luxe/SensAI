@@ -333,8 +333,9 @@ class SenseiRLBot(BaseAgent):
                 controller.yaw = float(np.clip(act[3], -1.0, 1.0))
                 controller.roll = float(np.clip(act[4], -1.0, 1.0))
             else:
-                controller.jump = bool(act[5] > jump_threshold and has_jump)
                 if is_on_ground:
+                    # Single jump pulse (ticks 0..3): initiates jump, then releases (ticks 4..7) to prevent infinite hopping loops
+                    controller.jump = bool(act[5] > jump_threshold and has_jump and self.ticks_since_last_action in (0, 1, 2, 3))
                     controller.pitch = 0.0
                     controller.roll = 0.0
                     controller.yaw = 0.0
