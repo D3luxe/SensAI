@@ -277,9 +277,11 @@ class LocomotionReward(BaseReward):
                 elif abs(action[1]) < 0.05:
                     kickoff_bonus -= 0.03  # Active penalty for driving parallel past the ball
 
-            # Clean speed-flip acceleration pulse only granted if aimed directly on collision track
-            if car.just_dodged and aim_accuracy > 0.8:
-                kickoff_bonus += 0.10
+            # Clean speed-flip acceleration pulse only granted if at high speed on collision track
+            if car.just_dodged and aim_accuracy > 0.8 and car_speed > 1000.0:
+                kickoff_bonus += 0.12
+            elif action[5] > 0.5 and car_speed < 700.0 and dist > 1500.0:
+                kickoff_bonus -= 0.05  # Penalize premature low-speed jumps that kill ground sprint traction
 
         # Bounce Anticipation Bonus: rewards closing speed toward airborne intercept point
         bounce_anticipation = 0.0

@@ -311,13 +311,15 @@ class SenseiRLBot(BaseAgent):
             self.current_steer = 0.7 * steer_val + 0.3 * self.current_steer
             controller.steer = float(np.clip(self.current_steer, -1.0, 1.0))
 
-            # Directional Flip / Dodge Detection (Requires confident jump + strong stick deflection)
+            # Directional Flip / Dodge Detection (Requires confident jump + strong stick deflection + momentum)
             jump_threshold = 0.5 if self.continuous_actions else 0.0
             stick_threshold = 0.4 if self.continuous_actions else 0.1
             has_strong_dodge_stick = (abs(act[2]) > stick_threshold or abs(act[3]) > stick_threshold or abs(act[4]) > stick_threshold)
             is_dodge = bool(act[5] > jump_threshold and has_strong_dodge_stick)
+            car_speed = float(np.linalg.norm(car_state.vel))
+            can_ground_dodge = (not is_on_ground) or (car_speed > 600.0)
 
-            if is_dodge and (has_jump or has_flip):
+            if is_dodge and (has_jump or has_flip) and can_ground_dodge:
                 # 120Hz 4-stage substep cadence for authentic Rocket League double-jump dodges:
                 # Ground flip: jump (0,1) -> release (2,3) -> dodge (4,5) -> finish (6,7)
                 # Air dodge: immediate dodge (0,1,2) -> finish
