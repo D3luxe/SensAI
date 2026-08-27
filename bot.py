@@ -363,19 +363,6 @@ class SenseiRLBot(BaseAgent):
             jump_threshold = 0.5 if self.continuous_actions else 0.0
             jump_requested = bool(act[5] > jump_threshold)
 
-            # Kickoff Sprint Guidance (RLBot Standard):
-            # When the ball is on the center spot and untouched, sprint directly at the ball with full throttle & boost.
-            if not self.ball_touched_since_kickoff and ball_dist_center < 60.0 and ball_speed < 100.0:
-                target_vec = ball_state.pos - car_state.pos
-                dist_to_ball = float(np.linalg.norm(target_vec))
-                if dist_to_ball > 200.0:
-                    unit_target = target_vec / max(1.0, dist_to_ball)
-                    lateral_align = float(np.dot(unit_target, car_rot_mat[1]))
-                    controller.throttle = 1.0
-                    controller.boost = True
-                    controller.steer = float(np.clip(lateral_align * 3.5, -1.0, 1.0))
-                    controller.handbrake = False
-
             # Ground stabilization & Dodge Takeoff Clearance:
             # When driving on the ground without jump, OR during Phase 1 (ticks 0..3) of a ground dodge takeoff,
             # keep pitch and roll neutral so the nose does not bottom out into the turf.
@@ -398,7 +385,7 @@ class SenseiRLBot(BaseAgent):
                 controller.jump = False
 
             boost_threshold = 0.3 if self.continuous_actions else 0.0
-            controller.boost = bool(controller.boost or (act[6] > boost_threshold))
+            controller.boost = bool(act[6] > boost_threshold)
 
             # Handbrake / Powerslide:
             # Must ONLY be active when on the ground and actively steering.
