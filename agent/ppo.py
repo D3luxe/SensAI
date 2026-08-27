@@ -41,6 +41,7 @@ class PPOTrainer:
         log_cfg = self.config.get("logging", {})
 
         self.lr = float(hp.get("learning_rate", 3e-4))
+        self.weight_decay = float(hp.get("weight_decay", 1e-4))
         self.gamma = float(hp.get("gamma", 0.99))
         self.gae_lambda = float(hp.get("gae_lambda", 0.95))
         self.clip_range = float(hp.get("clip_range", 0.2))
@@ -60,6 +61,8 @@ class PPOTrainer:
         self.game_mode = str(env_cfg.get("game_mode", "1v1"))
         self.self_play = bool(env_cfg.get("self_play", True))
         self.continuous_actions = bool(model_cfg.get("continuous_actions", True))
+        self.use_layer_norm = bool(model_cfg.get("use_layer_norm", True))
+        self.activation = str(model_cfg.get("activation", "leaky_relu"))
 
         self.save_dir = log_cfg.get("save_dir", "checkpoints")
         self.log_dir = log_cfg.get("log_dir", "logs")
@@ -119,11 +122,12 @@ class PPOTrainer:
             act_dim=self.act_dim,
             actor_hidden_dims=model_cfg.get("actor_hidden_dims", [256, 256, 128]),
             critic_hidden_dims=model_cfg.get("critic_hidden_dims", [256, 256, 128]),
-            activation=model_cfg.get("activation", "tanh"),
-            continuous_actions=self.continuous_actions
+            activation=self.activation,
+            continuous_actions=self.continuous_actions,
+            use_layer_norm=self.use_layer_norm
         ).to(self.device)
 
-        self.optimizer = optim.Adam(self.agent.parameters(), lr=self.lr, eps=1e-5)
+        self.optimizer = optim.Adam(self.agent.parameters(), lr=self.lr, eps=1e-5, weight_decay=self.weight_decay)
 
         # Left-Right Mirror Augmentation Masks (Strict Bilateral Symmetry)
         self.obs_mirror_mask = torch.tensor(OBS_MIRROR_MASK_NP, dtype=torch.float32, device=self.device)
@@ -207,6 +211,8 @@ class PPOTrainer:
             "obs_dim": self.obs_dim,
             "act_dim": self.act_dim,
             "continuous_actions": self.continuous_actions,
+            "use_layer_norm": self.use_layer_norm,
+            "activation": self.activation,
         }, path)
 
     def cleanup_old_checkpoints(self, max_to_keep: Optional[int] = None):

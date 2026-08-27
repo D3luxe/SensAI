@@ -17,6 +17,20 @@ def layer_init(layer: nn.Module, std: float = np.sqrt(2), bias_const: float = 0.
     return layer
 
 
+def get_activation_cls(activation: str):
+    act = activation.lower()
+    if act == "leaky_relu":
+        return lambda: nn.LeakyReLU(negative_slope=0.1)
+    elif act == "gelu":
+        return nn.GELU
+    elif act == "relu":
+        return nn.ReLU
+    elif act == "elu":
+        return nn.ELU
+    else:
+        return nn.Tanh
+
+
 class ActorCritic(nn.Module):
     def __init__(
         self,
@@ -24,21 +38,25 @@ class ActorCritic(nn.Module):
         act_dim: int = 8,
         actor_hidden_dims: List[int] = [256, 256, 128],
         critic_hidden_dims: List[int] = [256, 256, 128],
-        activation: str = "tanh",
-        continuous_actions: bool = True
+        activation: str = "leaky_relu",
+        continuous_actions: bool = True,
+        use_layer_norm: bool = True
     ):
         super().__init__()
         self.obs_dim = obs_dim
         self.act_dim = act_dim
         self.continuous_actions = continuous_actions
+        self.use_layer_norm = use_layer_norm
 
-        act_cls = nn.Tanh if activation == "tanh" else (nn.ReLU if activation == "relu" else nn.ELU)
+        act_cls = get_activation_cls(activation)
 
-        # Build Actor (Policy Network)
+        # Build Actor (Policy Network) with LayerNorm Regularization
         actor_layers = []
         prev_dim = obs_dim
         for hidden in actor_hidden_dims:
             actor_layers.append(layer_init(nn.Linear(prev_dim, hidden)))
+            if use_layer_norm:
+                actor_layers.append(nn.LayerNorm(hidden))
             actor_layers.append(act_cls())
             prev_dim = hidden
         self.actor_backbone = nn.Sequential(*actor_layers)
@@ -50,11 +68,13 @@ class ActorCritic(nn.Module):
         else:
             self.actor_logits = layer_init(nn.Linear(prev_dim, act_dim), std=0.01)
 
-        # Build Critic (Value Network)
+        # Build Critic (Value Network) with LayerNorm Regularization
         critic_layers = []
         prev_dim = obs_dim
         for hidden in critic_hidden_dims:
             critic_layers.append(layer_init(nn.Linear(prev_dim, hidden)))
+            if use_layer_norm:
+                critic_layers.append(nn.LayerNorm(hidden))
             critic_layers.append(act_cls())
             prev_dim = hidden
         critic_layers.append(layer_init(nn.Linear(prev_dim, 1), std=1.0))
@@ -65,8 +85,8 @@ class ActorCritic(nn.Module):
         Re-centers the actor output layer biases for antisymmetric action axes (steer, yaw, roll)
         to strictly zero, defaults handbrake bias to negative (OFF), and prevents output tanh saturation.
         """
-        if self.continuous_actions and hasattr(self, "actor_mean"):
-            with torch.no_grad():
+        with torch.no_grad():
+            if self.continuous_actions and hasattr(self, "actor_mean"):
                 # Steer (index 1), Pitch (index 2), Yaw (index 3), Roll (index 4)
                 if self.actor_mean.bias is not None:
                     self.actor_mean.bias.data[1] = 0.0
@@ -81,6 +101,14 @@ class ActorCritic(nn.Module):
                 max_norm = 1.5
                 scale = torch.clamp(max_norm / (weight_norm + 1e-6), max=1.0)
                 self.actor_mean.weight.data *= scale
+
+            # Clamp backbone linear weights if they exceeded healthy numerical thresholds
+            for module in self.actor_backbone:
+                if isinstance(module, nn.Linear):
+                    w_norm = module.weight.data.norm(dim=1, keepdim=True)
+                    w_max = 3.0
+                    w_scale = torch.clamp(w_max / (w_norm + 1e-6), max=1.0)
+                    module.weight.data *= w_scale
 
     def get_value(self, obs: torch.Tensor) -> torch.Tensor:
         return self.critic(obs)

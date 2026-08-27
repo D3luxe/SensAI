@@ -6,10 +6,11 @@ environment:
 hyperparameters:
   batch_size: 8192
   clip_range: 0.2
-  ent_coef: 0.01
+  ent_coef: 0.02
   gae_lambda: 0.95
   gamma: 0.995
   learning_rate: 0.0003
+  weight_decay: 0.0001
   mini_batch_size: 1024
   n_epochs: 4
 logging:
@@ -20,6 +21,8 @@ logging:
   tensorboard: true
 model:
   continuous_actions: true
+  use_layer_norm: true
+  activation: "leaky_relu"
 rewards:
   aerial_height_weight: 0.08
   air_dribble_carry_weight: 0.06

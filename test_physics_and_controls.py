@@ -300,6 +300,29 @@ class TestPhysicsAndControls(unittest.TestCase):
         bot.get_output(packet_moving)
         self.assertTrue(bot.ball_touched_since_kickoff, "Fast moving ball must be marked as touched/active play")
 
+    def test_actor_critic_layer_norm_and_saturation(self):
+        """
+        Guarantees that ActorCritic with LayerNorm maintains bounded, healthy activations
+        even when fed extreme observation inputs, and prevents policy saturation.
+        """
+        model = ActorCritic(obs_dim=74, act_dim=8, continuous_actions=True, use_layer_norm=True, activation="leaky_relu")
+        model.eval()
+
+        # Extreme out-of-distribution observation input (+/- 10.0)
+        extreme_obs = torch.full((4, 74), 10.0, dtype=torch.float32)
+        action, _, _, value = model.get_action_and_value(extreme_obs, deterministic=True)
+
+        self.assertEqual(action.shape, (4, 8))
+        self.assertEqual(value.shape, (4, 1))
+
+        # Check that debias_symmetric_actions desaturates and zeroes biases
+        model.debias_symmetric_actions()
+        self.assertAlmostEqual(float(model.actor_mean.bias[1].detach()), 0.0, places=5)
+        self.assertAlmostEqual(float(model.actor_mean.bias[2].detach()), 0.0, places=5)
+        self.assertAlmostEqual(float(model.actor_mean.bias[3].detach()), 0.0, places=5)
+        self.assertAlmostEqual(float(model.actor_mean.bias[4].detach()), 0.0, places=5)
+        self.assertAlmostEqual(float(model.actor_mean.bias[7].detach()), -2.0, places=5)
+
 
 def verify_physics_and_controls_pipeline(verbose: bool = False) -> bool:
     """

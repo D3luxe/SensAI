@@ -112,9 +112,19 @@ class SenseiRLBot(BaseAgent):
                 ckpt = torch.load(ckpt_path, map_location=self.device)
                 self.continuous_actions = ckpt.get("continuous_actions", False)
                 ckpt_act_dim = 8 if self.continuous_actions else self.discrete_parser.action_dim
-                self.model = ActorCritic(obs_dim=obs_dim, act_dim=ckpt_act_dim, continuous_actions=self.continuous_actions).to(self.device)
                 
-                saved_state = ckpt["model_state_dict"]
+                saved_state = ckpt.get("model_state_dict", {})
+                # Check if checkpoint contains LayerNorm parameters (1D tensor weights inside backbone)
+                has_ln = any("LayerNorm" in k or (len(v.shape) == 1 and "bias" not in k and "log_std" not in k) for k, v in saved_state.items())
+                use_ln = ckpt.get("use_layer_norm", has_ln)
+
+                self.model = ActorCritic(
+                    obs_dim=obs_dim,
+                    act_dim=ckpt_act_dim,
+                    continuous_actions=self.continuous_actions,
+                    use_layer_norm=use_ln
+                ).to(self.device)
+                
                 model_state = self.model.state_dict()
                 migrated = False
                 for k in list(saved_state.keys()):
@@ -136,7 +146,7 @@ class SenseiRLBot(BaseAgent):
                 self.model.debias_symmetric_actions()
                 self.model.eval()
                 self.loaded_ckpt_mtime = os.path.getmtime(ckpt_path) if os.path.exists(ckpt_path) else 0.0
-                msg = f"[SensAI] Successfully loaded in-game model from {ckpt_path} (Mode: {'Continuous' if self.continuous_actions else f'Discrete RLGym ({ckpt_act_dim} actions)'}, ObsDim: {obs_dim})"
+                msg = f"[SensAI] Successfully loaded in-game model from {ckpt_path} (Mode: {'Continuous' if self.continuous_actions else f'Discrete RLGym ({ckpt_act_dim} actions)'}, ObsDim: {obs_dim}, LayerNorm: {use_ln})"
                 print(msg)
                 log_debug(f"[INIT] {msg}")
             except Exception as e:
