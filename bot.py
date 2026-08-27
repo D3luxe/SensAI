@@ -328,8 +328,8 @@ class SenseiRLBot(BaseAgent):
                 else:
                     controller.jump = bool(self.ticks_since_last_action in (0, 1, 2))
 
-                # Canonical 1-to-1 mapping matching standard RLBot gamepad conventions
-                controller.pitch = float(np.clip(act[2], -1.0, 1.0))
+                # Canonical mapping matching standard RLBot gamepad conventions (pitch is inverted between RocketSim and RLBot)
+                controller.pitch = -float(np.clip(act[2], -1.0, 1.0))
                 controller.yaw = float(np.clip(act[3], -1.0, 1.0))
                 controller.roll = float(np.clip(act[4], -1.0, 1.0))
             else:
@@ -339,7 +339,7 @@ class SenseiRLBot(BaseAgent):
                     controller.roll = 0.0
                     controller.yaw = 0.0
                 else:
-                    controller.pitch = float(np.clip(act[2], -1.0, 1.0))
+                    controller.pitch = -float(np.clip(act[2], -1.0, 1.0))
                     controller.roll = float(np.clip(act[4], -1.0, 1.0))
                     controller.yaw = float(np.clip(act[3], -1.0, 1.0))
 
