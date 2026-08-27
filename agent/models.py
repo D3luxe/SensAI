@@ -67,9 +67,10 @@ class ActorCritic(nn.Module):
         """
         if self.continuous_actions and hasattr(self, "actor_mean"):
             with torch.no_grad():
-                # Steer (index 1), Yaw (index 3), Roll (index 4)
+                # Steer (index 1), Pitch (index 2), Yaw (index 3), Roll (index 4)
                 if self.actor_mean.bias is not None:
                     self.actor_mean.bias.data[1] = 0.0
+                    self.actor_mean.bias.data[2] = 0.0
                     self.actor_mean.bias.data[3] = 0.0
                     self.actor_mean.bias.data[4] = 0.0
                     # Default Handbrake (index 7) bias to -2.0 (OFF unless deliberately triggered)

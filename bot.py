@@ -310,14 +310,22 @@ class SenseiRLBot(BaseAgent):
             self.current_steer = 0.65 * raw_steer + 0.35 * self.current_steer
             controller.throttle = float(np.clip(act[0], -1.0, 1.0))
             controller.steer = float(np.clip(self.current_steer, -1.0, 1.0))
-            controller.pitch = float(np.clip(act[2], -1.0, 1.0))
-            controller.yaw = float(np.clip(act[3], -1.0, 1.0))
-            controller.roll = float(np.clip(act[4], -1.0, 1.0))
-
-            # Double-Jump & Dodge 120Hz Substep Cadence (Allows natural speed-flips, wave-dashes, and aerials)
+            
+            # Aerial controls: active when airborne or when deliberately jumping/dodging
             jump_threshold = 0.5 if self.continuous_actions else 0.0
             jump_requested = bool(act[5] > jump_threshold)
 
+            if is_on_ground and not jump_requested:
+                # Ground stability: keep air pitch and roll neutral to prevent death-rolls over wall curves and bumps
+                controller.pitch = 0.0
+                controller.yaw = float(np.clip(act[3], -1.0, 1.0))
+                controller.roll = 0.0
+            else:
+                controller.pitch = float(np.clip(act[2], -1.0, 1.0))
+                controller.yaw = float(np.clip(act[3], -1.0, 1.0))
+                controller.roll = float(np.clip(act[4], -1.0, 1.0))
+
+            # Double-Jump & Dodge 120Hz Substep Cadence (Allows natural speed-flips, wave-dashes, and aerials)
             if jump_requested:
                 if is_on_ground:
                     # Ground flip / jump: jump (ticks 0,1) -> release (ticks 2,3) -> dodge/double-jump (ticks 4,5)
