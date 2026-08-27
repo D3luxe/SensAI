@@ -137,29 +137,12 @@ def render_reward_breakdown_plot(blue_rewards: Dict[str, float], orange_rewards:
     Renders a clean dark-themed horizontal bar chart showing points earned by reward category.
     """
     CATEGORY_NAMES = {
-        "goal": "Goals & Power Bonus",
-        "ball_vel_toward_goal": "Ball Velocity to Goal",
-        "aligned_shot": "Shots on Target",
-        "possession": "Tactical Space Dominance",
-        "dribble": "Roof Carry & Dribble",
-        "behind_ball": "Goal-Side Rotation",
-        "defensive_position": "Defensive Position",
-        "face_ball": "Facing / Tracking Ball",
-        "save": "Saves & Clears",
-        "touch_ball": "Ball Touches",
-        "speed_toward_ball": "Speed Toward Ball",
-        "kickoff": "Kickoff Speed Rush",
-        "demo_bump": "Bumps & Demolitions",
-        "boost_steal": "Opponent Boost Steals",
-        "small_pad": "Small Boost Pads (+12)",
-        "big_pad": "Big Boost Orbs (+100)",
-        "save_boost": "Boost Tank Retention",
-        "aerial_height": "Aerial Jump / Height",
-        "ground_to_air_setup": "Ground-to-Air Setup Pop",
-        "wall_aerial_launch": "Wall Aerial Launch",
-        "air_dribble_carry": "Air-Dribble Carry",
-        "velocity": "General Driving Speed",
-        "inactivity_penalty": "Inactivity & Standstill Penalty",
+        "goal": "Module 1: Goals, Saves & Power Multiplier",
+        "ball_strike": "Module 2: Ball Strikes, xG Shots & Dodge Bounties",
+        "locomotion": "Module 3: 3D Locomotion, Kickoff Sprint & Powerslides",
+        "aerial": "Module 4: Tactical Aerial Flight & Air-Carries",
+        "positioning": "Module 5: 50/50 Challenges, Rotation & Positioning",
+        "boost_economy": "Module 6: Boost Pads, Orbs & Conservation",
     }
 
     # Dynamically capture all active reward categories
