@@ -209,15 +209,15 @@ def build_full_diagnostic_export() -> tuple[str, str]:
     elapsed_str = format_elapsed_time(elapsed)
     metrics = status.get("metrics", {})
 
-    # 1. System & Engine
+    # 1. System & Physics Engine
     try:
         from env.physics_engine import ROCKETSIM_AVAILABLE
     except Exception:
         ROCKETSIM_AVAILABLE = False
     
-    engine_str = "C++ RocketSim (High Speed Bullet Physics ~5000+ SPS)" if ROCKETSIM_AVAILABLE else "Pure-Python Fallback (~1100 SPS)"
+    engine_str = "C++ RocketSim (High Speed Bullet Physics ~4000+ SPS)" if ROCKETSIM_AVAILABLE else "Pure-Python Fallback (~1100 SPS)"
 
-    # 2. Configs
+    # 2. Hyperparameters & Environment Config
     default_cfg = load_yaml_config("config/default_config.yaml")
     hp = default_cfg.get("hyperparameters", {})
     env = default_cfg.get("environment", {})
@@ -239,11 +239,51 @@ def build_full_diagnostic_export() -> tuple[str, str]:
         except Exception:
             pass
 
-    # 3. Telemetry & AI Coach
-    telem = extract_rolling_telemetry("logs/history.jsonl", window=8)
+    # 3. Model Weights & Exploration Health
+    model_health: Dict[str, Any] = {}
+    latest_ckpt_path = "checkpoints/latest_model.pt"
+    if os.path.exists(latest_ckpt_path):
+        try:
+            ckpt = torch.load(latest_ckpt_path, map_location="cpu")
+            sd = ckpt.get("model_state_dict", {})
+            obs_dim = ckpt.get("obs_dim", 74)
+            act_dim = ckpt.get("act_dim", 8)
+            continuous = ckpt.get("continuous_actions", True)
+
+            # Exploration standard deviations
+            log_std = sd.get("actor_log_std", None)
+            if log_std is not None:
+                clamped_std = torch.clamp(log_std, min=-3.0, max=0.0)
+                stds = torch.exp(clamped_std).squeeze().tolist()
+                channel_names = ["Throttle", "Steer", "Pitch", "Yaw", "Roll", "Jump", "Boost", "Handbrake"]
+                exploration_sigmas = {channel_names[i]: round(stds[i], 3) for i in range(min(len(channel_names), len(stds)))}
+            else:
+                exploration_sigmas = {}
+
+            # Weight norms for stability check
+            w_actor = sd.get("actor_mean.weight", None)
+            w_critic = sd.get("critic.0.weight", None)
+            actor_norm = round(float(torch.norm(w_actor)), 3) if w_actor is not None else None
+            critic_norm = round(float(torch.norm(w_critic)), 3) if w_critic is not None else None
+
+            model_health = {
+                "obs_dim": obs_dim,
+                "act_dim": act_dim,
+                "continuous_actions": continuous,
+                "checkpoint_iteration": ckpt.get("iteration", 0),
+                "checkpoint_global_step": ckpt.get("global_step", 0),
+                "actor_weight_norm": actor_norm,
+                "critic_weight_norm": critic_norm,
+                "exploration_std_by_channel": exploration_sigmas
+            }
+        except Exception as e:
+            model_health = {"error": f"Failed to parse checkpoint: {e}"}
+
+    # 4. Telemetry & AI Coach
+    telem = extract_rolling_telemetry("logs/history.jsonl", window=10)
     coach_report = generate_ai_coach_diagnostics(telem, active_rewards=rew)
 
-    # 4. Checkpoint Files
+    # 5. Checkpoint Files
     ckpts = glob.glob("checkpoints/*.pt")
     ckpt_info = []
     for c in sorted(ckpts, key=os.path.getmtime, reverse=True)[:6]:
@@ -252,7 +292,7 @@ def build_full_diagnostic_export() -> tuple[str, str]:
         ckpt_info.append(f"- `{os.path.basename(c)}` ({size_mb:.1f} MB, modified {mtime})")
     ckpts_str = "\n".join(ckpt_info) if ckpt_info else "*(No checkpoint files found)*"
 
-    # 5. Recent Logs Tail
+    # 6. Recent Logs Tail
     log_tail = mgr.get_logs(max_lines=20)
     log_tail_str = "".join(log_tail).strip() if log_tail else "*(No console output recorded yet)*"
 
@@ -271,11 +311,22 @@ def build_full_diagnostic_export() -> tuple[str, str]:
 | **Global Timesteps** | `{metrics.get('global_step', 0):,}` | **Policy Entropy** | `{metrics.get('entropy', 0.0):.4f}` |
 | **Policy Loss** | `{metrics.get('policy_loss', 0.0):.5f}` | **Value Loss** | `{metrics.get('value_loss', 0.0):.4f}` |
 | **Ball Touches / Rollout** | `{metrics.get('ball_touches', 0.0):.1f}` | **Goals / Rollout** | `{metrics.get('goals', 0)}` |
+| **Observation Dimensions** | `{model_health.get('obs_dim', 74)} features` | **Action Dimensions** | `{model_health.get('act_dim', 8)} channels` |
 
 ---
 
 ### 🧠 AI Coach Behavioral Diagnosis
 {coach_report}
+
+---
+
+### 🎛️ Active 6-Module Hierarchical Reward Weights
+* **Module 1 (Goals & Saves):** Goal: `{rew.get('goal_weight', 250.0):+.1f}` | Concede: `{rew.get('concede_weight', -100.0):+.1f}` | Save: `{rew.get('save_weight', 50.0):+.1f}` | Laser Multi: `{rew.get('goal_speed_multi', 1.5):.1f}x`
+* **Module 2 (Ball Strike & xG Shots):** Hit: `{rew.get('touch_ball_weight', 12.0):+.1f}` | xG Shot: `{rew.get('aligned_shot_weight', 40.0):+.1f}` | High Aerial: `{rew.get('high_aerial_bounty', 25.0):+.1f}` | Kickoff 1st Touch: `{rew.get('kickoff_first_touch_bonus', 35.0):+.1f}`
+* **Module 3 (3D Locomotion):** Nav Speed: `{rew.get('speed_toward_ball_weight', 0.06):.3f}` | Dodge Rush: `{rew.get('dodge_rush_multi', 1.6):.1f}x`
+* **Module 4 (Tactical Aerials):** Aerial Climb: `{rew.get('aerial_height_weight', 0.08):.3f}` | Air Dribble: `{rew.get('air_dribble_carry_weight', 0.06):.3f}`
+* **Module 5 (Positioning & 50/50s):** Goal-Side: `{rew.get('behind_ball_weight', 0.04):.3f}` | Inactivity Penalty: `{rew.get('inactivity_penalty_weight', 0.05):.3f}`
+* **Module 6 (Boost Economy):** Small Pad: `{rew.get('small_pad_weight', 5.0):+.1f}` | Big Orb: `{rew.get('big_pad_weight', 15.0):+.1f}` | Steal: `{rew.get('boost_steal_weight', 10.0):+.1f}`
 
 ---
 
@@ -294,6 +345,7 @@ def build_full_diagnostic_export() -> tuple[str, str]:
             "elapsed_formatted": elapsed_str,
             "physics_engine": engine_str,
         },
+        "model_health": model_health,
         "convergence_metrics": {
             "iteration": metrics.get("iteration", 0),
             "global_step": metrics.get("global_step", 0),
