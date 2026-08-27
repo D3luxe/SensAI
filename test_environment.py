@@ -44,11 +44,10 @@ class TestRocketLeagueEnvironment(unittest.TestCase):
         rew, rew_dict = rew_manager.get_reward(arena.cars[0], arena, np.zeros(8), False, None)
         self.assertIsInstance(rew, float)
         self.assertIn("goal", rew_dict)
-        self.assertIn("ball_strike", rew_dict)
-        self.assertIn("locomotion", rew_dict)
-        self.assertIn("aerial", rew_dict)
-        self.assertIn("positioning", rew_dict)
-        self.assertIn("boost_economy", rew_dict)
+        self.assertIn("ball_to_goal", rew_dict)
+        self.assertIn("player_to_ball", rew_dict)
+        self.assertIn("touch", rew_dict)
+        self.assertIn("boost", rew_dict)
 
     def test_vectorized_env(self):
         vec_env = VectorizedRocketEnv(num_envs=4, game_mode="1v1", tick_skip=4)

@@ -190,40 +190,52 @@ class TestPhysicsAndControls(unittest.TestCase):
         obs_l = self.obs_builder.build_obs(car, MockArena(ball_l, [car]))
         self.assertLess(obs_l[35], 0.0, "Ball to the LEFT must produce negative local_ball_pos[1] offset!")
 
-    def test_locomotion_reward_steering_gradient(self):
+    def test_macro_rewards_potential_and_boost(self):
         """
-        Guarantees that LocomotionReward rewards driving straight (0.0) when pointing at the ball,
-        and rewards positive steering when the ball is to the Right.
+        Guarantees that Macro Potential-Based Rewards produce mathematically correct gradients:
+        1. Ball-to-Goal Velocity Reward is positive when moving toward opponent goal.
+        2. Player-to-Ball Velocity Reward is positive when approaching the ball.
+        3. Boost Reward follows Necto sqrt-curve (high reward for low-tank pad pickup).
         """
-        from env.physics_engine import CarState, BallState, BoostPad
-        from env.rewards import LocomotionReward
-        reward_fn = LocomotionReward(weight=0.06)
+        from env.physics_engine import CarState, BallState, BoostPad, ARENA_EXTENT_Y
+        from env.rewards import BallToGoalVelocityReward, PlayerToBallVelocityReward, BoostReward, GoalReward
 
         class MockArena:
             def __init__(self, ball, cars):
                 self.ball = ball
                 self.cars = cars
                 self.boost_pads = BoostPad.create_standard_pads()
-            def get_shot_threat(self, team): return False, 0.0, 0.0
 
         car = CarState(id=0, team=0, pos=np.array([0.0, -3000.0, 17.0], dtype=np.float32),
-                       vel=np.array([0.0, 1000.0, 0.0], dtype=np.float32),
+                       vel=np.array([0.0, 1500.0, 0.0], dtype=np.float32),
                        rot=np.array([0.0, np.pi / 2, 0.0], dtype=np.float32),
-                       boost=50.0, on_ground=True)
+                       boost=10.0, on_ground=True)
 
-        # 1. Ball straight ahead -> Steer 0.0 MUST give higher reward than steer +/-1.0
-        ball_c = BallState(pos=np.array([0.0, -2000.0, 93.0], dtype=np.float32))
-        rew_straight = reward_fn.get_reward(car, MockArena(ball_c, [car]), np.array([1.0, 0.0, 0, 0, 0, 0, 0, 0]), False, None)
-        rew_slam_r = reward_fn.get_reward(car, MockArena(ball_c, [car]), np.array([1.0, 1.0, 0, 0, 0, 0, 0, 0]), False, None)
-        rew_slam_l = reward_fn.get_reward(car, MockArena(ball_c, [car]), np.array([1.0, -1.0, 0, 0, 0, 0, 0, 0]), False, None)
-        self.assertGreater(rew_straight, rew_slam_r, "Straight driving (0.0) must score higher than slamming right when ball is centered!")
-        self.assertGreater(rew_straight, rew_slam_l, "Straight driving (0.0) must score higher than slamming left when ball is centered!")
+        # 1. Player to Ball closing speed
+        ball_fwd = BallState(pos=np.array([0.0, -1000.0, 93.0], dtype=np.float32),
+                             vel=np.array([0.0, 1000.0, 0.0], dtype=np.float32))
+        p2b_fn = PlayerToBallVelocityReward(weight=1.0)
+        rew_approach = p2b_fn.get_reward(car, MockArena(ball_fwd, [car]), np.zeros(8), False, None)
+        self.assertGreater(rew_approach, 0.0, "Approaching the ball must yield positive PlayerToBall reward!")
 
-        # 2. Ball to Right (+X = 200) -> Steer +0.7 MUST score higher than Steer -1.0
-        ball_r = BallState(pos=np.array([200.0, -2000.0, 93.0], dtype=np.float32))
-        rew_turn_r = reward_fn.get_reward(car, MockArena(ball_r, [car]), np.array([1.0, 0.7, 0, 0, 0, 0, 0, 0]), False, None)
-        rew_turn_away = reward_fn.get_reward(car, MockArena(ball_r, [car]), np.array([1.0, -1.0, 0, 0, 0, 0, 0, 0]), False, None)
-        self.assertGreater(rew_turn_r, rew_turn_away, "Steering towards right ball must score higher than steering away!")
+        # 2. Ball to Goal field progression
+        b2g_fn = BallToGoalVelocityReward(weight=1.5)
+        rew_prog = b2g_fn.get_reward(car, MockArena(ball_fwd, [car]), np.zeros(8), False, None)
+        self.assertGreater(rew_prog, 0.0, "Ball moving toward opponent net must yield positive BallToGoal reward!")
+
+        # 3. Necto Sqrt Boost Potential
+        boost_fn = BoostReward(gain_weight=1.0, lose_weight=0.5)
+        boost_fn.reset(MockArena(ball_fwd, [car]))
+        # Collect pad: 10% -> 22% (0.10 -> 0.22)
+        car.boost = 22.0
+        rew_boost = boost_fn.get_reward(car, MockArena(ball_fwd, [car]), np.zeros(8), False, None)
+        expected_diff = math.sqrt(0.22) - math.sqrt(0.10)
+        self.assertAlmostEqual(rew_boost, expected_diff, places=4, msg="Boost gain must match sqrt(curr) - sqrt(prev)!")
+
+        # 4. Zero-Sum Goal Reward
+        goal_fn = GoalReward(goal_weight=10.0, concede_weight=-10.0)
+        self.assertEqual(goal_fn.get_reward(car, MockArena(ball_fwd, [car]), np.zeros(8), True, 0), 10.0)
+        self.assertEqual(goal_fn.get_reward(car, MockArena(ball_fwd, [car]), np.zeros(8), True, 1), -10.0)
 
     def test_ground_dodge_substep_timing(self):
         """

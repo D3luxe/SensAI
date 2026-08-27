@@ -1,30 +1,25 @@
 {
-  "updated_at": 1787859978.1147125,
+  "updated_at": 1787866062.9435484,
   "learning_rate": 0.0003,
   "ent_coef": 0.0005,
   "clip_range": 0.2,
   "paused": false,
   "save_checkpoint_requested": false,
   "rewards": {
-    "goal_weight": 250.0,
-    "concede_weight": -100.0,
-    "save_weight": 50.0,
-    "goal_speed_multi": 1.5,
-    "touch_ball_weight": 12.0,
-    "aligned_shot_weight": 40.0,
-    "high_aerial_bounty": 25.0,
-    "flick_bounty": 30.0,
-    "directional_dodge_bounty": 15.0,
-    "kickoff_first_touch_bonus": 35.0,
-    "speed_toward_ball_weight": 0.08,
-    "dodge_rush_multi": 1.6,
-    "aerial_height_weight": 0.08,
-    "air_dribble_carry_weight": 0.06,
-    "behind_ball_weight": 0.035,
-    "inactivity_penalty_weight": 0.06,
-    "small_pad_weight": 7.0,
-    "big_pad_weight": 18.0,
-    "boost_steal_weight": 12.0,
-    "save_boost_weight": 0.02
+    "goal_weight": 10.0,
+    "concede_weight": -10.0,
+    "save_weight": 3.0,
+    "ball_to_goal_weight": 1.5,
+    "player_to_ball_weight": 0.8,
+    "touch_weight": 1.2,
+    "boost_gain_weight": 0.6,
+    "boost_lose_weight": 0.3
+  },
+  "scenarios": {
+    "kickoff_prob": 0.5,
+    "replay_prob": 0.15,
+    "aerial_prob": 0.15,
+    "wall_prob": 0.1,
+    "save_prob": 0.1
   }
 }

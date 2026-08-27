@@ -185,18 +185,18 @@ def generate_ai_coach_diagnostics(telemetry: Dict[str, Any], active_rewards: Dic
     corner_pct = telemetry.get("corner_zone_pct", 0.0)
     if corner_pct > 25.0:
         alerts.append(f"🚨 **High Corner Trapping ({corner_pct:.1f}%)**: The bot is spending over a quarter of the match trapped in corner dead-zones.")
-        tips.append("🔧 **Fix:** Lower **Goal-Side Rotation Weight (`behind_ball_weight`)** and increase **Navigation & Forward Speed (`speed_toward_ball_weight`)** to force center clears.")
+        tips.append("🔧 **Fix:** Increase **Ball-to-Goal Velocity (`ball_to_goal_weight`)** (e.g. `1.8` – `2.2`) to incentivize centering and clearing the ball.")
     else:
         healthy.append(f"✅ **Good Field Spacing**: Corner trapping is low ({corner_pct:.1f}%).")
 
     jump_pct = telemetry.get("jump_rate_pct", 0.0)
     air_pct = telemetry.get("air_time_pct", 0.0)
     if jump_pct < 1.5 and air_pct < 3.0:
-        alerts.append(f"🚨 **Grounded / Jump Paralysis (Jump: {jump_pct:.1f}%, Air: {air_pct:.1f}%)**: The bot is staying completely glued to the floor.")
-        tips.append("🔧 **Fix:** Increase **Tactical Aerial Flight Climb (`aerial_height_weight`)** (e.g. `0.10` – `0.15`) and **High Aerial Strike Bounty (`high_aerial_bounty`)**.")
+        alerts.append(f"🚨 **Grounded / Low Aerial Rate (Jump: {jump_pct:.1f}%, Air: {air_pct:.1f}%)**: The bot is staying glued to the floor.")
+        tips.append("🔧 **Fix:** Increase **Aerial Scenario Probability (`aerial_prob`)** to `0.25` in Scenario Settings to train airborne challenges.")
     elif jump_pct > 65.0:
         alerts.append(f"⚠️ **Jump Spamming ({jump_pct:.1f}%)**: The bot is spamming jump constantly, losing ground steering traction.")
-        tips.append("🔧 **Fix:** Slightly reduce **Tactical Aerial Flight Climb (`aerial_height_weight`)**.")
+        tips.append("🔧 **Fix:** Increase **Ground Boost Waste Penalty (`boost_lose_weight`)** to encourage stable driving lines.")
     else:
         healthy.append(f"✅ **Active Aerial Play**: Jump rate is {jump_pct:.1f}% with {air_pct:.1f}% airtime.")
 
@@ -206,7 +206,7 @@ def generate_ai_coach_diagnostics(telemetry: Dict[str, Any], active_rewards: Dic
     if steer_diff > 30.0:
         dominant = "Left" if left_pct > right_pct else "Right"
         alerts.append(f"🚨 **Steer Asymmetry / Donut Bias**: Turning {dominant} {max(left_pct, right_pct):.1f}% vs {min(left_pct, right_pct):.1f}%. The bot has developed a circular driving habit.")
-        tips.append("🔧 **Fix:** Increase **Navigation & Forward Speed (`speed_toward_ball_weight`)** and **Ball Contact Base Hit (`touch_ball_weight`)** to break circular turning.")
+        tips.append("🔧 **Fix:** Increase **Player-to-Ball Pursuit (`player_to_ball_weight`)** and **Touch Quality (`touch_weight`)** to force direct approaches.")
     else:
         healthy.append(f"✅ **Balanced Steering**: Left ({left_pct:.1f}%) and Right ({right_pct:.1f}%) steering are well-balanced.")
 
@@ -214,7 +214,7 @@ def generate_ai_coach_diagnostics(telemetry: Dict[str, Any], active_rewards: Dic
     mean_boost = telemetry.get("mean_boost_tank", 33.3)
     if zero_boost > 35.0 or mean_boost < 15.0:
         alerts.append(f"🚨 **Boost Starvation (Empty: {zero_boost:.1f}%, Avg: {mean_boost:.1f} boost)**: The bot is frequently driving on empty tanks.")
-        tips.append("🔧 **Fix:** Increase **Small Boost Pad Weight (`small_pad_weight`)** (e.g. `6.0` – `10.0`) and **Big Orb Weight (`big_pad_weight`)** (`18.0`).")
+        tips.append("🔧 **Fix:** Increase **Boost Pickup Gain Weight (`boost_gain_weight`)** (e.g. `0.8` – `1.2`) or raise **Ground Waste Penalty (`boost_lose_weight`)**.")
     else:
         healthy.append(f"✅ **Healthy Boost Reserves**: Average tank is {mean_boost:.1f} boost ({zero_boost:.1f}% empty).")
 
@@ -222,7 +222,7 @@ def generate_ai_coach_diagnostics(telemetry: Dict[str, Any], active_rewards: Dic
     fwd_pct = telemetry.get("throttle_forward_pct", 0.0)
     if rev_pct > 30.0:
         alerts.append(f"⚠️ **Excessive Reversing ({rev_pct:.1f}%)**: The bot is spending significant time backing up rather than rotating forward.")
-        tips.append("🔧 **Fix:** Increase **Navigation & Forward Speed (`speed_toward_ball_weight`)** and verify forward drive bias.")
+        tips.append("🔧 **Fix:** Increase **Player-to-Ball Pursuit (`player_to_ball_weight`)** (e.g. `1.0` – `1.4`).")
     else:
         healthy.append(f"✅ **Forward Aggression**: Driving forward {fwd_pct:.1f}% of the time.")
 

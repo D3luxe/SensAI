@@ -6,7 +6,7 @@ environment:
 hyperparameters:
   batch_size: 8192
   clip_range: 0.2
-  ent_coef: 0.01
+  ent_coef: 0.012
   gae_lambda: 0.95
   gamma: 0.995
   learning_rate: 0.0003
@@ -23,32 +23,20 @@ model:
   continuous_actions: true
   use_layer_norm: true
 rewards:
-  aerial_height_weight: 0.08
-  air_dribble_carry_weight: 0.06
-  aligned_shot_weight: 40.0
-  behind_ball_weight: 0.035
-  big_pad_weight: 18.0
-  boost_steal_weight: 12.0
-  concede_weight: -100.0
-  directional_dodge_bounty: 15.0
-  dodge_rush_multi: 1.6
-  flick_bounty: 30.0
-  goal_speed_multi: 1.5
-  goal_weight: 250.0
-  high_aerial_bounty: 25.0
-  inactivity_penalty_weight: 0.06
-  kickoff_first_touch_bonus: 35.0
-  save_boost_weight: 0.02
-  save_weight: 50.0
-  small_pad_weight: 7.0
-  speed_toward_ball_weight: 0.08
-  touch_ball_weight: 12.0
+  goal_weight: 10.0
+  concede_weight: -10.0
+  save_weight: 3.0
+  ball_to_goal_weight: 1.5
+  player_to_ball_weight: 0.8
+  touch_weight: 1.2
+  boost_gain_weight: 0.6
+  boost_lose_weight: 0.3
 scenarios:
   aerial_prob: 0.15
-  kickoff_prob: 0.35
+  kickoff_prob: 0.5
   max_replays_to_ingest: 50
-  replay_prob: 0.25
+  replay_prob: 0.15
   replay_sort_mode: newest
   replays_pool_path: data/replays/replays_pool.npz
   save_prob: 0.1
-  wall_prob: 0.15
+  wall_prob: 0.1
