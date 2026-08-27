@@ -76,6 +76,8 @@ class SenseiRLBot(BaseAgent):
         self.current_steer = 0.0
         self.ground_dodge_active = False
         self.fast_aerial_active = False
+        self.dodge_cooldown = 0
+        self.ball_touched_since_kickoff = False
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self.obs_builder = DefaultObservationBuilder(symmetric=True)
         self.discrete_parser = DiscreteActionParser()
@@ -172,6 +174,22 @@ class SenseiRLBot(BaseAgent):
             if packet.num_cars <= self.index:
                 return controller
 
+            # Extract ball
+            b_phys = packet.game_ball.physics
+            ball_state = BallState(
+                pos=np.array([b_phys.location.x, b_phys.location.y, b_phys.location.z], dtype=np.float32),
+                vel=np.array([b_phys.velocity.x, b_phys.velocity.y, b_phys.velocity.z], dtype=np.float32),
+                ang_vel=np.array([b_phys.angular_velocity.x, b_phys.angular_velocity.y, b_phys.angular_velocity.z], dtype=np.float32)
+            )
+
+            # Match and Kickoff State Tracking
+            ball_speed = float(np.linalg.norm(ball_state.vel))
+            ball_dist_center = float(np.linalg.norm(ball_state.pos[:2]))
+            if ball_dist_center < 50.0 and ball_speed < 80.0:
+                self.ball_touched_since_kickoff = False
+            elif ball_speed > 120.0 or ball_dist_center > 150.0:
+                self.ball_touched_since_kickoff = True
+
             # Extract self car
             my_car = packet.game_cars[self.index]
             is_on_ground = bool(my_car.has_wheel_contact)
@@ -195,15 +213,8 @@ class SenseiRLBot(BaseAgent):
                 boost=float(my_car.boost),
                 on_ground=is_on_ground,
                 has_jump=has_jump,
-                has_flip=has_flip
-            )
-
-            # Extract ball
-            b_phys = packet.game_ball.physics
-            ball_state = BallState(
-                pos=np.array([b_phys.location.x, b_phys.location.y, b_phys.location.z], dtype=np.float32),
-                vel=np.array([b_phys.velocity.x, b_phys.velocity.y, b_phys.velocity.z], dtype=np.float32),
-                ang_vel=np.array([b_phys.angular_velocity.x, b_phys.angular_velocity.y, b_phys.angular_velocity.z], dtype=np.float32)
+                has_flip=has_flip,
+                ball_touches=1 if self.ball_touched_since_kickoff else 0
             )
 
             # Extract future ball trajectory from RLBot
@@ -282,7 +293,8 @@ class SenseiRLBot(BaseAgent):
                         boost=float(opp_car.boost),
                         on_ground=opp_on_ground,
                         has_jump=opp_jump,
-                        has_flip=opp_flip
+                        has_flip=opp_flip,
+                        ball_touches=1 if self.ball_touched_since_kickoff else 0
                     ))
 
             self.ticks_since_last_action += 1
@@ -302,11 +314,20 @@ class SenseiRLBot(BaseAgent):
                         act = self.discrete_parser.parse_actions(act_idx)
                 self.prev_action = act
 
+                if self.dodge_cooldown > 0:
+                    self.dodge_cooldown -= 1
+
                 # Determine if a ground flip or fast aerial is initiated on tick 0
                 jump_threshold = 0.5 if self.continuous_actions else 0.0
                 jump_req = bool(act[5] > jump_threshold)
-                self.fast_aerial_active = bool(jump_req and is_on_ground and act[2] > 0.1 and act[6] > 0.3)
-                self.ground_dodge_active = bool(jump_req and is_on_ground and not self.fast_aerial_active)
+                if is_on_ground and self.dodge_cooldown == 0:
+                    self.fast_aerial_active = bool(jump_req and act[2] > 0.1 and act[6] > 0.3)
+                    self.ground_dodge_active = bool(jump_req and not self.fast_aerial_active)
+                    if self.ground_dodge_active:
+                        self.dodge_cooldown = 2
+                elif not is_on_ground:
+                    self.fast_aerial_active = False
+                    self.ground_dodge_active = False
             else:
                 # Hold previous action across the 8 physics substeps
                 act = self.prev_action
@@ -332,17 +353,24 @@ class SenseiRLBot(BaseAgent):
             jump_threshold = 0.5 if self.continuous_actions else 0.0
             jump_requested = bool(act[5] > jump_threshold)
 
-            # Ground stabilization: when firmly driving on ground without jump, keep pitch/roll neutral
-            if is_on_ground and not jump_requested:
+            # Ground stabilization & Dodge Takeoff Clearance:
+            # When driving on the ground without jump, OR during Phase 1 (ticks 0..3) of a ground dodge takeoff,
+            # keep pitch and roll neutral so the nose does not bottom out into the turf.
+            if (is_on_ground and not jump_requested) or (self.ground_dodge_active and self.ticks_since_last_action < 4):
                 controller.pitch = 0.0
                 controller.roll = 0.0
 
-            # Jump & Dodge execution
-            if jump_requested:
+            # Jump & Dodge execution (Exact 4-2-2 Substep Alignment with RocketSim):
+            # Phase 1 (Ticks 0..3): Hold Jump for 4 ticks (33.3ms) to fully clear suspension.
+            # Phase 2 (Ticks 4..5): Release Jump for 2 ticks (16.7ms).
+            # Phase 3 (Ticks 6..7): Press Jump for 2 ticks with directional pitch/yaw to trigger dodge impulse.
+            if jump_requested and self.dodge_cooldown > 0:
                 if self.ground_dodge_active or self.fast_aerial_active:
-                    controller.jump = bool(self.ticks_since_last_action in (0, 1, 4, 5))
+                    controller.jump = bool(self.ticks_since_last_action in (0, 1, 2, 3, 6, 7))
                 else:
-                    controller.jump = bool(self.ticks_since_last_action in (0, 1, 2))
+                    controller.jump = bool(self.ticks_since_last_action in (0, 1, 2, 3))
+            elif jump_requested:
+                controller.jump = bool(self.ticks_since_last_action in (0, 1, 2, 3))
             else:
                 controller.jump = False
 
