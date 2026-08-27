@@ -1310,4 +1310,14 @@ def create_ui():
             outputs=[unit_tests_overview_md, unit_tests_stdout]
         )
 
+        # Comprehensive Diagnostics Export Callback
+        def on_refresh_full_diagnostics():
+            overview_md, export_box = build_full_diagnostic_export()
+            return overview_md, export_box
+
+        refresh_snapshot_btn.click(
+            fn=on_refresh_full_diagnostics,
+            outputs=[diag_overview_md, diag_export_raw]
+        )
+
     return demo
