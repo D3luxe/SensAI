@@ -311,13 +311,14 @@ class SenseiRLBot(BaseAgent):
                 # Hold previous action across the 8 physics substeps
                 act = self.prev_action
 
-            # 1-to-1 Neural Policy Mapping (Zero artificial overrides)
+            # 1-to-1 Neural Policy Mapping (Matched with training physics engine)
             # Continuous Action vector: [throttle, steer, pitch, yaw, roll, jump, boost, handbrake]
             raw_steer = float(np.clip(act[1], -1.0, 1.0))
             # 120Hz Smooth Steering Filter (Eliminates high-frequency wheel chatter while retaining instant response)
             self.current_steer = 0.65 * raw_steer + 0.35 * self.current_steer
             controller.throttle = float(np.clip(act[0], -1.0, 1.0))
-            controller.steer = float(np.clip(self.current_steer, -1.0, 1.0))
+            # RLBot Gamepad Steer (Inverted to match RocketSim training action mapping)
+            controller.steer = -float(np.clip(self.current_steer, -1.0, 1.0))
 
             jump_threshold = 0.5 if self.continuous_actions else 0.0
             jump_requested = bool(act[5] > jump_threshold)
@@ -326,12 +327,12 @@ class SenseiRLBot(BaseAgent):
             if is_on_ground and not jump_requested:
                 # Ground stability: keep air pitch and roll neutral to prevent death-rolls over wall curves and bumps
                 controller.pitch = 0.0
-                controller.yaw = float(np.clip(act[3], -1.0, 1.0))
+                controller.yaw = -float(np.clip(act[3], -1.0, 1.0))
                 controller.roll = 0.0
             else:
                 controller.pitch = float(np.clip(act[2], -1.0, 1.0))
-                controller.yaw = float(np.clip(act[3], -1.0, 1.0))
-                controller.roll = float(np.clip(act[4], -1.0, 1.0))
+                controller.yaw = -float(np.clip(act[3], -1.0, 1.0))
+                controller.roll = -float(np.clip(act[4], -1.0, 1.0))
 
             # Double-Jump & Dodge 120Hz Substep Cadence (Allows natural speed-flips, wave-dashes, and aerials)
             if jump_requested:
