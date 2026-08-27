@@ -199,9 +199,11 @@ class BoostReward(BaseReward):
         self._prev_boost[car.id] = curr
 
         boost_diff = math.sqrt(curr) - math.sqrt(prev)
+        is_kickoff = bool(abs(arena.ball.pos[0]) < 50.0 and abs(arena.ball.pos[1]) < 50.0 and float(np.linalg.norm(arena.ball.vel)) < 100.0)
+
         if boost_diff >= 0:
             return self.gain_weight * boost_diff
-        elif car.pos[2] < GOAL_HEIGHT:
+        elif not is_kickoff and car.pos[2] < GOAL_HEIGHT:
             height_factor = max(0.0, 1.0 - (car.pos[2] / GOAL_HEIGHT))
             return self.lose_weight * boost_diff * height_factor
 
