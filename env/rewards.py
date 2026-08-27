@@ -258,22 +258,27 @@ class LocomotionReward(BaseReward):
         # Kickoff Sprint Acceleration Rush & Collision Aiming
         kickoff_bonus = 0.0
         is_center_ball = (abs(arena.ball.pos[0]) < 50.0 and abs(arena.ball.pos[1]) < 50.0 and float(np.linalg.norm(arena.ball.vel)) < 80.0)
-        if is_center_ball and dist > 250.0:
-            # Reward closing speed scaled by how accurately the car's nose is aimed along the collision track
-            collision_factor = max(0.0, 1.0 - (fwd_cross / 280.0))
-            if speed_toward > 500.0 and fwd_align > 0.6:
-                kickoff_bonus += 0.06 * collision_factor * min(1.5, speed_toward / 1400.0)
+        if is_center_ball and dist > 220.0:
+            # Steep angular aiming accuracy to center ball
+            aim_error_rad = math.acos(max(-1.0, min(1.0, fwd_align)))
+            aim_accuracy = max(0.0, 1.0 - (aim_error_rad / math.radians(10.0)))
+            
+            # Rush sprint payout scaled by angular aim lock
+            if speed_toward > 400.0:
+                kickoff_bonus += 0.12 * aim_accuracy * min(1.5, speed_toward / 1400.0)
 
-            # Active Kickoff Steering Correction: Teach turning inward toward (0,0) from off-center spawns
-            if fwd_cross > 50.0:
-                right = car.get_right_vector()
-                lat_offset = float(np.dot(right, unit_to_target))
-                is_steering_toward = (action[1] > 0.05 and lat_offset > 0.05) or (action[1] < -0.05 and lat_offset < -0.05)
-                if is_steering_toward:
-                    kickoff_bonus += 0.04  # Steering correction bonus
+            # Active Inward Steering Gradient for Off-Center & Diagonal Spawns
+            right = car.get_right_vector()
+            lat_offset = float(np.dot(right, unit_to_target))
+            if abs(lat_offset) > 0.02:
+                is_correcting = (action[1] > 0.05 and lat_offset > 0.02) or (action[1] < -0.05 and lat_offset < -0.02)
+                if is_correcting:
+                    kickoff_bonus += 0.08  # Substantial reward for steering into the ball
+                elif abs(action[1]) < 0.05:
+                    kickoff_bonus -= 0.03  # Active penalty for driving parallel past the ball
 
-            # Speed-flip acceleration pulse only granted if aimed inside the collision corridor
-            if car.just_dodged and is_on_collision_course:
+            # Clean speed-flip acceleration pulse only granted if aimed directly on collision track
+            if car.just_dodged and aim_accuracy > 0.8:
                 kickoff_bonus += 0.10
 
         # Bounce Anticipation Bonus: rewards closing speed toward airborne intercept point
