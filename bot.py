@@ -332,7 +332,7 @@ class SenseiRLBot(BaseAgent):
             else:
                 controller.pitch = float(np.clip(act[2], -1.0, 1.0))
                 controller.yaw = -float(np.clip(act[3], -1.0, 1.0))
-                controller.roll = -float(np.clip(act[4], -1.0, 1.0))
+                controller.roll = float(np.clip(act[4], -1.0, 1.0))
 
             # Double-Jump & Dodge 120Hz Substep Cadence (Allows natural speed-flips, wave-dashes, and aerials)
             if jump_requested:
