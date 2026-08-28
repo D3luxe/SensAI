@@ -214,12 +214,15 @@ class RocketSimArena:
                         b_pos_y = self._rsim_arena.ball.get_state().pos.y
                         self.scored_team = 0 if b_pos_y > 0 else 1
 
+                self._touch_active_this_step = {i: False for i in range(num_players)}
+                self._car_was_touching = {i: False for i in range(num_players)}
+
                 def on_touch_cb(**kwargs):
                     car_obj = kwargs.get("car")
                     if car_obj:
-                        for c in self.cars:
-                            if c.id == car_obj.id - 1:
-                                c.ball_touches += 1
+                        idx = car_obj.id - 1
+                        if idx in self._touch_active_this_step:
+                            self._touch_active_this_step[idx] = True
 
                 self._rsim_arena.set_goal_score_callback(on_goal_cb)
                 self._rsim_arena.set_ball_touch_callback(on_touch_cb)
@@ -443,8 +446,18 @@ class RocketSimArena:
                     boost=bool(act[6] > 0.3), handbrake=hnd_val
                 ))
             self._rsim_arena.step(total_ticks)
-
             self._sync_from_rsim()
+
+            # Debounced discrete touch counting: increment ball_touches on new contact initiation
+            if hasattr(self, "_touch_active_this_step"):
+                for i, car in enumerate(self.cars):
+                    is_touching = self._touch_active_this_step.get(i, False)
+                    was_touching = self._car_was_touching.get(i, False)
+                    if is_touching and not was_touching:
+                        car.ball_touches += 1
+                    self._car_was_touching[i] = is_touching
+                    self._touch_active_this_step[i] = False
+
             self._cached_pred_step = -1
             self._cached_rsim_preds = None
             self._cached_threat = {}
