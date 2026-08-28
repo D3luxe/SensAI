@@ -31,6 +31,9 @@ def get_activation_cls(activation: str):
         return nn.Tanh
 
 
+from env.observations import OBS_MIRROR_MASK_NP, ACT_MIRROR_MASK_NP
+
+
 class ActorCritic(nn.Module):
     def __init__(
         self,
@@ -47,6 +50,9 @@ class ActorCritic(nn.Module):
         self.act_dim = act_dim
         self.continuous_actions = continuous_actions
         self.use_layer_norm = use_layer_norm
+
+        self.register_buffer("obs_mirror_mask", torch.tensor(OBS_MIRROR_MASK_NP, dtype=torch.float32), persistent=False)
+        self.register_buffer("act_mirror_mask", torch.tensor(ACT_MIRROR_MASK_NP, dtype=torch.float32), persistent=False)
 
         act_cls = get_activation_cls(activation)
 
@@ -123,7 +129,18 @@ class ActorCritic(nn.Module):
         value = self.critic(obs)
 
         if self.continuous_actions:
-            action_mean = torch.tanh(self.actor_mean(features))
+            if obs.shape[-1] == self.obs_mirror_mask.shape[-1]:
+                # Equivariant Bilateral Symmetry Forward Pass
+                # Evaluates direct and mirrored paths simultaneously, guaranteeing 0.0 straight-ahead bias and exact left-right symmetry
+                obs_mirr = obs * self.obs_mirror_mask
+                feat_mirr = self.actor_backbone(obs_mirr)
+
+                raw_mean = torch.tanh(self.actor_mean(features))
+                mirr_mean = torch.tanh(self.actor_mean(feat_mirr)) * self.act_mirror_mask
+                action_mean = 0.5 * (raw_mean + mirr_mean)
+            else:
+                action_mean = torch.tanh(self.actor_mean(features))
+
             # Clamp log_std to [-2.5, -1.2] so exploration std is bounded within [0.08, 0.30] (optimal vehicle control window)
             clamped_log_std = torch.clamp(self.actor_log_std, min=-2.5, max=-1.2)
             action_log_std = clamped_log_std.expand_as(action_mean)
