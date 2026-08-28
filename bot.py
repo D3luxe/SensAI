@@ -5,6 +5,8 @@ Converts live Rocket League GameTickPacket data into model observations and retu
 
 from __future__ import annotations
 import os
+import io
+import time
 import math
 import numpy as np
 import torch
@@ -109,7 +111,22 @@ class SenseiRLBot(BaseAgent):
 
         if ckpt_path:
             try:
-                ckpt = torch.load(ckpt_path, map_location=self.device)
+                # Read into memory buffer first to avoid holding file locks on Windows
+                ckpt_bytes = None
+                for attempt in range(5):
+                    try:
+                        with open(ckpt_path, "rb") as f:
+                            ckpt_bytes = f.read()
+                        break
+                    except (PermissionError, OSError):
+                        time.sleep(0.05)
+                
+                if ckpt_bytes is None:
+                    with open(ckpt_path, "rb") as f:
+                        ckpt_bytes = f.read()
+
+                buffer = io.BytesIO(ckpt_bytes)
+                ckpt = torch.load(buffer, map_location=self.device)
                 self.continuous_actions = ckpt.get("continuous_actions", False)
                 ckpt_act_dim = 8 if self.continuous_actions else self.discrete_parser.action_dim
                 

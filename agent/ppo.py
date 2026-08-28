@@ -211,7 +211,7 @@ class PPOTrainer:
             print(f"[Live Config Error] {e}")
 
     def save_checkpoint(self, path: str):
-        torch.save({
+        data = {
             "iteration": self.iteration,
             "global_step": self.global_step,
             "model_state_dict": self.agent.state_dict(),
@@ -222,7 +222,31 @@ class PPOTrainer:
             "continuous_actions": self.continuous_actions,
             "use_layer_norm": self.use_layer_norm,
             "activation": self.activation,
-        }, path)
+        }
+        # Atomic save on Windows: write to .tmp file then replace with retry to avoid file lock conflict (Error 1224)
+        tmp_path = path + f".tmp.{os.getpid()}"
+        try:
+            torch.save(data, tmp_path)
+            for attempt in range(10):
+                try:
+                    if os.path.exists(path):
+                        os.replace(tmp_path, path)
+                    else:
+                        os.rename(tmp_path, path)
+                    break
+                except (PermissionError, OSError):
+                    time.sleep(0.05)
+            else:
+                try:
+                    torch.save(data, path)
+                except Exception as e:
+                    print(f"[PPO Trainer] Warning: Checkpoint save fallback failed: {e}")
+        finally:
+            if os.path.exists(tmp_path):
+                try:
+                    os.remove(tmp_path)
+                except Exception:
+                    pass
 
     def cleanup_old_checkpoints(self, max_to_keep: Optional[int] = None):
         """
