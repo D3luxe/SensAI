@@ -30,7 +30,7 @@ except ImportError:
     GameTickPacket = object
 
 from agent.models import ActorCritic
-from env.observations import DefaultObservationBuilder
+from env.observations import DefaultObservationBuilder, OBS_MIRROR_MASK_NP, ACT_MIRROR_MASK_NP
 from env.actions import DiscreteActionParser, ContinuousActionParser
 from env.physics_engine import (
     CarState, BallState, BoostPad,
@@ -313,13 +313,17 @@ class SenseiRLBot(BaseAgent):
                 arena = MockArena(ball_state, [car_state] + opponents, ball_pred=ball_prediction_slice, raw_pred_struct=pred_struct)
                 obs = self.obs_builder.build_obs(car_state, arena)
 
-                # Model Inference at 15Hz
+                # Model Inference at 15Hz with Bilateral Symmetrization
                 with torch.no_grad():
-                    obs_tensor = torch.tensor(obs, dtype=torch.float32, device=self.device).unsqueeze(0)
-                    action, _, _, _ = self.model.get_action_and_value(obs_tensor, deterministic=True)
                     if self.continuous_actions:
-                        act = action.squeeze(0).cpu().numpy()
+                        obs_m = obs * OBS_MIRROR_MASK_NP
+                        batch_obs = torch.tensor(np.vstack([obs, obs_m]), dtype=torch.float32, device=self.device)
+                        action, _, _, _ = self.model.get_action_and_value(batch_obs, deterministic=True)
+                        act_arr = action.cpu().numpy()
+                        act = (act_arr[0] + act_arr[1] * ACT_MIRROR_MASK_NP) * 0.5
                     else:
+                        obs_tensor = torch.tensor(obs, dtype=torch.float32, device=self.device).unsqueeze(0)
+                        action, _, _, _ = self.model.get_action_and_value(obs_tensor, deterministic=True)
                         act_idx = int(action.squeeze().cpu().item())
                         act = self.discrete_parser.parse_actions(act_idx)
                 self.prev_action = act

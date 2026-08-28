@@ -17,7 +17,7 @@ from env.physics_engine import (
     ARENA_EXTENT_X, ARENA_EXTENT_Y, GOAL_HALF_WIDTH, GOAL_HEIGHT,
     CAR_LENGTH, CAR_WIDTH, BALL_RADIUS
 )
-from env.observations import DefaultObservationBuilder
+from env.observations import DefaultObservationBuilder, OBS_MIRROR_MASK_NP, ACT_MIRROR_MASK_NP
 from env.actions import ContinuousActionParser, DiscreteActionParser
 from env.rewards import RewardManager
 from agent.models import ActorCritic
@@ -259,12 +259,17 @@ def simulate_match(
         if blue_model is not None:
             obs0 = obs_builder.build_obs(arena.cars[0], arena)
             with torch.no_grad():
-                obs_t = torch.tensor(obs0, dtype=torch.float32, device=device).unsqueeze(0)
-                act0, _, _, _ = blue_model.get_action_and_value(obs_t, deterministic=True)
                 if blue_model.continuous_actions:
-                    act0 = action_parser.parse_actions(act0.squeeze(0).cpu().numpy())
+                    obs0_m = obs0 * OBS_MIRROR_MASK_NP
+                    batch_obs0 = torch.tensor(np.vstack([obs0, obs0_m]), dtype=torch.float32, device=device)
+                    act0_t, _, _, _ = blue_model.get_action_and_value(batch_obs0, deterministic=True)
+                    act0_arr = act0_t.cpu().numpy()
+                    act0_sym = (act0_arr[0] + act0_arr[1] * ACT_MIRROR_MASK_NP) * 0.5
+                    act0 = action_parser.parse_actions(act0_sym)
                 else:
-                    act0_idx = int(act0.squeeze().cpu().item())
+                    obs_t = torch.tensor(obs0, dtype=torch.float32, device=device).unsqueeze(0)
+                    act0_t, _, _, _ = blue_model.get_action_and_value(obs_t, deterministic=True)
+                    act0_idx = int(act0_t.squeeze().cpu().item())
                     act0 = DiscreteActionParser().parse_actions(act0_idx)
         else:
             diff = arena.ball.pos - arena.cars[0].pos
@@ -276,12 +281,17 @@ def simulate_match(
         if orange_model is not None:
             obs1 = obs_builder.build_obs(arena.cars[1], arena)
             with torch.no_grad():
-                obs_t1 = torch.tensor(obs1, dtype=torch.float32, device=device).unsqueeze(0)
-                act1, _, _, _ = orange_model.get_action_and_value(obs_t1, deterministic=True)
                 if orange_model.continuous_actions:
-                    act1 = action_parser.parse_actions(act1.squeeze(0).cpu().numpy())
+                    obs1_m = obs1 * OBS_MIRROR_MASK_NP
+                    batch_obs1 = torch.tensor(np.vstack([obs1, obs1_m]), dtype=torch.float32, device=device)
+                    act1_t, _, _, _ = orange_model.get_action_and_value(batch_obs1, deterministic=True)
+                    act1_arr = act1_t.cpu().numpy()
+                    act1_sym = (act1_arr[0] + act1_arr[1] * ACT_MIRROR_MASK_NP) * 0.5
+                    act1 = action_parser.parse_actions(act1_sym)
                 else:
-                    act1_idx = int(act1.squeeze().cpu().item())
+                    obs_t1 = torch.tensor(obs1, dtype=torch.float32, device=device).unsqueeze(0)
+                    act1_t, _, _, _ = orange_model.get_action_and_value(obs_t1, deterministic=True)
+                    act1_idx = int(act1_t.squeeze().cpu().item())
                     act1 = DiscreteActionParser().parse_actions(act1_idx)
         else:
             diff_o = arena.ball.pos - arena.cars[1].pos
