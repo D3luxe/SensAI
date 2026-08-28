@@ -20,7 +20,7 @@ OBS_MIRROR_MASK_NP = np.array([
     -1.0,  1.0,  1.0,   # car_pos (pos.x negated)
     -1.0,  1.0,  1.0,   # car_vel (vel.x negated)
     -1.0,  1.0,  1.0,   # fwd (fwd.x negated)
-    -1.0,  1.0,  1.0,   # right (right.x negated, right.y and right.z preserved)
+     1.0, -1.0,  1.0,   # right (right.y negated across X=0 sagittal mirror plane)
     -1.0,  1.0,  1.0,   # up (up.x negated)
     -1.0,  1.0, -1.0,   # ang_vel (roll.x, yaw.z negated)
      1.0,  1.0,  1.0,  1.0,  # boost, on_ground, has_jump, has_flip

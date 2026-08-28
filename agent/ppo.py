@@ -409,24 +409,12 @@ class PPOTrainer:
                     mb_ret = b_returns[mb_inds]
                     mb_val = b_values[mb_inds]
 
-                    if self.continuous_actions:
-                        # Left-Right Sagittal Mirror Augmentation (Enforces strict bilateral symmetry)
-                        mb_o_mirr = mb_o * self.obs_mirror_mask
-                        mb_a_mirr = mb_a * self.act_mirror_mask
-
-                        aug_o = torch.cat([mb_o, mb_o_mirr], dim=0)
-                        aug_a = torch.cat([mb_a, mb_a_mirr], dim=0)
-                        aug_lp = torch.cat([mb_lp, mb_lp], dim=0)
-                        aug_adv = torch.cat([mb_adv, mb_adv], dim=0)
-                        aug_ret = torch.cat([mb_ret, mb_ret], dim=0)
-                        aug_val = torch.cat([mb_val, mb_val], dim=0)
-                    else:
-                        aug_o = mb_o
-                        aug_a = mb_a
-                        aug_lp = mb_lp
-                        aug_adv = mb_adv
-                        aug_ret = mb_ret
-                        aug_val = mb_val
+                    aug_o = mb_o
+                    aug_a = mb_a
+                    aug_lp = mb_lp
+                    aug_adv = mb_adv
+                    aug_ret = mb_ret
+                    aug_val = mb_val
 
                     _, newlogprob, entropy, newvalue = self.agent.get_action_and_value(
                         aug_o, aug_a
