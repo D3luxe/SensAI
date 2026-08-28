@@ -353,9 +353,11 @@ class SenseiRLBot(BaseAgent):
             controller.jump = bool(act[5] > jump_threshold)
 
             # Ground stabilization:
-            # When driving on the ground without jumping, keep pitch and roll neutral so the nose does not bottom out.
+            # When driving on the ground without jumping, keep pitch, yaw, and roll neutral
+            # so the vehicle steers purely via ground wheel physics without airborne gyro torque conflict.
             if is_on_ground and not controller.jump:
                 controller.pitch = 0.0
+                controller.yaw = 0.0
                 controller.roll = 0.0
 
             boost_threshold = 0.0

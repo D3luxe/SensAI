@@ -120,11 +120,6 @@ class PlayerToBallVelocityReward(BaseReward):
         prev_dist = self._prev_dist.get(car.id, curr_dist)
         self._prev_dist[car.id] = curr_dist
 
-        # If within striking proximity (< 300 uu), approach potential saturates to 0.0
-        # so strike quality and goal trajectory dictate reward
-        if curr_dist < 300.0:
-            return 0.0
-
         # Distance gap delta (positive when closing distance, negative when retreating)
         delta_dist = (prev_dist - curr_dist) / 2000.0
 
