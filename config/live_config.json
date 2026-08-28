@@ -1,25 +1,25 @@
 {
-  "updated_at": 1787878143.4747937,
+  "updated_at": 1787891676.9342282,
   "learning_rate": 0.0003,
   "ent_coef": 0.0005,
   "clip_range": 0.2,
   "paused": false,
   "save_checkpoint_requested": false,
   "rewards": {
-    "goal_weight": 30.0,
-    "concede_weight": -30.0,
-    "save_weight": 5.0,
-    "ball_to_goal_weight": 2.0,
-    "player_to_ball_weight": 0.15,
-    "touch_weight": 1.5,
-    "boost_gain_weight": 0.5,
-    "boost_lose_weight": 0.1
+    "goal_weight": 10.0,
+    "concede_weight": -10.0,
+    "save_weight": 3.0,
+    "ball_to_goal_weight": 1.5,
+    "player_to_ball_weight": 0.8,
+    "touch_weight": 1.2,
+    "boost_gain_weight": 0.6,
+    "boost_lose_weight": 0.3
   },
   "scenarios": {
-    "kickoff_prob": 0.5,
+    "kickoff_prob": 0.4,
     "replay_prob": 0.15,
-    "aerial_prob": 0.15,
+    "aerial_prob": 0.2,
     "wall_prob": 0.1,
-    "save_prob": 0.1
+    "save_prob": 0.15
   }
 }

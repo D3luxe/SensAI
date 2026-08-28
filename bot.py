@@ -345,7 +345,7 @@ class SenseiRLBot(BaseAgent):
             controller.yaw = float(np.clip(act[3], -1.0, 1.0))
             controller.roll = float(np.clip(act[4], -1.0, 1.0))
 
-            jump_threshold = 0.5 if self.continuous_actions else 0.0
+            jump_threshold = 0.0
             controller.jump = bool(act[5] > jump_threshold)
 
             # Ground stabilization:
@@ -354,7 +354,7 @@ class SenseiRLBot(BaseAgent):
                 controller.pitch = 0.0
                 controller.roll = 0.0
 
-            boost_threshold = 0.3 if self.continuous_actions else 0.0
+            boost_threshold = 0.0
             controller.boost = bool(act[6] > boost_threshold)
 
             # Handbrake / Powerslide:
