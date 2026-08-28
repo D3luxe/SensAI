@@ -210,12 +210,15 @@ class TestPhysicsAndControls(unittest.TestCase):
                        rot=np.array([0.0, np.pi / 2, 0.0], dtype=np.float32),
                        boost=10.0, on_ground=True)
 
-        # 1. Player to Ball closing speed
+        # 1. Player to Ball closing distance delta
         ball_fwd = BallState(pos=np.array([0.0, -1000.0, 93.0], dtype=np.float32),
                              vel=np.array([0.0, 1000.0, 0.0], dtype=np.float32))
         p2b_fn = PlayerToBallVelocityReward(weight=1.0)
+        p2b_fn.reset(MockArena(ball_fwd, [car]))
+        # Move car closer: from -3000 to -2500 (closing distance gap by 500 units)
+        car.pos = np.array([0.0, -2500.0, 17.0], dtype=np.float32)
         rew_approach = p2b_fn.get_reward(car, MockArena(ball_fwd, [car]), np.zeros(8), False, None)
-        self.assertGreater(rew_approach, 0.0, "Approaching the ball must yield positive PlayerToBall reward!")
+        self.assertGreater(rew_approach, 0.0, "Closing the distance gap to the ball must yield positive PlayerToBall reward!")
 
         # 2. Ball to Goal field progression
         b2g_fn = BallToGoalVelocityReward(weight=1.5)

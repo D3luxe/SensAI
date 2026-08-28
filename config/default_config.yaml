@@ -23,14 +23,14 @@ model:
   continuous_actions: true
   use_layer_norm: true
 rewards:
-  ball_to_goal_weight: 1.6
-  boost_gain_weight: 0.6
-  boost_lose_weight: 0.3
-  concede_weight: -10.0
-  goal_weight: 10.0
-  player_to_ball_weight: 0.7
-  save_weight: 3.0
-  touch_weight: 1.3
+  ball_to_goal_weight: 2.0
+  boost_gain_weight: 0.5
+  boost_lose_weight: 0.1
+  concede_weight: -30.0
+  goal_weight: 30.0
+  player_to_ball_weight: 0.15
+  save_weight: 5.0
+  touch_weight: 1.5
 scenarios:
   aerial_prob: 0.15
   kickoff_prob: 0.5

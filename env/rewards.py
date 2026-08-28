@@ -93,40 +93,47 @@ class BallToGoalVelocityReward(BaseReward):
 
 
 # ==============================================================================
-# 3. PLAYER-TO-BALL VELOCITY (Pursuit & Approach)
+# 3. PLAYER-TO-BALL DISTANCE DELTA (Pursuit & Approach Potential)
 # ==============================================================================
 class PlayerToBallVelocityReward(BaseReward):
     """
-    Continuous Closing Speed.
-    Rewards the player car for moving toward the ball.
-    Normalizes by CAR_MAX_SPEED (2300.0 uu/s).
-    Includes a 2.0x sprint multiplier and anti-retreat penalty during active kickoffs.
+    Necto / RLGym Potential-Based Distance Delta Approach Reward.
+    Rewards closing the Euclidean distance gap to the ball:
+        Phi(s) = -dist(car, ball) / 2000.0
+        Reward = (prev_dist - curr_dist) / 2000.0
+    When shadowing or circling a moving ball at constant distance: Reward is 0.0.
+    Within close striking proximity (< 300 uu): Approach potential is saturated (0.0),
+    forcing the agent to focus purely on strike direction (BallToGoal / TouchBall).
     """
-    def __init__(self, weight: float = 0.8):
+    def __init__(self, weight: float = 0.15):
         super().__init__(weight)
+        self._prev_dist: Dict[int, float] = {}
+
+    def reset(self, initial_state: RocketSimArena):
+        self._prev_dist = {
+            car.id: float(np.linalg.norm(initial_state.ball.pos - car.pos))
+            for car in initial_state.cars
+        }
 
     def get_reward(self, car: CarState, arena: RocketSimArena, action: np.ndarray, is_goal: bool, scoring_team: Optional[int]) -> float:
-        car_to_ball = arena.ball.pos - car.pos
-        dist = float(np.linalg.norm(car_to_ball))
-        if dist < 1e-4:
+        curr_dist = float(np.linalg.norm(arena.ball.pos - car.pos))
+        prev_dist = self._prev_dist.get(car.id, curr_dist)
+        self._prev_dist[car.id] = curr_dist
+
+        # If within striking proximity (< 300 uu), approach potential saturates to 0.0
+        # so strike quality and goal trajectory dictate reward
+        if curr_dist < 300.0:
             return 0.0
 
-        unit_to_ball = car_to_ball / dist
-        closing_speed = float(np.dot(car.vel, unit_to_ball))
+        # Distance gap delta (positive when closing distance, negative when retreating)
+        delta_dist = (prev_dist - curr_dist) / 2000.0
 
-        # Check if kickoff is active
+        # Kickoff sprint multiplier
         is_kickoff = bool(abs(arena.ball.pos[0]) < 50.0 and abs(arena.ball.pos[1]) < 50.0 and float(np.linalg.norm(arena.ball.vel)) < 100.0)
-        if is_kickoff:
-            if closing_speed > 200.0:
-                # 2.0x sprint multiplier for aggressively challenging the kickoff
-                return self.weight * (closing_speed / CAR_MAX_SPEED) * 2.0
-            elif closing_speed < -100.0:
-                # Anti-retreat penalty: penalize turning away or retreating into own net on kickoff
-                return -0.5
+        if is_kickoff and delta_dist > 0.0:
+            return self.weight * delta_dist * 2.0
 
-        # Normalized closing speed: positive when approaching ball
-        normalized_speed = closing_speed / CAR_MAX_SPEED
-        return self.weight * normalized_speed
+        return self.weight * delta_dist
 
 
 # ==============================================================================
@@ -221,22 +228,22 @@ class CombinedReward:
     def __init__(self, weights: Dict[str, float]):
         self.rewards: Dict[str, BaseReward] = {
             "goal": GoalReward(
-                goal_weight=weights.get("goal_weight", 10.0),
-                concede_weight=weights.get("concede_weight", -10.0),
-                save_weight=weights.get("save_weight", 3.0)
+                goal_weight=weights.get("goal_weight", 30.0),
+                concede_weight=weights.get("concede_weight", -30.0),
+                save_weight=weights.get("save_weight", 5.0)
             ),
             "ball_to_goal": BallToGoalVelocityReward(
-                weight=weights.get("ball_to_goal_weight", 1.5)
+                weight=weights.get("ball_to_goal_weight", 2.0)
             ),
             "player_to_ball": PlayerToBallVelocityReward(
-                weight=weights.get("player_to_ball_weight", 0.8)
+                weight=weights.get("player_to_ball_weight", 0.15)
             ),
             "touch": TouchBallReward(
-                weight=weights.get("touch_weight", 1.2)
+                weight=weights.get("touch_weight", 1.5)
             ),
             "boost": BoostReward(
-                gain_weight=weights.get("boost_gain_weight", 0.6),
-                lose_weight=weights.get("boost_lose_weight", 0.3)
+                gain_weight=weights.get("boost_gain_weight", 0.5),
+                lose_weight=weights.get("boost_lose_weight", 0.1)
             )
         }
 
