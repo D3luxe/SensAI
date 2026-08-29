@@ -181,16 +181,16 @@ class TouchBallReward(BaseReward):
             else:
                 direction_multiplier = 0.5
 
-            # Height scaling: Ground touch (Z=93) = 1.0x, Aerial touch (Z=1200) = 2.4x
+            # Height scaling: Ground touch (Z=93) = 1.0x, High Aerial touch (Z=1500) = 1.5x
             ball_z = float(arena.ball.pos[2])
-            height_multiplier = 1.0 + 2.0 * max(0.0, (ball_z - 150.0) / 1850.0)
+            height_multiplier = 1.0 + 0.5 * max(0.0, min(1.0, (ball_z - 150.0) / 1850.0))
 
             # Aerial airborne touch bonus (car airborne contesting high ball)
-            airborne_bonus = 0.5 if (not car.on_ground and ball_z > 250.0) else 0.0
+            airborne_bonus = 0.2 if (not car.on_ground and ball_z > 350.0) else 0.0
 
             # Kickoff first-touch race bounty
             is_kickoff_touch = bool(abs(arena.ball.pos[0]) < 200.0 and abs(arena.ball.pos[1]) < 200.0 and all(c.ball_touches <= 1 for c in arena.cars))
-            kickoff_bounty = 2.5 if is_kickoff_touch else 0.0
+            kickoff_bounty = 1.0 if is_kickoff_touch else 0.0
 
             return (self.weight * power_factor * direction_multiplier * height_multiplier) + airborne_bonus + kickoff_bounty
 
@@ -320,9 +320,14 @@ class BoostReward(BaseReward):
 
         if boost_diff >= 0:
             return self.gain_weight * boost_diff
-        elif not is_kickoff and car.pos[2] < GOAL_HEIGHT:
-            height_factor = max(0.0, 1.0 - (car.pos[2] / GOAL_HEIGHT))
-            return self.lose_weight * boost_diff * height_factor
+        elif not is_kickoff:
+            height_factor = max(0.2, 1.0 - (car.pos[2] / GOAL_HEIGHT))
+            loss_rew = self.lose_weight * boost_diff * height_factor
+            # Supersonic boost waste penalty: burning boost when already at max speed (>= 2100 uu/s)
+            speed = float(np.linalg.norm(car.vel))
+            if speed >= 2100.0 and action[6] > 0.0:
+                loss_rew -= 0.15
+            return loss_rew
 
         return 0.0
 
@@ -411,6 +416,16 @@ class CombinedReward:
             rew = float(r.get_reward(car, arena, action, is_goal, scoring_team))
             total += rew
             breakdown[name] = rew
+
+        # Handbrake Economy Regularization:
+        # Penalize holding handbrake while driving forward on straightaways
+        if car.on_ground and float(action[7]) > 0.2 and abs(float(action[1])) < 0.2:
+            fwd_speed = float(np.dot(car.vel, car.get_forward_vector()))
+            if fwd_speed > 300.0:
+                pen = -0.10 * float(action[7])
+                total += pen
+                breakdown["handbrake_penalty"] = pen
+
         return float(total), breakdown
 
 
