@@ -146,10 +146,33 @@ class PPOTrainer:
             except Exception as e:
                 print(f"[PPO Trainer] TensorBoard disabled: {e}")
 
+        # Decaying Behavioral Cloning Regularization
+        ppo_cfg = self.config.get("ppo", {})
+        self.bc_regularization_weight = float(ppo_cfg.get("bc_regularization_weight", 0.5))
+        self.bc_decay_steps = int(ppo_cfg.get("bc_decay_steps", 30_000_000))
+        self._bc_dataset_loaded = False
+        self.bc_obs_tensor = None
+        self.bc_act_tensor = None
+
         # State tracking
         self.global_step = 0
         self.iteration = 0
         self.last_live_config_mtime = 0.0
+
+    def _ensure_bc_dataset(self):
+        if self._bc_dataset_loaded:
+            return
+        self._bc_dataset_loaded = True
+        try:
+            from agent.pretrainer import BehavioralCloningTrainer
+            bc_trainer = BehavioralCloningTrainer()
+            obs, act = bc_trainer.generate_pretrain_dataset(max_samples=20000)
+            if len(obs) > 0:
+                self.bc_obs_tensor = torch.tensor(obs, dtype=torch.float32, device=self.device)
+                self.bc_act_tensor = torch.tensor(act, dtype=torch.float32, device=self.device)
+                print(f"[PPO Trainer] Decaying BC Regularization: Loaded {len(obs):,} human replay frames (Weight: {self.bc_regularization_weight}, Decay Horizon: {self.bc_decay_steps:,} steps)")
+        except Exception as e:
+            print(f"[PPO Trainer] Warning: Could not initialize BC dataset: {e}")
 
     def check_live_config(self):
         """
@@ -424,6 +447,7 @@ class PPOTrainer:
             pg_losses = []
             v_losses = []
             entropy_losses = []
+            bc_losses = []
 
             for epoch in range(self.n_epochs):
                 np.random.shuffle(b_inds)
@@ -479,6 +503,22 @@ class PPOTrainer:
                     entropy_loss = entropy.mean() / dim_scale
 
                     loss = pg_loss - self.ent_coef * entropy_loss + v_loss * self.vf_coef
+
+                    # Decaying Behavioral Cloning (BC) Regularization
+                    current_bc_weight = float(self.bc_regularization_weight * max(0.0, 1.0 - (self.global_step / max(1, self.bc_decay_steps))))
+                    if current_bc_weight > 1e-4:
+                        self._ensure_bc_dataset()
+                        if self.bc_obs_tensor is not None and len(self.bc_obs_tensor) > 0:
+                            n_bc = len(self.bc_obs_tensor)
+                            bc_sample_size = min(len(mb_inds), n_bc)
+                            bc_idx = torch.randint(0, n_bc, (bc_sample_size,), device=self.device)
+                            sample_bc_o = self.bc_obs_tensor[bc_idx]
+                            sample_bc_a = self.bc_act_tensor[bc_idx]
+
+                            pred_bc_act, _, _, _ = self.agent.get_action_and_value(sample_bc_o)
+                            bc_loss = nn.functional.smooth_l1_loss(pred_bc_act, sample_bc_a)
+                            loss = loss + current_bc_weight * bc_loss
+                            bc_losses.append(bc_loss.item())
 
                     self.optimizer.zero_grad()
                     loss.backward()

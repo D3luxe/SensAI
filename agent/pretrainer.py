@@ -19,6 +19,7 @@ from agent.models import ActorCritic, OBS_MIRROR_MASK_NP, ACT_MIRROR_MASK_NP
 from env.observations import DefaultObservationBuilder
 from env.physics_engine import CarState, BallState, BoostPad, ARENA_EXTENT_X, ARENA_EXTENT_Y
 from utils.replay_parser import ReplayParser, get_default_demo_dir
+from utils.inverse_dynamics import InverseDynamicsSolver
 
 
 class MockArenaForObs:
@@ -73,6 +74,11 @@ class BehavioralCloningTrainer:
         self._stop_requested = True
         self.status["message"] = "Stopping pretraining..."
 
+    def generate_pretrain_dataset(self, parser: Optional[ReplayParser] = None, max_samples: int = 50000) -> Tuple[np.ndarray, np.ndarray]:
+        if parser is None:
+            parser = ReplayParser(pool_path=self.pool_path)
+        return self.generate_expert_dataset(parser, max_samples)
+
     def generate_expert_dataset(self, parser: ReplayParser, max_samples: int = 50000) -> Tuple[np.ndarray, np.ndarray]:
         """
         Builds (N, 74) observation and (N, 8) expert action training pairs from replay pool.
@@ -125,43 +131,56 @@ class BehavioralCloningTrainer:
                 arena = MockArenaForObs(ball, [car])
                 obs_vec = self.obs_builder.build_obs(car, arena)
 
-                # Exact local-frame action synthesis (invariant across teams and world rotations):
-                local_ball_x = float(obs_vec[34]) # Forward distance / 2000
-                local_ball_y = float(obs_vec[35]) # Lateral distance / 2000 (RocketSim basis: <0 is Right, >0 is Left)
-                local_ball_z = float(obs_vec[36]) # Vertical distance / 2000
+                # ── True Human Action Extraction via Inverse Dynamics ───────────
+                expert_act = None
+                if idx < total_frames - 1:
+                    # Check if next frame is part of the same continuous match sequence
+                    c_pos_next = data["car_pos"][idx + 1]
+                    c_vel_next = data["car_vel"][idx + 1]
+                    c_rot_next = data["car_rot"][idx + 1]
+                    c_bst_next = data["car_boost"][idx + 1]
 
-                # Steering: in RocketSim basis, local_ball_y < 0 -> steer Right (+1), local_ball_y > 0 -> steer Left (-1)
-                if local_ball_x < -0.1:  # Ball behind car
-                    steer = 1.0 if local_ball_y < 0 else -1.0
-                    throttle = 0.5
-                    handbrake = 1.0
-                else:
-                    steer = float(np.clip(-local_ball_y * 6.0, -1.0, 1.0))
-                    throttle = 1.0 if local_ball_x > -0.2 else -0.3
-                    handbrake = 1.0 if abs(local_ball_y) > 0.35 and car.on_ground else 0.0
+                    c_p_next = c_pos_next[car_idx] if c_pos_next.ndim > 1 else c_pos_next
+                    c_v_next = c_vel_next[car_idx] if c_vel_next.ndim > 1 else c_vel_next
+                    c_r_next = c_rot_next[car_idx] if c_rot_next.ndim > 1 else c_rot_next
+                    c_b_next = c_bst_next[car_idx] if c_bst_next.ndim > 0 else c_bst_next
 
-                pitch = 0.0
-                yaw = 0.0
-                roll = 0.0
-                jump = 0.0
-                boost = 0.0
+                    # If delta distance < 200 uu, frames are continuous
+                    if float(np.linalg.norm(c_p_next - car_p)) < 250.0:
+                        expert_act = InverseDynamicsSolver.solve_car_action(
+                            car_p, car_v, car_r, np.zeros(3, dtype=np.float32), float(car_b), bool(car_p[2] < 25.0),
+                            c_p_next, c_v_next, c_r_next, np.zeros(3, dtype=np.float32), float(c_b_next), bool(c_p_next[2] < 25.0),
+                            dt=1.0 / 30.0
+                        )
 
-                if car.on_ground:
-                    # Boost when aligned towards ball
-                    if abs(local_ball_y) < 0.2 and local_ball_x > 0.3 and car.boost > 5.0:
-                        boost = 1.0
-                    # Kickoff speed-flip jump trigger
-                    is_kickoff = (abs(ball.pos[0]) < 50.0 and abs(ball.pos[1]) < 50.0)
-                    if is_kickoff and 0.4 < local_ball_x < 1.1:
-                        jump = 1.0
-                else:
-                    # Aerial orientation
-                    pitch = float(np.clip(local_ball_z * 3.0, -1.0, 1.0))
-                    yaw = steer
-                    if local_ball_z > 0.15 and car.boost > 10.0:
-                        boost = 1.0
+                if expert_act is None:
+                    # Analytical pursuit controller fallback for isolated boundary frames
+                    local_ball_x = float(obs_vec[34])
+                    local_ball_y = float(obs_vec[35])
+                    local_ball_z = float(obs_vec[36])
 
-                expert_act = np.array([throttle, steer, pitch, yaw, roll, jump, boost, handbrake], dtype=np.float32)
+                    if local_ball_x < -0.1:
+                        steer = 1.0 if local_ball_y < 0 else -1.0
+                        throttle = 0.5
+                        handbrake = 1.0
+                    else:
+                        steer = float(np.clip(-local_ball_y * 6.0, -1.0, 1.0))
+                        throttle = 1.0 if local_ball_x > -0.2 else -0.3
+                        handbrake = 1.0 if abs(local_ball_y) > 0.35 and car.on_ground else 0.0
+
+                    pitch, yaw, roll, jump, boost = 0.0, 0.0, 0.0, 0.0, 0.0
+                    if car.on_ground:
+                        if abs(local_ball_y) < 0.2 and local_ball_x > 0.3 and car.boost > 5.0:
+                            boost = 1.0
+                        if (abs(ball.pos[0]) < 50.0 and abs(ball.pos[1]) < 50.0) and 0.4 < local_ball_x < 1.1:
+                            jump = 1.0
+                    else:
+                        pitch = float(np.clip(local_ball_z * 3.0, -1.0, 1.0))
+                        yaw = steer
+                        if local_ball_z > 0.15 and car.boost > 10.0:
+                            boost = 1.0
+
+                    expert_act = np.array([throttle, steer, pitch, yaw, roll, jump, boost, handbrake], dtype=np.float32)
 
                 # Add direct sample
                 obs_list.append(obs_vec)

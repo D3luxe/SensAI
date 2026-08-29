@@ -170,7 +170,56 @@ class TestScenariosAndReplays(unittest.TestCase):
         if os.path.exists(test_ckpt):
             os.remove(test_ckpt)
 
+    def test_inverse_dynamics_solver(self):
+        from utils.inverse_dynamics import InverseDynamicsSolver
+
+        # 1. Test Ground Throttle & Boost Extraction
+        p_t = np.array([0.0, -3000.0, 17.0], dtype=np.float32)
+        v_t = np.array([0.0, 500.0, 0.0], dtype=np.float32)
+        r_t = np.array([0.0, np.pi / 2, 0.0], dtype=np.float32)  # Facing +Y
+        b_t = 100.0
+
+        p_next = np.array([0.0, -2980.0, 17.0], dtype=np.float32)
+        v_next = np.array([0.0, 600.0, 0.0], dtype=np.float32)  # Forward accel
+        r_next = np.array([0.0, np.pi / 2, 0.0], dtype=np.float32)
+        b_next = 98.0  # Consumed boost
+
+        act = InverseDynamicsSolver.solve_car_action(
+            p_t, v_t, r_t, np.zeros(3), b_t, True,
+            p_next, v_next, r_next, np.zeros(3), b_next, True,
+            dt=1.0 / 30.0
+        )
+        self.assertGreater(act[0], 0.5, "Forward acceleration must yield positive throttle act[0] > 0.5")
+        self.assertEqual(act[6], 1.0, "Boost consumption must yield act[6] = 1.0")
+
+        # 2. Test Airborne Pitch Down Extraction (Front-Flip)
+        p_air_t = np.array([0.0, 0.0, 500.0], dtype=np.float32)
+        v_air_t = np.array([0.0, 1000.0, 0.0], dtype=np.float32)
+        r_air_t = np.array([0.0, np.pi / 2, 0.0], dtype=np.float32)
+
+        p_air_next = np.array([0.0, 33.0, 480.0], dtype=np.float32)
+        v_air_next = np.array([0.0, 1500.0, -50.0], dtype=np.float32)
+        r_air_next = np.array([-0.3, np.pi / 2, 0.0], dtype=np.float32)  # Pitch nose down
+
+        act_air = InverseDynamicsSolver.solve_car_action(
+            p_air_t, v_air_t, r_air_t, np.zeros(3), 50.0, False,
+            p_air_next, v_air_next, r_air_next, np.zeros(3), 50.0, False,
+            dt=1.0 / 30.0
+        )
+        self.assertLess(act_air[2], -0.2, "Pitching down must yield negative pitch act[2] < -0.2")
+
+        # 3. Test Batch Extraction
+        c_pos_seq = np.stack([p_t, p_next], axis=0)
+        c_vel_seq = np.stack([v_t, v_next], axis=0)
+        c_rot_seq = np.stack([r_t, r_next], axis=0)
+        c_bst_seq = np.array([b_t, b_next], dtype=np.float32)
+
+        batch_acts = InverseDynamicsSolver.batch_extract_actions(c_pos_seq, c_vel_seq, c_rot_seq, c_bst_seq)
+        self.assertEqual(batch_acts.shape, (1, 8))
+        self.assertGreater(batch_acts[0, 0], 0.5)
+
 
 if __name__ == "__main__":
     unittest.main()
+
 
