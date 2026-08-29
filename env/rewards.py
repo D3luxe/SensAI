@@ -127,6 +127,15 @@ class PlayerToBallVelocityReward(BaseReward):
         # Distance gap delta (positive when closing distance, negative when retreating)
         delta_dist = (prev_dist - curr_dist) / 2000.0
 
+        # When ball is far behind the car (curr_dist > 300 uu and facing away),
+        # do not reward reversing backwards across the field; enforce turning around.
+        if curr_dist > 300.0:
+            car_to_ball = arena.ball.pos - car.pos
+            unit_to_ball = car_to_ball / max(1e-4, curr_dist)
+            fwd_alignment = float(np.dot(car.get_forward_vector(), unit_to_ball))
+            if fwd_alignment < 0.0 and delta_dist > 0.0:
+                delta_dist = delta_dist * max(0.0, fwd_alignment + 1.0) * 0.2
+
         # Kickoff sprint multiplier
         is_kickoff = bool(abs(arena.ball.pos[0]) < 50.0 and abs(arena.ball.pos[1]) < 50.0 and float(np.linalg.norm(arena.ball.vel)) < 100.0)
         if is_kickoff and delta_dist > 0.0:
@@ -194,9 +203,10 @@ class TouchBallReward(BaseReward):
 class SpeedReward(BaseReward):
     """
     Velocity Projection & Supersonic Traversal Reward.
-    Rewards car speed directed toward the ball.
+    Rewards car forward speed directed toward the ball.
     Incentivizes speed-flipping and forward dodges to break the 1400 uu/s ground drive limit
     up to supersonic (2200 - 2300 uu/s) even when boost is empty.
+    Strictly gates on positive forward vehicle velocity (zero reward for reversing across the pitch).
     """
     def __init__(self, weight: float = 0.35):
         super().__init__(weight)
@@ -205,6 +215,11 @@ class SpeedReward(BaseReward):
         car_to_ball = arena.ball.pos - car.pos
         dist = float(np.linalg.norm(car_to_ball))
         if dist < 1e-4:
+            return 0.0
+
+        # Only reward FORWARD driving speed (car moving in the direction it is facing)
+        fwd_speed = float(np.dot(car.vel, car.get_forward_vector()))
+        if fwd_speed <= 50.0:
             return 0.0
 
         unit_to_ball = car_to_ball / dist
@@ -220,7 +235,32 @@ class SpeedReward(BaseReward):
 
 
 # ==============================================================================
-# 6. JUMP MOMENTUM BRIDGE (Eliminates First-Jump Latency Barrier)
+# 6. FACE BALL & TURN-AROUND ALIGNMENT (Suppresses Backwards Chasing)
+# ==============================================================================
+class FaceBallReward(BaseReward):
+    """
+    Rewards orienting the car's nose towards the ball.
+    Creates a continuous positive gradient to turn around (via drift, U-turn, or half-flip)
+    the instant the ball ends up behind the car, rather than driving backwards in reverse.
+    """
+    def __init__(self, weight: float = 0.25):
+        super().__init__(weight)
+
+    def get_reward(self, car: CarState, arena: RocketSimArena, action: np.ndarray, is_goal: bool, scoring_team: Optional[int]) -> float:
+        car_to_ball = arena.ball.pos - car.pos
+        dist = float(np.linalg.norm(car_to_ball))
+        if dist < 1e-4:
+            return 0.0
+
+        unit_to_ball = car_to_ball / dist
+        forward_alignment = float(np.dot(car.get_forward_vector(), unit_to_ball))
+
+        # (alignment + 1.0) / 2.0 maps [-1.0, +1.0] -> [0.0, 1.0]
+        return self.weight * ((forward_alignment + 1.0) * 0.5)
+
+
+# ==============================================================================
+# 7. JUMP MOMENTUM BRIDGE (Eliminates First-Jump Latency Barrier)
 # ==============================================================================
 class JumpBridgeReward(BaseReward):
     """
@@ -253,7 +293,7 @@ class JumpBridgeReward(BaseReward):
 
 
 # ==============================================================================
-# 7. BOOST RETENTION & ECONOMY (Necto Sqrt-Potential Engine)
+# 8. BOOST RETENTION & ECONOMY (Necto Sqrt-Potential Engine)
 # ==============================================================================
 class BoostReward(BaseReward):
     """
@@ -293,7 +333,7 @@ class BoostReward(BaseReward):
 class CombinedReward:
     """
     Unified Macro Potential-Based Reward Manager.
-    Aggregates Macro Goal, Ball-to-Goal, Player-to-Ball, Speed/Flip, Jump-Bridge, Touch Quality, and Boost.
+    Aggregates Macro Goal, Ball-to-Goal, Player-to-Ball, Speed/Flip, Face-Ball, Jump-Bridge, Touch Quality, and Boost.
     """
     def __init__(self, weights: Dict[str, float]):
         self.rewards: Dict[str, BaseReward] = {
@@ -310,6 +350,9 @@ class CombinedReward:
             ),
             "speed": SpeedReward(
                 weight=weights.get("speed_weight", 0.35)
+            ),
+            "face_ball": FaceBallReward(
+                weight=weights.get("face_ball_weight", 0.25)
             ),
             "jump_bridge": JumpBridgeReward(
                 weight=weights.get("jump_bridge_weight", 0.2)
@@ -347,7 +390,19 @@ class CombinedReward:
         if "speed_weight" in new_weights and "speed" in self.rewards:
             self.rewards["speed"].weight = float(new_weights["speed_weight"])
 
+        if "face_ball_weight" in new_weights and "face_ball" in self.rewards:
+            self.rewards["face_ball"].weight = float(new_weights["face_ball_weight"])
+
         if "jump_bridge_weight" in new_weights and "jump_bridge" in self.rewards:
+            self.rewards["jump_bridge"].weight = float(new_weights["jump_bridge_weight"])
+
+        if "touch_weight" in new_weights and "touch" in self.rewards:
+            self.rewards["touch"].weight = float(new_weights["touch_weight"])
+
+        if "boost_gain_weight" in new_weights and "boost" in self.rewards:
+            self.rewards["boost"].gain_weight = float(new_weights["boost_gain_weight"])
+        if "boost_lose_weight" in new_weights and "boost" in self.rewards:
+            self.rewards["boost"].lose_weight = float(new_weights["boost_lose_weight"])
             self.rewards["jump_bridge"].weight = float(new_weights["jump_bridge_weight"])
 
         if "touch_weight" in new_weights and "touch" in self.rewards:

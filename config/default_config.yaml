@@ -26,19 +26,17 @@ rewards:
   ball_to_goal_weight: 1.5
   boost_gain_weight: 0.65
   boost_lose_weight: 0.35
-  concede_weight: -10.0
-  goal_weight: 10.0
+  concede_weight: -20.0
+  goal_weight: 20.0
   player_to_ball_weight: 0.8
-  speed_weight: 0.35
-  jump_bridge_weight: 0.2
-  save_weight: 3.0
-  touch_weight: 1.1
+  save_weight: 7.0
+  touch_weight: 1.4
 scenarios:
   aerial_prob: 0.3
   kickoff_prob: 0.3
   max_replays_to_ingest: 50
-  replay_prob: 0.15
+  replay_prob: 0.05
   replay_sort_mode: newest
   replays_pool_path: data/replays/replays_pool.npz
   save_prob: 0.15
-  wall_prob: 0.1
+  wall_prob: 0.2
