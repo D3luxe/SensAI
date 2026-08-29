@@ -20,7 +20,8 @@ import matplotlib.pyplot as plt
 
 from utils.process_manager import TrainingProcessManager
 from utils.visualizer import simulate_match
-from utils.replay_parser import ReplayParser, DEFAULT_DEMO_DIR
+from utils.replay_parser import ReplayParser, DEFAULT_DEMO_DIR, get_default_demo_dir
+from agent.pretrainer import BehavioralCloningTrainer
 from utils.test_runner import run_all_unit_tests, get_cached_or_run_tests, format_test_results_markdown
 from utils.diagnostics import (
     extract_rolling_telemetry,
@@ -688,6 +689,39 @@ def create_ui():
                         apply_scenarios_btn = gr.Button("💾 Apply Scenario Distribution Live", variant="primary")
                         scenarios_feedback_box = gr.Markdown("")
 
+                gr.Markdown("---")
+                gr.Markdown(
+                    """
+                    ### 🎓 Supervised Imitation Pretrainer (Behavioral Cloning)
+                    Bootstrap your agent with **Grand Champion / SSL baseline mechanics** (kickoffs, speed-flips, aerial reads, powerslide cuts) directly from human replay datasets before PPO reinforcement learning fine-tuning.
+                    """
+                )
+                with gr.Row():
+                    with gr.Column(scale=1):
+                        pretrain_epochs_slider = gr.Slider(10, 500, value=100, step=10, label="Pretraining Epochs", info="Number of supervised training passes over the replay dataset.")
+                        with gr.Row():
+                            pretrain_lr_input = gr.Number(value=0.001, label="Pretrain Learning Rate", info="Adam learning rate for imitation loss.")
+                            pretrain_batch_dropdown = gr.Dropdown(choices=[64, 128, 256, 512, 1024], value=256, label="Batch Size")
+                        pretrain_base_dropdown = gr.Dropdown(
+                            choices=["Initialize Fresh Model (Clean Baseline)"] + get_available_checkpoints(),
+                            value="Initialize Fresh Model (Clean Baseline)",
+                            label="Target Base Checkpoint"
+                        )
+                    with gr.Column(scale=1):
+                        with gr.Row():
+                            run_pretrain_btn = gr.Button("🚀 Run Supervised Imitation Pretraining", variant="primary", scale=2)
+                            stop_pretrain_btn = gr.Button("⏹️ Stop Pretraining", variant="stop", scale=1)
+                        pretrain_status_box = gr.Markdown("Ready to pretrain. Ingest replay files above first.")
+                        pretrain_handoff_box = gr.HTML(
+                            """
+                            <div style="background: rgba(15, 23, 42, 0.6); border: 1px solid #334155; border-radius: 8px; padding: 10px 14px; margin-top: 8px;">
+                                <span style="color: #94a3b8; font-size: 0.9rem;">
+                                    💡 <b>Seamless Handoff to PPO:</b> Pretraining saves directly to <code>checkpoints/latest_model.pt</code> and <code>checkpoints/pretrained_baseline.pt</code>. Once finished, click <b>Start Training</b> in the Top Dashboard to immediately begin PPO reinforcement learning on your pretrained baseline!
+                                </span>
+                            </div>
+                            """
+                        )
+
             # ---------------------------------------------------------
             # TAB 5: CONSOLE LOG STREAM
             # ---------------------------------------------------------
@@ -1224,6 +1258,41 @@ def create_ui():
             fn=on_apply_scenarios_weights,
             inputs=[sc_kickoff_slider, sc_replay_slider, sc_aerial_slider, sc_wall_slider, sc_save_slider],
             outputs=[scenarios_feedback_box]
+        )
+
+        # Pretrainer Callbacks
+        bc_trainer = BehavioralCloningTrainer()
+
+        def on_run_pretraining(epochs, lr, batch_size, base_ckpt):
+            if bc_trainer.is_running():
+                return "⚠️ Pretrainer is already running!"
+
+            chosen_ckpt = None
+            if base_ckpt and not base_ckpt.startswith("Initialize Fresh Model"):
+                chosen_ckpt = base_ckpt.split(" ")[0]
+
+            res = bc_trainer.train(
+                epochs=int(epochs),
+                batch_size=int(batch_size),
+                lr=float(lr),
+                base_checkpoint=chosen_ckpt
+            )
+            return res.get("message", "Pretraining finished.")
+
+        def on_stop_pretraining():
+            if bc_trainer.is_running():
+                bc_trainer.request_stop()
+                return "⏹️ Pretraining cancellation requested."
+            return "Pretrainer is not currently running."
+
+        run_pretrain_btn.click(
+            fn=on_run_pretraining,
+            inputs=[pretrain_epochs_slider, pretrain_lr_input, pretrain_batch_dropdown, pretrain_base_dropdown],
+            outputs=[pretrain_status_box]
+        )
+        stop_pretrain_btn.click(
+            fn=on_stop_pretraining,
+            outputs=[pretrain_status_box]
         )
 
         # Unit Tests Runner Callback

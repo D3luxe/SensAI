@@ -106,6 +106,38 @@ class TestScenariosAndReplays(unittest.TestCase):
         # In pure aerial mode, ball should be high up in the air
         self.assertGreater(self.arena.ball.pos[2], 300.0, "100% Aerial scenario must spawn elevated ball")
 
+    def test_behavioral_cloning_pretrainer(self):
+        from agent.pretrainer import BehavioralCloningTrainer
+        test_pool = "data/replays/test_bc_pool.npz"
+        test_ckpt = "checkpoints/test_bc_model.pt"
+
+        # Create synthetic replay frames
+        parser = ReplayParser(pool_path=test_pool)
+        N = 30
+        parser.states_buffer = {
+            "ball_pos": np.random.uniform(-1000, 1000, size=(N, 3)).astype(np.float32),
+            "ball_vel": np.random.normal(0, 500, size=(N, 3)).astype(np.float32),
+            "car_pos": np.zeros((N, 2, 3), dtype=np.float32),
+            "car_vel": np.zeros((N, 2, 3), dtype=np.float32),
+            "car_rot": np.zeros((N, 2, 3), dtype=np.float32),
+            "car_boost": np.full((N, 2), 50.0, dtype=np.float32)
+        }
+        parser.save_pool()
+
+        trainer = BehavioralCloningTrainer(pool_path=test_pool, checkpoint_path=test_ckpt)
+        status = trainer.train(epochs=2, batch_size=16, lr=0.001)
+
+        self.assertFalse(trainer.is_running())
+        self.assertEqual(status["epoch"], 2)
+        self.assertTrue(os.path.exists(test_ckpt))
+
+        # Cleanup
+        if os.path.exists(test_pool):
+            os.remove(test_pool)
+        if os.path.exists(test_ckpt):
+            os.remove(test_ckpt)
+
 
 if __name__ == "__main__":
     unittest.main()
+

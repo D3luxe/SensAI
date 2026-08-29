@@ -13,7 +13,20 @@ import numpy as np
 from typing import List, Dict, Any, Optional, Tuple
 
 
-DEFAULT_DEMO_DIR = os.path.expandvars(r"%USERPROFILE%\Documents\My Games\Rocket League\TAGame\Demos")
+def get_default_demo_dir() -> str:
+    """Auto-detects active Rocket League demo directory (OneDrive or standard Documents)."""
+    candidates = [
+        os.path.expandvars(r"%USERPROFILE%\OneDrive\Documents\My Games\Rocket League\TAGame\Demos"),
+        os.path.expandvars(r"%USERPROFILE%\Documents\My Games\Rocket League\TAGame\Demos"),
+        os.path.join("data", "replays")
+    ]
+    for c in candidates:
+        if os.path.exists(c):
+            return c
+    return candidates[1]
+
+
+DEFAULT_DEMO_DIR = get_default_demo_dir()
 DEFAULT_POOL_PATH = os.path.join("data", "replays", "replays_pool.npz")
 
 

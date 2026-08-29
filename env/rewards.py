@@ -403,15 +403,6 @@ class CombinedReward:
             self.rewards["boost"].gain_weight = float(new_weights["boost_gain_weight"])
         if "boost_lose_weight" in new_weights and "boost" in self.rewards:
             self.rewards["boost"].lose_weight = float(new_weights["boost_lose_weight"])
-            self.rewards["jump_bridge"].weight = float(new_weights["jump_bridge_weight"])
-
-        if "touch_weight" in new_weights and "touch" in self.rewards:
-            self.rewards["touch"].weight = float(new_weights["touch_weight"])
-
-        if "boost_gain_weight" in new_weights and "boost" in self.rewards:
-            self.rewards["boost"].gain_weight = float(new_weights["boost_gain_weight"])
-        if "boost_lose_weight" in new_weights and "boost" in self.rewards:
-            self.rewards["boost"].lose_weight = float(new_weights["boost_lose_weight"])
 
     def get_reward(self, car: CarState, arena: RocketSimArena, action: np.ndarray, is_goal: bool, scoring_team: Optional[int]) -> Tuple[float, Dict[str, float]]:
         total = 0.0
