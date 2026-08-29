@@ -283,7 +283,12 @@ class PPOTrainer:
             print(f"[PPO Trainer] Checkpoint not found at {path}")
             return
         checkpoint = torch.load(path, map_location=self.device)
-        saved_state = checkpoint["model_state_dict"]
+        if isinstance(checkpoint, dict) and "model_state_dict" in checkpoint:
+            saved_state = checkpoint["model_state_dict"]
+        elif isinstance(checkpoint, dict):
+            saved_state = checkpoint
+        else:
+            saved_state = checkpoint
         model_state = self.agent.state_dict()
 
         # Seamless dimension expansion migration (e.g. 64 -> 70 obs_dim, 19 -> 24 act_dim)

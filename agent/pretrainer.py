@@ -268,22 +268,22 @@ class BehavioralCloningTrainer:
             if progress_cb and (epoch % 5 == 0 or epoch == epochs):
                 progress_cb(self.status)
 
-        # Save pretrained model
+        # Save pretrained model & baseline
         os.makedirs(os.path.dirname(self.checkpoint_path), exist_ok=True)
-        torch.save({
+        payload = {
             "model_state_dict": model.state_dict(),
             "obs_dim": 74,
             "act_dim": 8,
+            "continuous_actions": True,
             "continuous": True,
             "use_layer_norm": True,
             "pretrained": True,
             "pretrain_samples": dataset_size,
             "timestamp": time.strftime("%Y-%m-%d %H:%M:%S")
-        }, self.checkpoint_path)
-
-        # Also save copy as pretrained_baseline.pt
+        }
+        torch.save(payload, self.checkpoint_path)
         baseline_path = os.path.join(os.path.dirname(self.checkpoint_path), "pretrained_baseline.pt")
-        torch.save(model.state_dict(), baseline_path)
+        torch.save(payload, baseline_path)
 
         elapsed = round(time.time() - start_time, 1)
         self._is_running = False
