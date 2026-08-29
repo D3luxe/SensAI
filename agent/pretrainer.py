@@ -20,6 +20,7 @@ from env.observations import DefaultObservationBuilder
 from env.physics_engine import CarState, BallState, BoostPad, ARENA_EXTENT_X, ARENA_EXTENT_Y
 from utils.replay_parser import ReplayParser, get_default_demo_dir
 from utils.inverse_dynamics import InverseDynamicsSolver
+from bot import rotation_to_rot_mat
 
 
 class MockArenaForObs:
@@ -159,7 +160,15 @@ class BehavioralCloningTrainer:
                     local_ball_y = float(obs_vec[35])
                     local_ball_z = float(obs_vec[36])
 
-                    if local_ball_x < -0.3:
+                    up_vec = car.get_up_vector()
+                    is_on_wall = bool(car.pos[2] > 150.0 and abs(up_vec[2]) < 0.7)
+
+                    if is_on_wall:
+                        # On vertical wall: steer toward floor/ball (inverted lateral mapping on vertical surfaces)
+                        steer = float(np.clip(local_ball_y * 6.0, -1.0, 1.0))
+                        throttle = 1.0
+                        handbrake = -1.0
+                    elif local_ball_x < -0.3:
                         steer = 1.0 if local_ball_y < 0 else -1.0
                         throttle = 1.0
                         handbrake = 1.0 if (abs(local_ball_y) > 0.6 and car.on_ground) else -1.0
@@ -169,7 +178,9 @@ class BehavioralCloningTrainer:
                         handbrake = -1.0
 
                     pitch, yaw, roll, jump, boost = 0.0, 0.0, 0.0, -1.0, -1.0
-                    if car.on_ground:
+                    if is_on_wall and ball.pos[2] < 200.0:
+                        jump = 1.0  # Wall-dodge jump recovery back down to pitch floor
+                    elif car.on_ground:
                         if abs(local_ball_y) < 0.2 and local_ball_x > 0.3 and car.boost > 5.0:
                             boost = 1.0
                         if (abs(ball.pos[0]) < 50.0 and abs(ball.pos[1]) < 50.0) and 0.4 < local_ball_x < 1.1:
@@ -187,10 +198,35 @@ class BehavioralCloningTrainer:
                 act_list.append(expert_act)
 
                 # Add exact bilateral mirrored sample to enforce 100% left-right symmetry
-                obs_mirr = obs_vec * OBS_MIRROR_MASK_NP
-                act_mirr = expert_act * ACT_MIRROR_MASK_NP
-                obs_list.append(obs_mirr)
-                act_list.append(act_mirr)
+        # ── Inject Synthetic Wall Recovery & Corner Exit Samples ──
+        for side in [-1.0, 1.0]:  # Left (-1) and Right (+1) sidewalls
+            wall_x = side * (ARENA_EXTENT_X - 96.0)
+            for y_pos in np.linspace(-3000, 3000, 10):
+                for z_pos in [300.0, 600.0, 1000.0]:
+                    for heading_sign in [1.0, -1.0]:  # Driving North (+Y) or South (-Y)
+                        yaw = math.pi / 2 if heading_sign > 0 else -math.pi / 2
+                        roll = side * (math.pi / 2 if heading_sign > 0 else -math.pi / 2)
+                        rot_mat = rotation_to_rot_mat(0.0, yaw, roll)
+                        car_wall = CarState(
+                            id=0, team=0,
+                            pos=np.array([wall_x, y_pos, z_pos], dtype=np.float32),
+                            vel=np.array([0.0, heading_sign * 800.0, 0.0], dtype=np.float32),
+                            rot=np.array([0.0, yaw, roll], dtype=np.float32),
+                            rot_mat=rot_mat,
+                            boost=33.3,
+                            on_ground=True
+                        )
+                        for bx in [-1000.0, 0.0, 1000.0]:
+                            for by in [-1500.0, 0.0, 1500.0]:
+                                ball_floor = BallState(pos=np.array([bx, by, 93.0], dtype=np.float32), vel=np.zeros(3, dtype=np.float32))
+                                obs_w = self.obs_builder.build_obs(car_wall, MockArenaForObs(ball_floor, [car_wall]))
+                                steer_down = float(side * heading_sign)
+                                act_w = np.array([1.0, steer_down, 0.0, 0.0, 0.0, 1.0, -1.0, -1.0], dtype=np.float32)
+
+                                obs_list.append(obs_w)
+                                act_list.append(act_w)
+                                obs_list.append(obs_w * OBS_MIRROR_MASK_NP)
+                                act_list.append(act_w * ACT_MIRROR_MASK_NP)
 
         return np.array(obs_list, dtype=np.float32), np.array(act_list, dtype=np.float32)
 
