@@ -366,13 +366,33 @@ class SenseiRLBot(BaseAgent):
             controller.yaw = float(np.clip(act[3], -1.0, 1.0))
             controller.roll = float(np.clip(act[4], -1.0, 1.0))
 
-            jump_threshold = 0.0
-            controller.jump = bool(act[5] > jump_threshold)
+            # ── RLGym / RLBot Jump & Dodge Substep Timing Sequencer ────────────
+            # Rocket League requires the jump button to be released (jump=False) for at least
+            # 1-2 physics ticks between the first jump and the second jump to execute a flip/dodge.
+            # When tick_skip=8 (15Hz action rate at 120Hz physics):
+            #  - First Jump (On Ground): Hold jump for ticks 0..3 (liftoff impulse + hold bonus),
+            #                            then release jump for ticks 4..7 to prime the airborne dodge.
+            #  - Second Jump / Dodge (Airborne): Press jump for ticks 0..2 (executes flip/dodge),
+            #                                    then release jump for ticks 3..7.
+            want_jump = bool(act[5] > 0.0)
+            substep_tick = self.ticks_since_last_action  # 0 to 7 within the 15Hz step
+
+            if is_on_ground:
+                if want_jump:
+                    controller.jump = bool(substep_tick <= 3)
+                else:
+                    controller.jump = False
+            else:
+                # Car is airborne
+                if want_jump:
+                    controller.jump = bool(substep_tick <= 2)
+                else:
+                    controller.jump = False
 
             # Ground stabilization:
             # When driving on the ground without jumping, keep pitch, yaw, and roll neutral
             # so the vehicle steers purely via ground wheel physics without airborne gyro torque conflict.
-            if is_on_ground and not controller.jump:
+            if is_on_ground and not want_jump:
                 controller.pitch = 0.0
                 controller.yaw = 0.0
                 controller.roll = 0.0

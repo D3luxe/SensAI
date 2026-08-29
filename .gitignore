@@ -14,7 +14,7 @@ checkpoints/manual_checkpoint_*.pt
 checkpoints/bak/
 *.bak
 *.pid
-logs/start_time.txt
+logs/*
 logs/train.pid
 .system_generated/
 runs/
