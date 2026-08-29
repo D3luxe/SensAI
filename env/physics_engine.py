@@ -401,7 +401,7 @@ class RocketSimArena:
             car.pos = c_state.pos.as_numpy().astype(np.float32)
             car.vel = c_state.vel.as_numpy().astype(np.float32)
             r_mat = c_state.rot_mat.as_numpy().astype(np.float32)
-            car.rot_mat = np.vstack([r_mat[0], -r_mat[1], r_mat[2]]).astype(np.float32)
+            car.rot_mat = r_mat.copy()
             car.ang_vel = c_state.ang_vel.as_numpy().astype(np.float32)
             car.boost = float(c_state.boost)
             car.on_ground = bool(c_state.is_on_ground)
