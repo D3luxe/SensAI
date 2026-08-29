@@ -389,6 +389,8 @@ def create_ui():
                     hp_cfg["ent_coef"] = float(live_data["ent_coef"])
                 if "clip_range" in live_data:
                     hp_cfg["clip_range"] = float(live_data["clip_range"])
+                if "baseline_opponent_ratio" in live_data:
+                    env_cfg["baseline_opponent_ratio"] = float(live_data["baseline_opponent_ratio"])
         except Exception:
             pass
 
@@ -686,8 +688,9 @@ def create_ui():
                         sc_aerial_slider = gr.Slider(0.0, 1.0, value=float(sc_cfg.get("aerial_prob", 0.15)), step=0.05, label="High Aerial Shots Ratio", info="Floating & rising balls (z: 600-1500) for aerial training.")
                         sc_wall_slider = gr.Slider(0.0, 1.0, value=float(sc_cfg.get("wall_prob", 0.15)), step=0.05, label="Wall & Backboard Play Ratio", info="Sidewall rolling and backboard rebound situations.")
                         sc_save_slider = gr.Slider(0.0, 1.0, value=float(sc_cfg.get("save_prob", 0.10)), step=0.05, label="Goalie Save & Shadow Defense Ratio", info="High threat shots on net testing goal line defense.")
+                        baseline_ratio_slider = gr.Slider(0.0, 1.0, value=float(env_cfg.get("baseline_opponent_ratio", 0.25)), step=0.05, label="Baseline Bot Matchup Ratio (Anti-Collusion)", info="Proportion of parallel matches against the heuristic kickoff rusher bot.")
                         
-                        apply_scenarios_btn = gr.Button("💾 Apply Scenario Distribution Live", variant="primary")
+                        apply_scenarios_btn = gr.Button("💾 Apply Distribution & Baseline Mix Live", variant="primary")
                         scenarios_feedback_box = gr.Markdown("")
 
                 gr.Markdown("---")
@@ -1273,7 +1276,7 @@ def create_ui():
             outputs=[replay_stats_box, ingestion_status_box]
         )
 
-        def on_apply_scenarios_weights(k_p, rep_p, aer_p, wall_p, save_p):
+        def on_apply_scenarios_weights(k_p, rep_p, aer_p, wall_p, save_p, base_r):
             sc_dict = {
                 "kickoff_prob": float(k_p),
                 "replay_prob": float(rep_p),
@@ -1291,6 +1294,7 @@ def create_ui():
                 except Exception:
                     pass
             live_data["scenarios"] = sc_dict
+            live_data["baseline_opponent_ratio"] = float(base_r)
             with open(live_path, "w") as f:
                 json.dump(live_data, f, indent=2)
 
@@ -1298,14 +1302,16 @@ def create_ui():
             def_cfg = load_yaml_config("config/default_config.yaml")
             def_cfg["scenarios"] = def_cfg.get("scenarios", {})
             def_cfg["scenarios"].update(sc_dict)
+            def_cfg["environment"] = def_cfg.get("environment", {})
+            def_cfg["environment"]["baseline_opponent_ratio"] = float(base_r)
             save_yaml_config(def_cfg, "config/default_config.yaml")
 
             tot = sum(sc_dict.values())
-            return f"✅ **Scenario distribution saved & applied live! (Total weight: {tot:.2f})**"
+            return f"✅ **Scenario distribution & Baseline Ratio ({float(base_r)*100:.0f}%) saved & applied live! (Scenario sum: {tot:.2f})**"
 
         apply_scenarios_btn.click(
             fn=on_apply_scenarios_weights,
-            inputs=[sc_kickoff_slider, sc_replay_slider, sc_aerial_slider, sc_wall_slider, sc_save_slider],
+            inputs=[sc_kickoff_slider, sc_replay_slider, sc_aerial_slider, sc_wall_slider, sc_save_slider, baseline_ratio_slider],
             outputs=[scenarios_feedback_box]
         )
 

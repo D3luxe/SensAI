@@ -11,11 +11,13 @@ from env.physics_engine import RocketSimArena, CarState
 from env.rewards import RewardManager
 from env.observations import DefaultObservationBuilder
 from env.actions import ContinuousActionParser, DiscreteActionParser
+from env.baseline_agent import BaselineChaser
 
 
 class RocketLeagueEnv:
     """
     Standard single-instance Gymnasium-compatible Rocket League match environment.
+    Supports symmetric self-play and asymmetric baseline challenger matches.
     """
     def __init__(
         self,
@@ -24,14 +26,17 @@ class RocketLeagueEnv:
         max_episode_steps: int = 1500,
         reward_weights: Optional[Dict[str, float]] = None,
         continuous_actions: bool = True,
-        self_play: bool = True
+        self_play: bool = True,
+        is_baseline_env: bool = False
     ):
         self.game_mode = game_mode
         self.num_players = 2 if game_mode == "1v1" else (4 if game_mode == "2v2" else 6)
         self.tick_skip = tick_skip
         self.max_episode_steps = max_episode_steps
         self.self_play = self_play
+        self.is_baseline_env = is_baseline_env
         self.continuous_actions = continuous_actions
+        self.baseline_bot = BaselineChaser(continuous_actions=continuous_actions) if is_baseline_env else None
 
         self.arena = RocketSimArena(num_players=self.num_players, game_mode=game_mode)
         self.obs_builder = DefaultObservationBuilder(symmetric=True)
@@ -72,7 +77,13 @@ class RocketLeagueEnv:
         Returns: (obs, rewards, dones, info)
         """
         self.current_step += 1
-        parsed_actions = self.action_parser.parse_actions(raw_actions)
+        actions_to_parse = raw_actions.copy()
+
+        # If baseline environment in 1v1, override Orange bot action with BaselineChaser
+        if self.is_baseline_env and self.baseline_bot is not None and len(self.arena.cars) > 1:
+            actions_to_parse[1] = self.baseline_bot.get_action(self.arena.cars[1], self.arena.ball)
+
+        parsed_actions = self.action_parser.parse_actions(actions_to_parse)
 
         is_goal = False
         scoring_team = None
@@ -113,7 +124,8 @@ class RocketLeagueEnv:
             "episode_rewards": list(self.episode_rewards),
             "episode_touches": list(self.episode_touches),
             "episode_goals": list(self.episode_goals),
-            "reward_breakdown": info_rewards
+            "reward_breakdown": info_rewards,
+            "is_baseline_env": self.is_baseline_env
         }
 
         # Auto-reset on goal/max steps/stalled kickoff
@@ -126,6 +138,7 @@ class RocketLeagueEnv:
 class VectorizedRocketEnv:
     """
     Vectorized parallel environment container running multiple RocketLeagueEnv instances simultaneously.
+    Supports dynamic partitioning between self-play environments and baseline bot opponents.
     """
     def __init__(
         self,
@@ -135,9 +148,19 @@ class VectorizedRocketEnv:
         max_episode_steps: int = 1500,
         reward_weights: Optional[Dict[str, float]] = None,
         continuous_actions: bool = True,
-        self_play: bool = True
+        self_play: bool = True,
+        baseline_opponent_ratio: float = 0.25
     ):
         self.num_envs = num_envs
+        self.game_mode = game_mode
+        self.tick_skip = tick_skip
+        self.max_episode_steps = max_episode_steps
+        self.reward_weights = reward_weights
+        self.continuous_actions = continuous_actions
+        self.self_play = self_play
+        self.baseline_opponent_ratio = max(0.0, min(1.0, baseline_opponent_ratio))
+
+        num_baseline = int(round(num_envs * self.baseline_opponent_ratio)) if game_mode == "1v1" else 0
         self.envs = [
             RocketLeagueEnv(
                 game_mode=game_mode,
@@ -145,13 +168,36 @@ class VectorizedRocketEnv:
                 max_episode_steps=max_episode_steps,
                 reward_weights=reward_weights,
                 continuous_actions=continuous_actions,
-                self_play=self_play
+                self_play=self_play,
+                is_baseline_env=(i >= num_envs - num_baseline)
             )
-            for _ in range(num_envs)
+            for i in range(num_envs)
         ]
         self.num_players_per_env = self.envs[0].num_players
         self.obs_dim = self.envs[0].obs_dim
         self.act_dim = self.envs[0].act_dim
+
+    def update_baseline_ratio(self, ratio: float):
+        """Dynamically reconfigures the number of environments running against the baseline opponent."""
+        self.baseline_opponent_ratio = max(0.0, min(1.0, ratio))
+        num_baseline = int(round(self.num_envs * self.baseline_opponent_ratio)) if self.game_mode == "1v1" else 0
+        for i, env in enumerate(self.envs):
+            is_baseline = (i >= self.num_envs - num_baseline)
+            env.is_baseline_env = is_baseline
+            env.baseline_bot = BaselineChaser(continuous_actions=self.continuous_actions) if is_baseline else None
+
+    def get_learner_mask(self) -> np.ndarray:
+        """
+        Returns boolean mask of shape (num_envs * num_players_per_env,)
+        True for policy learner actors, False for hardcoded baseline opponent actors.
+        """
+        mask = []
+        for env in self.envs:
+            if env.is_baseline_env:
+                mask.extend([True, False])  # Blue is learner, Orange is baseline bot
+            else:
+                mask.extend([True] * self.num_players_per_env)  # All are learners in self-play
+        return np.array(mask, dtype=bool)
 
     def update_reward_weights(self, weights: Dict[str, float]):
         for env in self.envs:

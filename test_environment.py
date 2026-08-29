@@ -80,6 +80,28 @@ class TestRocketLeagueEnvironment(unittest.TestCase):
         self.assertTrue(os.path.exists("logs/metrics.json"))
         self.assertTrue(os.path.exists("logs/history.jsonl"))
 
+    def test_baseline_chaser_and_vectorized_partitioning(self):
+        from env.baseline_agent import BaselineChaser
+        from env.physics_engine import CarState, BallState
+
+        bot = BaselineChaser(continuous_actions=True)
+        car = CarState(id=1, team=1, pos=np.array([0.0, 4608.0, 17.0], dtype=np.float32), rot=np.array([0.0, -np.pi/2, 0.0], dtype=np.float32))
+        ball = BallState(pos=np.array([0.0, 0.0, 93.15], dtype=np.float32))
+        act = bot.get_action(car, ball)
+        self.assertEqual(len(act), 8)
+        self.assertGreater(act[0], 0.5, "Baseline chaser must drive full throttle toward ball on kickoff")
+
+        # Test Vectorized partition
+        vec_env = VectorizedRocketEnv(num_envs=4, game_mode="1v1", baseline_opponent_ratio=0.5)
+        mask = vec_env.get_learner_mask()
+        self.assertEqual(len(mask), 8)
+        # First 2 envs (4 actors) self-play -> True, True, True, True
+        # Last 2 envs (4 actors) baseline -> True, False, True, False
+        self.assertTrue(mask[0])
+        self.assertTrue(mask[1])
+        self.assertTrue(mask[4])
+        self.assertFalse(mask[5])
+
     def test_physics_and_controls_preflight(self):
         from test_physics_and_controls import verify_physics_and_controls_pipeline
         verified = verify_physics_and_controls_pipeline(verbose=False)

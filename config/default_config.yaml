@@ -1,4 +1,5 @@
 environment:
+  baseline_opponent_ratio: 0.25
   game_mode: 1v1
   max_episode_steps: 3000
   num_envs: 64
@@ -27,19 +28,19 @@ ppo:
   bc_regularization_weight: 0.5
 rewards:
   ball_to_goal_weight: 1.5
-  boost_gain_weight: 0.7
-  boost_lose_weight: 0.35
+  boost_gain_weight: 0.6
+  boost_lose_weight: 0.3
   concede_weight: -20.0
   goal_weight: 20.0
   player_to_ball_weight: 0.8
-  save_weight: 7.0
-  touch_weight: 1.4
+  save_weight: 3.0
+  touch_weight: 1.2
 scenarios:
   aerial_prob: 0.2
-  kickoff_prob: 0.25
+  kickoff_prob: 0.3
   max_replays_to_ingest: 50
   replay_prob: 0.25
   replay_sort_mode: newest
   replays_pool_path: data/replays/replays_pool.npz
   save_prob: 0.15
-  wall_prob: 0.15
+  wall_prob: 0.1

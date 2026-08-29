@@ -138,8 +138,12 @@ class PlayerToBallVelocityReward(BaseReward):
 
         # Kickoff sprint multiplier
         is_kickoff = bool(abs(arena.ball.pos[0]) < 50.0 and abs(arena.ball.pos[1]) < 50.0 and float(np.linalg.norm(arena.ball.vel)) < 100.0)
-        if is_kickoff and delta_dist > 0.0:
-            return self.weight * delta_dist * 2.0
+        if is_kickoff:
+            # During kickoff race, apply 3.0x multiplier when closing distance and penalize peeling away
+            if delta_dist > 0.0:
+                return self.weight * delta_dist * 3.0
+            else:
+                return self.weight * delta_dist * 2.0
 
         return self.weight * delta_dist
 
@@ -315,12 +319,16 @@ class BoostReward(BaseReward):
         curr = float(np.clip(car.boost / 100.0, 0.0, 1.0))
         self._prev_boost[car.id] = curr
 
-        boost_diff = math.sqrt(curr) - math.sqrt(prev)
+        # Suspend all boost collection rewards and usage penalties during active kickoff (until ball is first touched/moving)
         is_kickoff = bool(abs(arena.ball.pos[0]) < 50.0 and abs(arena.ball.pos[1]) < 50.0 and float(np.linalg.norm(arena.ball.vel)) < 100.0)
+        if is_kickoff:
+            return 0.0
+
+        boost_diff = math.sqrt(curr) - math.sqrt(prev)
 
         if boost_diff >= 0:
             return self.gain_weight * boost_diff
-        elif not is_kickoff:
+        else:
             height_factor = max(0.2, 1.0 - (car.pos[2] / GOAL_HEIGHT))
             loss_rew = self.lose_weight * boost_diff * height_factor
             # Supersonic boost waste penalty: burning boost when already at max speed (>= 2100 uu/s)

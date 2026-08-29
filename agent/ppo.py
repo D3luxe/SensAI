@@ -98,6 +98,7 @@ class PPOTrainer:
             raise RuntimeError(f"[PPO Trainer] Pre-Flight Physics Verification Failed: {e}") from e
 
         # Initialize Vectorized Environment
+        self.baseline_opponent_ratio = float(env_cfg.get("baseline_opponent_ratio", 0.25))
         self.env = VectorizedRocketEnv(
             num_envs=self.num_envs,
             game_mode=self.game_mode,
@@ -105,7 +106,8 @@ class PPOTrainer:
             max_episode_steps=self.max_episode_steps,
             reward_weights=rew_cfg,
             continuous_actions=self.continuous_actions,
-            self_play=self.self_play
+            self_play=self.self_play,
+            baseline_opponent_ratio=self.baseline_opponent_ratio
         )
 
         sc_cfg = self.config.get("scenarios", {})
@@ -210,6 +212,14 @@ class PPOTrainer:
                 if "scenarios" in live and isinstance(live["scenarios"], dict):
                     self.env.update_scenarios(live["scenarios"])
                     print(f"[Live Config] Scenario distributions dynamically updated.")
+
+                # Update baseline opponent ratio
+                if "baseline_opponent_ratio" in live:
+                    new_ratio = float(live["baseline_opponent_ratio"])
+                    if abs(new_ratio - getattr(self, "baseline_opponent_ratio", 0.25)) > 1e-4:
+                        self.baseline_opponent_ratio = new_ratio
+                        self.env.update_baseline_ratio(self.baseline_opponent_ratio)
+                        print(f"[Live Config] Baseline opponent ratio dynamically updated to: {self.baseline_opponent_ratio:.2f}")
 
                 # Check manual save checkpoint trigger
                 if live.get("save_checkpoint_requested", False):
@@ -438,6 +448,18 @@ class PPOTrainer:
             b_advantages = advantages.reshape(-1)
             b_returns = returns.reshape(-1)
             b_values = val_buf.reshape(-1)
+
+            # Filter only policy learner actors (excludes heuristic baseline bot trajectories)
+            learner_mask_1d = self.env.get_learner_mask()
+            full_learner_mask = np.tile(learner_mask_1d, self.num_steps)
+            if not full_learner_mask.all():
+                learner_indices = torch.tensor(np.where(full_learner_mask)[0], device=self.device)
+                b_obs = b_obs[learner_indices]
+                b_logprobs = b_logprobs[learner_indices]
+                b_actions = b_actions[learner_indices]
+                b_advantages = b_advantages[learner_indices]
+                b_returns = b_returns[learner_indices]
+                b_values = b_values[learner_indices]
 
             # 4. PPO Mini-Batch Optimization
             total_samples = b_obs.shape[0]
