@@ -79,6 +79,102 @@ class ReplayParser:
             "file_size_mb": round(file_size, 2)
         }
 
+    def clear_pool(self) -> bool:
+        """Clears active memory buffer and removes saved pool from disk."""
+        self.states_buffer = None
+        if os.path.exists(self.pool_path):
+            try:
+                os.remove(self.pool_path)
+                return True
+            except Exception as e:
+                print(f"[ReplayParser] Warning: Could not remove {self.pool_path}: {e}")
+        return True
+
+    def ingest_zip(self, zip_path: str) -> Tuple[int, int]:
+        """
+        Extracts and ingests all .replay, .npz, and .json files contained inside a .zip archive.
+        Handles nested subfolders and temporary cleanup automatically.
+        """
+        import zipfile
+        import tempfile
+        import shutil
+
+        if not os.path.exists(zip_path) or not zipfile.is_zipfile(zip_path):
+            return 0, 0
+
+        temp_dir = tempfile.mkdtemp(prefix="rl_replays_zip_")
+        try:
+            with zipfile.ZipFile(zip_path, 'r') as zip_ref:
+                zip_ref.extractall(temp_dir)
+
+            files = []
+            for root, _, filenames in os.walk(temp_dir):
+                for fn in filenames:
+                    ext = os.path.splitext(fn)[1].lower()
+                    if ext in [".replay", ".npz", ".json"]:
+                        files.append(os.path.join(root, fn))
+
+            if not files:
+                return 0, 0
+
+            extracted_b_pos = []
+            extracted_b_vel = []
+            extracted_c_pos = []
+            extracted_c_vel = []
+            extracted_c_rot = []
+            extracted_c_bst = []
+
+            processed_count = 0
+            for fpath in files:
+                try:
+                    frames = self._parse_file(fpath)
+                    if frames and len(frames["ball_pos"]) > 0:
+                        extracted_b_pos.append(frames["ball_pos"])
+                        extracted_b_vel.append(frames["ball_vel"])
+                        extracted_c_pos.append(frames["car_pos"])
+                        extracted_c_vel.append(frames["car_vel"])
+                        extracted_c_rot.append(frames["car_rot"])
+                        extracted_c_bst.append(frames["car_boost"])
+                        processed_count += 1
+                except Exception as e:
+                    print(f"[ReplayParser] Error reading extracted {fpath}: {e}")
+
+            if not extracted_b_pos:
+                return 0, 0
+
+            new_b_pos = np.vstack(extracted_b_pos)
+            new_b_vel = np.vstack(extracted_b_vel)
+            new_c_pos = np.vstack(extracted_c_pos)
+            new_c_vel = np.vstack(extracted_c_vel)
+            new_c_rot = np.vstack(extracted_c_rot)
+            new_c_bst = np.vstack(extracted_c_bst)
+
+            if self.states_buffer is not None:
+                self.states_buffer["ball_pos"] = np.vstack([self.states_buffer["ball_pos"], new_b_pos])
+                self.states_buffer["ball_vel"] = np.vstack([self.states_buffer["ball_vel"], new_b_vel])
+                self.states_buffer["car_pos"] = np.vstack([self.states_buffer["car_pos"], new_c_pos])
+                self.states_buffer["car_vel"] = np.vstack([self.states_buffer["car_vel"], new_c_vel])
+                self.states_buffer["car_rot"] = np.vstack([self.states_buffer["car_rot"], new_c_rot])
+                self.states_buffer["car_boost"] = np.vstack([self.states_buffer["car_boost"], new_c_bst])
+            else:
+                self.states_buffer = {
+                    "ball_pos": new_b_pos,
+                    "ball_vel": new_b_vel,
+                    "car_pos": new_c_pos,
+                    "car_vel": new_c_vel,
+                    "car_rot": new_c_rot,
+                    "car_boost": new_c_bst
+                }
+
+            if len(self.states_buffer["ball_pos"]) > 100000:
+                for k in self.states_buffer:
+                    self.states_buffer[k] = self.states_buffer[k][-100000:]
+
+            self.save_pool()
+            return processed_count, len(new_b_pos)
+        finally:
+            shutil.rmtree(temp_dir, ignore_errors=True)
+
     def sample_state(self, num_cars: int = 2) -> Optional[Dict[str, Any]]:
         """
         Samples a single random game state from the replay pool.

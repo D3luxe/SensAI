@@ -46,9 +46,42 @@ class TestScenariosAndReplays(unittest.TestCase):
         self.assertEqual(sampled["ball_pos"].shape, (3,))
         self.assertEqual(sampled["car_pos"].shape, (2, 3))
 
+        # Test clear pool
+        self.assertTrue(parser.clear_pool())
+        stats_cleared = parser.get_pool_stats()
+        self.assertEqual(stats_cleared["total_frames"], 0)
+        self.assertFalse(os.path.exists(pool_path))
+
+        # Test zip ingestion
+        import zipfile
+        zip_test_path = "data/replays/test_replays.zip"
+        raw_test_file = "data/replays/dummy.json"
+        import json
+        with open(raw_test_file, "w") as f:
+            json.dump({
+                "ball_pos": [[0,0,100], [10,10,100]],
+                "ball_vel": [[0,0,0], [0,0,0]],
+                "car_pos": [[[0,0,17],[0,0,17]], [[0,0,17],[0,0,17]]],
+                "car_vel": [[[0,0,0],[0,0,0]], [[0,0,0],[0,0,0]]],
+                "car_rot": [[[0,0,0],[0,0,0]], [[0,0,0],[0,0,0]]],
+                "car_boost": [[50,50], [50,50]]
+            }, f)
+
+        with zipfile.ZipFile(zip_test_path, "w") as z:
+            z.write(raw_test_file, arcname="nested/match_1.json")
+
+        parser_zip = ReplayParser(pool_path=pool_path)
+        count, frames = parser_zip.ingest_zip(zip_test_path)
+        self.assertEqual(count, 1)
+        self.assertEqual(frames, 2)
+        self.assertEqual(parser_zip.get_pool_stats()["total_frames"], 2)
+
         # Cleanup
-        if os.path.exists(pool_path):
-            os.remove(pool_path)
+        parser_zip.clear_pool()
+        if os.path.exists(zip_test_path):
+            os.remove(zip_test_path)
+        if os.path.exists(raw_test_file):
+            os.remove(raw_test_file)
 
     def test_all_state_setters(self):
         rsim_arena = self.arena._rsim_arena

@@ -667,13 +667,15 @@ def create_ui():
                             )
                         scan_demos_btn = gr.Button("📂 Scan & Ingest Local Demos", variant="primary")
                         
-                        gr.Markdown("##### 📤 Or Upload Replay Files Directly:")
+                        gr.Markdown("##### 📤 Or Upload Replays / Zip Archives Directly:")
                         replay_upload_box = gr.File(
                             file_count="multiple",
-                            file_types=[".replay", ".npz", ".json"],
-                            label="Drop .replay, .npz, or .json files here"
+                            file_types=[".replay", ".npz", ".json", ".zip"],
+                            label="Drop .replay, .zip (containing replays), or .npz files here"
                         )
-                        upload_ingest_btn = gr.Button("📥 Ingest Uploaded Files", variant="secondary")
+                        with gr.Row():
+                            upload_ingest_btn = gr.Button("📥 Ingest Uploaded Files", variant="secondary", scale=2)
+                            clear_replays_btn = gr.Button("🗑️ Clear Ingested Pool", variant="stop", scale=1)
                         ingestion_status_box = gr.Markdown("Ready to ingest.")
 
                     # Right Column: Scenario Probability Weights
@@ -1202,25 +1204,42 @@ def create_ui():
             file_count = 0
             for f in uploaded_files:
                 fpath = f.name if hasattr(f, "name") else str(f)
-                frames = p._parse_file(fpath)
-                if frames and len(frames["ball_pos"]) > 0:
-                    file_count += 1
-                    total_frames += len(frames["ball_pos"])
-                    if p.states_buffer is not None:
-                        for k in p.states_buffer:
-                            p.states_buffer[k] = np.vstack([p.states_buffer[k], frames[k]])
-                    else:
-                        p.states_buffer = frames
+                ext = os.path.splitext(fpath)[1].lower()
+                if ext == ".zip":
+                    count, frames_cnt = p.ingest_zip(fpath)
+                    file_count += count
+                    total_frames += frames_cnt
+                else:
+                    frames = p._parse_file(fpath)
+                    if frames and len(frames["ball_pos"]) > 0:
+                        file_count += 1
+                        total_frames += len(frames["ball_pos"])
+                        if p.states_buffer is not None:
+                            for k in p.states_buffer:
+                                p.states_buffer[k] = np.vstack([p.states_buffer[k], frames[k]])
+                        else:
+                            p.states_buffer = frames
 
             if file_count > 0:
                 p.save_pool()
                 stats_html = build_replay_stats_md()
-                return stats_html, f"✅ **Successfully parsed & ingested {file_count} files ({total_frames:,} frames)!**"
+                return stats_html, f"✅ **Successfully parsed & ingested {file_count} replays ({total_frames:,} frames)!**"
             return build_replay_stats_md(), "❌ Failed to extract valid game frames from uploaded files."
 
         upload_ingest_btn.click(
             fn=on_upload_ingest,
             inputs=[replay_upload_box],
+            outputs=[replay_stats_box, ingestion_status_box]
+        )
+
+        def on_clear_replays():
+            p = ReplayParser()
+            p.clear_pool()
+            stats_html = build_replay_stats_md()
+            return stats_html, "🗑️ **Ingested replays dataset pool has been completely cleared.**"
+
+        clear_replays_btn.click(
+            fn=on_clear_replays,
             outputs=[replay_stats_box, ingestion_status_box]
         )
 
