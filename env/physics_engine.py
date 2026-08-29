@@ -442,7 +442,7 @@ class RocketSimArena:
                 hnd_val = bool(act[7] > 0.2 and abs(act[1]) > 0.15 and is_on_gnd)
                 r_car.set_controls(rsim.CarControls(
                     throttle=float(act[0]), steer=-float(act[1]), pitch=float(act[2]),
-                    yaw=-float(act[3]), roll=-float(act[4]), jump=bool(act[5] > 0.0),
+                    yaw=-float(act[3]), roll=-float(act[4]), jump=bool(act[5] > 0.33),
                     boost=bool(act[6] > 0.0), handbrake=hnd_val
                 ))
             self._rsim_arena.step(total_ticks)
@@ -590,7 +590,7 @@ class RocketSimArena:
             pitch = float(np.clip(act[2], -1.0, 1.0))
             yaw = float(np.clip(act[3], -1.0, 1.0))
             roll = float(np.clip(act[4], -1.0, 1.0))
-            jump = bool(act[5] > 0.0)
+            jump = bool(act[5] > 0.33)
             boost = bool(act[6] > 0.0 and car.boost > 0.0)
             handbrake = bool(act[7] > 0.2 and abs(steer) > 0.15 and car.on_ground)
 

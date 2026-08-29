@@ -76,11 +76,11 @@ class SenseiRLBot(BaseAgent):
         self.tick_skip = 8
         self.ticks_since_last_action = 0
         self.prev_action: np.ndarray | None = None
-        self.current_steer = 0.0
         self.ground_dodge_active = False
         self.fast_aerial_active = False
         self.dodge_cooldown = 0
         self.ball_touched_since_kickoff = False
+        self.boost_pad_mapping: list[int] | None = None
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self.obs_builder = DefaultObservationBuilder(symmetric=True)
         self.discrete_parser = DiscreteActionParser()
@@ -263,12 +263,24 @@ class SenseiRLBot(BaseAgent):
 
             # Build dummy arena struct for obs builder
             class MockArena:
-                def __init__(self, ball, cars, ball_pred=None, raw_pred_struct=None):
+                def __init__(self, ball, cars, ball_pred=None, raw_pred_struct=None, game_boosts=None, boost_pad_mapping=None):
                     self.ball = ball
                     self.cars = cars
                     self.ball_prediction_slice = ball_pred
                     self._pred_struct = raw_pred_struct
                     self.boost_pads = BoostPad.create_standard_pads()
+                    self._sm_pad_indices = np.array([i for i, p in enumerate(self.boost_pads) if not p.is_big], dtype=int)
+                    self._bg_pad_indices = np.array([i for i, p in enumerate(self.boost_pads) if p.is_big], dtype=int)
+                    self._small_pad_pos_3d = np.array([self.boost_pads[i].pos for i in self._sm_pad_indices], dtype=np.float32)
+                    self._big_pad_pos_3d = np.array([self.boost_pads[i].pos for i in self._bg_pad_indices], dtype=np.float32)
+
+                    if game_boosts is not None and boost_pad_mapping is not None:
+                        for std_idx, packet_idx in enumerate(boost_pad_mapping):
+                            if packet_idx < len(game_boosts):
+                                self.boost_pads[std_idx].is_active = bool(game_boosts[packet_idx].is_active)
+
+                    self._small_pad_active = np.array([self.boost_pads[i].is_active for i in self._sm_pad_indices], dtype=bool)
+                    self._big_pad_active = np.array([self.boost_pads[i].is_active for i in self._bg_pad_indices], dtype=bool)
 
                 def get_shot_threat(self, team: int):
                     defending_goal_y = -ARENA_EXTENT_Y if team == 0 else ARENA_EXTENT_Y
@@ -331,7 +343,36 @@ class SenseiRLBot(BaseAgent):
             self.ticks_since_last_action += 1
             if self.ticks_since_last_action >= self.tick_skip or self.prev_action is None:
                 self.ticks_since_last_action = 0
-                arena = MockArena(ball_state, [car_state] + opponents, ball_pred=ball_prediction_slice, raw_pred_struct=pred_struct)
+
+                # Compute boost pad spatial mapping once when FieldInfo is available
+                if self.boost_pad_mapping is None and RLBOT_AVAILABLE and hasattr(self, "get_field_info"):
+                    try:
+                        field_info = self.get_field_info()
+                        if field_info is not None and getattr(field_info, "num_boosts", 0) > 0:
+                            std_pads = BoostPad.create_standard_pads()
+                            mapping = []
+                            for std_pad in std_pads:
+                                best_idx = 0
+                                min_dist = float("inf")
+                                for b_i in range(field_info.num_boosts):
+                                    loc = field_info.boost_pads[b_i].location
+                                    d = math.hypot(loc.x - std_pad.pos[0], loc.y - std_pad.pos[1])
+                                    if d < min_dist:
+                                        min_dist = d
+                                        best_idx = b_i
+                                mapping.append(best_idx)
+                            self.boost_pad_mapping = mapping
+                    except Exception:
+                        pass
+
+                game_boosts = getattr(packet, "game_boosts", None)
+                arena = MockArena(
+                    ball_state, [car_state] + opponents,
+                    ball_pred=ball_prediction_slice,
+                    raw_pred_struct=pred_struct,
+                    game_boosts=game_boosts,
+                    boost_pad_mapping=self.boost_pad_mapping
+                )
                 obs = self.obs_builder.build_obs(car_state, arena)
 
                 # Model Inference at 15Hz (ActorCritic evaluates native equivariant bilateral policy)
@@ -357,11 +398,8 @@ class SenseiRLBot(BaseAgent):
             #  - Yaw:      Direct (+1.0 Yaw Right, -1.0 Yaw Left)
             #  - Roll:     Direct (+1.0 Roll Right, -1.0 Roll Left)
             #  - Pitch:    Inverted (-1.0 Nose Up / Aerial Climb, +1.0 Nose Down / Front Flip)
-            raw_steer = float(np.clip(act[1], -1.0, 1.0))
-            self.current_steer = 0.8 * raw_steer + 0.2 * self.current_steer
-
             controller.throttle = float(np.clip(act[0], -1.0, 1.0))
-            controller.steer = float(np.clip(self.current_steer, -1.0, 1.0))
+            controller.steer = float(np.clip(act[1], -1.0, 1.0))
             controller.pitch = -float(np.clip(act[2], -1.0, 1.0))
             controller.yaw = float(np.clip(act[3], -1.0, 1.0))
             controller.roll = float(np.clip(act[4], -1.0, 1.0))
