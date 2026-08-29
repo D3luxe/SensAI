@@ -1198,32 +1198,63 @@ def create_ui():
             if not uploaded_files:
                 return build_replay_stats_md(), "⚠️ No files selected for upload."
 
+            if not isinstance(uploaded_files, (list, tuple)):
+                uploaded_files = [uploaded_files]
+
             p = ReplayParser()
             total_frames = 0
             file_count = 0
+            errors = []
+
             for f in uploaded_files:
-                fpath = f.name if hasattr(f, "name") else str(f)
-                ext = os.path.splitext(fpath)[1].lower()
-                if ext == ".zip":
-                    count, frames_cnt = p.ingest_zip(fpath)
-                    file_count += count
-                    total_frames += frames_cnt
+                # Robust path resolution for Gradio file objects
+                if isinstance(f, str):
+                    fpath = f
+                elif isinstance(f, dict):
+                    fpath = f.get("path") or f.get("name") or ""
+                elif hasattr(f, "path") and f.path:
+                    fpath = f.path
+                elif hasattr(f, "name") and f.name:
+                    fpath = f.name
                 else:
-                    frames = p._parse_file(fpath)
-                    if frames and len(frames["ball_pos"]) > 0:
-                        file_count += 1
-                        total_frames += len(frames["ball_pos"])
-                        if p.states_buffer is not None:
-                            for k in p.states_buffer:
-                                p.states_buffer[k] = np.vstack([p.states_buffer[k], frames[k]])
+                    fpath = str(f)
+
+                if not os.path.exists(fpath):
+                    errors.append(f"File not found: {fpath}")
+                    continue
+
+                ext = os.path.splitext(fpath)[1].lower()
+                try:
+                    if ext == ".zip":
+                        count, frames_cnt = p.ingest_zip(fpath)
+                        if count > 0:
+                            file_count += count
+                            total_frames += frames_cnt
                         else:
-                            p.states_buffer = frames
+                            errors.append(f"No .replay files found inside {os.path.basename(fpath)}")
+                    else:
+                        frames = p._parse_file(fpath)
+                        if frames and len(frames["ball_pos"]) > 0:
+                            file_count += 1
+                            total_frames += len(frames["ball_pos"])
+                            if p.states_buffer is not None:
+                                for k in p.states_buffer:
+                                    p.states_buffer[k] = np.vstack([p.states_buffer[k], frames[k]])
+                            else:
+                                p.states_buffer = frames
+                        else:
+                            errors.append(f"Could not parse valid telemetry from {os.path.basename(fpath)}")
+                except Exception as e:
+                    errors.append(f"{os.path.basename(fpath)}: {e}")
 
             if file_count > 0:
                 p.save_pool()
                 stats_html = build_replay_stats_md()
                 return stats_html, f"✅ **Successfully parsed & ingested {file_count} replays ({total_frames:,} frames)!**"
-            return build_replay_stats_md(), "❌ Failed to extract valid game frames from uploaded files."
+
+            stats_html = build_replay_stats_md()
+            err_msg = " | ".join(errors) if errors else "No valid .replay, .zip, or .npz data extracted."
+            return stats_html, f"❌ **Ingestion Failed:** {err_msg}"
 
         upload_ingest_btn.click(
             fn=on_upload_ingest,
