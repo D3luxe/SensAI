@@ -96,19 +96,45 @@ class ReplayParser:
     def ingest_zip(self, zip_path: str) -> Tuple[int, int]:
         """
         Extracts and ingests all .replay, .npz, and .json files contained inside a .zip archive.
+        Uses multi-engine extraction (zipfile -> tar.exe -> powershell) to handle large/Zip64 archives.
         Handles nested subfolders and temporary cleanup automatically.
         """
         import zipfile
         import tempfile
         import shutil
+        import subprocess
 
-        if not os.path.exists(zip_path) or not zipfile.is_zipfile(zip_path):
+        if not os.path.exists(zip_path):
             return 0, 0
 
         temp_dir = tempfile.mkdtemp(prefix="rl_replays_zip_")
         try:
-            with zipfile.ZipFile(zip_path, 'r') as zip_ref:
-                zip_ref.extractall(temp_dir)
+            extracted_ok = False
+
+            # 1. Try standard Python zipfile
+            try:
+                with zipfile.ZipFile(zip_path, 'r') as zip_ref:
+                    zip_ref.extractall(temp_dir)
+                extracted_ok = True
+            except Exception:
+                pass
+
+            # 2. Fallback to Windows built-in tar.exe
+            if not extracted_ok or not os.listdir(temp_dir):
+                try:
+                    subprocess.run(['tar', '-xf', zip_path, '-C', temp_dir], capture_output=True)
+                    if os.listdir(temp_dir):
+                        extracted_ok = True
+                except Exception:
+                    pass
+
+            # 3. Fallback to PowerShell Expand-Archive
+            if not extracted_ok or not os.listdir(temp_dir):
+                try:
+                    ps_cmd = f"Expand-Archive -LiteralPath '{zip_path}' -DestinationPath '{temp_dir}' -Force"
+                    subprocess.run(['powershell', '-Command', ps_cmd], capture_output=True)
+                except Exception:
+                    pass
 
             files = []
             for root, _, filenames in os.walk(temp_dir):
