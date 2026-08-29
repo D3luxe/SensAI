@@ -401,10 +401,10 @@ class SenseiRLBot(BaseAgent):
             controller.boost = bool(act[6] > 0.2)
 
             # Handbrake / Powerslide:
-            # Must ONLY be active when on the ground and actively steering.
-            # When airborne, handbrake triggers Rocket League's Air Roll modifier.
-            if is_on_ground and abs(controller.steer) > 0.15:
-                controller.handbrake = bool(act[7] > 0.33)
+            # Must ONLY be active when on the ground and executing a sharp turnaround cut.
+            # Mild and moderate steering must maintain full tire grip.
+            if is_on_ground and abs(controller.steer) > 0.4:
+                controller.handbrake = bool(act[7] > 0.5)
             else:
                 controller.handbrake = False
 
