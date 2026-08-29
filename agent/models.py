@@ -129,7 +129,7 @@ class ActorCritic(nn.Module):
         value = self.critic(obs)
 
         if self.continuous_actions:
-            if obs.shape[-1] == self.obs_mirror_mask.shape[-1]:
+            if obs.shape[-1] == self.obs_mirror_mask.shape[-1] and self.act_dim == self.act_mirror_mask.shape[-1]:
                 # Equivariant Bilateral Symmetry Forward Pass
                 # Evaluates direct and mirrored paths simultaneously, guaranteeing 0.0 straight-ahead bias and exact left-right symmetry
                 obs_mirr = obs * self.obs_mirror_mask

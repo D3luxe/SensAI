@@ -147,7 +147,7 @@ class TestPhysicsAndControls(unittest.TestCase):
     def test_rot_mat_basis_parity(self):
         """
         Guarantees that bot.py rotation_to_rot_mat exactly matches C++ RocketSim Bullet basis
-        (Row 0: Forward, Row 1: Right = -Bullet_Left, Row 2: Up = Bullet_Up).
+        (Row 0: Forward, Row 1: Right, Row 2: Up).
         """
         from bot import rotation_to_rot_mat
         for p in [-1.2, -0.5, 0.0, 0.5, 1.2]:
@@ -155,12 +155,8 @@ class TestPhysicsAndControls(unittest.TestCase):
                 for r in [-1.0, 0.0, 1.0]:
                     m_bot = rotation_to_rot_mat(p, y, r)
                     m_rsim = rsim.Angle(pitch=p, yaw=y, roll=r).as_rot_mat().as_numpy().astype(np.float32)
-                    # Row 0 (Forward):
-                    self.assertLess(float(np.max(np.abs(m_bot[0] - m_rsim[0]))), 1e-6)
-                    # Row 1 (Right = -Bullet_Left):
-                    self.assertLess(float(np.max(np.abs(m_bot[1] - (-m_rsim[1])))), 1e-6)
-                    # Row 2 (Up):
-                    self.assertLess(float(np.max(np.abs(m_bot[2] - m_rsim[2]))), 1e-6)
+                    # Exact 1-to-1 match across all 3 rows (Forward, Right, Up)
+                    self.assertLess(float(np.max(np.abs(m_bot - m_rsim))), 1e-5)
 
 
     def test_observation_lateral_ball_offsets(self):
@@ -182,12 +178,13 @@ class TestPhysicsAndControls(unittest.TestCase):
         # Ball to Right (+X = +500)
         ball_r = BallState(pos=np.array([500.0, -2000.0, 93.0], dtype=np.float32))
         obs_r = self.obs_builder.build_obs(car, MockArena(ball_r, [car]))
-        self.assertGreater(obs_r[35], 0.0, "Ball to the RIGHT must produce positive local_ball_pos[1] offset!")
+        # In RocketSim basis (row 1 = [-sy, cy, 0]), a ball at +X produces negative dot product with row 1
+        self.assertLess(obs_r[35], 0.0, "Ball to the RIGHT (+X) must produce negative local_ball_pos[1] offset in RocketSim basis!")
 
         # Ball to Left (-X = -500)
         ball_l = BallState(pos=np.array([-500.0, -2000.0, 93.0], dtype=np.float32))
         obs_l = self.obs_builder.build_obs(car, MockArena(ball_l, [car]))
-        self.assertLess(obs_l[35], 0.0, "Ball to the LEFT must produce negative local_ball_pos[1] offset!")
+        self.assertGreater(obs_l[35], 0.0, "Ball to the LEFT (-X) must produce positive local_ball_pos[1] offset in RocketSim basis!")
 
     def test_macro_rewards_potential_and_boost(self):
         """
@@ -388,8 +385,8 @@ def verify_physics_and_controls_pipeline(verbose: bool = False) -> bool:
     car_obs = CarState(id=0, team=0, pos=np.array([0.0, -3000.0, 17.0], dtype=np.float32), rot=np.array([0.0, np.pi/2, 0.0], dtype=np.float32))
     obs_r = builder.build_obs(car_obs, MockArena(BallState(pos=np.array([500.0, -2000.0, 93.0], dtype=np.float32)), [car_obs]))
     obs_l = builder.build_obs(car_obs, MockArena(BallState(pos=np.array([-500.0, -2000.0, 93.0], dtype=np.float32)), [car_obs]))
-    assert obs_r[35] > 0.0, "Ball on Right must produce positive local lateral offset!"
-    assert obs_l[35] < 0.0, "Ball on Left must produce negative local lateral offset!"
+    assert obs_r[35] < 0.0, "Ball on Right (+X) must produce negative local lateral offset in RocketSim basis!"
+    assert obs_l[35] > 0.0, "Ball on Left (-X) must produce positive local lateral offset in RocketSim basis!"
 
     if verbose:
         print("[Pre-Flight Pipeline] Verified: Pitch, Steer, Observations, and Rewards are 100% aligned.")

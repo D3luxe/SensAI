@@ -43,13 +43,14 @@ from env.physics_engine import (
 
 def rotation_to_rot_mat(pitch: float, yaw: float, roll: float) -> np.ndarray:
     """
-    Computes exact 3x3 orthonormal basis (Row 0: Forward, Row 1: Right, Row 2: Up).
+    Computes exact 3x3 orthonormal basis (Row 0: Forward, Row 1: Right, Row 2: Up)
+    matching C++ RocketSim Angle.as_rot_mat() exactly.
     """
     cy, sy = math.cos(yaw), math.sin(yaw)
     cp, sp = math.cos(pitch), math.sin(pitch)
     cr, sr = math.cos(roll), math.sin(roll)
     fwd = np.array([cp * cy, cp * sy, sp], dtype=np.float32)
-    right = np.array([sy * cr - cy * sp * sr, -cy * cr - sy * sp * sr, cp * sr], dtype=np.float32)
+    right = np.array([-sy * cr + cy * sp * sr, cy * cr + sy * sp * sr, -cp * sr], dtype=np.float32)
     up = np.array([-cy * sp * cr - sy * sr, -sy * sp * cr + cy * sr, cp * cr], dtype=np.float32)
     return np.vstack([fwd, right, up]).astype(np.float32)
 
@@ -127,10 +128,13 @@ class SenseiRLBot(BaseAgent):
 
                 buffer = io.BytesIO(ckpt_bytes)
                 ckpt = torch.load(buffer, map_location=self.device)
-                self.continuous_actions = ckpt.get("continuous_actions", False)
+                saved_state = ckpt.get("model_state_dict", {})
+                
+                # Robust continuous actions detection
+                has_mean = "actor_mean.weight" in saved_state
+                self.continuous_actions = ckpt.get("continuous_actions", has_mean)
                 ckpt_act_dim = 8 if self.continuous_actions else self.discrete_parser.action_dim
                 
-                saved_state = ckpt.get("model_state_dict", {})
                 # Check if checkpoint contains LayerNorm parameters (1D tensor weights inside backbone)
                 has_ln = any("LayerNorm" in k or (len(v.shape) == 1 and "bias" not in k and "log_std" not in k) for k, v in saved_state.items())
                 use_ln = ckpt.get("use_layer_norm", has_ln)
