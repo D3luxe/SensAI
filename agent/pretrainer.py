@@ -182,24 +182,27 @@ class BehavioralCloningTrainer:
 
     def train(
         self,
-        epochs: int = 100,
-        batch_size: int = 256,
+        epochs: int = 50,
+        batch_size: int = 512,
         lr: float = 0.001,
         base_checkpoint: Optional[str] = None,
         progress_cb: Optional[Callable[[Dict[str, Any]], None]] = None
     ) -> Dict[str, Any]:
         """
-        Executes supervised behavioral cloning on replay dataset.
+        Executes fast supervised behavioral cloning on replay dataset.
         """
         self._is_running = True
         self._stop_requested = False
+
+        # Set max CPU threads for accelerated training
+        torch.set_num_threads(os.cpu_count() or 16)
 
         parser = ReplayParser(pool_path=self.pool_path)
         self.status["message"] = "Extracting observation-action pairs from replay dataset..."
         if progress_cb:
             progress_cb(self.status)
 
-        obs_data, act_data = self.generate_expert_dataset(parser)
+        obs_data, act_data = self.generate_expert_dataset(parser, max_samples=25000)
         if len(obs_data) == 0:
             self._is_running = False
             self.status["message"] = "Error: Replay pool is empty. Ingest .replay files first."
