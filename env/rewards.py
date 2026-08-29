@@ -98,25 +98,29 @@ class BallToGoalVelocityReward(BaseReward):
 class PlayerToBallVelocityReward(BaseReward):
     """
     Necto / RLGym Potential-Based Distance Delta Approach Reward.
-    Rewards closing the Euclidean distance gap to the ball:
+    Rewards closing the distance gap to the ball:
         Phi(s) = -dist(car, ball) / 2000.0
         Reward = (prev_dist - curr_dist) / 2000.0
-    When shadowing or circling a moving ball at constant distance: Reward is 0.0.
-    Within close striking proximity (< 300 uu): Approach potential is saturated (0.0),
-    forcing the agent to focus purely on strike direction (BallToGoal / TouchBall).
+    When ball is grounded (Z < 300), evaluates horizontal plane (X, Y) distance
+    so jumping to initiate a speed-flip never registers an artificial distance penalty.
     """
     def __init__(self, weight: float = 0.15):
         super().__init__(weight)
         self._prev_dist: Dict[int, float] = {}
 
+    def _calc_dist(self, car_pos: np.ndarray, ball_pos: np.ndarray) -> float:
+        if ball_pos[2] < 300.0 and car_pos[2] < 300.0:
+            return float(np.linalg.norm(ball_pos[:2] - car_pos[:2]))
+        return float(np.linalg.norm(ball_pos - car_pos))
+
     def reset(self, initial_state: RocketSimArena):
         self._prev_dist = {
-            car.id: float(np.linalg.norm(initial_state.ball.pos - car.pos))
+            car.id: self._calc_dist(car.pos, initial_state.ball.pos)
             for car in initial_state.cars
         }
 
     def get_reward(self, car: CarState, arena: RocketSimArena, action: np.ndarray, is_goal: bool, scoring_team: Optional[int]) -> float:
-        curr_dist = float(np.linalg.norm(arena.ball.pos - car.pos))
+        curr_dist = self._calc_dist(car.pos, arena.ball.pos)
         prev_dist = self._prev_dist.get(car.id, curr_dist)
         self._prev_dist[car.id] = curr_dist
 
@@ -132,14 +136,14 @@ class PlayerToBallVelocityReward(BaseReward):
 
 
 # ==============================================================================
-# 4. BALL TOUCH & DIRECTIONALITY (Hit Quality)
+# 4. BALL TOUCH & DIRECTIONALITY (Hit Quality & Aerial Height Scaling)
 # ==============================================================================
 class TouchBallReward(BaseReward):
     """
     Atomic Ball Strike Quality.
-    Rewarded at the exact moment of ball contact, scaled by touch speed and
-    alignment directed towards the opponent's net.
-    Includes an instant +2.5 bounty for winning the kickoff first touch.
+    Rewarded at the exact moment of ball contact, scaled by touch speed,
+    alignment directed towards the opponent's net, and vertical height multiplier
+    to strongly reward aerial plays and high challenges.
     """
     def __init__(self, weight: float = 1.2):
         super().__init__(weight)
@@ -168,17 +172,88 @@ class TouchBallReward(BaseReward):
             else:
                 direction_multiplier = 0.5
 
+            # Height scaling: Ground touch (Z=93) = 1.0x, Aerial touch (Z=1200) = 2.4x
+            ball_z = float(arena.ball.pos[2])
+            height_multiplier = 1.0 + 2.0 * max(0.0, (ball_z - 150.0) / 1850.0)
+
+            # Aerial airborne touch bonus (car airborne contesting high ball)
+            airborne_bonus = 0.5 if (not car.on_ground and ball_z > 250.0) else 0.0
+
             # Kickoff first-touch race bounty
             is_kickoff_touch = bool(abs(arena.ball.pos[0]) < 200.0 and abs(arena.ball.pos[1]) < 200.0 and all(c.ball_touches <= 1 for c in arena.cars))
             kickoff_bounty = 2.5 if is_kickoff_touch else 0.0
 
-            return (self.weight * power_factor * direction_multiplier) + kickoff_bounty
+            return (self.weight * power_factor * direction_multiplier * height_multiplier) + airborne_bonus + kickoff_bounty
 
         return 0.0
 
 
 # ==============================================================================
-# 5. BOOST RETENTION & ECONOMY (Necto Sqrt-Potential Engine)
+# 5. SPEED & FLIP MOMENTUM (Supersonic Traversal on Low Boost)
+# ==============================================================================
+class SpeedReward(BaseReward):
+    """
+    Velocity Projection & Supersonic Traversal Reward.
+    Rewards car speed directed toward the ball.
+    Incentivizes speed-flipping and forward dodges to break the 1400 uu/s ground drive limit
+    up to supersonic (2200 - 2300 uu/s) even when boost is empty.
+    """
+    def __init__(self, weight: float = 0.35):
+        super().__init__(weight)
+
+    def get_reward(self, car: CarState, arena: RocketSimArena, action: np.ndarray, is_goal: bool, scoring_team: Optional[int]) -> float:
+        car_to_ball = arena.ball.pos - car.pos
+        dist = float(np.linalg.norm(car_to_ball))
+        if dist < 1e-4:
+            return 0.0
+
+        unit_to_ball = car_to_ball / dist
+        vel_toward_ball = float(np.dot(car.vel, unit_to_ball))
+
+        # Positive normalized forward speed towards ball
+        norm_vel = max(0.0, vel_toward_ball) / CAR_MAX_SPEED
+
+        # Supersonic bonus
+        supersonic_bonus = 0.15 if car.is_supersonic else 0.0
+
+        return self.weight * (norm_vel + supersonic_bonus)
+
+
+# ==============================================================================
+# 6. JUMP MOMENTUM BRIDGE (Eliminates First-Jump Latency Barrier)
+# ==============================================================================
+class JumpBridgeReward(BaseReward):
+    """
+    Eliminates the initial jump latency barrier when initiating dodges/aerials toward the ball.
+    Provides an immediate transition incentive on the exact frame the car leaves the ground
+    while aligned toward the target.
+    """
+    def __init__(self, weight: float = 0.2):
+        super().__init__(weight)
+        self._prev_on_ground: Dict[int, bool] = {}
+
+    def reset(self, initial_state: RocketSimArena):
+        self._prev_on_ground = {car.id: car.on_ground for car in initial_state.cars}
+
+    def get_reward(self, car: CarState, arena: RocketSimArena, action: np.ndarray, is_goal: bool, scoring_team: Optional[int]) -> float:
+        prev_ground = self._prev_on_ground.get(car.id, car.on_ground)
+        self._prev_on_ground[car.id] = car.on_ground
+
+        # Trigger on the exact frame the car leaves the ground to jump
+        if prev_ground and not car.on_ground and car.vel[2] > 150.0:
+            car_to_ball = arena.ball.pos - car.pos
+            dist = float(np.linalg.norm(car_to_ball))
+            if dist > 400.0:
+                unit_to_ball = car_to_ball / dist
+                forward_alignment = float(np.dot(car.get_forward_vector(), unit_to_ball))
+                if forward_alignment > 0.3:
+                    return self.weight * forward_alignment
+
+        return 0.0
+
+
+# ==============================================================================
+# 7. BOOST RETENTION & ECONOMY (Necto Sqrt-Potential Engine)
 # ==============================================================================
 class BoostReward(BaseReward):
     """
@@ -218,7 +293,7 @@ class BoostReward(BaseReward):
 class CombinedReward:
     """
     Unified Macro Potential-Based Reward Manager.
-    Aggregates Macro Goal, Ball-to-Goal, Player-to-Ball, Touch Quality, and Boost Conservation.
+    Aggregates Macro Goal, Ball-to-Goal, Player-to-Ball, Speed/Flip, Jump-Bridge, Touch Quality, and Boost.
     """
     def __init__(self, weights: Dict[str, float]):
         self.rewards: Dict[str, BaseReward] = {
@@ -232,6 +307,12 @@ class CombinedReward:
             ),
             "player_to_ball": PlayerToBallVelocityReward(
                 weight=weights.get("player_to_ball_weight", 0.15)
+            ),
+            "speed": SpeedReward(
+                weight=weights.get("speed_weight", 0.35)
+            ),
+            "jump_bridge": JumpBridgeReward(
+                weight=weights.get("jump_bridge_weight", 0.2)
             ),
             "touch": TouchBallReward(
                 weight=weights.get("touch_weight", 1.5)
@@ -262,6 +343,12 @@ class CombinedReward:
 
         if "player_to_ball_weight" in new_weights and "player_to_ball" in self.rewards:
             self.rewards["player_to_ball"].weight = float(new_weights["player_to_ball_weight"])
+
+        if "speed_weight" in new_weights and "speed" in self.rewards:
+            self.rewards["speed"].weight = float(new_weights["speed_weight"])
+
+        if "jump_bridge_weight" in new_weights and "jump_bridge" in self.rewards:
+            self.rewards["jump_bridge"].weight = float(new_weights["jump_bridge_weight"])
 
         if "touch_weight" in new_weights and "touch" in self.rewards:
             self.rewards["touch"].weight = float(new_weights["touch_weight"])
