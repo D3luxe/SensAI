@@ -418,9 +418,16 @@ class ReplayParser:
         car_vel[:, 0, :2] = rng.normal(0, 1000, size=(num_frames, 2))
         car_vel[:, 1, :2] = rng.normal(0, 1000, size=(num_frames, 2))
 
+        # Realistic heading distribution with natural approach angles, lateral cuts, and turnarounds
+        heading_to_ball_0 = np.arctan2(ball_pos[:, 1] - car_pos[:, 0, 1], ball_pos[:, 0] - car_pos[:, 0, 0])
+        heading_to_ball_1 = np.arctan2(ball_pos[:, 1] - car_pos[:, 1, 1], ball_pos[:, 0] - car_pos[:, 1, 0])
+
+        yaw_offsets_0 = rng.uniform(-np.pi, np.pi, size=num_frames) * rng.choice([0.0, 0.3, 0.7, 1.0], size=num_frames, p=[0.1, 0.4, 0.3, 0.2])
+        yaw_offsets_1 = rng.uniform(-np.pi, np.pi, size=num_frames) * rng.choice([0.0, 0.3, 0.7, 1.0], size=num_frames, p=[0.1, 0.4, 0.3, 0.2])
+
         car_rot = np.zeros((num_frames, 2, 3), dtype=np.float32)
-        car_rot[:, 0, 1] = np.arctan2(ball_pos[:, 1] - car_pos[:, 0, 1], ball_pos[:, 0] - car_pos[:, 0, 0])
-        car_rot[:, 1, 1] = np.arctan2(ball_pos[:, 1] - car_pos[:, 1, 1], ball_pos[:, 0] - car_pos[:, 1, 0])
+        car_rot[:, 0, 1] = heading_to_ball_0 + yaw_offsets_0
+        car_rot[:, 1, 1] = heading_to_ball_1 + yaw_offsets_1
 
         car_boost = np.zeros((num_frames, 2), dtype=np.float32)
         car_boost[:, 0] = rng.uniform(20.0, 100.0, size=num_frames)

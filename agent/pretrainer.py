@@ -15,7 +15,7 @@ import torch.nn as nn
 import torch.optim as optim
 from typing import Dict, Any, Optional, Tuple, Callable
 
-from agent.models import ActorCritic
+from agent.models import ActorCritic, OBS_MIRROR_MASK_NP, ACT_MIRROR_MASK_NP
 from env.observations import DefaultObservationBuilder
 from env.physics_engine import CarState, BallState, BoostPad, ARENA_EXTENT_X, ARENA_EXTENT_Y
 from utils.replay_parser import ReplayParser, get_default_demo_dir
@@ -125,58 +125,53 @@ class BehavioralCloningTrainer:
                 arena = MockArenaForObs(ball, [car])
                 obs_vec = self.obs_builder.build_obs(car, arena)
 
-                # Expert action synthesis from state dynamics
-                # 1. Throttle: +1 when driving forward towards ball, -1 if braking
-                car_to_ball = ball.pos - car.pos
-                dist_xy = float(np.linalg.norm(car_to_ball[:2]))
-                unit_xy = car_to_ball[:2] / max(1.0, dist_xy)
-                fwd_xy = car.get_forward_vector()[:2]
-                fwd_norm = float(np.linalg.norm(fwd_xy))
-                fwd_dir = (fwd_xy / fwd_norm) if fwd_norm > 1e-3 else np.array([0.0, 1.0])
+                # Exact local-frame action synthesis (invariant across teams and world rotations):
+                local_ball_x = float(obs_vec[34]) # Forward distance / 2000
+                local_ball_y = float(obs_vec[35]) # Lateral distance / 2000 (RocketSim basis: <0 is Right, >0 is Left)
+                local_ball_z = float(obs_vec[36]) # Vertical distance / 2000
 
-                alignment = float(np.dot(fwd_dir, unit_xy))
-                steer_cross = float(fwd_dir[0] * unit_xy[1] - fwd_dir[1] * unit_xy[0])
+                # Steering: in RocketSim basis, local_ball_y < 0 -> steer Right (+1), local_ball_y > 0 -> steer Left (-1)
+                if local_ball_x < -0.1:  # Ball behind car
+                    steer = 1.0 if local_ball_y < 0 else -1.0
+                    throttle = 0.5
+                    handbrake = 1.0
+                else:
+                    steer = float(np.clip(-local_ball_y * 6.0, -1.0, 1.0))
+                    throttle = 1.0 if local_ball_x > -0.2 else -0.3
+                    handbrake = 1.0 if abs(local_ball_y) > 0.35 and car.on_ground else 0.0
 
-                throttle = 1.0 if alignment > -0.2 else -0.5
-                steer = np.clip(-steer_cross * 2.5, -1.0, 1.0)
-                
-                # Invert steer for Orange team perspective
-                if car.team == 1:
-                    steer = -steer
-
-                # Pitch / Yaw / Roll for airborne
                 pitch = 0.0
                 yaw = 0.0
                 roll = 0.0
                 jump = 0.0
                 boost = 0.0
-                handbrake = 0.0
 
                 if car.on_ground:
-                    # Handbrake for sharp turn cuts
-                    if alignment < 0.3 and dist_xy > 400.0:
-                        handbrake = 1.0
-                    # Boost on straightaways
-                    if alignment > 0.8 and dist_xy > 600.0 and car.boost > 5.0:
+                    # Boost when aligned towards ball
+                    if abs(local_ball_y) < 0.2 and local_ball_x > 0.3 and car.boost > 5.0:
                         boost = 1.0
-                    # Jump for kickoff speed-flips or aerial takes
+                    # Kickoff speed-flip jump trigger
                     is_kickoff = (abs(ball.pos[0]) < 50.0 and abs(ball.pos[1]) < 50.0)
-                    if is_kickoff and dist_xy > 1000.0 and dist_xy < 2200.0:
+                    if is_kickoff and 0.4 < local_ball_x < 1.1:
                         jump = 1.0
                 else:
-                    # Aerial pitch towards ball
-                    z_diff = ball.pos[2] - car.pos[2]
-                    if z_diff > 100.0:
-                        pitch = 0.8  # Nose up
-                        if car.boost > 10.0:
-                            boost = 1.0
-                    elif z_diff < -100.0:
-                        pitch = -0.8 # Nose down
+                    # Aerial orientation
+                    pitch = float(np.clip(local_ball_z * 3.0, -1.0, 1.0))
+                    yaw = steer
+                    if local_ball_z > 0.15 and car.boost > 10.0:
+                        boost = 1.0
 
                 expert_act = np.array([throttle, steer, pitch, yaw, roll, jump, boost, handbrake], dtype=np.float32)
 
+                # Add direct sample
                 obs_list.append(obs_vec)
                 act_list.append(expert_act)
+
+                # Add exact bilateral mirrored sample to enforce 100% left-right symmetry
+                obs_mirr = obs_vec * OBS_MIRROR_MASK_NP
+                act_mirr = expert_act * ACT_MIRROR_MASK_NP
+                obs_list.append(obs_mirr)
+                act_list.append(act_mirr)
 
         return np.array(obs_list, dtype=np.float32), np.array(act_list, dtype=np.float32)
 
@@ -202,7 +197,7 @@ class BehavioralCloningTrainer:
         if progress_cb:
             progress_cb(self.status)
 
-        obs_data, act_data = self.generate_expert_dataset(parser, max_samples=25000)
+        obs_data, act_data = self.generate_expert_dataset(parser, max_samples=5000)
         if len(obs_data) == 0:
             self._is_running = False
             self.status["message"] = "Error: Replay pool is empty. Ingest .replay files first."
