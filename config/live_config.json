@@ -1,5 +1,5 @@
 {
-  "updated_at": 1787976079.9086869,
+  "updated_at": 1787982199.3157053,
   "learning_rate": 0.0003,
   "ent_coef": 0.0005,
   "clip_range": 0.2,
@@ -16,10 +16,10 @@
     "boost_lose_weight": 0.3
   },
   "scenarios": {
-    "kickoff_prob": 0.3,
-    "replay_prob": 0.05,
-    "aerial_prob": 0.3,
-    "wall_prob": 0.2,
-    "save_prob": 0.15
+    "kickoff_prob": 0.25,
+    "replay_prob": 0.25,
+    "aerial_prob": 0.25,
+    "wall_prob": 0.15,
+    "save_prob": 0.1
   }
 }

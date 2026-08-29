@@ -12,5 +12,10 @@ scratch/
 checkpoints/checkpoint_iter_*.pt
 checkpoints/manual_checkpoint_*.pt
 checkpoints/bak/
+*.bak
+*.pid
+logs/start_time.txt
+logs/train.pid
 .system_generated/
 runs/
+
