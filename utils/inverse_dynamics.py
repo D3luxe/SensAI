@@ -84,7 +84,7 @@ class InverseDynamicsSolver:
             boost_act = 1.0
             throttle_act = 1.0
         else:
-            boost_act = 0.0
+            boost_act = -1.0
             # Solve throttle from drive curve: a = drive_accel(v) * throttle
             max_drive_accel = max(100.0, DRIVE_ACCEL_ZERO * (1.0 - min(current_speed, 1400.0) / 1400.0))
             if on_ground_t:
@@ -121,7 +121,7 @@ class InverseDynamicsSolver:
             if lateral_slip > 350.0 and abs(steer_act) > 0.2:
                 handbrake_act = 1.0
             else:
-                handbrake_act = 0.0
+                handbrake_act = -1.0
 
             pitch_act = 0.0
             yaw_act = 0.0
@@ -129,7 +129,7 @@ class InverseDynamicsSolver:
         else:
             # Airborne 3D Attitude Control
             steer_act = 0.0
-            handbrake_act = 0.0
+            handbrake_act = -1.0
 
             # Pitch (in RocketSim/RLGym: -1.0 is nose down, +1.0 is nose up)
             pitch_rate = float(measured_omega[0])
@@ -145,7 +145,7 @@ class InverseDynamicsSolver:
 
         # 5. Jump & Dodge Detection
         # Initial jump: ground -> air with upward vertical impulse (vz >= 250 uu/s)
-        jump_act = 0.0
+        jump_act = -1.0
         if on_ground_t and not on_ground_next and vel_next[2] > 200.0:
             jump_act = 1.0
         elif not on_ground_t and not on_ground_next:
@@ -162,9 +162,9 @@ class InverseDynamicsSolver:
             float(np.clip(pitch_act, -1.0, 1.0)),
             float(np.clip(yaw_act, -1.0, 1.0)),
             float(np.clip(roll_act, -1.0, 1.0)),
-            float(np.clip(jump_act, 0.0, 1.0)),
-            float(np.clip(boost_act, 0.0, 1.0)),
-            float(np.clip(handbrake_act, 0.0, 1.0))
+            float(np.clip(jump_act, -1.0, 1.0)),
+            float(np.clip(boost_act, -1.0, 1.0)),
+            float(np.clip(handbrake_act, -1.0, 1.0))
         ], dtype=np.float32)
 
     @classmethod

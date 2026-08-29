@@ -367,6 +367,7 @@ class SenseiRLBot(BaseAgent):
             controller.roll = float(np.clip(act[4], -1.0, 1.0))
 
             # ── RLGym / RLBot Jump & Dodge Substep Timing Sequencer ────────────
+            # Continuous action [-1.0, +1.0]: act[5] > 0.33 is a deliberate jump signal.
             # Rocket League requires the jump button to be released (jump=False) for at least
             # 1-2 physics ticks between the first jump and the second jump to execute a flip/dodge.
             # When tick_skip=8 (15Hz action rate at 120Hz physics):
@@ -374,7 +375,7 @@ class SenseiRLBot(BaseAgent):
             #                            then release jump for ticks 4..7 to prime the airborne dodge.
             #  - Second Jump / Dodge (Airborne): Press jump for ticks 0..2 (executes flip/dodge),
             #                                    then release jump for ticks 3..7.
-            want_jump = bool(act[5] > 0.0)
+            want_jump = bool(act[5] > 0.33)
             substep_tick = self.ticks_since_last_action  # 0 to 7 within the 15Hz step
 
             if is_on_ground:
@@ -384,7 +385,7 @@ class SenseiRLBot(BaseAgent):
                     controller.jump = False
             else:
                 # Car is airborne
-                if want_jump:
+                if want_jump and has_flip:
                     controller.jump = bool(substep_tick <= 2)
                 else:
                     controller.jump = False
@@ -397,14 +398,13 @@ class SenseiRLBot(BaseAgent):
                 controller.yaw = 0.0
                 controller.roll = 0.0
 
-            boost_threshold = 0.0
-            controller.boost = bool(act[6] > boost_threshold)
+            controller.boost = bool(act[6] > 0.2)
 
             # Handbrake / Powerslide:
             # Must ONLY be active when on the ground and actively steering.
             # When airborne, handbrake triggers Rocket League's Air Roll modifier.
             if is_on_ground and abs(controller.steer) > 0.15:
-                controller.handbrake = bool(act[7] > 0.2)
+                controller.handbrake = bool(act[7] > 0.33)
             else:
                 controller.handbrake = False
 
