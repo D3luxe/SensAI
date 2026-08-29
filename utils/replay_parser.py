@@ -66,6 +66,10 @@ class ReplayParser:
 
     def get_pool_stats(self) -> Dict[str, Any]:
         """Returns statistics on the current replay pool."""
+        if not os.path.exists(self.pool_path):
+            self.states_buffer = None
+            return {"total_frames": 0, "num_matches": 0, "file_size_mb": 0.0}
+
         if self.states_buffer is None:
             self.load_pool()
         if self.states_buffer is None:
@@ -85,7 +89,6 @@ class ReplayParser:
         if os.path.exists(self.pool_path):
             try:
                 os.remove(self.pool_path)
-                return True
             except Exception as e:
                 print(f"[ReplayParser] Warning: Could not remove {self.pool_path}: {e}")
         return True

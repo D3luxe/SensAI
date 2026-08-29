@@ -627,9 +627,8 @@ def create_ui():
                     Train advanced mechanics (Aerials, Wall Plays, Goalie Saves, Replays) from step 0 by injecting realistic game states directly into RocketSim training environments.
                     """
                 )
-                parser_inst = ReplayParser()
                 def build_replay_stats_md():
-                    st = parser_inst.get_pool_stats()
+                    st = ReplayParser().get_pool_stats()
                     return f"""
                     <div style="background: rgba(30, 41, 59, 0.7); border: 1px solid #334155; border-radius: 8px; padding: 12px 18px; margin-bottom: 12px;">
                         <h4 style="margin: 0 0 6px 0; color: #38bdf8;">📊 Active Replay Dataset Pool</h4>
