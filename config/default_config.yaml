@@ -12,9 +12,6 @@ hyperparameters:
   learning_rate: 0.0003
   mini_batch_size: 1024
   n_epochs: 2
-ppo:
-  bc_regularization_weight: 0.5
-  bc_decay_steps: 30000000
 logging:
   checkpoint_interval: 20
   log_dir: logs
@@ -25,6 +22,9 @@ model:
   activation: leaky_relu
   continuous_actions: true
   use_layer_norm: true
+ppo:
+  bc_decay_steps: 30000000
+  bc_regularization_weight: 0.5
 rewards:
   ball_to_goal_weight: 1.5
   boost_gain_weight: 0.7
@@ -35,11 +35,11 @@ rewards:
   save_weight: 7.0
   touch_weight: 1.4
 scenarios:
-  aerial_prob: 0.25
+  aerial_prob: 0.2
   kickoff_prob: 0.25
   max_replays_to_ingest: 50
   replay_prob: 0.25
   replay_sort_mode: newest
   replays_pool_path: data/replays/replays_pool.npz
-  save_prob: 0.1
+  save_prob: 0.15
   wall_prob: 0.15

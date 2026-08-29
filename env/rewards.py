@@ -354,13 +354,13 @@ class CombinedReward:
                 weight=weights.get("player_to_ball_weight", 0.15)
             ),
             "speed": SpeedReward(
-                weight=weights.get("speed_weight", 0.35)
+                weight=weights.get("speed_weight", 0.0)
             ),
             "face_ball": FaceBallReward(
-                weight=weights.get("face_ball_weight", 0.25)
+                weight=weights.get("face_ball_weight", 0.0)
             ),
             "jump_bridge": JumpBridgeReward(
-                weight=weights.get("jump_bridge_weight", 0.2)
+                weight=weights.get("jump_bridge_weight", 0.0)
             ),
             "touch": TouchBallReward(
                 weight=weights.get("touch_weight", 1.5)
