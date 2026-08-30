@@ -1,5 +1,5 @@
 {
-  "updated_at": 1788071660.9242716,
+  "updated_at": 1788116910.7094164,
   "learning_rate": 0.0003,
   "ent_coef": 0.001,
   "clip_range": 0.2,
@@ -14,6 +14,7 @@
     "save_weight": 3.0,
     "ball_to_goal_weight": 1.5,
     "player_to_ball_weight": 0.6,
+    "jump_bridge_weight": 0.20,
     "touch_weight": 1.2,
     "boost_gain_weight": 0.6,
     "boost_lose_weight": 0.3

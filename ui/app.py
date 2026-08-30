@@ -469,8 +469,8 @@ def create_ui():
                     with gr.Column():
                         gr.Markdown("### 🎯 Field Progression & Pursuit")
                         ball_to_goal_slider = gr.Slider(0.0, 5.0, value=float(rew_cfg.get("ball_to_goal_weight", 1.5)), step=0.1, label="Ball-to-Goal Velocity Weight", info="Continuous field progression toward opponent net.")
-                        player_to_ball_slider = gr.Slider(0.0, 3.0, value=float(rew_cfg.get("player_to_ball_weight", 0.8)), step=0.1, label="Player-to-Ball Closing Speed Weight", info="Continuous approach speed toward the ball.")
-                        face_ball_slider = gr.Slider(0.0, 3.0, value=float(rew_cfg.get("face_ball_weight", 0.0)), step=0.1, label="Face-Ball Nose Alignment Weight", info="Continuous nose-to-ball orientation (disabled by default to prevent farming).")
+                        player_to_ball_slider = gr.Slider(0.0, 3.0, value=float(rew_cfg.get("player_to_ball_weight", 0.6)), step=0.1, label="Player-to-Ball Approach & Control Weight", info="Paced approach speed toward ball with strike-zone velocity matching.")
+                        jump_bridge_slider = gr.Slider(0.0, 1.0, value=float(rew_cfg.get("jump_bridge_weight", 0.2)), step=0.05, label="Jump & Aerial Takeoff Incentive", info="Atomic 1-frame takeoff & flip transition bounty directed toward the ball.")
                         touch_slider = gr.Slider(0.0, 5.0, value=float(rew_cfg.get("touch_weight", 1.2)), step=0.1, label="Directional Ball Strike Quality", info="Touch impact scaled by speed & goal alignment.")
 
                 with gr.Row():
@@ -925,7 +925,7 @@ def create_ui():
         # Apply Live Rewards (Macro Potential Architecture)
         def on_apply_rewards(
             g_w, c_w, sv_w,
-            b2g_w, p2b_w, fb_w, tch_w,
+            b2g_w, p2b_w, jb_w, tch_w,
             bg_w, bl_w
         ):
             rewards = {
@@ -934,7 +934,7 @@ def create_ui():
                 "save_weight": float(sv_w),
                 "ball_to_goal_weight": float(b2g_w),
                 "player_to_ball_weight": float(p2b_w),
-                "face_ball_weight": float(fb_w),
+                "jump_bridge_weight": float(jb_w),
                 "touch_weight": float(tch_w),
                 "boost_gain_weight": float(bg_w),
                 "boost_lose_weight": float(bl_w)
@@ -952,7 +952,7 @@ def create_ui():
             fn=on_apply_rewards,
             inputs=[
                 goal_slider, concede_slider, save_slider,
-                ball_to_goal_slider, player_to_ball_slider, face_ball_slider, touch_slider,
+                ball_to_goal_slider, player_to_ball_slider, jump_bridge_slider, touch_slider,
                 boost_gain_slider, boost_lose_slider
             ],
             outputs=[reward_apply_msg]
@@ -960,8 +960,8 @@ def create_ui():
 
         def on_reset_rewards():
             return (
-                10.0, -10.0, 3.0,
-                1.5, 0.8, 0.0, 1.2,
+                20.0, -20.0, 3.0,
+                1.5, 0.6, 0.20, 1.2,
                 0.6, 0.3
             )
 
@@ -969,7 +969,7 @@ def create_ui():
             fn=on_reset_rewards,
             outputs=[
                 goal_slider, concede_slider, save_slider,
-                ball_to_goal_slider, player_to_ball_slider, face_ball_slider, touch_slider,
+                ball_to_goal_slider, player_to_ball_slider, jump_bridge_slider, touch_slider,
                 boost_gain_slider, boost_lose_slider
             ]
         )

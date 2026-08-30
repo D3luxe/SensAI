@@ -149,11 +149,23 @@ class PlayerToBallVelocityReward(BaseReward):
             if fwd_alignment > 0.5:
                 rel_vel_2d = float(np.linalg.norm(car.vel[:2] - arena.ball.vel[:2]))
                 vel_match_reward = max(0.0, 1.0 - (rel_vel_2d / 800.0)) * 0.15
+        elif curr_dist < 800.0:
+            # Mid-Range Proximity Speed Pacing (400 - 800 uu)
+            # Caps the delta to an optimal arrival speed so supersonic charging past the ball is not overrewarded
+            if delta_dist > 0.0:
+                max_paced_delta = (max(500.0, curr_dist * 1.8) / 2000.0) * (8.0 / 120.0)
+                delta_dist = min(delta_dist, max_paced_delta)
+            elif abs(float(action[1])) > 0.35:
+                # Turning Maneuver Protection: Zero penalty if slowing down to tighten turning radius
+                delta_dist = 0.0
         else:
-            # When ball is far behind the car (curr_dist > 400 uu and facing away),
-            # do not reward reversing backwards across the field; enforce turning around.
+            # Long Range Approach (> 800 uu)
+            # When ball is far behind the car and facing away, do not reward reversing backwards
             if fwd_alignment < 0.0 and delta_dist > 0.0:
                 delta_dist = delta_dist * max(0.0, fwd_alignment + 1.0) * 0.2
+            elif abs(float(action[1])) > 0.4 and delta_dist < 0.0:
+                # Allow braking to re-route or turn toward pads/ball without harsh distance drop penalty
+                delta_dist = delta_dist * 0.2
 
         # Kickoff sprint multiplier & anti-peel penalty
         is_kickoff = bool(abs(arena.ball.pos[0]) < 50.0 and abs(arena.ball.pos[1]) < 50.0 and float(np.linalg.norm(arena.ball.vel)) < 100.0)
@@ -330,14 +342,15 @@ class JumpBridgeReward(BaseReward):
         self._prev_on_ground[car.id] = car.on_ground
 
         # Trigger on the exact frame the car leaves the ground to jump
-        if prev_ground and not car.on_ground and car.vel[2] > 150.0:
+        if prev_ground and not car.on_ground and car.vel[2] > 100.0:
             car_to_ball = arena.ball.pos - car.pos
             dist = float(np.linalg.norm(car_to_ball))
-            if dist > 400.0:
+            if dist > 250.0:
                 unit_to_ball = car_to_ball / dist
                 forward_alignment = float(np.dot(car.get_forward_vector(), unit_to_ball))
-                if forward_alignment > 0.3:
-                    return self.weight * forward_alignment
+                if forward_alignment > 0.2:
+                    aerial_mult = 1.5 if arena.ball.pos[2] > 300.0 else 1.0
+                    return self.weight * forward_alignment * aerial_mult
 
         return 0.0
 
@@ -414,7 +427,7 @@ class CombinedReward:
                 weight=weights.get("face_ball_weight", 0.0)
             ),
             "jump_bridge": JumpBridgeReward(
-                weight=weights.get("jump_bridge_weight", 0.0)
+                weight=weights.get("jump_bridge_weight", 0.20)
             ),
             "touch": TouchBallReward(
                 weight=weights.get("touch_weight", 1.5)
