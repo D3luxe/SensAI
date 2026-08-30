@@ -127,12 +127,31 @@ class PlayerToBallVelocityReward(BaseReward):
         # Distance gap delta (positive when closing distance, negative when retreating)
         delta_dist = (prev_dist - curr_dist) / 2000.0
 
-        # When ball is far behind the car (curr_dist > 300 uu and facing away),
-        # do not reward reversing backwards across the field; enforce turning around.
-        if curr_dist > 300.0:
-            car_to_ball = arena.ball.pos - car.pos
-            unit_to_ball = car_to_ball / max(1e-4, curr_dist)
-            fwd_alignment = float(np.dot(car.get_forward_vector(), unit_to_ball))
+        # Car-to-ball alignment vector
+        car_to_ball = arena.ball.pos - car.pos
+        unit_to_ball = car_to_ball / max(1e-4, curr_dist)
+        fwd_alignment = float(np.dot(car.get_forward_vector(), unit_to_ball))
+
+        # Strike Zone Control & Velocity-Matching Gate (< 400 uu)
+        # Inside the strike zone, taper raw approach speed to allow braking/patience for catches & pops
+        vel_match_reward = 0.0
+        if curr_dist <= 400.0:
+            # Scale approach reward down smoothly near the ball (prevents blind full-throttle ramming)
+            taper_scale = max(0.2, curr_dist / 400.0)
+            if delta_dist > 0:
+                delta_dist *= taper_scale
+            else:
+                # Patience Protection: Do not penalize waiting for bounces if positioned behind the ball
+                if fwd_alignment > 0.0:
+                    delta_dist = 0.0
+
+            # Velocity-matching bonus: reward pacing/dribbling with the ball when aligned
+            if fwd_alignment > 0.5:
+                rel_vel_2d = float(np.linalg.norm(car.vel[:2] - arena.ball.vel[:2]))
+                vel_match_reward = max(0.0, 1.0 - (rel_vel_2d / 800.0)) * 0.15
+        else:
+            # When ball is far behind the car (curr_dist > 400 uu and facing away),
+            # do not reward reversing backwards across the field; enforce turning around.
             if fwd_alignment < 0.0 and delta_dist > 0.0:
                 delta_dist = delta_dist * max(0.0, fwd_alignment + 1.0) * 0.2
 
@@ -149,18 +168,19 @@ class PlayerToBallVelocityReward(BaseReward):
             else:
                 return self.weight * delta_dist * 2.5
 
-        return self.weight * delta_dist
+        return (self.weight * delta_dist) + vel_match_reward
 
 
 # ==============================================================================
-# 4. BALL TOUCH & DIRECTIONALITY (Hit Quality & Aerial Height Scaling)
+# 4. BALL TOUCH & CONTEXTUAL DIRECTIONALITY (Power Shots vs Controlled Catches)
 # ==============================================================================
 class TouchBallReward(BaseReward):
     """
-    Atomic Ball Strike Quality.
-    Rewarded at the exact moment of ball contact, scaled by touch speed,
-    alignment directed towards the opponent's net, and vertical height multiplier
-    to strongly reward aerial plays and high challenges.
+    Context-Aware Ball Strike & Possession Quality.
+    Rewarded at the exact moment of ball contact, adapting intelligently to tactical context:
+      1. Tactical Boom / Shot on Net: Booming strikes scaled heavily by goal alignment.
+      2. Possession & Control Catch: Soft touches and pops that keep the ball under close control.
+      3. Vertical Aerials: Height scaling and airborne bonuses for aerial challenges.
     """
     def __init__(self, weight: float = 1.2):
         super().__init__(weight)
@@ -177,30 +197,46 @@ class TouchBallReward(BaseReward):
         if curr > prev:
             # Touch occurred on this step
             ball_speed = float(np.linalg.norm(arena.ball.vel))
-            power_factor = min(1.6, max(0.5, ball_speed / 1200.0))
-
             target_goal_y = ARENA_EXTENT_Y if car.team == 0 else -ARENA_EXTENT_Y
             unit_to_goal = np.array([0.0, 1.0 if car.team == 0 else -1.0, 0.0], dtype=np.float32)
 
+            goal_alignment = 0.0
             if ball_speed > 1e-4:
                 unit_ball_vel = arena.ball.vel / ball_speed
                 goal_alignment = float(np.dot(unit_ball_vel, unit_to_goal))
-                direction_multiplier = max(0.1, (goal_alignment + 1.0) / 2.0)
+
+            # Directional multiplier: heavy boost for hits toward opponent net
+            if goal_alignment >= 0.0:
+                direction_multiplier = 1.0 + (goal_alignment * 1.5)  # 1.0x -> 2.5x
             else:
-                direction_multiplier = 0.5
+                direction_multiplier = max(0.1, (goal_alignment + 1.0) * 0.5)
+
+            # Dual-Path Context Evaluator:
+            # Context A: Tactical Boom (Power shot on net / clearing hit)
+            power_bonus = 0.0
+            if goal_alignment > 0.5:
+                power_bonus = min(1.0, ball_speed / 2000.0)
+
+            # Context B: Possession & Controlled Catch (Soft touch / pop that keeps car and ball close)
+            rel_speed = float(np.linalg.norm(car.vel - arena.ball.vel))
+            control_bonus = max(0.0, 1.0 - (rel_speed / 600.0)) * 0.8
+
+            # Take the best tactical execution (either booming shot on target or surgical possession catch)
+            tactical_bonus = max(power_bonus, control_bonus)
 
             # Height scaling: Ground touch (Z=93) = 1.0x, High Aerial touch (Z=1500) = 1.5x
             ball_z = float(arena.ball.pos[2])
             height_multiplier = 1.0 + 0.5 * max(0.0, min(1.0, (ball_z - 150.0) / 1850.0))
 
             # Aerial airborne touch bonus (car airborne contesting high ball)
-            airborne_bonus = 0.2 if (not car.on_ground and ball_z > 350.0) else 0.0
+            airborne_bonus = 0.3 if (not car.on_ground and ball_z > 350.0) else 0.0
 
             # Kickoff first-touch race bounty
             is_kickoff_touch = bool(abs(arena.ball.pos[0]) < 200.0 and abs(arena.ball.pos[1]) < 200.0 and all(c.ball_touches <= 1 for c in arena.cars))
             kickoff_bounty = 1.0 if is_kickoff_touch else 0.0
 
-            return (self.weight * power_factor * direction_multiplier * height_multiplier) + airborne_bonus + kickoff_bounty
+            base_touch = 0.8
+            return (self.weight * (base_touch + tactical_bonus) * direction_multiplier * height_multiplier) + airborne_bonus + kickoff_bounty
 
         return 0.0
 
