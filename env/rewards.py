@@ -136,14 +136,18 @@ class PlayerToBallVelocityReward(BaseReward):
             if fwd_alignment < 0.0 and delta_dist > 0.0:
                 delta_dist = delta_dist * max(0.0, fwd_alignment + 1.0) * 0.2
 
-        # Kickoff sprint multiplier
+        # Kickoff sprint multiplier & anti-peel penalty
         is_kickoff = bool(abs(arena.ball.pos[0]) < 50.0 and abs(arena.ball.pos[1]) < 50.0 and float(np.linalg.norm(arena.ball.vel)) < 100.0)
         if is_kickoff:
+            # Harsh penalty if car peels off towards corner boost or away from net on kickoff
+            if abs(car.pos[0]) > 1200.0 and abs(car.pos[1]) > 3200.0:
+                return -1.5
+
             # During kickoff race, apply 3.0x multiplier when closing distance and penalize peeling away
             if delta_dist > 0.0:
                 return self.weight * delta_dist * 3.0
             else:
-                return self.weight * delta_dist * 2.0
+                return self.weight * delta_dist * 2.5
 
         return self.weight * delta_dist
 
@@ -246,8 +250,9 @@ class FaceBallReward(BaseReward):
     Rewards orienting the car's nose towards the ball.
     Creates a continuous positive gradient to turn around (via drift, U-turn, or half-flip)
     the instant the ball ends up behind the car, rather than driving backwards in reverse.
+    Enforces strict straight-ahead pathing during kickoffs.
     """
-    def __init__(self, weight: float = 0.25):
+    def __init__(self, weight: float = 0.5):
         super().__init__(weight)
 
     def get_reward(self, car: CarState, arena: RocketSimArena, action: np.ndarray, is_goal: bool, scoring_team: Optional[int]) -> float:
@@ -259,7 +264,12 @@ class FaceBallReward(BaseReward):
         unit_to_ball = car_to_ball / dist
         forward_alignment = float(np.dot(car.get_forward_vector(), unit_to_ball))
 
-        # (alignment + 1.0) / 2.0 maps [-1.0, +1.0] -> [0.0, 1.0]
+        is_kickoff = bool(abs(arena.ball.pos[0]) < 50.0 and abs(arena.ball.pos[1]) < 50.0 and float(np.linalg.norm(arena.ball.vel)) < 100.0)
+        if is_kickoff:
+            # During kickoff, strong positive reward for facing straight at ball, steep penalty for yawing away
+            return self.weight * forward_alignment * 2.5
+
+        # Normal play: (alignment + 1.0) / 2.0 maps [-1.0, +1.0] -> [0.0, 1.0]
         return self.weight * ((forward_alignment + 1.0) * 0.5)
 
 
@@ -365,7 +375,7 @@ class CombinedReward:
                 weight=weights.get("speed_weight", 0.0)
             ),
             "face_ball": FaceBallReward(
-                weight=weights.get("face_ball_weight", 0.0)
+                weight=weights.get("face_ball_weight", 0.5)
             ),
             "jump_bridge": JumpBridgeReward(
                 weight=weights.get("jump_bridge_weight", 0.0)

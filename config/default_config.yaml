@@ -31,6 +31,7 @@ rewards:
   boost_gain_weight: 0.6
   boost_lose_weight: 0.3
   concede_weight: -20.0
+  face_ball_weight: 0.5
   goal_weight: 20.0
   player_to_ball_weight: 0.8
   save_weight: 3.0

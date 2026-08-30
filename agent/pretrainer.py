@@ -193,6 +193,14 @@ class BehavioralCloningTrainer:
 
                     expert_act = np.array([throttle, steer, pitch, yaw, roll, jump, boost, handbrake], dtype=np.float32)
 
+                # Kickoff Sanitation: If frame is during active kickoff and player peeled away to corner boost,
+                # sanitize expert action to enforce straight-ahead kickoff rush toward the ball.
+                is_kickoff = bool(obs_vec[52] > 0.5)
+                if is_kickoff:
+                    expert_act[0] = 1.0  # Full forward throttle
+                    expert_act[1] = float(np.clip(-float(obs_vec[35]) * 4.0, -0.2, 0.2))  # Precise nose-to-ball alignment
+                    expert_act[6] = 1.0 if car.boost > 0 else -1.0  # Boost on kickoff
+
                 # Add direct sample
                 obs_list.append(obs_vec)
                 act_list.append(expert_act)
