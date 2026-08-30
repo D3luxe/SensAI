@@ -470,7 +470,7 @@ def create_ui():
                         gr.Markdown("### 🎯 Field Progression & Pursuit")
                         ball_to_goal_slider = gr.Slider(0.0, 5.0, value=float(rew_cfg.get("ball_to_goal_weight", 1.5)), step=0.1, label="Ball-to-Goal Velocity Weight", info="Continuous field progression toward opponent net.")
                         player_to_ball_slider = gr.Slider(0.0, 3.0, value=float(rew_cfg.get("player_to_ball_weight", 0.8)), step=0.1, label="Player-to-Ball Closing Speed Weight", info="Continuous approach speed toward the ball.")
-                        face_ball_slider = gr.Slider(0.0, 3.0, value=float(rew_cfg.get("face_ball_weight", 0.5)), step=0.1, label="Face-Ball Nose Alignment Weight", info="Continuous nose-to-ball orientation (2.5x multiplier on kickoff).")
+                        face_ball_slider = gr.Slider(0.0, 3.0, value=float(rew_cfg.get("face_ball_weight", 0.0)), step=0.1, label="Face-Ball Nose Alignment Weight", info="Continuous nose-to-ball orientation (disabled by default to prevent farming).")
                         touch_slider = gr.Slider(0.0, 5.0, value=float(rew_cfg.get("touch_weight", 1.2)), step=0.1, label="Directional Ball Strike Quality", info="Touch impact scaled by speed & goal alignment.")
 
                 with gr.Row():
@@ -961,7 +961,7 @@ def create_ui():
         def on_reset_rewards():
             return (
                 10.0, -10.0, 3.0,
-                1.5, 0.8, 0.5, 1.2,
+                1.5, 0.8, 0.0, 1.2,
                 0.6, 0.3
             )
 

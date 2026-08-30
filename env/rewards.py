@@ -252,7 +252,7 @@ class FaceBallReward(BaseReward):
     the instant the ball ends up behind the car, rather than driving backwards in reverse.
     Enforces strict straight-ahead pathing during kickoffs.
     """
-    def __init__(self, weight: float = 0.5):
+    def __init__(self, weight: float = 0.0):
         super().__init__(weight)
 
     def get_reward(self, car: CarState, arena: RocketSimArena, action: np.ndarray, is_goal: bool, scoring_team: Optional[int]) -> float:
@@ -375,7 +375,7 @@ class CombinedReward:
                 weight=weights.get("speed_weight", 0.0)
             ),
             "face_ball": FaceBallReward(
-                weight=weights.get("face_ball_weight", 0.5)
+                weight=weights.get("face_ball_weight", 0.0)
             ),
             "jump_bridge": JumpBridgeReward(
                 weight=weights.get("jump_bridge_weight", 0.0)
