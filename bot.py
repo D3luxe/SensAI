@@ -397,12 +397,11 @@ class SenseiRLBot(BaseAgent):
             #  - Steer:    Direct (+1.0 Steer Right, -1.0 Steer Left)
             #  - Yaw:      Direct (+1.0 Yaw Right, -1.0 Yaw Left)
             #  - Roll:     Direct (+1.0 Roll Right, -1.0 Roll Left)
-            #  - Pitch:    Inverted (-1.0 Nose Up / Aerial Climb, +1.0 Nose Down / Front Flip)
             controller.throttle = float(np.clip(act[0], -1.0, 1.0))
-            controller.steer = float(np.clip(act[1], -1.0, 1.0))
+            controller.steer = -float(np.clip(act[1], -1.0, 1.0))
             controller.pitch = -float(np.clip(act[2], -1.0, 1.0))
-            controller.yaw = float(np.clip(act[3], -1.0, 1.0))
-            controller.roll = float(np.clip(act[4], -1.0, 1.0))
+            controller.yaw = -float(np.clip(act[3], -1.0, 1.0))
+            controller.roll = -float(np.clip(act[4], -1.0, 1.0))
 
             # ── RLGym / RLBot Jump & Dodge Substep Timing Sequencer ────────────
             # Continuous action [-1.0, +1.0]: act[5] > 0.33 is a deliberate jump signal.

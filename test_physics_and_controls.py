@@ -101,13 +101,12 @@ class TestPhysicsAndControls(unittest.TestCase):
         ctrl = bot.get_output(packet)
 
         # In-Game Rocket League gamepad stick input mapping:
-        # Throttle (+1.0), Steer (+1.0 Right, -1.0 Left), Yaw (+1.0 Right, -1.0 Left), Roll (+1.0 Right, -1.0 Left)
-        # Pitch is -act[2] (-1.0 Nose Up / Aerial Climb, +1.0 Nose Down / Front Flip)
+        # Matches physics_engine.py rsim controls: steer=-act[1], pitch=-act[2], yaw=-act[3], roll=-act[4]
         self.assertAlmostEqual(ctrl.throttle, 0.8, places=4, msg="Throttle maps direct (+0.8 Forward)!")
-        self.assertAlmostEqual(ctrl.steer, -0.7, places=4, msg="Steer maps direct (act[1]=-0.7 Left maps to ctrl.steer=-0.7 Left)!")
+        self.assertAlmostEqual(ctrl.steer, 0.7, places=4, msg="Steer is -act[1] (act[1]=-0.7 Left maps to ctrl.steer=+0.7 Left)!")
         self.assertAlmostEqual(ctrl.pitch, 0.9, places=4, msg="Pitch is -act[2] (act[2]=-0.9 Down/Frontflip maps to ctrl.pitch=+0.9 Push Stick Forward)!")
-        self.assertAlmostEqual(ctrl.yaw, 0.6, places=4, msg="Yaw maps direct (act[3]=+0.6 Right maps to ctrl.yaw=+0.6 Right)!")
-        self.assertAlmostEqual(ctrl.roll, -0.5, places=4, msg="Roll maps direct (act[4]=-0.5 Left maps to ctrl.roll=-0.5 Roll Left)!")
+        self.assertAlmostEqual(ctrl.yaw, -0.6, places=4, msg="Yaw is -act[3] (act[3]=+0.6 Right maps to ctrl.yaw=-0.6 Right)!")
+        self.assertAlmostEqual(ctrl.roll, 0.5, places=4, msg="Roll is -act[4] (act[4]=-0.5 Left maps to ctrl.roll=+0.5 Roll Left)!")
         self.assertTrue(ctrl.boost)
         self.assertFalse(ctrl.handbrake, msg="Airborne car must NEVER activate handbrake (Air Roll conflict)!")
 
