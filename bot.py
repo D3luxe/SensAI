@@ -421,9 +421,16 @@ class SenseiRLBot(BaseAgent):
                 else:
                     controller.jump = False
             else:
-                # Car is airborne
-                if want_jump and has_flip:
-                    controller.jump = bool(substep_tick <= 2)
+                # Car is airborne: execute second jump / dodge
+                is_dodging = bool(want_jump and has_flip and substep_tick <= 2)
+                if is_dodging:
+                    controller.jump = True
+                    # If driving forward and initiating a dodge, guarantee forward pitch (+1.0 stick) for front/diagonal flip
+                    if float(act[0]) > 0.3 and abs(float(act[2])) < 0.3:
+                        controller.pitch = 1.0  # Push stick forward for front-flip (overcomes deadzone)
+                        if abs(float(act[1])) > 0.2:
+                            controller.yaw = -float(np.clip(act[1], -1.0, 1.0))
+                            controller.roll = -float(np.clip(act[1], -1.0, 1.0))
                 else:
                     controller.jump = False
 
@@ -448,6 +455,12 @@ class SenseiRLBot(BaseAgent):
             self.tick_count += 1
             ball_pos = ball_state.pos
             is_kickoff = bool(abs(ball_pos[0]) < 50.0 and abs(ball_pos[1]) < 50.0 and float(np.linalg.norm(ball_state.vel)) < 100.0)
+            
+            # Event logging on jump/dodge trigger
+            if controller.jump and substep_tick == 0:
+                action_type = "LIFTOFF JUMP" if is_on_ground else "AIRBORNE FLIP"
+                log_debug(f"[TICK {self.tick_count}] *** {action_type} EXECUTED *** pit={controller.pitch:+.2f} yaw={controller.yaw:+.2f} rol={controller.roll:+.2f}")
+
             if self.tick_count <= 10 or self.tick_count % 120 == 0 or is_kickoff:
                 log_debug(
                     f"[TICK {self.tick_count}] pos=({car_state.pos[0]:.0f}, {car_state.pos[1]:.0f}) "
