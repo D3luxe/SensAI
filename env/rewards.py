@@ -109,7 +109,9 @@ class PlayerToBallVelocityReward(BaseReward):
         self._prev_dist: Dict[int, float] = {}
 
     def _calc_dist(self, car_pos: np.ndarray, ball_pos: np.ndarray) -> float:
-        if ball_pos[2] < 300.0 and car_pos[2] < 300.0:
+        # If ball is grounded (Z < 300), evaluate horizontal (X, Y) distance
+        # so jumping / flipping never incurs an artificial vertical distance penalty
+        if ball_pos[2] < 300.0:
             return float(np.linalg.norm(ball_pos[:2] - car_pos[:2]))
         return float(np.linalg.norm(ball_pos - car_pos))
 
@@ -301,30 +303,40 @@ class FaceBallReward(BaseReward):
 class JumpBridgeReward(BaseReward):
     """
     Eliminates the initial jump latency barrier when initiating dodges/aerials toward the ball.
-    Provides an immediate transition incentive on the exact frame the car leaves the ground
-    while aligned toward the target.
+    Provides an immediate transition incentive on:
+      1. Ground -> Air Takeoff: on the exact frame the car jumps off the ground toward the ball.
+      2. Airborne Dodge / Flip: on the exact frame an airborne front-flip/dodge is triggered toward the ball.
     """
-    def __init__(self, weight: float = 0.2):
+    def __init__(self, weight: float = 0.25):
         super().__init__(weight)
         self._prev_on_ground: Dict[int, bool] = {}
+        self._prev_has_flip: Dict[int, bool] = {}
 
     def reset(self, initial_state: RocketSimArena):
         self._prev_on_ground = {car.id: car.on_ground for car in initial_state.cars}
+        self._prev_has_flip = {car.id: car.has_flip for car in initial_state.cars}
 
     def get_reward(self, car: CarState, arena: RocketSimArena, action: np.ndarray, is_goal: bool, scoring_team: Optional[int]) -> float:
         prev_ground = self._prev_on_ground.get(car.id, car.on_ground)
         self._prev_on_ground[car.id] = car.on_ground
 
-        # Trigger on the exact frame the car leaves the ground to jump
-        if prev_ground and not car.on_ground and car.vel[2] > 100.0:
-            car_to_ball = arena.ball.pos - car.pos
-            dist = float(np.linalg.norm(car_to_ball))
-            if dist > 250.0:
-                unit_to_ball = car_to_ball / dist
-                forward_alignment = float(np.dot(car.get_forward_vector(), unit_to_ball))
-                if forward_alignment > 0.2:
-                    aerial_mult = 1.5 if arena.ball.pos[2] > 300.0 else 1.0
-                    return self.weight * forward_alignment * aerial_mult
+        prev_flip = self._prev_has_flip.get(car.id, car.has_flip)
+        self._prev_has_flip[car.id] = car.has_flip
+
+        car_to_ball = arena.ball.pos - car.pos
+        dist = float(np.linalg.norm(car_to_ball))
+        if dist > 200.0:
+            unit_to_ball = car_to_ball / dist
+            forward_alignment = float(np.dot(car.get_forward_vector(), unit_to_ball))
+
+            # 1. Takeoff Transition (Ground -> Air)
+            if prev_ground and not car.on_ground and car.vel[2] > 100.0 and forward_alignment > 0.2:
+                aerial_mult = 1.5 if arena.ball.pos[2] > 300.0 else 1.0
+                return self.weight * forward_alignment * aerial_mult
+
+            # 2. Dodge / Flip Transition (Airborne Flip toward the ball)
+            if not car.on_ground and prev_flip and not car.has_flip and forward_alignment > 0.3:
+                return self.weight * forward_alignment * 1.5
 
         return 0.0
 
