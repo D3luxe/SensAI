@@ -64,20 +64,22 @@ class GoalReward(BaseReward):
 
 
 # ==============================================================================
-# 2. BALL-TO-GOAL PROGRESSION (Field Displacement)
+# 2. BALL-TO-GOAL PROGRESSION (Field Displacement & On-Target Trajectory)
 # ==============================================================================
 class BallToGoalVelocityReward(BaseReward):
     """
-    Continuous Potential-Based Progression.
-    Rewards ball velocity directed toward the opponent's net.
-    Normalizes by BALL_MAX_SPEED (6000.0 uu/s).
+    Continuous Potential-Based Progression with Goal Opening Targeting.
+    Rewards ball velocity directed toward the opponent's goal opening (X in [-GOAL_HALF_WIDTH, +GOAL_HALF_WIDTH]).
+    Heavily bonuses on-target trajectories that enter the net (1.6x), while dampening
+    wide shots that roll into the backwall/corner beside the goal.
     """
     def __init__(self, weight: float = 1.5):
         super().__init__(weight)
 
     def get_reward(self, car: CarState, arena: RocketSimArena, action: np.ndarray, is_goal: bool, scoring_team: Optional[int]) -> float:
         target_goal_y = ARENA_EXTENT_Y if car.team == 0 else -ARENA_EXTENT_Y
-        target_pos = np.array([0.0, target_goal_y, 0.0], dtype=np.float32)
+        target_x = float(np.clip(arena.ball.pos[0], -GOAL_HALF_WIDTH * 0.8, GOAL_HALF_WIDTH * 0.8))
+        target_pos = np.array([target_x, target_goal_y, GOAL_HEIGHT * 0.35], dtype=np.float32)
 
         ball_to_goal = target_pos - arena.ball.pos
         dist = float(np.linalg.norm(ball_to_goal))
@@ -87,8 +89,24 @@ class BallToGoalVelocityReward(BaseReward):
         unit_to_goal = ball_to_goal / dist
         ball_velocity_toward_goal = float(np.dot(arena.ball.vel, unit_to_goal))
 
-        # Normalized progress: positive when moving toward opponent goal, negative toward own
-        normalized_progress = ball_velocity_toward_goal / BALL_MAX_SPEED
+        # On-Target Trajectory & Backwall Miss Multiplier:
+        # If ball is moving downfield, calculate where its trajectory intersects the opponent endline
+        vy_forward = arena.ball.vel[1] if car.team == 0 else -arena.ball.vel[1]
+        on_target_mult = 1.0
+        if vy_forward > 50.0:
+            delta_y = abs(target_goal_y - arena.ball.pos[1])
+            dt = delta_y / vy_forward
+            x_impact = arena.ball.pos[0] + arena.ball.vel[0] * dt
+            if abs(x_impact) <= GOAL_HALF_WIDTH:
+                # Shot is directly on target into the net opening!
+                on_target_mult = 1.6
+            elif abs(x_impact) > GOAL_HALF_WIDTH * 1.3 and abs(arena.ball.pos[1]) > 2000.0:
+                # Ball is in attacking half and heading wide into the backwall/corner
+                # Dampen reward so the bot is forced to cut the ball inward towards the goal opening
+                miss_factor = min(1.0, (abs(x_impact) - GOAL_HALF_WIDTH) / 1500.0)
+                on_target_mult = max(0.15, 1.0 - (0.75 * miss_factor))
+
+        normalized_progress = (ball_velocity_toward_goal / BALL_MAX_SPEED) * on_target_mult
         return self.weight * normalized_progress
 
 
@@ -240,24 +258,39 @@ class TouchBallReward(BaseReward):
         if curr > prev:
             # Touch occurred on this step
             ball_speed = float(np.linalg.norm(arena.ball.vel))
+            # Target goal opening rather than pure +Y direction
             target_goal_y = ARENA_EXTENT_Y if car.team == 0 else -ARENA_EXTENT_Y
-            unit_to_goal = np.array([0.0, 1.0 if car.team == 0 else -1.0, 0.0], dtype=np.float32)
+            target_x = float(np.clip(arena.ball.pos[0], -GOAL_HALF_WIDTH * 0.75, GOAL_HALF_WIDTH * 0.75))
+            target_pos = np.array([target_x, target_goal_y, GOAL_HEIGHT * 0.35], dtype=np.float32)
+
+            ball_to_net = target_pos - arena.ball.pos
+            unit_to_goal = ball_to_net / max(1e-4, float(np.linalg.norm(ball_to_net)))
 
             goal_alignment = 0.0
             if ball_speed > 1e-4:
                 unit_ball_vel = arena.ball.vel / ball_speed
                 goal_alignment = float(np.dot(unit_ball_vel, unit_to_goal))
 
+            # On-Target Trajectory Bonus: Check if touch velocity produces a direct shot into the net
+            vy_forward = arena.ball.vel[1] if car.team == 0 else -arena.ball.vel[1]
+            if vy_forward > 80.0:
+                delta_y = abs(target_goal_y - arena.ball.pos[1])
+                dt = delta_y / vy_forward
+                x_impact = arena.ball.pos[0] + arena.ball.vel[0] * dt
+                if abs(x_impact) <= GOAL_HALF_WIDTH:
+                    # Direct shot on target into the net opening!
+                    goal_alignment = max(goal_alignment, 0.7) + 0.35
+
             # Directional multiplier: heavy boost for hits toward opponent net
             if goal_alignment >= 0.0:
-                direction_multiplier = 1.0 + (goal_alignment * 1.5)  # 1.0x -> 2.5x
+                direction_multiplier = 1.0 + (min(1.0, goal_alignment) * 1.5)  # 1.0x -> 2.5x
             else:
                 direction_multiplier = max(0.1, (goal_alignment + 1.0) * 0.5)
 
             # Dual-Path Context Evaluator:
             # Context A: Tactical Boom (Power shot on net / clearing hit)
             power_bonus = 0.0
-            if goal_alignment > 0.5:
+            if goal_alignment > 0.4:
                 power_bonus = min(1.0, ball_speed / 2000.0)
 
             # Context B: Possession & Controlled Catch (Soft touch / pop that keeps car and ball close)
