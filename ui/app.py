@@ -120,6 +120,30 @@ button.primary-btn {
     align-items: center !important;
     gap: 10px !important;
 }
+
+.cyber-panel {
+    background: linear-gradient(135deg, rgba(30, 41, 59, 0.7) 0%, rgba(15, 23, 42, 0.9) 100%);
+    border: 1px solid #334155;
+    border-radius: 10px;
+    padding: 16px 20px;
+    margin-bottom: 14px;
+    box-shadow: 0 4px 15px rgba(0, 0, 0, 0.25);
+}
+
+.status-callout-box {
+    background: #0f172a;
+    border: 1px solid #334155;
+    border-left: 4px solid #38bdf8;
+    border-radius: 6px;
+    padding: 10px 16px;
+    margin-top: 10px;
+    font-size: 0.95em;
+    color: #f1f5f9;
+    min-height: 44px;
+    display: flex;
+    align-items: center;
+    box-shadow: inset 0 1px 3px rgba(0,0,0,0.4);
+}
 """
 
 
@@ -642,111 +666,116 @@ def create_ui():
                     )
 
             # ---------------------------------------------------------
-            # TAB 4: 🎯 SCENARIOS & REPLAY INGESTION
             # ---------------------------------------------------------
-            with gr.TabItem("🎯 Scenarios & Replays"):
-                gr.Markdown(
-                    """
-                    ### 🎯 Scenario State Setters & Replay Ingestion
-                    Train advanced mechanics (Aerials, Wall Plays, Goalie Saves, Replays) from step 0 by injecting realistic game states directly into RocketSim training environments.
-                    """
-                )
+            # TAB 4: 📁 REPLAY INGESTION & IMITATION PRETRAINER
+            # ---------------------------------------------------------
+            with gr.TabItem("📁 Replays & Imitation Pretrainer"):
                 def build_replay_stats_md():
                     st = ReplayParser().get_pool_stats()
+                    has_data = st['total_frames'] > 0
+                    badge = '<span class="status-badge-running">● DATASET ACTIVE</span>' if has_data else '<span class="status-badge-stopped">○ EMPTY DATASET</span>'
                     return f"""
-                    <div style="background: rgba(30, 41, 59, 0.7); border: 1px solid #334155; border-radius: 8px; padding: 12px 18px; margin-bottom: 12px;">
-                        <h4 style="margin: 0 0 6px 0; color: #38bdf8;">📊 Active Replay Dataset Pool</h4>
-                        <div style="display: flex; gap: 24px; font-size: 0.95rem;">
-                            <span><b>Active Frames:</b> {st['total_frames']:,}</span>
-                            <span><b>Estimated Matches:</b> {st['num_matches']}</span>
-                            <span><b>Pool File Size:</b> {st['file_size_mb']} MB</span>
+                    <div class="cyber-panel" style="display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 16px; margin-bottom: 16px;">
+                        <div style="display: flex; align-items: center; gap: 14px;">
+                            {badge}
+                            <span style="font-size: 1.1em; font-weight: 700; color: #f8fafc;">Active Replay Dataset Pool</span>
+                        </div>
+                        <div style="display: flex; align-items: center; gap: 24px; font-size: 0.95em; color: #cbd5e1;">
+                            <span>Active Frames: <b style="color: #38bdf8;">{st['total_frames']:,}</b></span>
+                            <span>Estimated Matches: <b style="color: #818cf8;">{st['num_matches']}</b></span>
+                            <span>Pool Storage: <b style="color: #34d399;">{st['file_size_mb']} MB</b></span>
                         </div>
                     </div>
                     """
 
                 replay_stats_box = gr.HTML(value=build_replay_stats_md())
 
-                with gr.Row():
-                    # Left Column: Replay Ingestion
-                    with gr.Column(scale=1):
-                        gr.Markdown("#### 📁 Replay Scanner & Ingestion")
-                        demo_dir_input = gr.Textbox(
-                            value=DEFAULT_DEMO_DIR,
-                            label="Local Rocket League Demos Directory",
-                            info="Path to your local saved .replay files."
-                        )
-                        with gr.Row():
-                            max_replays_slider = gr.Slider(
-                                10, 1000,
-                                value=int(sc_cfg.get("max_replays_to_ingest", 50)),
-                                step=10,
-                                label="Max Replays to Ingest",
-                                info="Limits batch size to prevent lag with thousands of replays."
+                # Section 1: Replay Ingestion Engine
+                with gr.Group():
+                    gr.Markdown("### 📂 Replay Scanner & Ingestion Engine")
+                    with gr.Row():
+                        # Left: Local Directory Scanner
+                        with gr.Column(scale=1):
+                            demo_dir_input = gr.Textbox(
+                                value=DEFAULT_DEMO_DIR,
+                                label="Local Rocket League Demos Directory",
+                                info="Path to your local saved .replay files."
                             )
-                            sort_mode_dropdown = gr.Dropdown(
-                                choices=["Newest First", "Random Sample", "Oldest First"],
-                                value="Newest First",
-                                label="Selection Mode"
-                            )
-                        scan_demos_btn = gr.Button("📂 Scan & Ingest Local Demos", variant="primary")
-                        
-                        gr.Markdown("##### 📤 Or Upload Replays / Zip Archives Directly:")
-                        replay_upload_box = gr.File(
-                            file_count="multiple",
-                            file_types=[".replay", ".npz", ".json", ".zip"],
-                            label="Drop .replay, .zip (containing replays), or .npz files here"
-                        )
-                        with gr.Row():
-                            upload_ingest_btn = gr.Button("📥 Ingest Uploaded Files", variant="secondary", scale=2)
-                            clear_replays_btn = gr.Button("🗑️ Clear Ingested Pool", variant="stop", scale=1)
-                        ingestion_status_box = gr.Markdown("Ready to ingest.")
+                            with gr.Row():
+                                max_replays_slider = gr.Slider(
+                                    10, 1000,
+                                    value=int(sc_cfg.get("max_replays_to_ingest", 50)),
+                                    step=10,
+                                    label="Max Replays to Ingest",
+                                    info="Limits batch size to prevent lag."
+                                )
+                                sort_mode_dropdown = gr.Dropdown(
+                                    choices=["Newest First", "Random Sample", "Oldest First"],
+                                    value="Newest First",
+                                    label="Selection Mode"
+                                )
+                            scan_demos_btn = gr.Button("📂 Scan & Ingest Local Demos", variant="primary")
 
-                    # Right Column: Scenario Probability Weights
-                    with gr.Column(scale=1):
-                        gr.Markdown("#### 🎛️ Training Scenario Distribution")
-                        gr.Markdown("*Configure the frequency of game scenarios generated during environment resets:*")
-                        sc_kickoff_slider = gr.Slider(0.0, 1.0, value=float(sc_cfg.get("kickoff_prob", 0.35)), step=0.05, label="Kickoff Scenarios Ratio", info="Standard competitive kickoff formations.")
-                        sc_replay_slider = gr.Slider(0.0, 1.0, value=float(sc_cfg.get("replay_prob", 0.25)), step=0.05, label="Human Replay States Ratio", info="Authentic match states sampled from ingested replays.")
-                        sc_aerial_slider = gr.Slider(0.0, 1.0, value=float(sc_cfg.get("aerial_prob", 0.15)), step=0.05, label="High Aerial Shots Ratio", info="Floating & rising balls (z: 600-1500) for aerial training.")
-                        sc_wall_slider = gr.Slider(0.0, 1.0, value=float(sc_cfg.get("wall_prob", 0.15)), step=0.05, label="Wall & Backboard Play Ratio", info="Sidewall rolling and backboard rebound situations.")
-                        sc_save_slider = gr.Slider(0.0, 1.0, value=float(sc_cfg.get("save_prob", 0.10)), step=0.05, label="Goalie Save & Shadow Defense Ratio", info="High threat shots on net testing goal line defense.")
-                        baseline_ratio_slider = gr.Slider(0.0, 1.0, value=float(env_cfg.get("baseline_opponent_ratio", 0.25)), step=0.05, label="Baseline Bot Matchup Ratio (Anti-Collusion)", info="Proportion of parallel matches against the heuristic kickoff rusher bot.")
-                        
-                        apply_scenarios_btn = gr.Button("💾 Apply Distribution & Baseline Mix Live", variant="primary")
-                        scenarios_feedback_box = gr.Markdown("")
+                        # Right: Direct Upload Box
+                        with gr.Column(scale=1):
+                            replay_upload_box = gr.File(
+                                file_count="multiple",
+                                file_types=[".replay", ".npz", ".json", ".zip"],
+                                label="Upload .replay, .zip (containing replays), or .npz files directly"
+                            )
+                            with gr.Row():
+                                upload_ingest_btn = gr.Button("📥 Ingest Uploaded Files", variant="secondary", scale=2)
+                                clear_replays_btn = gr.Button("🗑️ Clear Pool", variant="stop", scale=1)
+
+                    ingestion_status_box = gr.HTML(
+                        """
+                        <div class="status-callout-box">
+                            <span style="color: #38bdf8; font-weight: 700; margin-right: 8px;">STATUS:</span>
+                            <span>Ready to scan or ingest replays.</span>
+                        </div>
+                        """
+                    )
 
                 gr.Markdown("---")
-                gr.Markdown(
-                    """
-                    ### 🎓 Supervised Imitation Pretrainer (Behavioral Cloning)
-                    Bootstrap your agent with **Grand Champion / SSL baseline mechanics** (kickoffs, speed-flips, aerial reads, powerslide cuts) directly from human replay datasets before PPO reinforcement learning fine-tuning.
-                    """
-                )
-                with gr.Row():
-                    with gr.Column(scale=1):
-                        pretrain_epochs_slider = gr.Slider(10, 500, value=100, step=10, label="Pretraining Epochs", info="Number of supervised training passes over the replay dataset.")
-                        with gr.Row():
-                            pretrain_lr_input = gr.Number(value=0.001, label="Pretrain Learning Rate", info="Adam learning rate for imitation loss.")
-                            pretrain_batch_dropdown = gr.Dropdown(choices=[64, 128, 256, 512, 1024], value=256, label="Batch Size")
-                        pretrain_base_dropdown = gr.Dropdown(
-                            choices=["Initialize Fresh Model (Clean Baseline)"] + get_available_checkpoints(),
-                            value="Initialize Fresh Model (Clean Baseline)",
-                            label="Target Base Checkpoint"
-                        )
-                    with gr.Column(scale=1):
-                        with gr.Row():
-                            run_pretrain_btn = gr.Button("🚀 Run Supervised Imitation Pretraining", variant="primary", scale=2)
-                            stop_pretrain_btn = gr.Button("⏹️ Stop Pretraining", variant="stop", scale=1)
-                        pretrain_status_box = gr.Markdown("Ready to pretrain. Ingest replay files above first.")
-                        pretrain_handoff_box = gr.HTML(
-                            """
-                            <div style="background: rgba(15, 23, 42, 0.6); border: 1px solid #334155; border-radius: 8px; padding: 10px 14px; margin-top: 8px;">
-                                <span style="color: #94a3b8; font-size: 0.9rem;">
-                                    💡 <b>Seamless Handoff to PPO:</b> Pretraining saves directly to <code>checkpoints/latest_model.pt</code> and <code>checkpoints/pretrained_baseline.pt</code>. Once finished, click <b>Start Training</b> in the Top Dashboard to immediately begin PPO reinforcement learning on your pretrained baseline!
-                                </span>
-                            </div>
-                            """
-                        )
+
+                # Section 2: Supervised Imitation Pretrainer (Behavioral Cloning)
+                with gr.Group():
+                    gr.Markdown("### 🎓 Supervised Imitation Pretrainer (Behavioral Cloning)")
+                    gr.Markdown(
+                        "*Bootstrap your agent with **Grand Champion / SSL baseline mechanics** (kickoffs, speed-flips, aerial reads, powerslide cuts) directly from human replay datasets before PPO reinforcement learning.*"
+                    )
+                    with gr.Row():
+                        with gr.Column(scale=1):
+                            pretrain_epochs_slider = gr.Slider(10, 500, value=100, step=10, label="Pretraining Epochs", info="Number of supervised training passes over the replay dataset.")
+                            with gr.Row():
+                                pretrain_lr_input = gr.Number(value=0.001, label="Pretrain Learning Rate", info="Adam learning rate for imitation loss.")
+                                pretrain_batch_dropdown = gr.Dropdown(choices=[64, 128, 256, 512, 1024], value=256, label="Batch Size")
+                            pretrain_base_dropdown = gr.Dropdown(
+                                choices=["Initialize Fresh Model (Clean Baseline)"] + get_available_checkpoints(),
+                                value="Initialize Fresh Model (Clean Baseline)",
+                                label="Target Base Checkpoint"
+                            )
+                        with gr.Column(scale=1):
+                            with gr.Row():
+                                run_pretrain_btn = gr.Button("🚀 Run Supervised Imitation Pretraining", variant="primary", scale=2)
+                                stop_pretrain_btn = gr.Button("⏹️ Stop Pretraining", variant="stop", scale=1)
+                            pretrain_status_box = gr.HTML(
+                                """
+                                <div class="status-callout-box">
+                                    <span style="color: #38bdf8; font-weight: 700; margin-right: 8px;">PRETRAIN STATUS:</span>
+                                    <span>Ready to pretrain. Ingest replay files above first.</span>
+                                </div>
+                                """
+                            )
+                            pretrain_handoff_box = gr.HTML(
+                                """
+                                <div style="background: rgba(15, 23, 42, 0.6); border: 1px solid #334155; border-radius: 8px; padding: 10px 14px; margin-top: 10px;">
+                                    <span style="color: #94a3b8; font-size: 0.9rem;">
+                                        💡 <b>Seamless Handoff to PPO:</b> Pretraining saves directly to <code>checkpoints/latest_model.pt</code> and <code>checkpoints/pretrained_baseline.pt</code>. Once finished, click <b>Start Training</b> in the Top Dashboard to immediately begin PPO reinforcement learning on your pretrained baseline!
+                                    </span>
+                                </div>
+                                """
+                            )
 
             # ---------------------------------------------------------
             # TAB 5: CONSOLE LOG STREAM
@@ -1239,9 +1268,19 @@ def create_ui():
             stats_html = build_replay_stats_md()
             
             if count > 0:
-                msg = f"✅ **Successfully ingested {count} replays ({frames:,} new game frames) into training pool!**"
+                msg = f"""
+                <div class="status-callout-box" style="border-left-color: #4ade80;">
+                    <span style="color: #4ade80; font-weight: 700; margin-right: 8px;">SUCCESS:</span>
+                    <span>Successfully ingested <b>{count}</b> replays (<b style="color: #38bdf8;">{frames:,}</b> new game frames) into training pool!</span>
+                </div>
+                """
             else:
-                msg = f"⚠️ No valid `.replay` or dataset files found in `{demo_dir}`."
+                msg = f"""
+                <div class="status-callout-box" style="border-left-color: #facc15;">
+                    <span style="color: #facc15; font-weight: 700; margin-right: 8px;">SCAN RESULT:</span>
+                    <span>No valid <code>.replay</code> or dataset files found in <code>{demo_dir}</code>.</span>
+                </div>
+                """
             return stats_html, msg
 
         scan_demos_btn.click(
@@ -1252,7 +1291,13 @@ def create_ui():
 
         def on_upload_ingest(uploaded_files):
             if not uploaded_files:
-                return build_replay_stats_md(), "⚠️ No files selected for upload."
+                msg = """
+                <div class="status-callout-box" style="border-left-color: #facc15;">
+                    <span style="color: #facc15; font-weight: 700; margin-right: 8px;">WARNING:</span>
+                    <span>No files selected for upload. Drag and drop files first.</span>
+                </div>
+                """
+                return build_replay_stats_md(), msg
 
             if not isinstance(uploaded_files, (list, tuple)):
                 uploaded_files = [uploaded_files]
@@ -1306,11 +1351,23 @@ def create_ui():
             if file_count > 0:
                 p.save_pool()
                 stats_html = build_replay_stats_md()
-                return stats_html, f"✅ **Successfully parsed & ingested {file_count} replays ({total_frames:,} frames)!**"
+                msg = f"""
+                <div class="status-callout-box" style="border-left-color: #4ade80;">
+                    <span style="color: #4ade80; font-weight: 700; margin-right: 8px;">INGESTION COMPLETE:</span>
+                    <span>Successfully parsed & ingested <b>{file_count}</b> replays (<b style="color: #38bdf8;">{total_frames:,}</b> frames)!</span>
+                </div>
+                """
+                return stats_html, msg
 
             stats_html = build_replay_stats_md()
             err_msg = " | ".join(errors) if errors else "No valid .replay, .zip, or .npz data extracted."
-            return stats_html, f"❌ **Ingestion Failed:** {err_msg}"
+            msg = f"""
+            <div class="status-callout-box" style="border-left-color: #f87171;">
+                <span style="color: #f87171; font-weight: 700; margin-right: 8px;">ERROR:</span>
+                <span>{err_msg}</span>
+            </div>
+            """
+            return stats_html, msg
 
         upload_ingest_btn.click(
             fn=on_upload_ingest,
@@ -1322,7 +1379,13 @@ def create_ui():
             p = ReplayParser()
             p.clear_pool()
             stats_html = build_replay_stats_md()
-            return stats_html, "🗑️ **Ingested replays dataset pool has been completely cleared.**"
+            msg = """
+            <div class="status-callout-box" style="border-left-color: #facc15;">
+                <span style="color: #facc15; font-weight: 700; margin-right: 8px;">POOL CLEARED:</span>
+                <span>Ingested replay dataset pool has been completely reset.</span>
+            </div>
+            """
+            return stats_html, msg
 
         clear_replays_btn.click(
             fn=on_clear_replays,
@@ -1360,7 +1423,7 @@ def create_ui():
             save_yaml_config(def_cfg, "config/default_config.yaml")
 
             tot = sum(sc_dict.values())
-            return f"✅ **Scenario distribution & Baseline Ratio ({float(base_r)*100:.0f}%) saved & applied live! (Scenario sum: {tot:.2f})**"
+            return f"""<div class="status-callout-box" style="border-left-color: #4ade80;"><span style="color: #4ade80; font-weight: 700; margin-right: 8px;">APPLIED:</span><span>Scenario distribution & Baseline Ratio ({float(base_r)*100:.0f}%) saved! (Scenario sum: {tot:.2f})</span></div>"""
 
         apply_scenarios_btn.click(
             fn=on_apply_scenarios_weights,
@@ -1373,7 +1436,12 @@ def create_ui():
 
         def on_run_pretraining(epochs, lr, batch_size, base_ckpt):
             if bc_trainer.is_running():
-                return "⚠️ Pretrainer is already running!"
+                return """
+                <div class="status-callout-box" style="border-left-color: #facc15;">
+                    <span style="color: #facc15; font-weight: 700; margin-right: 8px;">BUSY:</span>
+                    <span>Pretrainer is already running!</span>
+                </div>
+                """
 
             chosen_ckpt = None
             if base_ckpt and not base_ckpt.startswith("Initialize Fresh Model"):
@@ -1385,13 +1453,32 @@ def create_ui():
                 lr=float(lr),
                 base_checkpoint=chosen_ckpt
             )
-            return res.get("message", "Pretraining finished.")
+            raw_msg = res.get("message", "Pretraining finished.")
+            success = res.get("success", True)
+            color = "#4ade80" if success else "#f87171"
+            title = "COMPLETED" if success else "FAILED"
+            return f"""
+            <div class="status-callout-box" style="border-left-color: {color};">
+                <span style="color: {color}; font-weight: 700; margin-right: 8px;">{title}:</span>
+                <span>{raw_msg}</span>
+            </div>
+            """
 
         def on_stop_pretraining():
             if bc_trainer.is_running():
                 bc_trainer.request_stop()
-                return "⏹️ Pretraining cancellation requested."
-            return "Pretrainer is not currently running."
+                return """
+                <div class="status-callout-box" style="border-left-color: #f87171;">
+                    <span style="color: #f87171; font-weight: 700; margin-right: 8px;">STOPPED:</span>
+                    <span>Imitation pretrainer stop requested.</span>
+                </div>
+                """
+            return """
+            <div class="status-callout-box" style="border-left-color: #94a3b8;">
+                <span style="color: #94a3b8; font-weight: 700; margin-right: 8px;">IDLE:</span>
+                <span>Pretrainer is not currently running.</span>
+            </div>
+            """
 
         run_pretrain_btn.click(
             fn=on_run_pretraining,
