@@ -454,17 +454,10 @@ class RocketSimArena:
                         yaw_val = -float(act[3]) if want_jump else 0.0
                         roll_val = -float(act[4]) if want_jump else 0.0
                     else:
-                        is_dodging = bool(want_jump and not has_flip and tick <= 2)
-                        jump_val = is_dodging
-                        # When executing an airborne dodge while driving forward, guarantee front-flip pitch (-1.0) if pitch is neutral
-                        if is_dodging and float(act[0]) > 0.3 and abs(float(act[2])) < 0.3:
-                            pitch_val = -1.0
-                            yaw_val = -float(act[1]) if abs(float(act[1])) > 0.2 else -float(act[3])
-                            roll_val = -float(act[1]) if abs(float(act[1])) > 0.2 else -float(act[4])
-                        else:
-                            pitch_val = float(act[2])
-                            yaw_val = -float(act[3])
-                            roll_val = -float(act[4])
+                        jump_val = bool(want_jump and not has_flip and tick <= 2)
+                        pitch_val = float(act[2])
+                        yaw_val = -float(act[3])
+                        roll_val = -float(act[4])
 
                     hnd_val = bool(act[7] > 0.2 and abs(act[1]) > 0.15 and is_on_gnd)
                     r_car.set_controls(rsim.CarControls(

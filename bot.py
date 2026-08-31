@@ -404,35 +404,16 @@ class SenseiRLBot(BaseAgent):
             controller.roll = -float(np.clip(act[4], -1.0, 1.0))
 
             # ── RLGym / RLBot Jump & Dodge Substep Timing Sequencer ────────────
-            # Continuous action [-1.0, +1.0]: act[5] > 0.33 is a deliberate jump signal.
-            # Rocket League requires the jump button to be released (jump=False) for at least
-            # 1-2 physics ticks between the first jump and the second jump to execute a flip/dodge.
-            # When tick_skip=8 (15Hz action rate at 120Hz physics):
-            #  - First Jump (On Ground): Hold jump for ticks 0..3 (liftoff impulse + hold bonus),
-            #                            then release jump for ticks 4..7 to prime the airborne dodge.
-            #  - Second Jump / Dodge (Airborne): Press jump for ticks 0..2 (executes flip/dodge),
-            #                                    then release jump for ticks 3..7.
+            # Controls jump button release/press timing across the 8 physics substeps:
+            #  - Ground Liftoff: Hold jump for ticks 0..3, release ticks 4..7 to prime airborne dodge.
+            #  - Airborne Dodge: Press jump on ticks 0..2 to activate second jump / dodge.
             want_jump = bool(act[5] > 0.0)
             substep_tick = self.ticks_since_last_action  # 0 to 7 within the 15Hz step
 
             if is_on_ground:
-                if want_jump:
-                    controller.jump = bool(substep_tick <= 3)
-                else:
-                    controller.jump = False
+                controller.jump = bool(want_jump and substep_tick <= 3)
             else:
-                # Car is airborne: execute second jump / dodge
-                is_dodging = bool(want_jump and has_flip and substep_tick <= 2)
-                if is_dodging:
-                    controller.jump = True
-                    # If driving forward and initiating a dodge, guarantee forward pitch (+1.0 stick) for front/diagonal flip
-                    if float(act[0]) > 0.3 and abs(float(act[2])) < 0.3:
-                        controller.pitch = 1.0  # Push stick forward for front-flip (overcomes deadzone)
-                        if abs(float(act[1])) > 0.2:
-                            controller.yaw = -float(np.clip(act[1], -1.0, 1.0))
-                            controller.roll = -float(np.clip(act[1], -1.0, 1.0))
-                else:
-                    controller.jump = False
+                controller.jump = bool(want_jump and has_flip and substep_tick <= 2)
 
             # Ground stabilization:
             # When driving on the ground without jumping, keep pitch, yaw, and roll neutral
