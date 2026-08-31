@@ -127,60 +127,34 @@ class PlayerToBallVelocityReward(BaseReward):
         # Distance gap delta (positive when closing distance, negative when retreating)
         delta_dist = (prev_dist - curr_dist) / 2000.0
 
-        # Car-to-ball alignment vector
-        car_to_ball = arena.ball.pos - car.pos
-        unit_to_ball = car_to_ball / max(1e-4, curr_dist)
-        fwd_alignment = float(np.dot(car.get_forward_vector(), unit_to_ball))
-
-        # Strike Zone Control & Velocity-Matching Gate (< 400 uu)
-        # Inside the strike zone, taper raw approach speed to allow braking/patience for catches & pops
-        vel_match_reward = 0.0
-        if curr_dist <= 400.0:
-            # Scale approach reward down smoothly near the ball (prevents blind full-throttle ramming)
-            taper_scale = max(0.2, curr_dist / 400.0)
-            if delta_dist > 0:
-                delta_dist *= taper_scale
-            else:
-                # Patience Protection: Do not penalize waiting for bounces if positioned behind the ball
-                if fwd_alignment > 0.0:
-                    delta_dist = 0.0
-
-            # Velocity-matching bonus: reward pacing/dribbling with the ball when aligned
-            if fwd_alignment > 0.5:
-                rel_vel_2d = float(np.linalg.norm(car.vel[:2] - arena.ball.vel[:2]))
-                vel_match_reward = max(0.0, 1.0 - (rel_vel_2d / 800.0)) * 0.15
-        elif curr_dist < 800.0:
-            # Mid-Range Proximity Speed Pacing (400 - 800 uu)
-            # Caps the delta to an optimal arrival speed so supersonic charging past the ball is not overrewarded
-            if delta_dist > 0.0:
-                max_paced_delta = (max(500.0, curr_dist * 1.8) / 2000.0) * (8.0 / 120.0)
-                delta_dist = min(delta_dist, max_paced_delta)
-            elif abs(float(action[1])) > 0.35:
-                # Turning Maneuver Protection: Zero penalty if slowing down to tighten turning radius
-                delta_dist = 0.0
-        else:
-            # Long Range Approach (> 800 uu)
-            # When ball is far behind the car and facing away, do not reward reversing backwards
-            if fwd_alignment < 0.0 and delta_dist > 0.0:
-                delta_dist = delta_dist * max(0.0, fwd_alignment + 1.0) * 0.2
-            elif abs(float(action[1])) > 0.4 and delta_dist < 0.0:
-                # Allow braking to re-route or turn toward pads/ball without harsh distance drop penalty
-                delta_dist = delta_dist * 0.2
-
-        # Kickoff sprint multiplier & anti-peel penalty
+        # Kickoff sprint multiplier & anti-peel penalty (evaluated FIRST to guarantee full-throttle rush)
         is_kickoff = bool(abs(arena.ball.pos[0]) < 50.0 and abs(arena.ball.pos[1]) < 50.0 and float(np.linalg.norm(arena.ball.vel)) < 100.0)
         if is_kickoff:
             # Harsh penalty if car peels off towards corner boost or away from net on kickoff
             if abs(car.pos[0]) > 1200.0 and abs(car.pos[1]) > 3200.0:
                 return -1.5
 
-            # During kickoff race, apply 3.0x multiplier when closing distance and penalize peeling away
+            # Unconditional 100% speed rush on kickoff all the way through impact (no braking, no pacing)
             if delta_dist > 0.0:
                 return self.weight * delta_dist * 3.0
             else:
                 return self.weight * delta_dist * 2.5
 
-        return (self.weight * delta_dist) + vel_match_reward
+        # ── General Open Play ─────────────────────────────────────────────────
+        car_to_ball = arena.ball.pos - car.pos
+        unit_to_ball = car_to_ball / max(1e-4, curr_dist)
+        fwd_alignment = float(np.dot(car.get_forward_vector(), unit_to_ball))
+
+        # Strike Zone Patience Gate (< 300 uu)
+        # When positioned behind the ball facing opponent net, do not penalize brief pauses for bounces
+        if curr_dist <= 300.0:
+            if delta_dist < 0.0 and fwd_alignment > 0.0:
+                delta_dist = 0.0
+        elif fwd_alignment < 0.0 and delta_dist > 0.0:
+            # Dampen reward if reversing across field facing away from ball
+            delta_dist = delta_dist * max(0.0, fwd_alignment + 1.0) * 0.2
+
+        return self.weight * delta_dist
 
 
 # ==============================================================================
