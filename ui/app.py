@@ -462,15 +462,15 @@ def create_ui():
                 with gr.Row():
                     with gr.Column():
                         gr.Markdown("### 🥅 Match Macro Outcomes")
-                        goal_slider = gr.Slider(0.0, 30.0, value=float(rew_cfg.get("goal_weight", 10.0)), step=1.0, label="Goal Scored Bounty (+pts)", info="Primary zero-sum win payout.")
-                        concede_slider = gr.Slider(-30.0, 0.0, value=float(rew_cfg.get("concede_weight", -10.0)), step=1.0, label="Goal Conceded Penalty (-pts)", info="Defensive urgency deduction.")
+                        goal_slider = gr.Slider(0.0, 30.0, value=float(rew_cfg.get("goal_weight", 20.0)), step=1.0, label="Goal Scored Bounty (+pts)", info="Primary zero-sum win payout.")
+                        concede_slider = gr.Slider(-30.0, 0.0, value=float(rew_cfg.get("concede_weight", -20.0)), step=1.0, label="Goal Conceded Penalty (-pts)", info="Defensive urgency deduction.")
                         save_slider = gr.Slider(0.0, 15.0, value=float(rew_cfg.get("save_weight", 3.0)), step=0.5, label="Goal-Line Save & Clear Bounty (+pts)", info="Clearing dangerous shots off defending goal line.")
 
                     with gr.Column():
-                        gr.Markdown("### 🎯 Field Progression & Pursuit")
+                        gr.Markdown("### 🎯 Field Progression & Mechanics")
                         ball_to_goal_slider = gr.Slider(0.0, 5.0, value=float(rew_cfg.get("ball_to_goal_weight", 1.5)), step=0.1, label="Ball-to-Goal Velocity Weight", info="Continuous field progression toward opponent net.")
-                        player_to_ball_slider = gr.Slider(0.0, 3.0, value=float(rew_cfg.get("player_to_ball_weight", 0.6)), step=0.1, label="Player-to-Ball Approach & Control Weight", info="Paced approach speed toward ball with strike-zone velocity matching.")
-                        jump_bridge_slider = gr.Slider(0.0, 1.0, value=float(rew_cfg.get("jump_bridge_weight", 0.2)), step=0.05, label="Jump & Aerial Takeoff Incentive", info="Atomic 1-frame takeoff & flip transition bounty directed toward the ball.")
+                        player_to_ball_slider = gr.Slider(0.0, 3.0, value=float(rew_cfg.get("player_to_ball_weight", 0.6)), step=0.1, label="Player-to-Ball Approach & Control Weight", info="Distance-gated speed rush downfield with strike-zone pacing.")
+                        jump_bridge_slider = gr.Slider(0.0, 1.0, value=float(rew_cfg.get("jump_bridge_weight", 0.35)), step=0.05, label="Jump & Aerial Takeoff Incentive", info="Takeoff & speed-flip transition bounty (2.0x on elevated aerials).")
                         touch_slider = gr.Slider(0.0, 5.0, value=float(rew_cfg.get("touch_weight", 1.2)), step=0.1, label="Directional Ball Strike Quality", info="Touch impact scaled by speed & goal alignment.")
 
                 with gr.Row():
@@ -481,9 +481,30 @@ def create_ui():
                         gr.Markdown("### 🛡️ Ground Conservation Gate")
                         boost_lose_slider = gr.Slider(0.0, 2.0, value=float(rew_cfg.get("boost_lose_weight", 0.3)), step=0.05, label="Ground Boost Waste Penalty Weight", info="Penalizes burning boost on ground (airborne flight is exempt).")
 
+                gr.Markdown("---")
+                gr.Markdown("### 🎲 Dynamic Scenario Setter Distributions & Training Dials")
                 with gr.Row():
-                    apply_rewards_btn = gr.Button("⚡ Apply Live Reward Weights", variant="primary")
-                    reset_rewards_btn = gr.Button("🔄 Reset to Standard Balanced Weights", variant="secondary")
+                    with gr.Column():
+                        kickoff_prob_slider = gr.Slider(0.0, 1.0, value=float(sc_cfg.get("kickoff_prob", 0.25)), step=0.05, label="Kickoff Scenario Probability", info="Spawns standard 1v1 kickoff formations (diagonal, off-center, straight).")
+                        replay_prob_slider = gr.Slider(0.0, 1.0, value=float(sc_cfg.get("replay_prob", 0.30)), step=0.05, label="Human Replay Scenario Probability", info="Spawns authentic match situations from parsed human replay frames.")
+                        aerial_prob_slider = gr.Slider(0.0, 1.0, value=float(sc_cfg.get("aerial_prob", 0.20)), step=0.05, label="Aerial Scenario Probability", info="Spawns floating / high flying balls to train aerial mechanics.")
+
+                    with gr.Column():
+                        wall_prob_slider = gr.Slider(0.0, 1.0, value=float(sc_cfg.get("wall_prob", 0.10)), step=0.05, label="Wall Play Scenario Probability", info="Spawns balls along curved arena walls to train wall hits and air dribbles.")
+                        save_prob_slider = gr.Slider(0.0, 1.0, value=float(sc_cfg.get("save_prob", 0.15)), step=0.05, label="Goalie Save Scenario Probability", info="Spawns fast opponent shots heading on target into defending net.")
+                        baseline_opp_slider = gr.Slider(0.0, 1.0, value=float(env_cfg.get("baseline_opponent_ratio", 0.25)), step=0.05, label="Baseline Bot Opponent Ratio", info="Proportion of match environments paired against heuristic baseline bot vs self-play.")
+
+                with gr.Row():
+                    with gr.Column():
+                        gr.Markdown("### 👤 Human Replay Behavioral Cloning (BC) Guidance")
+                        bc_weight_slider = gr.Slider(0.0, 1.0, value=float(hp_cfg.get("bc_regularization_weight", 0.10)), step=0.05, label="Replay Guidance Weight (Continuous Trajectory)", info="Nudges vehicle steering, throttle pacing, and aerial orientation from human replays.")
+                    with gr.Column():
+                        gr.Markdown("### ⏳ Guidance Decay Horizon")
+                        bc_decay_input = gr.Number(value=int(hp_cfg.get("bc_decay_steps", 150000000)), precision=0, label="Replay Guidance Decay Horizon (Global Steps)", info="Step threshold over which replay guidance smoothly decays to 0.0.")
+
+                with gr.Row():
+                    apply_rewards_btn = gr.Button("⚡ Apply Live Training Dials", variant="primary")
+                    reset_rewards_btn = gr.Button("🔄 Reset to Balanced Standard Dials", variant="secondary")
 
                 reward_apply_msg = gr.Markdown("")
 
@@ -922,11 +943,13 @@ def create_ui():
         ckpt_btn.click(fn=on_save_checkpoint, outputs=control_outputs)
         tb_btn.click(fn=on_tensorboard, outputs=control_outputs)
 
-        # Apply Live Rewards (Macro Potential Architecture)
+        # Apply Live Training Dials (Rewards, Scenarios, Opponents, BC Guidance)
         def on_apply_rewards(
             g_w, c_w, sv_w,
             b2g_w, p2b_w, jb_w, tch_w,
-            bg_w, bl_w
+            bg_w, bl_w,
+            k_p, r_p, a_p, w_p, s_p,
+            base_opp, bc_w, bc_dec
         ):
             rewards = {
                 "goal_weight": float(g_w),
@@ -939,21 +962,45 @@ def create_ui():
                 "boost_gain_weight": float(bg_w),
                 "boost_lose_weight": float(bl_w)
             }
-            mgr.update_live_config({"rewards": rewards})
+            scenarios = {
+                "kickoff_prob": float(k_p),
+                "replay_prob": float(r_p),
+                "aerial_prob": float(a_p),
+                "wall_prob": float(w_p),
+                "save_prob": float(s_p)
+            }
+            payload = {
+                "rewards": rewards,
+                "scenarios": scenarios,
+                "baseline_opponent_ratio": float(base_opp),
+                "bc_regularization_weight": float(bc_w),
+                "bc_decay_steps": int(bc_dec)
+            }
+            mgr.update_live_config(payload)
             try:
                 base_cfg = load_yaml_config("config/default_config.yaml")
                 base_cfg["rewards"] = rewards
+                base_cfg["scenarios"] = scenarios
+                if "environment" not in base_cfg:
+                    base_cfg["environment"] = {}
+                base_cfg["environment"]["baseline_opponent_ratio"] = float(base_opp)
+                if "hyperparameters" not in base_cfg:
+                    base_cfg["hyperparameters"] = {}
+                base_cfg["hyperparameters"]["bc_regularization_weight"] = float(bc_w)
+                base_cfg["hyperparameters"]["bc_decay_steps"] = int(bc_dec)
                 save_yaml_config(base_cfg, "config/default_config.yaml")
             except Exception:
                 pass
-            return f"✅ **Live Macro Reward weights applied and saved at {time.strftime('%H:%M:%S')}!** Settings persist across reloads."
+            return f"✅ **Live Training Dials applied and saved at {time.strftime('%H:%M:%S')}!** Rewards, scenarios, opponent matchups, and replay guidance updated dynamically."
 
         apply_rewards_btn.click(
             fn=on_apply_rewards,
             inputs=[
                 goal_slider, concede_slider, save_slider,
                 ball_to_goal_slider, player_to_ball_slider, jump_bridge_slider, touch_slider,
-                boost_gain_slider, boost_lose_slider
+                boost_gain_slider, boost_lose_slider,
+                kickoff_prob_slider, replay_prob_slider, aerial_prob_slider, wall_prob_slider, save_prob_slider,
+                baseline_opp_slider, bc_weight_slider, bc_decay_input
             ],
             outputs=[reward_apply_msg]
         )
@@ -961,8 +1008,10 @@ def create_ui():
         def on_reset_rewards():
             return (
                 20.0, -20.0, 3.0,
-                1.5, 0.6, 0.20, 1.2,
-                0.6, 0.3
+                1.5, 0.6, 0.35, 1.2,
+                0.6, 0.3,
+                0.25, 0.30, 0.20, 0.10, 0.15,
+                0.25, 0.10, 150000000
             )
 
         reset_rewards_btn.click(
@@ -970,7 +1019,9 @@ def create_ui():
             outputs=[
                 goal_slider, concede_slider, save_slider,
                 ball_to_goal_slider, player_to_ball_slider, jump_bridge_slider, touch_slider,
-                boost_gain_slider, boost_lose_slider
+                boost_gain_slider, boost_lose_slider,
+                kickoff_prob_slider, replay_prob_slider, aerial_prob_slider, wall_prob_slider, save_prob_slider,
+                baseline_opp_slider, bc_weight_slider, bc_decay_input
             ]
         )
 
