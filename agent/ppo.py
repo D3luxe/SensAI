@@ -537,10 +537,11 @@ class PPOTrainer:
                             sample_bc_o = self.bc_obs_tensor[bc_idx]
                             sample_bc_a = self.bc_act_tensor[bc_idx]
 
-                            pred_bc_act, _, _, _ = self.agent.get_action_and_value(sample_bc_o)
-                            # Regularize continuous vehicle dynamics (throttle, steer, pitch, yaw, roll, boost, handbrake).
-                            # Mask out channel 5 (Jump) to prevent the 98% unpressed human replay imbalance from crushing jump exploration.
-                            bc_mask = torch.tensor([1.0, 1.0, 1.0, 1.0, 1.0, 0.0, 1.0, 1.0], device=self.device)
+                            pred_bc_act, _, _, _ = self.agent.get_action_and_value(sample_bc_o, deterministic=True)
+                            # Regularize continuous vehicle dynamics (throttle, steer, pitch, yaw, roll).
+                            # Binary button channels (5: Jump, 6: Boost, 7: Handbrake) are masked out to prevent
+                            # human replay button class imbalances from suppressing RL exploration.
+                            bc_mask = torch.tensor([1.0, 1.0, 1.0, 1.0, 1.0, 0.0, 0.0, 0.0], device=self.device)
                             bc_loss_raw = nn.functional.smooth_l1_loss(pred_bc_act, sample_bc_a, reduction='none')
                             bc_loss = (bc_loss_raw * bc_mask).sum(dim=-1).mean() / bc_mask.sum()
                             loss = loss + current_bc_weight * bc_loss
