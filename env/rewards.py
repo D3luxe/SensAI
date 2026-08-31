@@ -147,6 +147,11 @@ class PlayerToBallVelocityReward(BaseReward):
         unit_to_ball = car_to_ball / max(1e-4, curr_dist)
         fwd_alignment = float(np.dot(car.get_forward_vector(), unit_to_ball))
 
+        # Strike Zone Distance-Gated Speed Pacing (< 600 uu)
+        # Downfield (> 600 uu): 100% speed toward ball is rewarded (incentivizes speed-flips & supersonic traversal)
+        # Near ball (< 600 uu): Smoothly tapers speed reward to 0.0 at 200 uu to allow throttle modulation for catches & angled shots
+        speed_taper = min(1.0, max(0.0, (curr_dist - 200.0) / 400.0))
+
         # Strike Zone Patience Gate (< 300 uu)
         # When positioned behind the ball facing opponent net, do not penalize brief pauses for bounces
         if curr_dist <= 300.0:
@@ -156,11 +161,11 @@ class PlayerToBallVelocityReward(BaseReward):
             # Dampen reward if reversing across field facing away from ball
             delta_dist = delta_dist * max(0.0, fwd_alignment + 1.0) * 0.2
 
-        # Projected Forward Velocity Reward (Nexto/Necto continuous speed & flip incentive)
-        # Directly rewards vehicle velocity projected along the vector to the ball (max 2300 uu/s)
-        # When executing a speed-flip or front-flip, velocity surges from 1400 -> 1900+ uu/s, producing an immediate reward spike
+        # Projected Forward Velocity Reward (Distance-Gated)
+        # Directly rewards vehicle velocity projected along the vector to the ball downfield (> 600 uu)
+        # Tapers inside strike zone so the bot is not forced into blind supersonic overshooting
         fwd_speed_to_ball = max(0.0, float(np.dot(car.vel, unit_to_ball)))
-        vel_toward_ball = (fwd_speed_to_ball / 2300.0) * 0.15 * max(0.0, fwd_alignment)
+        vel_toward_ball = (fwd_speed_to_ball / 2300.0) * 0.20 * max(0.0, fwd_alignment) * speed_taper
 
         return (self.weight * delta_dist) + vel_toward_ball
 
@@ -310,10 +315,10 @@ class JumpBridgeReward(BaseReward):
     """
     Eliminates the initial jump latency barrier when initiating dodges/aerials toward the ball.
     Provides an immediate transition incentive on:
-      1. Ground -> Air Takeoff: on the exact frame the car jumps off the ground toward the ball.
+      1. Ground -> Air Takeoff: on the exact frame the car jumps off the ground toward the ball (2.0x on aerials).
       2. Airborne Dodge / Flip: on the exact frame an airborne front-flip/dodge is triggered toward the ball.
     """
-    def __init__(self, weight: float = 0.25):
+    def __init__(self, weight: float = 0.35):
         super().__init__(weight)
         self._prev_on_ground: Dict[int, bool] = {}
         self._prev_has_flip: Dict[int, bool] = {}
@@ -337,7 +342,7 @@ class JumpBridgeReward(BaseReward):
 
             # 1. Takeoff Transition (Ground -> Air)
             if prev_ground and not car.on_ground and car.vel[2] > 100.0 and forward_alignment > 0.2:
-                aerial_mult = 1.5 if arena.ball.pos[2] > 300.0 else 1.0
+                aerial_mult = 2.0 if arena.ball.pos[2] > 250.0 else 1.0
                 return self.weight * forward_alignment * aerial_mult
 
             # 2. Dodge / Flip Transition (Airborne Flip toward the ball)
@@ -419,7 +424,7 @@ class CombinedReward:
                 weight=weights.get("face_ball_weight", 0.0)
             ),
             "jump_bridge": JumpBridgeReward(
-                weight=weights.get("jump_bridge_weight", 0.20)
+                weight=weights.get("jump_bridge_weight", 0.35)
             ),
             "touch": TouchBallReward(
                 weight=weights.get("touch_weight", 1.5)
