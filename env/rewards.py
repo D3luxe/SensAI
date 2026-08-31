@@ -156,7 +156,13 @@ class PlayerToBallVelocityReward(BaseReward):
             # Dampen reward if reversing across field facing away from ball
             delta_dist = delta_dist * max(0.0, fwd_alignment + 1.0) * 0.2
 
-        return self.weight * delta_dist
+        # Projected Forward Velocity Reward (Nexto/Necto continuous speed & flip incentive)
+        # Directly rewards vehicle velocity projected along the vector to the ball (max 2300 uu/s)
+        # When executing a speed-flip or front-flip, velocity surges from 1400 -> 1900+ uu/s, producing an immediate reward spike
+        fwd_speed_to_ball = max(0.0, float(np.dot(car.vel, unit_to_ball)))
+        vel_toward_ball = (fwd_speed_to_ball / 2300.0) * 0.15 * max(0.0, fwd_alignment)
+
+        return (self.weight * delta_dist) + vel_toward_ball
 
 
 # ==============================================================================

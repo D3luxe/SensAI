@@ -443,7 +443,7 @@ class RocketSimArena:
                     c_state = r_car.get_state()
                     is_on_gnd = bool(c_state.is_on_ground)
                     has_flip = bool(c_state.has_flipped or c_state.has_double_jumped)
-                    want_jump = bool(act[5] > 0.33)
+                    want_jump = bool(act[5] > 0.0)
 
                     # Substep Jump & Flip Sequencer:
                     # Ground jump: hold ticks 0..3 (liftoff), release ticks 4..7 to prime airborne dodge

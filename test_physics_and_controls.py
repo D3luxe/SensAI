@@ -280,18 +280,18 @@ class TestPhysicsAndControls(unittest.TestCase):
         ball = Struct(physics=Struct(location=Struct(x=500.0, y=1000.0, z=91.25), velocity=Struct(x=200.0, y=0.0, z=0.0), angular_velocity=Struct(x=0, y=0, z=0)))
         packet = Struct(num_cars=1, game_cars=[car], game_ball=ball, game_info=Struct(is_match_ended=False))
 
-        # 1. Driving on ground without jump (act[5] = 0.20 <= 0.33): pitch should be stabilized to 0.0
-        bot.prev_action = np.array([1.0, 0.0, -1.0, 0.0, 0.0, 0.20, 0.0, 0.0], dtype=np.float32)
+        # 1. Driving on ground without jump (act[5] = -0.50 <= 0.0): pitch should be stabilized to 0.0
+        bot.prev_action = np.array([1.0, 0.0, -1.0, 0.0, 0.0, -0.50, 0.0, 0.0], dtype=np.float32)
         bot.ticks_since_last_action = 1
         ctrl_drive = bot.get_output(packet)
-        self.assertFalse(ctrl_drive.jump, "Jump must be False when act[5] <= 0.33")
+        self.assertFalse(ctrl_drive.jump, "Jump must be False when act[5] <= 0.0")
         self.assertAlmostEqual(ctrl_drive.pitch, 0.0, places=4, msg="Pitch must be stabilized to 0.0 on ground when not jumping")
 
-        # 2. Jump requested (act[5] = 0.50 > 0.33): jump should be True and pitch active
+        # 2. Jump requested (act[5] = 0.50 > 0.0): jump should be True and pitch active
         bot.prev_action = np.array([1.0, 0.0, -1.0, 0.0, 0.0, 0.50, 0.0, 0.0], dtype=np.float32)
         bot.ticks_since_last_action = 1
         ctrl_jump = bot.get_output(packet)
-        self.assertTrue(ctrl_jump.jump, "Jump must be True when act[5] > 0.33")
+        self.assertTrue(ctrl_jump.jump, "Jump must be True when act[5] > 0.0")
         self.assertAlmostEqual(ctrl_jump.pitch, 1.0, places=4, msg="Pitch must be active when jump is requested")
 
     def test_kickoff_touch_state_tracking(self):
@@ -350,7 +350,7 @@ class TestPhysicsAndControls(unittest.TestCase):
         self.assertAlmostEqual(float(model.actor_mean.bias[2].detach()), 0.0, places=5)
         self.assertAlmostEqual(float(model.actor_mean.bias[3].detach()), 0.0, places=5)
         self.assertAlmostEqual(float(model.actor_mean.bias[4].detach()), 0.0, places=5)
-        self.assertAlmostEqual(float(model.actor_mean.bias[7].detach()), 0.0, places=5)
+        self.assertAlmostEqual(float(model.actor_binary.bias[2].detach()), 0.0, places=5)
 
     def test_bot_boost_pad_awareness(self):
         """

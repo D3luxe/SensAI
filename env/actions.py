@@ -39,8 +39,8 @@ class ContinuousActionParser:
         actions[..., 3] = np.clip(actions[..., 3], -1.0, 1.0)
         actions[..., 4] = np.clip(actions[..., 4], -1.0, 1.0)
 
-        # Binary button thresholds for Jump, Boost, and Handbrake
-        actions[..., 5] = (actions[..., 5] > 0.33).astype(np.float32)  # Jump (> 0.33 deliberate threshold)
+        # Binary button thresholds for Jump, Boost, and Handbrake (Hybrid Bernoulli actions in {-1.0, +1.0})
+        actions[..., 5] = (actions[..., 5] > 0.0).astype(np.float32)  # Jump (> 0.0 Bernoulli threshold)
         actions[..., 6] = (actions[..., 6] > 0.0).astype(np.float32)  # Boost
         actions[..., 7] = (actions[..., 7] > 0.0).astype(np.float32)  # Handbrake
         return actions

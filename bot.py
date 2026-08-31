@@ -412,7 +412,7 @@ class SenseiRLBot(BaseAgent):
             #                            then release jump for ticks 4..7 to prime the airborne dodge.
             #  - Second Jump / Dodge (Airborne): Press jump for ticks 0..2 (executes flip/dodge),
             #                                    then release jump for ticks 3..7.
-            want_jump = bool(act[5] > 0.33)
+            want_jump = bool(act[5] > 0.0)
             substep_tick = self.ticks_since_last_action  # 0 to 7 within the 15Hz step
 
             if is_on_ground:
