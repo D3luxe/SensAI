@@ -506,25 +506,38 @@ def create_ui():
                         boost_lose_slider = gr.Slider(0.0, 2.0, value=float(rew_cfg.get("boost_lose_weight", 0.3)), step=0.05, label="Ground Boost Waste Penalty Weight", info="Penalizes burning boost on ground (airborne flight is exempt).")
 
                 gr.Markdown("---")
-                gr.Markdown("### 🎲 Dynamic Scenario Setter Distributions & Training Dials")
-                with gr.Row():
-                    with gr.Column():
-                        kickoff_prob_slider = gr.Slider(0.0, 1.0, value=float(sc_cfg.get("kickoff_prob", 0.25)), step=0.05, label="Kickoff Scenario Probability", info="Spawns standard 1v1 kickoff formations (diagonal, off-center, straight).")
-                        replay_prob_slider = gr.Slider(0.0, 1.0, value=float(sc_cfg.get("replay_prob", 0.30)), step=0.05, label="Human Replay Scenario Probability", info="Spawns authentic match situations from parsed human replay frames.")
-                        aerial_prob_slider = gr.Slider(0.0, 1.0, value=float(sc_cfg.get("aerial_prob", 0.20)), step=0.05, label="Aerial Scenario Probability", info="Spawns floating / high flying balls to train aerial mechanics.")
+                with gr.Group():
+                    with gr.Row():
+                        with gr.Column(scale=4):
+                            gr.Markdown("### 🎲 Dynamic Scenario Setter Distribution (Normalized 100% Group)")
+                            gr.Markdown("*Move any slider — the group dynamically rebalances and snaps to 0.01 so the total always equals 100%.*")
+                        with gr.Column(scale=1):
+                            scenario_total_badge = gr.HTML(
+                                """
+                                <div style="display: flex; justify-content: flex-end; align-items: center; height: 100%;">
+                                    <span class="status-badge-running" style="font-size: 1.0em; padding: 6px 16px;">● Total Mix: 100%</span>
+                                </div>
+                                """
+                            )
+                    with gr.Row():
+                        with gr.Column():
+                            kickoff_prob_slider = gr.Slider(0.0, 1.0, value=float(sc_cfg.get("kickoff_prob", 0.25)), step=0.01, label="Kickoff Scenario Probability", info="Standard 1v1 kickoff formations (diagonal, off-center, straight).")
+                            replay_prob_slider = gr.Slider(0.0, 1.0, value=float(sc_cfg.get("replay_prob", 0.30)), step=0.01, label="Human Replay Scenario Probability", info="Authentic match situations sampled from ingested replays.")
+                            aerial_prob_slider = gr.Slider(0.0, 1.0, value=float(sc_cfg.get("aerial_prob", 0.20)), step=0.01, label="High Aerial Scenario Probability", info="Floating & rising balls (z: 600-1500) for aerial training.")
 
-                    with gr.Column():
-                        wall_prob_slider = gr.Slider(0.0, 1.0, value=float(sc_cfg.get("wall_prob", 0.10)), step=0.05, label="Wall Play Scenario Probability", info="Spawns balls along curved arena walls to train wall hits and air dribbles.")
-                        save_prob_slider = gr.Slider(0.0, 1.0, value=float(sc_cfg.get("save_prob", 0.15)), step=0.05, label="Goalie Save Scenario Probability", info="Spawns fast opponent shots heading on target into defending net.")
-                        baseline_opp_slider = gr.Slider(0.0, 1.0, value=float(env_cfg.get("baseline_opponent_ratio", 0.25)), step=0.05, label="Baseline Bot Opponent Ratio", info="Proportion of match environments paired against heuristic baseline bot vs self-play.")
+                        with gr.Column():
+                            wall_prob_slider = gr.Slider(0.0, 1.0, value=float(sc_cfg.get("wall_prob", 0.10)), step=0.01, label="Wall Play Scenario Probability", info="Sidewall rolling and backboard rebound situations.")
+                            save_prob_slider = gr.Slider(0.0, 1.0, value=float(sc_cfg.get("save_prob", 0.15)), step=0.01, label="Goalie Save Scenario Probability", info="Fast opponent shots heading on target into defending net.")
 
-                with gr.Row():
-                    with gr.Column():
-                        gr.Markdown("### 👤 Human Replay Behavioral Cloning (BC) Guidance")
-                        bc_weight_slider = gr.Slider(0.0, 1.0, value=float(hp_cfg.get("bc_regularization_weight", 0.10)), step=0.05, label="Replay Guidance Weight (Continuous Trajectory)", info="Nudges vehicle steering, throttle pacing, and aerial orientation from human replays.")
-                    with gr.Column():
-                        gr.Markdown("### ⏳ Guidance Decay Horizon")
-                        bc_decay_input = gr.Number(value=int(hp_cfg.get("bc_decay_steps", 150000000)), precision=0, label="Replay Guidance Decay Horizon (Global Steps)", info="Step threshold over which replay guidance smoothly decays to 0.0.")
+                with gr.Group():
+                    with gr.Row():
+                        with gr.Column():
+                            gr.Markdown("### 👥 Opponent Matchup Distribution")
+                            baseline_opp_slider = gr.Slider(0.0, 1.0, value=float(env_cfg.get("baseline_opponent_ratio", 0.25)), step=0.01, label="Baseline Bot Matchup Ratio", info="Proportion of match environments paired against heuristic baseline bot vs self-play.")
+                        with gr.Column():
+                            gr.Markdown("### 👤 Human Replay Guidance (BC)")
+                            bc_weight_slider = gr.Slider(0.0, 1.0, value=float(hp_cfg.get("bc_regularization_weight", 0.10)), step=0.01, label="Replay Guidance Weight (Continuous Trajectory)", info="Nudges vehicle steering, throttle pacing, and aerial orientation from human replays.")
+                            bc_decay_input = gr.Number(value=int(hp_cfg.get("bc_decay_steps", 150000000)), precision=0, label="Replay Guidance Decay Horizon (Global Steps)", info="Step threshold over which replay guidance smoothly decays to 0.0.")
 
                 with gr.Row():
                     apply_rewards_btn = gr.Button("⚡ Apply Live Training Dials", variant="primary")
@@ -1033,6 +1046,49 @@ def create_ui():
             ],
             outputs=[reward_apply_msg]
         )
+
+        # Dynamic 100% Normalized Scenario Rebalancing Handler
+        def rebalance_scenarios_handler(changed_idx, new_val, k, r, a, w, s):
+            current_vals = [float(k), float(r), float(a), float(w), float(s)]
+            new_val = round(max(0.0, min(1.0, float(new_val))), 2)
+            vals = list(current_vals)
+            vals[changed_idx] = new_val
+
+            rem = round(1.0 - new_val, 4)
+            other_indices = [i for i in range(5) if i != changed_idx]
+            other_sum = sum(vals[i] for i in other_indices)
+
+            if other_sum > 1e-6:
+                for i in other_indices:
+                    vals[i] = round((vals[i] / other_sum) * rem, 2)
+            else:
+                eq = round(rem / len(other_indices), 2)
+                for i in other_indices:
+                    vals[i] = eq
+
+            # Fix rounding drift to guarantee exact 1.00 (100%) sum
+            drift = round(1.0 - sum(vals), 2)
+            if abs(drift) > 1e-4:
+                best_other = max(other_indices, key=lambda i: vals[i])
+                vals[best_other] = round(vals[best_other] + drift, 2)
+
+            out = [round(v, 2) for v in vals]
+            tot_pct = int(round(sum(out) * 100))
+            badge_html = f"""
+            <div style="display: flex; justify-content: flex-end; align-items: center; height: 100%;">
+                <span class="status-badge-running" style="font-size: 1.0em; padding: 6px 16px;">● Total Mix: {tot_pct}%</span>
+            </div>
+            """
+            return out[0], out[1], out[2], out[3], out[4], badge_html
+
+        scenario_sliders = [kickoff_prob_slider, replay_prob_slider, aerial_prob_slider, wall_prob_slider, save_prob_slider]
+        scenario_outputs = [kickoff_prob_slider, replay_prob_slider, aerial_prob_slider, wall_prob_slider, save_prob_slider, scenario_total_badge]
+
+        kickoff_prob_slider.release(fn=lambda v, k, r, a, w, s: rebalance_scenarios_handler(0, v, k, r, a, w, s), inputs=[kickoff_prob_slider] + scenario_sliders, outputs=scenario_outputs)
+        replay_prob_slider.release(fn=lambda v, k, r, a, w, s: rebalance_scenarios_handler(1, v, k, r, a, w, s), inputs=[replay_prob_slider] + scenario_sliders, outputs=scenario_outputs)
+        aerial_prob_slider.release(fn=lambda v, k, r, a, w, s: rebalance_scenarios_handler(2, v, k, r, a, w, s), inputs=[aerial_prob_slider] + scenario_sliders, outputs=scenario_outputs)
+        wall_prob_slider.release(fn=lambda v, k, r, a, w, s: rebalance_scenarios_handler(3, v, k, r, a, w, s), inputs=[wall_prob_slider] + scenario_sliders, outputs=scenario_outputs)
+        save_prob_slider.release(fn=lambda v, k, r, a, w, s: rebalance_scenarios_handler(4, v, k, r, a, w, s), inputs=[save_prob_slider] + scenario_sliders, outputs=scenario_outputs)
 
         def on_reset_rewards():
             return (
