@@ -181,7 +181,8 @@ class ActorCritic(nn.Module):
             if action is None:
                 if deterministic:
                     act_cont = action_mean
-                    act_bin = torch.where(bin_logits > 0.0, torch.tensor(1.0, device=obs.device), torch.tensor(-1.0, device=obs.device))
+                    # Bernoulli probability sampling for binary buttons (matches training distribution)
+                    act_bin = dist_bin.sample() * 2.0 - 1.0
                 else:
                     act_cont = dist_cont.rsample()
                     act_bin = dist_bin.sample() * 2.0 - 1.0

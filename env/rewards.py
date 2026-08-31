@@ -129,6 +129,11 @@ class PlayerToBallVelocityReward(BaseReward):
         # Distance gap delta (positive when closing distance, negative when retreating)
         delta_dist = (prev_dist - curr_dist) / 2000.0
 
+        # Unit alignment vector to ball
+        car_to_ball = arena.ball.pos - car.pos
+        unit_to_ball = car_to_ball / max(1e-4, curr_dist)
+        fwd_alignment = float(np.dot(car.get_forward_vector(), unit_to_ball))
+
         # Kickoff sprint multiplier & anti-peel penalty (evaluated FIRST to guarantee full-throttle rush)
         is_kickoff = bool(abs(arena.ball.pos[0]) < 50.0 and abs(arena.ball.pos[1]) < 50.0 and float(np.linalg.norm(arena.ball.vel)) < 100.0)
         if is_kickoff:
@@ -136,16 +141,13 @@ class PlayerToBallVelocityReward(BaseReward):
             if abs(car.pos[0]) > 1200.0 and abs(car.pos[1]) > 3200.0:
                 return -1.5
 
-            # Unconditional 100% speed rush on kickoff all the way through impact (no braking, no pacing)
-            if delta_dist > 0.0:
-                return self.weight * delta_dist * 3.0
-            else:
-                return self.weight * delta_dist * 2.5
+            # Full throttle sprint on kickoff + forward velocity reward for speed-flipping
+            fwd_speed_to_ball = max(0.0, float(np.dot(car.vel, unit_to_ball)))
+            vel_toward_ball = (fwd_speed_to_ball / 2300.0) * 0.30 * max(0.0, fwd_alignment)
+            kickoff_mult = 3.0 if delta_dist > 0.0 else 2.5
+            return (self.weight * delta_dist * kickoff_mult) + vel_toward_ball
 
         # ── General Open Play ─────────────────────────────────────────────────
-        car_to_ball = arena.ball.pos - car.pos
-        unit_to_ball = car_to_ball / max(1e-4, curr_dist)
-        fwd_alignment = float(np.dot(car.get_forward_vector(), unit_to_ball))
 
         # Strike Zone Distance-Gated Speed Pacing (< 600 uu)
         # Downfield (> 600 uu): 100% speed toward ball is rewarded (incentivizes speed-flips & supersonic traversal)
