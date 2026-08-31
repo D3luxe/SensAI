@@ -101,6 +101,9 @@ class ActorCritic(nn.Module):
                     self.actor_mean.bias.data[4] = 0.0
                     # Center Handbrake (index 7) bias to 0.0 for natural exploration
                     self.actor_mean.bias.data[7] = 0.0
+                    # Prevent Jump (index 5) and Boost (index 6) from drifting into exploration lockout (< -0.25)
+                    self.actor_mean.bias.data[5] = torch.clamp(self.actor_mean.bias.data[5], min=-0.2, max=0.5)
+                    self.actor_mean.bias.data[6] = torch.clamp(self.actor_mean.bias.data[6], min=-0.2, max=0.5)
 
                 # Desaturate actor_mean weights if they exceeded linear analog range
                 weight_norm = self.actor_mean.weight.data.norm(dim=1, keepdim=True)
