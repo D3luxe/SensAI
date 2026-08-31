@@ -203,6 +203,12 @@ class PPOTrainer:
                 if "clip_range" in live:
                     self.clip_range = float(live["clip_range"])
 
+                # Update Behavioral Cloning (BC) replay regularization
+                if "bc_regularization_weight" in live:
+                    self.bc_regularization_weight = float(live["bc_regularization_weight"])
+                if "bc_decay_steps" in live:
+                    self.bc_decay_steps = int(live["bc_decay_steps"])
+
                 # Update rewards
                 if "rewards" in live and isinstance(live["rewards"], dict):
                     self.env.update_reward_weights(live["rewards"])

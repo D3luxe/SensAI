@@ -1,10 +1,10 @@
 {
-  "updated_at": 1788180196.5359251,
+  "updated_at": 1788193386.4095283,
   "learning_rate": 0.0003,
   "ent_coef": 0.001,
   "clip_range": 0.2,
-  "bc_regularization_weight": 0.5,
-  "bc_decay_steps": 30000000,
+  "bc_regularization_weight": 0.1,
+  "bc_decay_steps": 150000000,
   "baseline_opponent_ratio": 0.25,
   "paused": false,
   "save_checkpoint_requested": false,
@@ -20,8 +20,8 @@
     "boost_lose_weight": 0.3
   },
   "scenarios": {
-    "kickoff_prob": 0.3,
-    "replay_prob": 0.25,
+    "kickoff_prob": 0.25,
+    "replay_prob": 0.3,
     "aerial_prob": 0.2,
     "wall_prob": 0.1,
     "save_prob": 0.15
