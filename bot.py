@@ -441,7 +441,7 @@ class SenseiRLBot(BaseAgent):
             # Must ONLY be active when on the ground and executing a sharp turnaround cut.
             # Mild and moderate steering must maintain full tire grip.
             if is_on_ground and abs(controller.steer) > 0.4:
-                controller.handbrake = bool(act[7] > 0.5)
+                controller.handbrake = bool(act[7] > 0.0)
             else:
                 controller.handbrake = False
 
