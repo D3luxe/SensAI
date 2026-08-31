@@ -436,16 +436,42 @@ class RocketSimArena:
             self.scored_team = None
             total_ticks = max(1, int(round(dt * 120.0)))
 
-            for i, r_car in enumerate(self._rsim_cars):
-                act = actions[i] if i < len(actions) else np.zeros(8, dtype=np.float32)
-                is_on_gnd = bool(r_car.get_state().is_on_ground)
-                hnd_val = bool(act[7] > 0.2 and abs(act[1]) > 0.15 and is_on_gnd)
-                r_car.set_controls(rsim.CarControls(
-                    throttle=float(act[0]), steer=-float(act[1]), pitch=float(act[2]),
-                    yaw=-float(act[3]), roll=-float(act[4]), jump=bool(act[5] > 0.33),
-                    boost=bool(act[6] > 0.0), handbrake=hnd_val
-                ))
-            self._rsim_arena.step(total_ticks)
+            # Step simulation through substeps with exact Rocket League / RLGym jump timing sequencer
+            for tick in range(total_ticks):
+                for i, r_car in enumerate(self._rsim_cars):
+                    act = actions[i] if i < len(actions) else np.zeros(8, dtype=np.float32)
+                    c_state = r_car.get_state()
+                    is_on_gnd = bool(c_state.is_on_ground)
+                    has_flip = bool(c_state.has_flipped or c_state.has_double_jumped)
+                    want_jump = bool(act[5] > 0.33)
+
+                    # Substep Jump & Flip Sequencer:
+                    # Ground jump: hold ticks 0..3 (liftoff), release ticks 4..7 to prime airborne dodge
+                    # Airborne dodge: press jump on ticks 0..2 to activate dodge/flip impulse
+                    if is_on_gnd:
+                        jump_val = bool(want_jump and tick <= 3)
+                        pitch_val = float(act[2]) if want_jump else 0.0
+                        yaw_val = -float(act[3]) if want_jump else 0.0
+                        roll_val = -float(act[4]) if want_jump else 0.0
+                    else:
+                        jump_val = bool(want_jump and not has_flip and tick <= 2)
+                        pitch_val = float(act[2])
+                        yaw_val = -float(act[3])
+                        roll_val = -float(act[4])
+
+                    hnd_val = bool(act[7] > 0.2 and abs(act[1]) > 0.15 and is_on_gnd)
+                    r_car.set_controls(rsim.CarControls(
+                        throttle=float(act[0]),
+                        steer=-float(act[1]),
+                        pitch=pitch_val,
+                        yaw=yaw_val,
+                        roll=roll_val,
+                        jump=jump_val,
+                        boost=bool(act[6] > 0.0),
+                        handbrake=hnd_val
+                    ))
+                self._rsim_arena.step(1)
+
             self._sync_from_rsim()
 
             # Debounced discrete touch counting: increment ball_touches on new contact initiation

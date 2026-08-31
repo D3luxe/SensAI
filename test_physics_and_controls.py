@@ -71,6 +71,30 @@ class TestPhysicsAndControls(unittest.TestCase):
         arena.step([np.array([1.0, +1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]), np.zeros(8)], dt=15.0 / 120.0)
         self.assertGreater(arena.cars[0].pos[0], 0.0, "act[1]=+1.0 must steer car RIGHT (towards +X)!")
 
+    def test_substep_dodge_and_flip_execution(self):
+        """
+        Guarantees that RocketSimArena.step executes a genuine front-flip / dodge impulse
+        when jump is requested across consecutive ground and airborne action steps.
+        """
+        arena = RocketSimArena(num_players=2, game_mode="1v1")
+        arena.reset(random_kickoff=False)
+
+        cs = arena._rsim_cars[0].get_state()
+        cs.pos = rsim.Vec(0, -3000, 17)
+        cs.vel = rsim.Vec(0, 1000, 0)
+        cs.rot_mat = rsim.Angle(pitch=0.0, yaw=np.pi / 2, roll=0.0).as_rot_mat()
+        arena._rsim_cars[0].set_state(cs)
+
+        # Step 1: Jump off ground (act[5] = 1.0)
+        arena.step([np.array([1.0, 0.0, -1.0, 0.0, 0.0, 1.0, 0.0, 0.0]), np.zeros(8)], dt=8.0 / 120.0)
+        self.assertFalse(arena._rsim_cars[0].get_state().is_on_ground, "Car must be airborne after Step 1 jump!")
+
+        # Step 2: Front-flip / Dodge (act[5] = 1.0, pitch = -1.0)
+        arena.step([np.array([1.0, 0.0, -1.0, 0.0, 0.0, 1.0, 0.0, 0.0]), np.zeros(8)], dt=8.0 / 120.0)
+        c_state2 = arena._rsim_cars[0].get_state()
+        self.assertTrue(c_state2.has_flipped, "Substep sequencer must trigger has_flipped=True in RocketSim!")
+        self.assertGreater(c_state2.vel.y, 1400.0, "Front-flip must deliver > 400 uu/s forward velocity impulse!")
+
     def test_bot_controller_pass_through(self):
         """
         Guarantees that bot.py passes pitch, steer, yaw, roll 1-to-1 without accidental sign negation.

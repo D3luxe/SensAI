@@ -435,7 +435,7 @@ class SenseiRLBot(BaseAgent):
                 controller.yaw = 0.0
                 controller.roll = 0.0
 
-            controller.boost = bool(act[6] > 0.2)
+            controller.boost = bool(act[6] > 0.0)
 
             # Handbrake / Powerslide:
             # Must ONLY be active when on the ground and executing a sharp turnaround cut.
