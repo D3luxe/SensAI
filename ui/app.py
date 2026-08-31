@@ -1392,45 +1392,6 @@ def create_ui():
             outputs=[replay_stats_box, ingestion_status_box]
         )
 
-        def on_apply_scenarios_weights(k_p, rep_p, aer_p, wall_p, save_p, base_r):
-            sc_dict = {
-                "kickoff_prob": float(k_p),
-                "replay_prob": float(rep_p),
-                "aerial_prob": float(aer_p),
-                "wall_prob": float(wall_p),
-                "save_prob": float(save_p),
-            }
-            # Update live_config.json
-            live_path = "config/live_config.json"
-            live_data = {}
-            if os.path.exists(live_path):
-                try:
-                    with open(live_path, "r") as f:
-                        live_data = json.load(f)
-                except Exception:
-                    pass
-            live_data["scenarios"] = sc_dict
-            live_data["baseline_opponent_ratio"] = float(base_r)
-            with open(live_path, "w") as f:
-                json.dump(live_data, f, indent=2)
-
-            # Update default_config.yaml
-            def_cfg = load_yaml_config("config/default_config.yaml")
-            def_cfg["scenarios"] = def_cfg.get("scenarios", {})
-            def_cfg["scenarios"].update(sc_dict)
-            def_cfg["environment"] = def_cfg.get("environment", {})
-            def_cfg["environment"]["baseline_opponent_ratio"] = float(base_r)
-            save_yaml_config(def_cfg, "config/default_config.yaml")
-
-            tot = sum(sc_dict.values())
-            return f"""<div class="status-callout-box" style="border-left-color: #4ade80;"><span style="color: #4ade80; font-weight: 700; margin-right: 8px;">APPLIED:</span><span>Scenario distribution & Baseline Ratio ({float(base_r)*100:.0f}%) saved! (Scenario sum: {tot:.2f})</span></div>"""
-
-        apply_scenarios_btn.click(
-            fn=on_apply_scenarios_weights,
-            inputs=[sc_kickoff_slider, sc_replay_slider, sc_aerial_slider, sc_wall_slider, sc_save_slider, baseline_ratio_slider],
-            outputs=[scenarios_feedback_box]
-        )
-
         # Pretrainer Callbacks
         bc_trainer = BehavioralCloningTrainer()
 
