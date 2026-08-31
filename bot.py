@@ -427,8 +427,8 @@ class SenseiRLBot(BaseAgent):
 
             # Handbrake / Powerslide:
             # Must ONLY be active when on the ground and executing a sharp turnaround cut.
-            # Mild and moderate steering must maintain full tire grip.
-            if is_on_ground and abs(controller.steer) > 0.4:
+            # Mild steering maintains full tire grip; sharp cuts activate powerslide drift.
+            if is_on_ground and abs(controller.steer) > 0.2:
                 controller.handbrake = bool(act[7] > 0.0)
             else:
                 controller.handbrake = False

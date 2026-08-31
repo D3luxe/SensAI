@@ -93,20 +93,22 @@ class BallToGoalVelocityReward(BaseReward):
 
 
 # ==============================================================================
-# 3. PLAYER-TO-BALL DISTANCE DELTA (Pursuit & Approach Potential)
+# 3. PLAYER-TO-BALL DISTANCE DELTA & AERIAL INTERCEPT (Pursuit & Pacing)
 # ==============================================================================
 class PlayerToBallVelocityReward(BaseReward):
     """
-    Necto / RLGym Potential-Based Distance Delta Approach Reward.
-    Rewards closing the distance gap to the ball:
-        Phi(s) = -dist(car, ball) / 2000.0
-        Reward = (prev_dist - curr_dist) / 2000.0
-    When ball is grounded (Z < 300), evaluates horizontal plane (X, Y) distance
-    so jumping to initiate a speed-flip never registers an artificial distance penalty.
+    Necto / RLGym Potential-Based Distance Delta Approach & Aerial Intercept Reward.
+    - Grounded Ball (Z < 300): Evaluates 2D horizontal distance delta so jumping for flips does not register an artificial penalty.
+    - Elevated Aerial Ball (Z >= 300): Evaluates true 3D intercept distance, rewarding climbing velocity in the air and dampening floor-circling underneath floating balls.
+    - Strike Zone Pacing (< 450 uu): Seamlessly transitions from downfield rush to strike-zone velocity matching.
+    - Anti-Overshoot Penalty: Punishes blasting past the ball along the attack axis without touching it.
+    - Deceleration / Braking Incentive: Rewards braking (throttle < 0) when closing dangerously fast on a slow ball from behind.
     """
     def __init__(self, weight: float = 0.15):
         super().__init__(weight)
         self._prev_dist: Dict[int, float] = {}
+        self._prev_touches: Dict[int, int] = {}
+        self._was_in_strike_zone: Dict[int, bool] = {}
 
     def _calc_dist(self, car_pos: np.ndarray, ball_pos: np.ndarray) -> float:
         # If ball is grounded (Z < 300), evaluate horizontal (X, Y) distance
@@ -120,56 +122,96 @@ class PlayerToBallVelocityReward(BaseReward):
             car.id: self._calc_dist(car.pos, initial_state.ball.pos)
             for car in initial_state.cars
         }
+        self._prev_touches = {car.id: car.ball_touches for car in initial_state.cars}
+        self._was_in_strike_zone = {car.id: False for car in initial_state.cars}
 
     def get_reward(self, car: CarState, arena: RocketSimArena, action: np.ndarray, is_goal: bool, scoring_team: Optional[int]) -> float:
         curr_dist = self._calc_dist(car.pos, arena.ball.pos)
         prev_dist = self._prev_dist.get(car.id, curr_dist)
         self._prev_dist[car.id] = curr_dist
 
-        # Distance gap delta (positive when closing distance, negative when retreating)
-        delta_dist = (prev_dist - curr_dist) / 2000.0
+        prev_t = self._prev_touches.get(car.id, car.ball_touches)
+        self._prev_touches[car.id] = car.ball_touches
 
         # Unit alignment vector to ball
         car_to_ball = arena.ball.pos - car.pos
         unit_to_ball = car_to_ball / max(1e-4, curr_dist)
         fwd_alignment = float(np.dot(car.get_forward_vector(), unit_to_ball))
 
-        # Kickoff sprint multiplier & anti-peel penalty (evaluated FIRST to guarantee full-throttle rush)
+        # Kickoff sprint multiplier & anti-peel penalty (guarantees full-throttle rush on kickoff)
         is_kickoff = bool(abs(arena.ball.pos[0]) < 50.0 and abs(arena.ball.pos[1]) < 50.0 and float(np.linalg.norm(arena.ball.vel)) < 100.0)
         if is_kickoff:
-            # Harsh penalty if car peels off towards corner boost or away from net on kickoff
+            delta_dist = (prev_dist - curr_dist) / 2000.0
             if abs(car.pos[0]) > 1200.0 and abs(car.pos[1]) > 3200.0:
                 return -1.5
-
-            # Full throttle sprint on kickoff + forward velocity reward for speed-flipping
             fwd_speed_to_ball = max(0.0, float(np.dot(car.vel, unit_to_ball)))
             vel_toward_ball = (fwd_speed_to_ball / 2300.0) * 0.30 * max(0.0, fwd_alignment)
             kickoff_mult = 3.0 if delta_dist > 0.0 else 2.5
             return (self.weight * delta_dist * kickoff_mult) + vel_toward_ball
 
         # ── General Open Play ─────────────────────────────────────────────────
+        ball_z = float(arena.ball.pos[2])
+        is_elevated_aerial = (ball_z > 350.0)
 
-        # Strike Zone Distance-Gated Speed Pacing (< 600 uu)
-        # Downfield (> 600 uu): 100% speed toward ball is rewarded (incentivizes speed-flips & supersonic traversal)
-        # Near ball (< 600 uu): Smoothly tapers speed reward to 0.0 at 200 uu to allow throttle modulation for catches & angled shots
-        speed_taper = min(1.0, max(0.0, (curr_dist - 200.0) / 400.0))
+        # 1. Anti-Overshoot Penalty & Strike Zone Tracking
+        overshoot_penalty = 0.0
+        in_strike = (curr_dist < 400.0)
+        was_strike = self._was_in_strike_zone.get(car.id, False)
+        self._was_in_strike_zone[car.id] = in_strike
 
-        # Strike Zone Patience Gate (< 300 uu)
-        # When positioned behind the ball facing opponent net, do not penalize brief pauses for bounces
+        if was_strike and not in_strike and car.ball_touches == prev_t and fwd_alignment < -0.15:
+            # Car was in the strike zone and flew past the ball without touching it!
+            overshoot_penalty = -0.30
+
+        # 2. Distance Delta with Strike Zone Pacing
+        raw_delta_dist = (prev_dist - curr_dist) / 2000.0
+
+        # Downfield (> 450 uu): 100% distance closure rewarded
+        # Inside strike zone (< 450 uu): Paces approach so car doesn't blindly barrel past ball
+        strike_pacing = min(1.0, max(0.15, (curr_dist - 150.0) / 300.0))
+        delta_dist = raw_delta_dist * strike_pacing
+
         if curr_dist <= 300.0:
             if delta_dist < 0.0 and fwd_alignment > 0.0:
                 delta_dist = 0.0
         elif fwd_alignment < 0.0 and delta_dist > 0.0:
-            # Dampen reward if reversing across field facing away from ball
             delta_dist = delta_dist * max(0.0, fwd_alignment + 1.0) * 0.2
 
-        # Projected Forward Velocity Reward (Distance-Gated)
-        # Directly rewards vehicle velocity projected along the vector to the ball downfield (> 600 uu)
-        # Tapers inside strike zone so the bot is not forced into blind supersonic overshooting
-        fwd_speed_to_ball = max(0.0, float(np.dot(car.vel, unit_to_ball)))
-        vel_toward_ball = (fwd_speed_to_ball / 2300.0) * 0.20 * max(0.0, fwd_alignment) * speed_taper
+        # 3. Strike-Zone Velocity Matching & Brake Incentives (< 450 uu)
+        vel_matching_bonus = 0.0
+        brake_incentive = 0.0
 
-        return (self.weight * delta_dist) + vel_toward_ball
+        if curr_dist < 450.0 and fwd_alignment > 0.2:
+            rel_speed = float(np.linalg.norm(car.vel - arena.ball.vel))
+            # Reward matching velocity with the ball inside the strike zone
+            vel_matching_bonus = 0.15 * max(0.0, 1.0 - (rel_speed / 900.0))
+
+            # If closing dangerously fast (> 1100 uu/s) on a slower ball (< 600 uu/s), reward braking to pace arrival
+            car_speed = float(np.linalg.norm(car.vel))
+            ball_speed = float(np.linalg.norm(arena.ball.vel))
+            if car_speed > 1100.0 and ball_speed < 600.0 and action[0] < -0.05:
+                brake_incentive = 0.12 * min(1.0, -action[0])
+
+        # 4. Projected Velocity Toward Ball (Airborne Climbing vs Ground Traversal)
+        vel_toward_ball = 0.0
+        if is_elevated_aerial:
+            if not car.on_ground:
+                # Airborne flight: Directly reward 3D closing velocity toward high ball!
+                air_climb_speed = max(0.0, float(np.dot(car.vel, unit_to_ball)))
+                vel_toward_ball = (air_climb_speed / 2300.0) * 0.35 * max(0.0, fwd_alignment)
+            else:
+                # Car is staying grounded while ball is floating high in the air
+                # Dampen grounded speed reward so bot doesn't exploit circling on floor underneath ball
+                fwd_speed_to_ball = max(0.0, float(np.dot(car.vel, unit_to_ball)))
+                vel_toward_ball = (fwd_speed_to_ball / 2300.0) * 0.05 * max(0.0, fwd_alignment)
+        else:
+            # Grounded or low ball: Distance-gated downfield rush
+            speed_taper = min(1.0, max(0.0, (curr_dist - 180.0) / 320.0))
+            fwd_speed_to_ball = max(0.0, float(np.dot(car.vel, unit_to_ball)))
+            vel_toward_ball = (fwd_speed_to_ball / 2300.0) * 0.20 * max(0.0, fwd_alignment) * speed_taper
+
+        total_reward = (self.weight * delta_dist) + vel_toward_ball + vel_matching_bonus + brake_incentive + overshoot_penalty
+        return float(total_reward)
 
 
 # ==============================================================================
@@ -181,7 +223,7 @@ class TouchBallReward(BaseReward):
     Rewarded at the exact moment of ball contact, adapting intelligently to tactical context:
       1. Tactical Boom / Shot on Net: Booming strikes scaled heavily by goal alignment.
       2. Possession & Control Catch: Soft touches and pops that keep the ball under close control.
-      3. Vertical Aerials: Height scaling and airborne bonuses for aerial challenges.
+      3. Vertical Aerials: Heavy height scaling (up to 2.5x) and airborne bonuses for aerial challenges.
     """
     def __init__(self, weight: float = 1.2):
         super().__init__(weight)
@@ -225,12 +267,12 @@ class TouchBallReward(BaseReward):
             # Take the best tactical execution (either booming shot on target or surgical possession catch)
             tactical_bonus = max(power_bonus, control_bonus)
 
-            # Height scaling: Ground touch (Z=93) = 1.0x, High Aerial touch (Z=1500) = 1.5x
+            # Height scaling: Ground touch (Z=93) = 1.0x, High Aerial touch (Z=1500) = 2.5x
             ball_z = float(arena.ball.pos[2])
-            height_multiplier = 1.0 + 0.5 * max(0.0, min(1.0, (ball_z - 150.0) / 1850.0))
+            height_multiplier = 1.0 + 1.5 * max(0.0, min(1.0, (ball_z - 150.0) / 1850.0))
 
             # Aerial airborne touch bonus (car airborne contesting high ball)
-            airborne_bonus = 0.3 if (not car.on_ground and ball_z > 350.0) else 0.0
+            airborne_bonus = 1.2 if (not car.on_ground and ball_z > 350.0) else 0.0
 
             # Kickoff first-touch race bounty
             is_kickoff_touch = bool(abs(arena.ball.pos[0]) < 200.0 and abs(arena.ball.pos[1]) < 200.0 and all(c.ball_touches <= 1 for c in arena.cars))
@@ -270,11 +312,12 @@ class SpeedReward(BaseReward):
         unit_to_ball = car_to_ball / dist
         vel_toward_ball = float(np.dot(car.vel, unit_to_ball))
 
-        # Positive normalized forward speed towards ball
-        norm_vel = max(0.0, vel_toward_ball) / CAR_MAX_SPEED
+        # Positive normalized forward speed towards ball with strike-zone taper
+        speed_taper = min(1.0, max(0.0, (dist - 180.0) / 320.0))
+        norm_vel = (max(0.0, vel_toward_ball) / CAR_MAX_SPEED) * speed_taper
 
-        # Supersonic bonus
-        supersonic_bonus = 0.15 if car.is_supersonic else 0.0
+        # Supersonic bonus (downfield traversal only)
+        supersonic_bonus = (0.15 * speed_taper) if car.is_supersonic else 0.0
 
         return self.weight * (norm_vel + supersonic_bonus)
 
@@ -343,12 +386,12 @@ class JumpBridgeReward(BaseReward):
             forward_alignment = float(np.dot(car.get_forward_vector(), unit_to_ball))
 
             # 1. Takeoff Transition (Ground -> Air)
-            if prev_ground and not car.on_ground and car.vel[2] > 100.0 and forward_alignment > 0.2:
-                aerial_mult = 2.0 if arena.ball.pos[2] > 250.0 else 1.0
+            if prev_ground and not car.on_ground and car.vel[2] > 100.0 and forward_alignment > 0.1:
+                aerial_mult = 3.0 if arena.ball.pos[2] > 250.0 else 1.2
                 return self.weight * forward_alignment * aerial_mult
 
             # 2. Dodge / Flip Transition (Airborne Flip toward the ball)
-            if not car.on_ground and prev_flip and not car.has_flip and forward_alignment > 0.3:
+            if not car.on_ground and prev_flip and not car.has_flip and forward_alignment > 0.2:
                 return self.weight * forward_alignment * 1.5
 
         return 0.0

@@ -1,10 +1,13 @@
 environment:
+  baseline_opponent_ratio: 0.15
   game_mode: 1v1
   max_episode_steps: 3000
   num_envs: 64
   tick_skip: 8
 hyperparameters:
   batch_size: 8192
+  bc_decay_steps: 150000000
+  bc_regularization_weight: 0.1
   clip_range: 0.2
   ent_coef: 0.001
   gae_lambda: 0.95
@@ -29,18 +32,15 @@ rewards:
   ball_to_goal_weight: 1.5
   boost_gain_weight: 0.6
   boost_lose_weight: 0.3
-  concede_weight: -20.0
-  goal_weight: 20.0
+  concede_weight: -30.0
+  goal_weight: 30.0
   jump_bridge_weight: 0.35
   player_to_ball_weight: 0.6
-  save_weight: 3.0
+  save_weight: 8.0
   touch_weight: 1.2
 scenarios:
-  aerial_prob: 0.2
+  aerial_prob: 0.1
   kickoff_prob: 0.3
-  max_replays_to_ingest: 50
-  replay_prob: 0.25
-  replay_sort_mode: newest
-  replays_pool_path: data/replays/replays_pool.npz
-  save_prob: 0.15
+  replay_prob: 0.4
+  save_prob: 0.1
   wall_prob: 0.1
