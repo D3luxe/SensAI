@@ -1,14 +1,11 @@
 """
 RLBot In-Game Verification & Diagnostic Agent.
-Key Features:
-  1. Kickoff Countdown Detection: Waits for 3-2-1 countdown to end before starting Test 1.
-  2. Spaced-out Inter-Test Cooldown: 3.0s pause between tests with on-screen countdown.
-  3. Extended Test Durations (4.0s per test) for easy visual verification.
-  4. Confirmed In-Game Hardware/Physics Conventions:
-     - Steer: steer = -1.0 turns RIGHT (+X), steer = +1.0 turns LEFT (-X)
-     - Pitch: pitch = +1.0 is PITCH DOWN (Front-Flip), pitch = -1.0 is PITCH UP (Aerial Climb)
-     - Yaw:   yaw = -1.0 is YAW RIGHT, yaw = +1.0 is YAW LEFT
-     - Roll:  roll = -1.0 is ROLL RIGHT, roll = +1.0 is ROLL LEFT
+Routines with precise in-game timing:
+  1. Test 1: Kickoff Speedflip/Frontflip - Charges downfield for 0.5s -> crisp frontflip -> supersonic smash into center ball!
+  2. Test 2: Steering Calibration - Steer Right (steer=-0.8) -> Steer Left (steer=+0.8) -> Straighten
+  3. Test 3: Vertical Fast Aerial - Jump 1 (pitch=-1.0) -> Jump 2 (neutral stick pitch=0.0) -> rocket climb to ceiling
+  4. Test 4: Wavedash - Short hop -> tilt up -> turf slam into instant acceleration
+  5. Test 5: Autonomous Ball Tracking - Computes angle to ball and steers directly into it
 """
 
 import math
@@ -42,7 +39,6 @@ class DiagnosticBot(BaseAgent):
         self.index = index
         self.tick_count = 0
         
-        # State machine: "TEST" or "COOLDOWN"
         self.state = "TEST"
         self.current_test = 0
         self.test_tick = 0
@@ -82,6 +78,7 @@ class DiagnosticBot(BaseAgent):
             controller.throttle = 1.0  # Hold gas ready for green light
             self.test_tick = 0
             self.state = "TEST"
+            self.current_test = 0
             self._render_hud(controller, "KICKOFF COUNTDOWN (Waiting for GO!)...", speed, car_pos, is_on_ground, countdown="3... 2... 1...")
             return controller
 
@@ -90,17 +87,16 @@ class DiagnosticBot(BaseAgent):
         # ─────────────────────────────────────────────────────────────────────
         if self.state == "COOLDOWN":
             self.cooldown_tick += 1
-            remaining_sec = max(0.0, (360 - self.cooldown_tick) / 120.0)
+            remaining_sec = max(0.0, (300 - self.cooldown_tick) / 120.0)
             
-            # Coast gently forward / stabilize on ground
-            controller.throttle = 0.2 if speed < 500 else 0.0
+            controller.throttle = 0.2 if speed < 400 else 0.0
             controller.steer = 0.0
             controller.pitch = 0.0
             
             next_test_name = self.test_names[(self.current_test + 1) % self.total_tests]
             status_msg = f"PAUSED: Next test in {remaining_sec:.1f}s -> {next_test_name}"
             
-            if self.cooldown_tick >= 360:
+            if self.cooldown_tick >= 300:
                 self.current_test = (self.current_test + 1) % self.total_tests
                 self.state = "TEST"
                 self.test_tick = 0
@@ -120,48 +116,50 @@ class DiagnosticBot(BaseAgent):
         mode = self.current_test
         status_msg = ""
 
-        # ── Test 0: Straight Kickoff Front-Flip ──────────────────────────────
+        # ── Test 0: Kickoff Front-Flip Smash ─────────────────────────────────
         if mode == 0:
             controller.throttle = 1.0
             controller.boost = True
 
-            if t < 25:
+            if t < 55:
+                # Drive forward & build speed toward center ball (approx 0.45s)
                 controller.jump = False
-                status_msg = "Charging forward with boost..."
-            elif 25 <= t < 29:
-                # 4-tick ground jump liftoff
+                status_msg = f"Charging toward ball with boost... (Speed: {speed:.0f} uu/s)"
+            elif 55 <= t < 59:
+                # Ground jump liftoff (4 ticks = 33ms)
                 controller.jump = True
                 status_msg = "Step 1: Ground Jump Liftoff (jump=True)"
-            elif 29 <= t < 32:
-                # 3-tick jump release
+            elif 59 <= t < 62:
+                # Airborne jump release (3 ticks = 25ms)
                 controller.jump = False
                 status_msg = "Step 2: Jump Release (jump=False)"
-            elif 32 <= t < 36:
-                # Front-flip: Pitch Down (+1.0 in RLBot) + Jump
+            elif 62 <= t < 66:
+                # Trigger crisp forward dodge (frontflip): pitch=+1.0 + jump=True
                 controller.jump = True
                 controller.pitch = 1.0
                 status_msg = "Step 3: FRONT-FLIP TRIGGER (pitch=+1.0, jump=True)"
             else:
+                # Boost through ball impact at supersonic speed (2200 uu/s)
                 controller.jump = False
                 controller.pitch = 0.0
-                status_msg = f"Front-flip complete! Peak Speed: {speed:.0f} uu/s"
+                status_msg = f"Front-flip complete! Peak Speed: {speed:.0f} uu/s (Supersonic Smash!)"
 
-            if t >= 240:
+            if t >= 220:
                 self._start_cooldown()
 
         # ── Test 1: Steering Calibration (Right with -1.0, Left with +1.0) ───
         elif mode == 1:
             controller.throttle = 0.75
 
-            if t < 60:
+            if t < 50:
                 # Steer RIGHT is -0.8
                 controller.steer = -0.8
                 status_msg = "STEERING RIGHT (steer=-0.8) -> Car turns RIGHT (+X)"
-            elif 60 <= t < 120:
+            elif 50 <= t < 100:
                 # Steer LEFT is +0.8
                 controller.steer = 0.8
                 status_msg = "STEERING LEFT (steer=+0.8) -> Car turns LEFT (-X)"
-            elif 120 <= t < 180:
+            elif 100 <= t < 150:
                 # Re-center right
                 controller.steer = -0.8
                 status_msg = "RE-CENTERING (steer=-0.8) -> Straightening"
@@ -169,7 +167,7 @@ class DiagnosticBot(BaseAgent):
                 controller.steer = 0.0
                 status_msg = "Steering test complete! Driving straight"
 
-            if t >= 240:
+            if t >= 220:
                 self._start_cooldown()
 
         # ── Test 2: True Fast Aerial (Vertical Climb without Backflip) ────────
@@ -204,7 +202,7 @@ class DiagnosticBot(BaseAgent):
                 controller.boost = (car_pos.z < 1600)
                 status_msg = f"AERIAL CLIMB! Height Z: {car_pos.z:.0f} uu | Vz: {car_vel.z:+.0f} uu/s"
 
-            if t >= 280 or (t > 70 and is_on_ground):
+            if t >= 260 or (t > 70 and is_on_ground):
                 self._start_cooldown()
 
         # ── Test 3: Center Wavedash (Hop -> Tilt Up -> Turf Slam) ────────────
@@ -235,7 +233,7 @@ class DiagnosticBot(BaseAgent):
                 controller.handbrake = (t < 65)
                 status_msg = f"Wavedash landed! Speed: {speed:.0f} uu/s"
 
-            if t >= 240:
+            if t >= 220:
                 self._start_cooldown()
 
         # ── Test 4: Autonomous Ball Tracking (Observation Check) ─────────────
@@ -255,14 +253,14 @@ class DiagnosticBot(BaseAgent):
             local_right = (dx * right_x + dy * right_y)
             angle_to_ball = math.atan2(local_right, local_fwd)
 
-            # Invert angle because steer = -1.0 is Right, +1.0 is Left
+            # Steer = -angle because steer = -1.0 is Right, +1.0 is Left
             controller.steer = float(np.clip(-angle_to_ball * 2.5, -1.0, 1.0))
             if abs(controller.steer) > 0.6:
                 controller.handbrake = (speed > 800)
 
             status_msg = f"Tracking Ball: dist={dist:.0f}, local_right={local_right:+.0f}, steer={controller.steer:+.2f}"
 
-            if t >= 360 or dist < 150.0:
+            if t >= 300 or dist < 150.0:
                 self._start_cooldown()
 
         # ─────────────────────────────────────────────────────────────────────
@@ -275,7 +273,7 @@ class DiagnosticBot(BaseAgent):
         return controller
 
     def _start_cooldown(self):
-        print(f"[SensAI Diag] Test {self.current_test + 1} Complete. Pausing for 3.0s before next test...\n")
+        print(f"[SensAI Diag] Test {self.current_test + 1} Complete. Pausing before next test...\n")
         self.state = "COOLDOWN"
         self.cooldown_tick = 0
         self.test_tick = 0
