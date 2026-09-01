@@ -1,15 +1,11 @@
 """
 RLBot In-Game Verification & Diagnostic Agent.
-Features:
-  1. Autonomous Midfield Reset: Drives to center field and faces +Y before every test so it NEVER drives up sidewalls.
-  2. Fixed Fast Aerial: Releases pitch stick to 0.0 on Jump 2 so it does a true vertical climb instead of an accidental backflip dodge!
-  3. Clear Console Telemetry & 2D/3D In-Game HUD.
-  4. 5 Sequential Hardcoded Mechanics:
-     - Test 1: Steering Calibration (Right +1.0 vs Left -1.0)
-     - Test 2: Kickoff Front-Flip / Dodge (pitch=+1.0, jump=True)
-     - Test 3: True Fast Aerial (Nose Up -> Neutral Double Jump -> Vertical Climb)
-     - Test 4: Wavedash (Hop -> Tilt Up -> Turf Slam)
-     - Test 5: Autonomous Ball Seeking (Observation & Alignment Test)
+Routines tailored for straight midfield execution without hitting sidewalls:
+  1. Test 1: Straight Kickoff Front-Flip (Drives straight down center line, frontflips to supersonic 2200 uu/s)
+  2. Test 2: Midfield Slalom Steering (Gentle Right veer -> Left veer -> Straighten down center)
+  3. Test 3: Vertical Fast Aerial (Jump 1 pitch up -> neutral double jump pulse -> vertical rocket climb)
+  4. Test 4: Center-Field Wavedash (Short hop -> tilt up -> turf slam)
+  5. Test 5: Closed-Loop Ball Strike (Drives directly to ball and hits it)
 """
 
 import math
@@ -18,15 +14,9 @@ import numpy as np
 try:
     from rlbot.agents.base_agent import BaseAgent, SimpleControllerState
     from rlbot.utils.structures.game_data_struct import GameTickPacket
-    try:
-        from rlbot.utils.game_state_util import GameState, CarState as RLCARState, Physics, Vector3, Rotator
-        GAME_STATE_AVAILABLE = True
-    except Exception:
-        GAME_STATE_AVAILABLE = False
     RLBOT_AVAILABLE = True
 except ImportError:
     RLBOT_AVAILABLE = False
-    GAME_STATE_AVAILABLE = False
     class SimpleControllerState:
         def __init__(self):
             self.steer = 0.0
@@ -49,22 +39,16 @@ class DiagnosticBot(BaseAgent):
         self.index = index
         self.tick_count = 0
         
-        # State Machine:
-        # Phase "RESET": Align car at midfield facing +Y
-        # Phase "TEST": Execute hardcoded test routine
-        self.state = "RESET"
-        self.reset_tick = 0
-        self.test_tick = 0
         self.current_test = 0
+        self.test_tick = 0
         self.total_tests = 5
-        self.last_log_time = 0.0
         
         self.test_names = [
-            "1. STEERING CALIBRATION (Right +1.0 & Left -1.0)",
-            "2. KICKOFF FRONT-FLIP (pitch=+1.0, jump=True)",
-            "3. TRUE FAST AERIAL (Double Jump Vertical Climb)",
-            "4. WAVEDASH (Hop -> Tilt Up -> Turf Slam)",
-            "5. CLOSED-LOOP BALL SEEKING (Observation Check)"
+            "1. KICKOFF FRONT-FLIP (pitch=+1.0, jump=True)",
+            "2. MIDFIELD SLALOM (Right -> Left -> Center)",
+            "3. VERTICAL FAST AERIAL (Double Jump Vertical Climb)",
+            "4. CENTER WAVEDASH (Hop -> Tilt Up -> Turf Slam)",
+            "5. AUTONOMOUS BALL TRACKING (Observation Check)"
         ]
 
         if RLBOT_AVAILABLE:
@@ -73,6 +57,7 @@ class DiagnosticBot(BaseAgent):
     def get_output(self, packet: GameTickPacket) -> SimpleControllerState:
         controller = SimpleControllerState()
         self.tick_count += 1
+        self.test_tick += 1
         
         my_car = packet.game_cars[self.index]
         ball = packet.game_ball
@@ -82,104 +67,31 @@ class DiagnosticBot(BaseAgent):
         is_on_ground = bool(my_car.has_wheel_contact)
         speed = math.sqrt(car_vel.x ** 2 + car_vel.y ** 2 + car_vel.z ** 2)
 
-        # ─────────────────────────────────────────────────────────────────────
-        # 1. AUTONOMOUS MIDFIELD RESET (Prevents hitting walls / getting stuck)
-        # ─────────────────────────────────────────────────────────────────────
-        if self.state == "RESET":
-            self.reset_tick += 1
-            # Target spot: (X=0, Y=-2500) facing +Y (yaw = pi/2)
-            target_x = 0.0
-            target_y = -2500.0 if self.team == 0 else 2500.0
-            target_yaw = math.pi / 2 if self.team == 0 else -math.pi / 2
-
-            dx = target_x - car_pos.x
-            dy = target_y - car_pos.y
-            dist = math.hypot(dx, dy)
-
-            # Orientation
-            yaw = car_rot.yaw
-            fwd_x, fwd_y = math.cos(yaw), math.sin(yaw)
-            right_x, right_y = math.sin(yaw), -math.cos(yaw)
-
-            # Check if car is already settled at midfield
-            yaw_diff = (target_yaw - yaw + math.pi) % (2 * math.pi) - math.pi
-            if dist < 250.0 and abs(yaw_diff) < 0.25 and speed < 150.0 and is_on_ground:
-                # Fully centered and aligned! Start test!
-                self.state = "TEST"
-                self.test_tick = 0
-                print(f"\n=======================================================")
-                print(f"[SensAI Diag] STARTING TEST {self.current_test + 1}/{self.total_tests}: {self.test_names[self.current_test]}")
-                print(f"=======================================================")
-                return controller
-
-            # Drive to reset position
-            if dist > 200.0:
-                angle_to_target = math.atan2(dx * right_x + dy * right_y, dx * fwd_x + dy * fwd_y)
-                controller.steer = float(np.clip(angle_to_target * 3.0, -1.0, 1.0))
-                controller.throttle = 0.8
-                controller.handbrake = (abs(angle_to_target) > 1.2 and speed > 400.0)
-            else:
-                # Turn to face downfield
-                controller.steer = float(np.clip(yaw_diff * 3.0, -1.0, 1.0))
-                controller.throttle = 0.1 if speed > 50.0 else 0.3
-                controller.handbrake = (abs(yaw_diff) > 0.8)
-
-            # If reset takes too long (> 5 seconds), force test start
-            if self.reset_tick > 600:
-                self.state = "TEST"
-                self.test_tick = 0
-            
-            return controller
-
-        # ─────────────────────────────────────────────────────────────────────
-        # 2. TEST EXECUTION STATE
-        # ─────────────────────────────────────────────────────────────────────
-        self.test_tick += 1
         t = self.test_tick
         mode = self.current_test
         status_msg = ""
 
-        # ── Test 0: Steering Calibration (Right then Left) ───────────────────
+        # ── Test 0: Straight Kickoff Front-Flip ──────────────────────────────
         if mode == 0:
-            controller.throttle = 0.8
-            if t < 70:
-                controller.steer = 1.0
-                status_msg = "STEERING RIGHT (+1.0) -> Car must turn RIGHT (+X)"
-            elif 70 <= t < 140:
-                controller.steer = -1.0
-                status_msg = "STEERING LEFT (-1.0) -> Car must turn LEFT (-X)"
-            elif 140 <= t < 180:
-                controller.steer = 1.0
-                controller.handbrake = True
-                status_msg = "POWERSLIDE RIGHT (steer=+1.0, handbrake=True)"
-            else:
-                controller.steer = 0.0
-                status_msg = "Steering calibration complete"
-
-            if t >= 220:
-                self._finish_test()
-
-        # ── Test 1: Kickoff Front-Flip / Dodge ───────────────────────────────
-        elif mode == 1:
             controller.throttle = 1.0
             controller.boost = True
 
-            if t < 20:
+            if t < 22:
                 controller.jump = False
-                status_msg = "Charging forward with boost..."
-            elif 20 <= t < 24:
+                status_msg = "Charging down center line with boost..."
+            elif 22 <= t < 26:
                 # 4-tick ground jump liftoff
                 controller.jump = True
-                status_msg = "Liftoff: Ground Jump (jump=True)"
-            elif 24 <= t < 27:
+                status_msg = "Step 1: Ground Jump Liftoff (jump=True)"
+            elif 26 <= t < 29:
                 # 3-tick jump release
                 controller.jump = False
-                status_msg = "Jump Release (jump=False)"
-            elif 27 <= t < 30:
-                # Dodge forward: Pitch Down (+1.0 in RLBot) + Jump
+                status_msg = "Step 2: Jump Release (jump=False)"
+            elif 29 <= t < 33:
+                # Front-flip: Pitch Down (+1.0 in RLBot) + Jump
                 controller.jump = True
                 controller.pitch = 1.0
-                status_msg = "FRONT-FLIP TRIGGER (pitch=+1.0, jump=True)"
+                status_msg = "Step 3: FRONT-FLIP TRIGGER (pitch=+1.0, jump=True)"
             else:
                 controller.jump = False
                 controller.pitch = 0.0
@@ -188,26 +100,49 @@ class DiagnosticBot(BaseAgent):
             if t >= 160:
                 self._finish_test()
 
-        # ── Test 2: TRUE Fast Aerial (Vertical Climb without Backflip!) ───────
+        # ── Test 1: Midfield Slalom Steering (Mild angles, stays in center) ───
+        elif mode == 1:
+            controller.throttle = 0.7
+
+            if t < 30:
+                # Mild steer Right (+0.7)
+                controller.steer = 0.7
+                status_msg = "SLALOM RIGHT (+0.7) -> Veering gently RIGHT"
+            elif 30 <= t < 75:
+                # Steer Left (-0.7) to cut back
+                controller.steer = -0.7
+                status_msg = "SLALOM LEFT (-0.7) -> Cutting back LEFT"
+            elif 75 <= t < 105:
+                # Steer Right (+0.7) to re-center
+                controller.steer = 0.7
+                status_msg = "SLALOM RE-CENTER (+0.7) -> Straightening"
+            else:
+                controller.steer = 0.0
+                status_msg = "Slalom complete! Driving straight down center"
+
+            if t >= 160:
+                self._finish_test()
+
+        # ── Test 2: True Fast Aerial (Vertical Climb without Backflip) ────────
         elif mode == 2:
             controller.throttle = 1.0
 
-            if t < 12:
+            if t < 15:
                 controller.jump = False
-                status_msg = "Approaching takeoff..."
-            elif 12 <= t < 16:
+                status_msg = "Approaching aerial launch..."
+            elif 15 <= t < 19:
                 # Jump 1: Liftoff & Tilt nose UP (-1.0 in RLBot)
                 controller.jump = True
                 controller.pitch = -1.0  # Nose UP
                 controller.boost = True
                 status_msg = "Jump 1: Liftoff + Pitch Up (-1.0)"
-            elif 16 <= t < 19:
+            elif 19 <= t < 22:
                 # Release jump AND center pitch stick to 0.0 to prevent backflip dodge!
                 controller.jump = False
                 controller.pitch = 0.0  # CRITICAL: Neutral stick prevents backflip!
                 controller.boost = True
                 status_msg = "Jump Release + Stick Centered (pitch=0.0)"
-            elif 19 <= t < 22:
+            elif 22 <= t < 25:
                 # Jump 2: Pure vertical double jump impulse (pitch MUST be 0.0)
                 controller.jump = True
                 controller.pitch = 0.0  # Neutral pitch = Double Jump impulse (NO BACKFLIP!)
@@ -216,30 +151,30 @@ class DiagnosticBot(BaseAgent):
             else:
                 # Airborne flight: Pitch up and boost into the ceiling!
                 controller.jump = False
-                controller.pitch = -0.8 if car_pos.z < 800 else -0.3
+                controller.pitch = -0.8 if car_pos.z < 800 else -0.2
                 controller.boost = (car_pos.z < 1600)
                 status_msg = f"AERIAL CLIMB! Height Z: {car_pos.z:.0f} uu | Vz: {car_vel.z:+.0f} uu/s"
 
             if t >= 200 or (t > 50 and is_on_ground):
                 self._finish_test()
 
-        # ── Test 3: Wavedash (Hop -> Tilt Up -> Turf Slam) ───────────────────
+        # ── Test 3: Center Wavedash (Hop -> Tilt Up -> Turf Slam) ────────────
         elif mode == 3:
             controller.throttle = 1.0
 
             if t < 15:
                 controller.jump = False
-                status_msg = "Building speed..."
+                status_msg = "Rolling forward..."
             elif 15 <= t < 18:
                 # Short hop
                 controller.jump = True
                 status_msg = "Short hop"
-            elif 18 <= t < 32:
+            elif 18 <= t < 30:
                 # Tilt nose slightly UP (-0.5) while falling back to turf
                 controller.jump = False
                 controller.pitch = -0.5
                 status_msg = "Tilting nose UP (-0.5) waiting for rear wheel touch..."
-            elif 32 <= t < 36:
+            elif 30 <= t < 34:
                 # Frontflip into the turf as wheels touch down
                 controller.jump = True
                 controller.pitch = 1.0  # Frontflip (+1.0) into ground
@@ -254,7 +189,7 @@ class DiagnosticBot(BaseAgent):
             if t >= 160:
                 self._finish_test()
 
-        # ── Test 4: Closed-Loop Ball Seeking (Observation Check) ─────────────
+        # ── Test 4: Autonomous Ball Tracking (Observation Check) ─────────────
         elif mode == 4:
             controller.throttle = 1.0
             controller.boost = (speed < 1700)
@@ -275,16 +210,16 @@ class DiagnosticBot(BaseAgent):
             if abs(controller.steer) > 0.6:
                 controller.handbrake = (speed > 800)
 
-            status_msg = f"Seeking Ball: dist={dist:.0f}, local_right={local_right:+.0f}, steer={controller.steer:+.2f}"
+            status_msg = f"Tracking Ball: dist={dist:.0f}, local_right={local_right:+.0f}, steer={controller.steer:+.2f}"
 
-            if t >= 300 or dist < 200.0:
+            if t >= 250 or dist < 150.0:
                 self._finish_test()
 
         # ─────────────────────────────────────────────────────────────────────
         # Console Telemetry Logging (Prints to RLBot Terminal every 15 ticks)
         # ─────────────────────────────────────────────────────────────────────
         if self.tick_count % 15 == 0:
-            print(f"[SensAI Diag | Test {mode+1}] {status_msg} | Speed: {speed:.0f} uu/s | Pos: ({car_pos.x:.0f}, {car_pos.y:.0f}, {car_pos.z:.0f}) | Ctrl: str={controller.steer:+.1f} pit={controller.pitch:+.1f} jmp={int(controller.jump)} bst={int(controller.boost)}")
+            print(f"[SensAI Diag | Test {mode+1}] {status_msg} | Speed: {speed:.0f} uu/s | Pos: ({car_pos.x:.0f}, {car_pos.y:.0f}, {car_pos.z:.0f})")
 
         # ─────────────────────────────────────────────────────────────────────
         # On-Screen 2D HUD Rendering
@@ -318,8 +253,6 @@ class DiagnosticBot(BaseAgent):
         return controller
 
     def _finish_test(self):
-        print(f"[SensAI Diag] Test {self.current_test + 1} Finished. Returning to midfield for next test...\n")
+        print(f"[SensAI Diag] Test {self.current_test + 1} Finished.\n")
         self.current_test = (self.current_test + 1) % self.total_tests
-        self.state = "RESET"
-        self.reset_tick = 0
         self.test_tick = 0
