@@ -356,17 +356,28 @@ class SpeedReward(BaseReward):
 
 
 # ==============================================================================
-# 6. FACE BALL & TURN-AROUND ALIGNMENT (Suppresses Backwards Chasing)
+# 6. FACE BALL POTENTIAL DELTA (PBRS Nose Alignment without Per-Tick Farming)
 # ==============================================================================
 class FaceBallReward(BaseReward):
     """
-    Rewards orienting the car's nose towards the ball.
-    Creates a continuous positive gradient to turn around (via drift, U-turn, or half-flip)
-    the instant the ball ends up behind the car, rather than driving backwards in reverse.
-    Enforces strict straight-ahead pathing during kickoffs.
+    Potential-Based Alignment Delta Reward (PBRS).
+    Rewards the rate of angular convergence toward the ball (alignment_next - alignment_prev).
+    Yields strictly 0.0 reward when maintaining heading or driving straight, completely preventing
+    per-tick reward farming while providing a direct gradient to rotate the nose toward the ball.
     """
     def __init__(self, weight: float = 0.0):
         super().__init__(weight)
+        self._prev_alignment: Dict[int, float] = {}
+
+    def reset(self, initial_state: RocketSimArena):
+        self._prev_alignment = {}
+        for car in initial_state.cars:
+            d = initial_state.ball.pos - car.pos
+            dist = float(np.linalg.norm(d))
+            if dist > 1e-4:
+                self._prev_alignment[car.id] = float(np.dot(car.get_forward_vector(), d / dist))
+            else:
+                self._prev_alignment[car.id] = 1.0
 
     def get_reward(self, car: CarState, arena: RocketSimArena, action: np.ndarray, is_goal: bool, scoring_team: Optional[int]) -> float:
         car_to_ball = arena.ball.pos - car.pos
@@ -375,15 +386,14 @@ class FaceBallReward(BaseReward):
             return 0.0
 
         unit_to_ball = car_to_ball / dist
-        forward_alignment = float(np.dot(car.get_forward_vector(), unit_to_ball))
+        curr_alignment = float(np.dot(car.get_forward_vector(), unit_to_ball))
+        prev_align = self._prev_alignment.get(car.id, curr_alignment)
+        self._prev_alignment[car.id] = curr_alignment
 
-        is_kickoff = bool(abs(arena.ball.pos[0]) < 50.0 and abs(arena.ball.pos[1]) < 50.0 and float(np.linalg.norm(arena.ball.vel)) < 100.0)
-        if is_kickoff:
-            # During kickoff, strong positive reward for facing straight at ball, steep penalty for yawing away
-            return self.weight * forward_alignment * 2.5
-
-        # Normal play: (alignment + 1.0) / 2.0 maps [-1.0, +1.0] -> [0.0, 1.0]
-        return self.weight * ((forward_alignment + 1.0) * 0.5)
+        # Pure potential difference delta: (align_t+1 - align_t)
+        # Strictly 0.0 when driving straight; positive when rotating toward ball; negative when yawing away.
+        delta_alignment = curr_alignment - prev_align
+        return self.weight * delta_alignment
 
 
 # ==============================================================================
