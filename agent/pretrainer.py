@@ -169,11 +169,11 @@ class BehavioralCloningTrainer:
                         throttle = 1.0
                         handbrake = -1.0
                     elif local_ball_x < -0.3:
-                        steer = 1.0 if local_ball_y < 0 else -1.0
+                        steer = 1.0 if local_ball_y > 0 else -1.0
                         throttle = 1.0
                         handbrake = 1.0 if (abs(local_ball_y) > 0.6 and car.on_ground) else -1.0
                     else:
-                        steer = float(np.clip(-local_ball_y * 6.0, -1.0, 1.0))
+                        steer = float(np.clip(local_ball_y * 6.0, -1.0, 1.0))
                         throttle = 1.0
                         handbrake = -1.0
 
