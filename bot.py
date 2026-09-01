@@ -398,10 +398,10 @@ class SenseiRLBot(BaseAgent):
             #  - Yaw:      Direct (+1.0 Yaw Right, -1.0 Yaw Left)
             #  - Roll:     Direct (+1.0 Roll Right, -1.0 Roll Left)
             controller.throttle = float(np.clip(act[0], -1.0, 1.0))
-            controller.steer = -float(np.clip(act[1], -1.0, 1.0))
-            controller.pitch = -float(np.clip(act[2], -1.0, 1.0))
-            controller.yaw = -float(np.clip(act[3], -1.0, 1.0))
-            controller.roll = -float(np.clip(act[4], -1.0, 1.0))
+            controller.steer = float(np.clip(act[1], -1.0, 1.0))
+            controller.pitch = float(np.clip(act[2], -1.0, 1.0))
+            controller.yaw = float(np.clip(act[3], -1.0, 1.0))
+            controller.roll = float(np.clip(act[4], -1.0, 1.0))
 
             # ── RLGym / RLBot Jump & Dodge Substep Timing Sequencer ────────────
             # Controls jump button release/press timing across the 8 physics substeps:

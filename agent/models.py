@@ -181,8 +181,7 @@ class ActorCritic(nn.Module):
             if action is None:
                 if deterministic:
                     act_cont = action_mean
-                    # Bernoulli probability sampling for binary buttons (matches training distribution)
-                    act_bin = dist_bin.sample() * 2.0 - 1.0
+                    act_bin = (bin_logits > 0.0).float() * 2.0 - 1.0
                 else:
                     act_cont = dist_cont.rsample()
                     act_bin = dist_bin.sample() * 2.0 - 1.0

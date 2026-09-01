@@ -152,17 +152,9 @@ class CarState:
         return np.array([cp * cy, cp * sy, sp], dtype=np.float32)
 
     def get_right_vector(self) -> np.ndarray:
-        if self.rot_mat is not None:
-            return self.rot_mat[1].copy()
-        p, y, r = self.rot
-        cp, sp = math.cos(p), math.sin(p)
-        cy, sy = math.cos(y), math.sin(y)
-        cr, sr = math.cos(r), math.sin(r)
-        return np.array([
-            -sy * cr + cy * sp * sr,
-            cy * cr + sy * sp * sr,
-            -cp * sr
-        ], dtype=np.float32)
+        fwd = self.get_forward_vector()
+        up = self.get_up_vector()
+        return np.cross(fwd, up).astype(np.float32)
 
     def get_up_vector(self) -> np.ndarray:
         if self.rot_mat is not None:
@@ -450,12 +442,12 @@ class RocketSimArena:
                     # Airborne dodge: press jump on ticks 0..2 to activate dodge/flip impulse
                     if is_on_gnd:
                         jump_val = bool(want_jump and tick <= 3)
-                        pitch_val = float(act[2]) if want_jump else 0.0
+                        pitch_val = -float(act[2]) if want_jump else 0.0
                         yaw_val = -float(act[3]) if want_jump else 0.0
                         roll_val = -float(act[4]) if want_jump else 0.0
                     else:
                         jump_val = bool(want_jump and not has_flip and tick <= 2)
-                        pitch_val = float(act[2])
+                        pitch_val = -float(act[2])
                         yaw_val = -float(act[3])
                         roll_val = -float(act[4])
 

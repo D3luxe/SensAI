@@ -22,29 +22,29 @@ class TestPhysicsAndControls(unittest.TestCase):
 
     def test_pitch_control_direction(self):
         """
-        Guarantees that act[2] = -1.0 ALWAYS pitches nose down (front-flip)
-        and act[2] = +1.0 ALWAYS pitches nose up (backflip / climb).
+        Guarantees that act[2] = +1.0 ALWAYS pitches nose down (front-flip)
+        and act[2] = -1.0 ALWAYS pitches nose up (backflip / climb / aerial).
         """
         arena = RocketSimArena(num_players=2, game_mode="1v1")
         arena.reset(random_kickoff=False)
 
-        # 1. Test Pitch Down (-1.0) in RocketSim
+        # 1. Test Pitch Down (+1.0) in RocketSim
         cs = arena._rsim_cars[0].get_state()
         cs.pos = rsim.Vec(0, 0, 500)
         cs.vel = rsim.Vec(0, 0, 0)
-        cs.rot_mat = rsim.Angle(pitch=0.0, yaw=np.pi / 2, roll=0.0).as_rot_mat()
+        cs.rot_mat = rsim.Angle(np.pi / 2, 0.0, 0.0).as_rot_mat()
         arena._rsim_cars[0].set_state(cs)
 
-        arena.step([np.array([0.0, 0.0, -1.0, 0.0, 0.0, 0.0, 0.0, 0.0]), np.zeros(8)], dt=10.0 / 120.0)
-        fwd_down = arena.cars[0].get_forward_vector()
-        self.assertLess(fwd_down[2], 0.0, "act[2]=-1.0 must pitch nose DOWN in training physics!")
-
-        # 2. Test Pitch Up (+1.0) in RocketSim
-        cs.rot_mat = rsim.Angle(pitch=0.0, yaw=np.pi / 2, roll=0.0).as_rot_mat()
-        arena._rsim_cars[0].set_state(cs)
         arena.step([np.array([0.0, 0.0, +1.0, 0.0, 0.0, 0.0, 0.0, 0.0]), np.zeros(8)], dt=10.0 / 120.0)
+        fwd_down = arena.cars[0].get_forward_vector()
+        self.assertLess(fwd_down[2], 0.0, "act[2]=+1.0 must pitch nose DOWN in training physics!")
+
+        # 2. Test Pitch Up (-1.0) in RocketSim
+        cs.rot_mat = rsim.Angle(np.pi / 2, 0.0, 0.0).as_rot_mat()
+        arena._rsim_cars[0].set_state(cs)
+        arena.step([np.array([0.0, 0.0, -1.0, 0.0, 0.0, 0.0, 0.0, 0.0]), np.zeros(8)], dt=10.0 / 120.0)
         fwd_up = arena.cars[0].get_forward_vector()
-        self.assertGreater(fwd_up[2], 0.0, "act[2]=+1.0 must pitch nose UP in training physics!")
+        self.assertGreater(fwd_up[2], 0.0, "act[2]=-1.0 must pitch nose UP in training physics!")
 
     def test_steer_control_direction(self):
         """
@@ -58,7 +58,7 @@ class TestPhysicsAndControls(unittest.TestCase):
         cs = arena._rsim_cars[0].get_state()
         cs.pos = rsim.Vec(0, -3000, 17)
         cs.vel = rsim.Vec(0, 500, 0)
-        cs.rot_mat = rsim.Angle(pitch=0.0, yaw=np.pi / 2, roll=0.0).as_rot_mat()
+        cs.rot_mat = rsim.Angle(np.pi / 2, 0.0, 0.0).as_rot_mat()
         arena._rsim_cars[0].set_state(cs)
         arena.step([np.array([1.0, -1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]), np.zeros(8)], dt=15.0 / 120.0)
         self.assertLess(arena.cars[0].pos[0], 0.0, "act[1]=-1.0 must steer car LEFT (towards -X)!")
@@ -66,7 +66,7 @@ class TestPhysicsAndControls(unittest.TestCase):
         # Test Steer Right (+1.0)
         cs.pos = rsim.Vec(0, -3000, 17)
         cs.vel = rsim.Vec(0, 500, 0)
-        cs.rot_mat = rsim.Angle(pitch=0.0, yaw=np.pi / 2, roll=0.0).as_rot_mat()
+        cs.rot_mat = rsim.Angle(np.pi / 2, 0.0, 0.0).as_rot_mat()
         arena._rsim_cars[0].set_state(cs)
         arena.step([np.array([1.0, +1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]), np.zeros(8)], dt=15.0 / 120.0)
         self.assertGreater(arena.cars[0].pos[0], 0.0, "act[1]=+1.0 must steer car RIGHT (towards +X)!")
@@ -82,15 +82,15 @@ class TestPhysicsAndControls(unittest.TestCase):
         cs = arena._rsim_cars[0].get_state()
         cs.pos = rsim.Vec(0, -3000, 17)
         cs.vel = rsim.Vec(0, 1000, 0)
-        cs.rot_mat = rsim.Angle(pitch=0.0, yaw=np.pi / 2, roll=0.0).as_rot_mat()
+        cs.rot_mat = rsim.Angle(np.pi / 2, 0.0, 0.0).as_rot_mat()
         arena._rsim_cars[0].set_state(cs)
 
         # Step 1: Jump off ground (act[5] = 1.0)
-        arena.step([np.array([1.0, 0.0, -1.0, 0.0, 0.0, 1.0, 0.0, 0.0]), np.zeros(8)], dt=8.0 / 120.0)
+        arena.step([np.array([1.0, 0.0, 1.0, 0.0, 0.0, 1.0, 0.0, 0.0]), np.zeros(8)], dt=8.0 / 120.0)
         self.assertFalse(arena._rsim_cars[0].get_state().is_on_ground, "Car must be airborne after Step 1 jump!")
 
-        # Step 2: Front-flip / Dodge (act[5] = 1.0, pitch = -1.0)
-        arena.step([np.array([1.0, 0.0, -1.0, 0.0, 0.0, 1.0, 0.0, 0.0]), np.zeros(8)], dt=8.0 / 120.0)
+        # Step 2: Front-flip / Dodge (act[5] = 1.0, pitch = +1.0)
+        arena.step([np.array([1.0, 0.0, 1.0, 0.0, 0.0, 1.0, 0.0, 0.0]), np.zeros(8)], dt=8.0 / 120.0)
         c_state2 = arena._rsim_cars[0].get_state()
         self.assertTrue(c_state2.has_flipped, "Substep sequencer must trigger has_flipped=True in RocketSim!")
         self.assertGreater(c_state2.vel.y, 1400.0, "Front-flip must deliver > 400 uu/s forward velocity impulse!")
@@ -125,12 +125,11 @@ class TestPhysicsAndControls(unittest.TestCase):
         ctrl = bot.get_output(packet)
 
         # In-Game Rocket League gamepad stick input mapping:
-        # Matches physics_engine.py rsim controls: steer=-act[1], pitch=-act[2], yaw=-act[3], roll=-act[4]
         self.assertAlmostEqual(ctrl.throttle, 0.8, places=4, msg="Throttle maps direct (+0.8 Forward)!")
-        self.assertAlmostEqual(ctrl.steer, 0.7, places=4, msg="Steer is -act[1] (act[1]=-0.7 Left maps to ctrl.steer=+0.7 Left)!")
-        self.assertAlmostEqual(ctrl.pitch, 0.9, places=4, msg="Pitch is -act[2] (act[2]=-0.9 Down/Frontflip maps to ctrl.pitch=+0.9 Push Stick Forward)!")
-        self.assertAlmostEqual(ctrl.yaw, -0.6, places=4, msg="Yaw is -act[3] (act[3]=+0.6 Right maps to ctrl.yaw=-0.6 Right)!")
-        self.assertAlmostEqual(ctrl.roll, 0.5, places=4, msg="Roll is -act[4] (act[4]=-0.5 Left maps to ctrl.roll=+0.5 Roll Left)!")
+        self.assertAlmostEqual(ctrl.steer, -0.7, places=4, msg="Steer is act[1] (act[1]=-0.7 Left maps to ctrl.steer=-0.7 Left)!")
+        self.assertAlmostEqual(ctrl.pitch, -0.9, places=4, msg="Pitch is act[2] (act[2]=-0.9 Pitch Up maps to ctrl.pitch=-0.9 Pull Stick Back)!")
+        self.assertAlmostEqual(ctrl.yaw, 0.6, places=4, msg="Yaw is act[3] (act[3]=+0.6 Right maps to ctrl.yaw=+0.6 Right)!")
+        self.assertAlmostEqual(ctrl.roll, -0.5, places=4, msg="Roll is act[4] (act[4]=-0.5 Left maps to ctrl.roll=-0.5 Roll Left)!")
         self.assertTrue(ctrl.boost)
         self.assertFalse(ctrl.handbrake, msg="Airborne car must NEVER activate handbrake (Air Roll conflict)!")
 
@@ -198,13 +197,12 @@ class TestPhysicsAndControls(unittest.TestCase):
         # Ball to Right (+X = +500)
         ball_r = BallState(pos=np.array([500.0, -2000.0, 93.0], dtype=np.float32))
         obs_r = self.obs_builder.build_obs(car, MockArena(ball_r, [car]))
-        # In RocketSim basis (row 1 = [-sy, cy, 0]), a ball at +X produces negative dot product with row 1
-        self.assertLess(obs_r[35], 0.0, "Ball to the RIGHT (+X) must produce negative local_ball_pos[1] offset in RocketSim basis!")
+        self.assertGreater(obs_r[35], 0.0, "Ball to the RIGHT (+X) must produce positive local_ball_pos[1] offset in true right basis!")
 
         # Ball to Left (-X = -500)
         ball_l = BallState(pos=np.array([-500.0, -2000.0, 93.0], dtype=np.float32))
         obs_l = self.obs_builder.build_obs(car, MockArena(ball_l, [car]))
-        self.assertGreater(obs_l[35], 0.0, "Ball to the LEFT (-X) must produce positive local_ball_pos[1] offset in RocketSim basis!")
+        self.assertLess(obs_l[35], 0.0, "Ball to the LEFT (-X) must produce negative local_ball_pos[1] offset in true right basis!")
 
     def test_macro_rewards_potential_and_boost(self):
         """
@@ -292,7 +290,7 @@ class TestPhysicsAndControls(unittest.TestCase):
         bot.ticks_since_last_action = 1
         ctrl_jump = bot.get_output(packet)
         self.assertTrue(ctrl_jump.jump, "Jump must be True when act[5] > 0.0")
-        self.assertAlmostEqual(ctrl_jump.pitch, 1.0, places=4, msg="Pitch must be active when jump is requested")
+        self.assertAlmostEqual(ctrl_jump.pitch, -1.0, places=4, msg="Pitch must be active when jump is requested")
 
     def test_kickoff_touch_state_tracking(self):
         """
@@ -390,27 +388,27 @@ def verify_physics_and_controls_pipeline(verbose: bool = False) -> bool:
     arena = RocketSimArena(num_players=2, game_mode="1v1")
     arena.reset(random_kickoff=False)
 
-    # 1. Pitch Down (-1.0)
+    # 1. Pitch Down (+1.0)
     cs = arena._rsim_cars[0].get_state()
     cs.pos = rsim.Vec(0, 0, 500)
     cs.vel = rsim.Vec(0, 0, 0)
-    cs.rot_mat = rsim.Angle(pitch=0.0, yaw=np.pi / 2, roll=0.0).as_rot_mat()
-    arena._rsim_cars[0].set_state(cs)
-    arena.step([np.array([0.0, 0.0, -1.0, 0.0, 0.0, 0.0, 0.0, 0.0]), np.zeros(8)], dt=10.0 / 120.0)
-    fwd_down = arena.cars[0].get_forward_vector()
-    assert fwd_down[2] < 0.0, f"act[2]=-1.0 must pitch nose DOWN in training (got {fwd_down[2]:+.4f})!"
-
-    # 2. Pitch Up (+1.0)
-    cs.rot_mat = rsim.Angle(pitch=0.0, yaw=np.pi / 2, roll=0.0).as_rot_mat()
+    cs.rot_mat = rsim.Angle(np.pi / 2, 0.0, 0.0).as_rot_mat()
     arena._rsim_cars[0].set_state(cs)
     arena.step([np.array([0.0, 0.0, +1.0, 0.0, 0.0, 0.0, 0.0, 0.0]), np.zeros(8)], dt=10.0 / 120.0)
+    fwd_down = arena.cars[0].get_forward_vector()
+    assert fwd_down[2] < 0.0, f"act[2]=+1.0 must pitch nose DOWN in training (got {fwd_down[2]:+.4f})!"
+
+    # 2. Pitch Up (-1.0)
+    cs.rot_mat = rsim.Angle(np.pi / 2, 0.0, 0.0).as_rot_mat()
+    arena._rsim_cars[0].set_state(cs)
+    arena.step([np.array([0.0, 0.0, -1.0, 0.0, 0.0, 0.0, 0.0, 0.0]), np.zeros(8)], dt=10.0 / 120.0)
     fwd_up = arena.cars[0].get_forward_vector()
-    assert fwd_up[2] > 0.0, f"act[2]=+1.0 must pitch nose UP in training (got {fwd_up[2]:+.4f})!"
+    assert fwd_up[2] > 0.0, f"act[2]=-1.0 must pitch nose UP in training (got {fwd_up[2]:+.4f})!"
 
     # 3. Steer Left (-1.0)
     cs.pos = rsim.Vec(0, -3000, 17)
     cs.vel = rsim.Vec(0, 500, 0)
-    cs.rot_mat = rsim.Angle(pitch=0.0, yaw=np.pi / 2, roll=0.0).as_rot_mat()
+    cs.rot_mat = rsim.Angle(np.pi / 2, 0.0, 0.0).as_rot_mat()
     arena._rsim_cars[0].set_state(cs)
     arena.step([np.array([1.0, -1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]), np.zeros(8)], dt=15.0 / 120.0)
     assert arena.cars[0].pos[0] < 0.0, "act[1]=-1.0 must steer car LEFT (towards -X)!"
@@ -418,7 +416,7 @@ def verify_physics_and_controls_pipeline(verbose: bool = False) -> bool:
     # 4. Steer Right (+1.0)
     cs.pos = rsim.Vec(0, -3000, 17)
     cs.vel = rsim.Vec(0, 500, 0)
-    cs.rot_mat = rsim.Angle(pitch=0.0, yaw=np.pi / 2, roll=0.0).as_rot_mat()
+    cs.rot_mat = rsim.Angle(np.pi / 2, 0.0, 0.0).as_rot_mat()
     arena._rsim_cars[0].set_state(cs)
     arena.step([np.array([1.0, +1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]), np.zeros(8)], dt=15.0 / 120.0)
     assert arena.cars[0].pos[0] > 0.0, "act[1]=+1.0 must steer car RIGHT (towards +X)!"
@@ -433,8 +431,8 @@ def verify_physics_and_controls_pipeline(verbose: bool = False) -> bool:
     car_obs = CarState(id=0, team=0, pos=np.array([0.0, -3000.0, 17.0], dtype=np.float32), rot=np.array([0.0, np.pi/2, 0.0], dtype=np.float32))
     obs_r = builder.build_obs(car_obs, MockArena(BallState(pos=np.array([500.0, -2000.0, 93.0], dtype=np.float32)), [car_obs]))
     obs_l = builder.build_obs(car_obs, MockArena(BallState(pos=np.array([-500.0, -2000.0, 93.0], dtype=np.float32)), [car_obs]))
-    assert obs_r[35] < 0.0, "Ball on Right (+X) must produce negative local lateral offset in RocketSim basis!"
-    assert obs_l[35] > 0.0, "Ball on Left (-X) must produce positive local lateral offset in RocketSim basis!"
+    assert obs_r[35] > 0.0, "Ball on Right (+X) must produce positive local lateral offset in true right basis!"
+    assert obs_l[35] < 0.0, "Ball on Left (-X) must produce negative local lateral offset in true right basis!"
 
     if verbose:
         print("[Pre-Flight Pipeline] Verified: Pitch, Steer, Observations, and Rewards are 100% aligned.")
