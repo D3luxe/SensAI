@@ -1,11 +1,10 @@
 """
 RLBot In-Game Verification & Diagnostic Agent.
-Routines tailored for straight midfield execution without hitting sidewalls:
-  1. Test 1: Straight Kickoff Front-Flip (Drives straight down center line, frontflips to supersonic 2200 uu/s)
-  2. Test 2: Midfield Slalom Steering (Gentle Right veer -> Left veer -> Straighten down center)
-  3. Test 3: Vertical Fast Aerial (Jump 1 pitch up -> neutral double jump pulse -> vertical rocket climb)
-  4. Test 4: Center-Field Wavedash (Short hop -> tilt up -> turf slam)
-  5. Test 5: Closed-Loop Ball Strike (Drives directly to ball and hits it)
+Confirmed In-Game Hardware/Physics Conventions:
+  - Steer: steer = -1.0 turns RIGHT (+X), steer = +1.0 turns LEFT (-X)
+  - Pitch: pitch = +1.0 is PITCH DOWN (Front-Flip), pitch = -1.0 is PITCH UP (Aerial Climb)
+  - Yaw:   yaw = -1.0 is YAW RIGHT, yaw = +1.0 is YAW LEFT
+  - Roll:  roll = -1.0 is ROLL RIGHT, roll = +1.0 is ROLL LEFT
 """
 
 import math
@@ -45,9 +44,9 @@ class DiagnosticBot(BaseAgent):
         
         self.test_names = [
             "1. KICKOFF FRONT-FLIP (pitch=+1.0, jump=True)",
-            "2. MIDFIELD SLALOM (Right -> Left -> Center)",
-            "3. VERTICAL FAST AERIAL (Double Jump Vertical Climb)",
-            "4. CENTER WAVEDASH (Hop -> Tilt Up -> Turf Slam)",
+            "2. STEER RIGHT (steer=-1.0) & STEER LEFT (steer=+1.0)",
+            "3. VERTICAL FAST AERIAL (pitch=-1.0 + Boost Climb)",
+            "4. WAVEDASH (Hop -> Tilt Up -> Turf Slam)",
             "5. AUTONOMOUS BALL TRACKING (Observation Check)"
         ]
 
@@ -78,7 +77,7 @@ class DiagnosticBot(BaseAgent):
 
             if t < 22:
                 controller.jump = False
-                status_msg = "Charging down center line with boost..."
+                status_msg = "Charging forward down center with boost..."
             elif 22 <= t < 26:
                 # 4-tick ground jump liftoff
                 controller.jump = True
@@ -100,25 +99,25 @@ class DiagnosticBot(BaseAgent):
             if t >= 160:
                 self._finish_test()
 
-        # ── Test 1: Midfield Slalom Steering (Mild angles, stays in center) ───
+        # ── Test 1: Steering Calibration (Right with -1.0, Left with +1.0) ───
         elif mode == 1:
             controller.throttle = 0.7
 
-            if t < 30:
-                # Mild steer Right (+0.7)
-                controller.steer = 0.7
-                status_msg = "SLALOM RIGHT (+0.7) -> Veering gently RIGHT"
-            elif 30 <= t < 75:
-                # Steer Left (-0.7) to cut back
-                controller.steer = -0.7
-                status_msg = "SLALOM LEFT (-0.7) -> Cutting back LEFT"
-            elif 75 <= t < 105:
-                # Steer Right (+0.7) to re-center
-                controller.steer = 0.7
-                status_msg = "SLALOM RE-CENTER (+0.7) -> Straightening"
+            if t < 40:
+                # Steer RIGHT is -0.8
+                controller.steer = -0.8
+                status_msg = "STEERING RIGHT (steer=-0.8) -> Car turns RIGHT (+X)"
+            elif 40 <= t < 80:
+                # Steer LEFT is +0.8
+                controller.steer = 0.8
+                status_msg = "STEERING LEFT (steer=+0.8) -> Car turns LEFT (-X)"
+            elif 80 <= t < 120:
+                # Re-center right
+                controller.steer = -0.8
+                status_msg = "RE-CENTERING (steer=-0.8) -> Straightening"
             else:
                 controller.steer = 0.0
-                status_msg = "Slalom complete! Driving straight down center"
+                status_msg = "Steering test complete! Driving straight"
 
             if t >= 160:
                 self._finish_test()
@@ -206,7 +205,8 @@ class DiagnosticBot(BaseAgent):
             local_right = (dx * right_x + dy * right_y)
             angle_to_ball = math.atan2(local_right, local_fwd)
 
-            controller.steer = float(np.clip(angle_to_ball * 2.5, -1.0, 1.0))
+            # Invert angle because steer = -1.0 is Right, +1.0 is Left
+            controller.steer = float(np.clip(-angle_to_ball * 2.5, -1.0, 1.0))
             if abs(controller.steer) > 0.6:
                 controller.handbrake = (speed > 800)
 
