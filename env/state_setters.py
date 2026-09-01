@@ -41,12 +41,12 @@ class KickoffSetter(BaseStateSetter):
     Standard competitive Rocket League kickoff configurations (Diagonal, Off-Center, Goal-Line).
     """
     KICKOFF_LOCATIONS = [
-        # (x, y, yaw) for Team 0
-        (-2048.0, -2560.0, 0.896),   # Left Diagonal
-        (2048.0, -2560.0, 2.245),    # Right Diagonal
-        (-256.0, -3840.0, math.pi/2), # Left Center
-        (256.0, -3840.0, math.pi/2),  # Right Center
-        (0.0, -4608.0, math.pi/2),    # Goal Line Straight
+        # (x, y, yaw) for Team 0 (Standard Rocket League 45°, 135°, and 90° spawns)
+        (-2048.0, -2560.0, math.pi / 4),      # Left Diagonal (45°)
+        (2048.0, -2560.0, 3 * math.pi / 4),   # Right Diagonal (135°)
+        (-256.0, -3840.0, math.pi / 2),        # Left Center (90°)
+        (256.0, -3840.0, math.pi / 2),         # Right Center (90°)
+        (0.0, -4608.0, math.pi / 2),           # Goal Line Straight (90°)
     ]
 
     def reset(self, rsim_arena: Any, num_players: int) -> None:

@@ -451,7 +451,7 @@ class RocketSimArena:
                         yaw_val = -float(act[3])
                         roll_val = -float(act[4])
 
-                    hnd_val = bool(act[7] > 0.2 and abs(act[1]) > 0.15 and is_on_gnd)
+                    hnd_val = bool(act[7] > 0.0 and is_on_gnd)
                     r_car.set_controls(rsim.CarControls(
                         throttle=float(act[0]),
                         steer=-float(act[1]),

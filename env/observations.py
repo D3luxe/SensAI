@@ -187,7 +187,7 @@ class DefaultObservationBuilder:
         out[51] = float(threat_z)
         is_center_ball = bool(abs(bx) < 50.0 and abs(by) < 50.0 and (abs(bvx) + abs(bvy) + abs(bvz)) < 80.0)
         is_first_touch = bool(all(c.ball_touches == 0 for c in arena.cars))
-        out[52] = 1.0 if is_center_ball else 0.0
+        out[52] = 1.0 if (is_center_ball and is_first_touch) else 0.0
         out[53] = 1.0 if is_first_touch else 0.0
 
         # 4. Opponents / Other Players (14 features)

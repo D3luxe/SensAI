@@ -80,6 +80,7 @@ class SenseiRLBot(BaseAgent):
         self.fast_aerial_active = False
         self.dodge_cooldown = 0
         self.ball_touched_since_kickoff = False
+        self.kickoff_stagnation_ticks = 0
         self.boost_pad_mapping: list[int] | None = None
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self.obs_builder = DefaultObservationBuilder(symmetric=True)
@@ -189,6 +190,9 @@ class SenseiRLBot(BaseAgent):
         # Guard: check match state (allow kickoff and freeplay play)
         if getattr(packet.game_info, "is_match_ended", False):
             return controller
+        if not getattr(packet.game_info, "is_round_active", True):
+            controller.throttle = 1.0
+            return controller
 
         try:
             # Periodic live check for newer training checkpoints (every 120 ticks = 1 second)
@@ -213,19 +217,29 @@ class SenseiRLBot(BaseAgent):
                 ang_vel=np.array([b_phys.angular_velocity.x, b_phys.angular_velocity.y, b_phys.angular_velocity.z], dtype=np.float32)
             )
 
-            # Match and Kickoff State Tracking
+            # Match and Kickoff State Tracking:
+            # Detect new kickoff when is_kickoff_pause is True and ball is placed at center
+            is_kickoff_pause = getattr(packet.game_info, "is_kickoff_pause", False)
             ball_speed = float(np.linalg.norm(ball_state.vel))
             ball_dist_center = float(np.linalg.norm(ball_state.pos[:2]))
-            if ball_dist_center < 50.0 and ball_speed < 80.0:
-                self.ball_touched_since_kickoff = False
-            elif ball_speed > 120.0 or ball_dist_center > 150.0:
-                self.ball_touched_since_kickoff = True
+
+            if is_kickoff_pause and ball_dist_center < 50.0 and ball_speed < 80.0:
+                if self.ball_touched_since_kickoff:
+                    self.ball_touched_since_kickoff = False
+                    self.kickoff_stagnation_ticks = 0
+                    self.prev_action = None
+                    self.ticks_since_last_action = 0
+            elif not self.ball_touched_since_kickoff:
+                self.kickoff_stagnation_ticks += 1
+                if ball_speed > 100.0 or ball_dist_center > 120.0 or self.kickoff_stagnation_ticks > 180:
+                    self.ball_touched_since_kickoff = True
 
             # Extract self car
             my_car = packet.game_cars[self.index]
             is_on_ground = bool(my_car.has_wheel_contact)
             has_jump = is_on_ground or (not getattr(my_car, "jumped", False))
-            has_flip = not getattr(my_car, "double_jumped", False)
+            # Align with RocketSim training: has_flip is only True when airborne and flip is available
+            has_flip = bool((not is_on_ground) and (not getattr(my_car, "double_jumped", False)))
 
             car_rot_mat = rotation_to_rot_mat(
                 my_car.physics.rotation.pitch,
@@ -319,7 +333,7 @@ class SenseiRLBot(BaseAgent):
                     opp_car = packet.game_cars[i]
                     opp_on_ground = bool(opp_car.has_wheel_contact)
                     opp_jump = opp_on_ground or (not getattr(opp_car, "jumped", False))
-                    opp_flip = not getattr(opp_car, "double_jumped", False)
+                    opp_flip = bool((not opp_on_ground) and (not getattr(opp_car, "double_jumped", False)))
                     opp_rot_mat = rotation_to_rot_mat(
                         opp_car.physics.rotation.pitch,
                         opp_car.physics.rotation.yaw,
@@ -374,6 +388,7 @@ class SenseiRLBot(BaseAgent):
                     boost_pad_mapping=self.boost_pad_mapping
                 )
                 obs = self.obs_builder.build_obs(car_state, arena)
+                self.latest_obs = obs
 
                 # Model Inference at 15Hz (ActorCritic evaluates native equivariant bilateral policy)
                 with torch.no_grad():
@@ -397,11 +412,12 @@ class SenseiRLBot(BaseAgent):
             #  - Steer:    Direct (+1.0 Steer Right, -1.0 Steer Left)
             #  - Yaw:      Direct (+1.0 Yaw Right, -1.0 Yaw Left)
             #  - Roll:     Direct (+1.0 Roll Right, -1.0 Roll Left)
+            # Action mapping aligned with RocketSim physics engine:
             controller.throttle = float(np.clip(act[0], -1.0, 1.0))
-            controller.steer = float(np.clip(act[1], -1.0, 1.0))
+            controller.steer = -float(np.clip(act[1], -1.0, 1.0))
             controller.pitch = -float(np.clip(act[2], -1.0, 1.0))
-            controller.yaw = float(np.clip(act[3], -1.0, 1.0))
-            controller.roll = float(np.clip(act[4], -1.0, 1.0))
+            controller.yaw = -float(np.clip(act[3], -1.0, 1.0))
+            controller.roll = -float(np.clip(act[4], -1.0, 1.0))
 
             # ── RLGym / RLBot Jump & Dodge Substep Timing Sequencer ────────────
             # Controls jump button release/press timing across the 8 physics substeps:
@@ -424,14 +440,7 @@ class SenseiRLBot(BaseAgent):
                 controller.roll = 0.0
 
             controller.boost = bool(act[6] > 0.0)
-
-            # Handbrake / Powerslide:
-            # Must ONLY be active when on the ground and executing a sharp turnaround cut.
-            # Mild steering maintains full tire grip; sharp cuts activate powerslide drift.
-            if is_on_ground and abs(controller.steer) > 0.2:
-                controller.handbrake = bool(act[7] > 0.0)
-            else:
-                controller.handbrake = False
+            controller.handbrake = bool(act[7] > 0.0 and is_on_ground)
 
             self.tick_count += 1
             ball_pos = ball_state.pos

@@ -124,26 +124,26 @@ class TestPhysicsAndControls(unittest.TestCase):
         car.has_wheel_contact = False
         ctrl = bot.get_output(packet)
 
-        # In-Game Rocket League gamepad stick input mapping:
+        # In-Game Rocket League gamepad stick input mapping aligned with RocketSim physics engine:
         self.assertAlmostEqual(ctrl.throttle, 0.8, places=4, msg="Throttle maps direct (+0.8 Forward)!")
-        self.assertAlmostEqual(ctrl.steer, -0.7, places=4, msg="Steer is act[1] (act[1]=-0.7 Left maps to ctrl.steer=-0.7 Left)!")
-        self.assertAlmostEqual(ctrl.pitch, 0.9, places=4, msg="Pitch is -act[2] (act[2]=-0.9 Pitch Up maps to ctrl.pitch=+0.9 Pull Stick Back)!")
-        self.assertAlmostEqual(ctrl.yaw, 0.6, places=4, msg="Yaw is act[3] (act[3]=+0.6 Right maps to ctrl.yaw=+0.6 Right)!")
-        self.assertAlmostEqual(ctrl.roll, -0.5, places=4, msg="Roll is act[4] (act[4]=-0.5 Left maps to ctrl.roll=-0.5 Roll Left)!")
+        self.assertAlmostEqual(ctrl.steer, 0.7, places=4, msg="Steer is -act[1] (act[1]=-0.7 Left maps to ctrl.steer=+0.7)!")
+        self.assertAlmostEqual(ctrl.pitch, 0.9, places=4, msg="Pitch is -act[2] (act[2]=-0.9 Pitch Up maps to ctrl.pitch=+0.9)!")
+        self.assertAlmostEqual(ctrl.yaw, -0.6, places=4, msg="Yaw is -act[3] (act[3]=+0.6 Right maps to ctrl.yaw=-0.6)!")
+        self.assertAlmostEqual(ctrl.roll, 0.5, places=4, msg="Roll is -act[4] (act[4]=-0.5 Left maps to ctrl.roll=+0.5)!")
         self.assertTrue(ctrl.boost)
         self.assertFalse(ctrl.handbrake, msg="Airborne car must NEVER activate handbrake (Air Roll conflict)!")
 
-        # Test Ground Handbrake:
+        # Test Ground Handbrake Pure Pass-Through:
         car.has_wheel_contact = True
-        # 1. Straight driving with handbrake request -> Handbrake must remain False
-        bot.prev_action = np.array([1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.9], dtype=np.float32)
+        # 1. Action with handbrake disabled (act[7] = -0.9 <= 0.0) -> Handbrake is False
+        bot.prev_action = np.array([1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, -0.9], dtype=np.float32)
         ctrl_straight = bot.get_output(packet)
-        self.assertFalse(ctrl_straight.handbrake, msg="Driving straight must NOT trigger handbrake (full forward traction)!")
+        self.assertFalse(ctrl_straight.handbrake, msg="Handbrake must be False when act[7] <= 0.0!")
 
-        # 2. Sharp turn with handbrake request -> Handbrake must activate
+        # 2. Action with handbrake enabled (act[7] = 0.9 > 0.0) -> Handbrake is True
         bot.prev_action = np.array([1.0, 0.8, 0.0, 0.0, 0.0, 0.0, 0.0, 0.9], dtype=np.float32)
         ctrl_turn = bot.get_output(packet)
-        self.assertTrue(ctrl_turn.handbrake, msg="Sharp ground turn with handbrake request must trigger powerslide!")
+        self.assertTrue(ctrl_turn.handbrake, msg="Handbrake must be True when act[7] > 0.0 and car is on ground!")
 
     def test_bilateral_symmetry_masks(self):
         """
@@ -321,11 +321,35 @@ class TestPhysicsAndControls(unittest.TestCase):
         bot.get_output(packet)
         self.assertFalse(bot.ball_touched_since_kickoff, "Ball at rest in center must be marked untouched")
 
-        # Fast moving ball -> play has commenced
+        # Kickoff Timeout Recovery: after > 180 ticks of untouched ball, timeout recovery activates
+        bot.kickoff_stagnation_ticks = 181
+        bot.get_output(packet)
+        self.assertTrue(bot.ball_touched_since_kickoff, "Untouched kickoff beyond 180 ticks must trigger timeout recovery")
+
+        # Moving ball reinforces active play
         ball_moving = Struct(physics=Struct(location=Struct(x=500.0, y=1000.0, z=200.0), velocity=Struct(x=500, y=1200, z=0), angular_velocity=Struct(x=0, y=0, z=0)))
         packet_moving = Struct(num_cars=1, game_cars=[car], game_ball=ball_moving, game_info=Struct(is_match_ended=False))
         bot.get_output(packet_moving)
         self.assertTrue(bot.ball_touched_since_kickoff, "Fast moving ball must be marked as touched/active play")
+
+        # Re-entering kickoff pause resets kickoff tracking
+        packet_pause = Struct(num_cars=1, game_cars=[car], game_ball=ball, game_info=Struct(is_match_ended=False, is_kickoff_pause=True))
+        bot.get_output(packet_pause)
+        self.assertFalse(bot.ball_touched_since_kickoff, "Entering kickoff pause must reset ball_touched_since_kickoff")
+        self.assertEqual(bot.kickoff_stagnation_ticks, 0, "Entering kickoff pause must reset kickoff stagnation ticks")
+
+    def test_has_flip_ground_and_airborne_parity(self):
+        """
+        Guarantees that has_flip is strictly False on the ground (matching RocketSim training)
+        and True when airborne with double-jump available.
+        """
+        from env.physics_engine import CarState
+        car_ground = CarState(id=0, team=0, on_ground=True, has_flip=False)
+        self.assertFalse(car_ground.has_flip, "Car on ground must have has_flip=False")
+
+        # Airborne with double jump available
+        car_air = CarState(id=0, team=0, on_ground=False, has_flip=True)
+        self.assertTrue(car_air.has_flip, "Airborne car with double jump available must have has_flip=True")
 
     def test_actor_critic_layer_norm_and_saturation(self):
         """

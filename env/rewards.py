@@ -465,11 +465,68 @@ class BoostReward(BaseReward):
         else:
             height_factor = max(0.2, 1.0 - (car.pos[2] / GOAL_HEIGHT))
             loss_rew = self.lose_weight * boost_diff * height_factor
+
             # Supersonic boost waste penalty: burning boost when already at max speed (>= 2100 uu/s)
             speed = float(np.linalg.norm(car.vel))
             if speed >= 2100.0 and action[6] > 0.0:
                 loss_rew -= 0.15
+
+            # Off-axis boost waste penalty: burning boost when facing away from ball on ground (causes wide orbiting)
+            if car.on_ground and action[6] > 0.0:
+                car_to_ball = arena.ball.pos - car.pos
+                dist_to_ball = float(np.linalg.norm(car_to_ball))
+                if dist_to_ball > 300.0:
+                    unit_to_ball = car_to_ball / dist_to_ball
+                    fwd_align = float(np.dot(car.get_forward_vector(), unit_to_ball))
+                    if fwd_align < 0.10:
+                        loss_rew -= 0.15 * (1.0 - fwd_align)
+
             return loss_rew
+
+        return 0.0
+
+
+# ==============================================================================
+# 9. POWERSLIDE & DRIFT TURN-AROUND REWARD (Tight Hairpin Cuts & Snap Pivoting)
+# ==============================================================================
+class PowerslideReward(BaseReward):
+    """
+    Rewards active handbrake / powerslide usage during sharp ground turnarounds.
+    Incentivizes pressing handbrake (action[7] > 0.0) when the ball is off-axis (fwd_alignment < 0.7)
+    proportional to turning rate toward the ball, enabling tight U-turns and cuts without orbiting.
+    """
+    def __init__(self, weight: float = 0.30):
+        super().__init__(weight)
+        self._prev_alignment: Dict[int, float] = {}
+
+    def reset(self, initial_state: RocketSimArena):
+        self._prev_alignment = {}
+        for car in initial_state.cars:
+            d = initial_state.ball.pos - car.pos
+            dist = float(np.linalg.norm(d))
+            if dist > 1e-4:
+                self._prev_alignment[car.id] = float(np.dot(car.get_forward_vector(), d / dist))
+            else:
+                self._prev_alignment[car.id] = 1.0
+
+    def get_reward(self, car: CarState, arena: RocketSimArena, action: np.ndarray, is_goal: bool, scoring_team: Optional[int]) -> float:
+        car_to_ball = arena.ball.pos - car.pos
+        dist = float(np.linalg.norm(car_to_ball))
+        if dist < 1e-4:
+            return 0.0
+
+        unit_to_ball = car_to_ball / dist
+        fwd_alignment = float(np.dot(car.get_forward_vector(), unit_to_ball))
+        prev_align = self._prev_alignment.get(car.id, fwd_alignment)
+        self._prev_alignment[car.id] = fwd_alignment
+
+        # Active on ground when ball is off-axis and handbrake is applied
+        if car.on_ground and fwd_alignment < 0.75 and float(action[7]) > 0.0:
+            alignment_rate = max(0.0, fwd_alignment - prev_align)
+            steer_mag = abs(float(action[1]))
+            handbrake_intensity = max(0.0, float(action[7]))
+            turn_bonus = alignment_rate * 5.0 * (0.5 + 0.5 * steer_mag) * handbrake_intensity
+            return self.weight * turn_bonus
 
         return 0.0
 
@@ -510,6 +567,9 @@ class CombinedReward:
             "boost": BoostReward(
                 gain_weight=weights.get("boost_gain_weight", 0.5),
                 lose_weight=weights.get("boost_lose_weight", 0.1)
+            ),
+            "powerslide": PowerslideReward(
+                weight=weights.get("powerslide_weight", 0.30)
             )
         }
 
@@ -539,6 +599,9 @@ class CombinedReward:
 
         if "face_ball_weight" in new_weights and "face_ball" in self.rewards:
             self.rewards["face_ball"].weight = float(new_weights["face_ball_weight"])
+
+        if "powerslide_weight" in new_weights and "powerslide" in self.rewards:
+            self.rewards["powerslide"].weight = float(new_weights["powerslide_weight"])
 
         if "jump_bridge_weight" in new_weights and "jump_bridge" in self.rewards:
             self.rewards["jump_bridge"].weight = float(new_weights["jump_bridge_weight"])
