@@ -1,15 +1,15 @@
 environment:
-  baseline_opponent_ratio: 0.1
+  baseline_opponent_ratio: 0.05
   game_mode: 1v1
   max_episode_steps: 3000
-  num_envs: 64
+  num_envs: 96
   tick_skip: 8
 hyperparameters:
   batch_size: 8192
   bc_decay_steps: 150000000
-  bc_regularization_weight: 0.1
+  bc_regularization_weight: 0.15
   clip_range: 0.2
-  ent_coef: 0.002
+  ent_coef: 0.001
   gae_lambda: 0.95
   gamma: 0.995
   learning_rate: 0.0003
@@ -33,16 +33,17 @@ rewards:
   boost_gain_weight: 0.6
   boost_lose_weight: 0.3
   concede_weight: -30.0
-  face_ball_weight: 0.4
+  face_ball_weight: 0.5
   goal_weight: 30.0
   jump_bridge_weight: 0.35
   player_to_ball_weight: 0.6
-  powerslide_weight: 0.3
+  powerslide_weight: 0.6
   save_weight: 8.0
   touch_weight: 1.2
 scenarios:
   aerial_prob: 0.12
-  kickoff_prob: 0.34
-  replay_prob: 0.3
-  save_prob: 0.12
-  wall_prob: 0.12
+  kickoff_prob: 0.30
+  replay_prob: 0.26
+  save_prob: 0.10
+  turnaround_prob: 0.12
+  wall_prob: 0.10

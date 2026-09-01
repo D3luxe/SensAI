@@ -247,18 +247,65 @@ class ReplayStateSetter(BaseStateSetter):
         return True
 
 
+class TurnaroundRecoverySetter(BaseStateSetter):
+    """
+    Spawns cars traveling fast downfield with the ball positioned behind or to the side.
+    Forces the agent to execute powerslide 180° hairpin cuts, tap-braking, and turnarounds.
+    """
+    def reset(self, rsim_arena: Any, num_players: int) -> None:
+        target_team = random.choice([0, 1])
+        sign = 1.0 if target_team == 0 else -1.0
+
+        # Ball grounded behind the midfield line
+        bx = random.uniform(-1200, 1200)
+        by = -sign * random.uniform(800, 2400)
+        bz = 93.15
+
+        bs = rsim_arena.ball.get_state()
+        bs.pos = rsim.Vec(bx, by, bz)
+        bs.vel = rsim.Vec(random.uniform(-100, 100), -sign * random.uniform(0, 300), 0)
+        bs.ang_vel = rsim.Vec(0, 0, 0)
+        rsim_arena.ball.set_state(bs)
+
+        for i, car in enumerate(rsim_arena.get_cars()):
+            cs = car.get_state()
+            cs.boost = random.uniform(30.0, 80.0)
+            team = i % 2
+
+            if team == target_team:
+                # Car moving fast away from ball towards opponent end
+                cx = random.uniform(-1000, 1000)
+                cy = sign * random.uniform(200, 1800)
+                cs.pos = rsim.Vec(cx, cy, 17.0)
+                yaw = sign * math.pi / 2 + random.uniform(-0.3, 0.3)
+                cs.rot_mat = rsim.Angle(pitch=0.0, yaw=yaw, roll=0.0).as_rot_mat()
+                # Fast forward momentum (1200 - 1800 uu/s) moving away from ball
+                speed = random.uniform(1200, 1800)
+                cs.vel = rsim.Vec(math.cos(yaw) * speed, math.sin(yaw) * speed, 0)
+            else:
+                # Opponent challenging or rotating back
+                cs.pos = rsim.Vec(random.uniform(-800, 800), by - sign * random.uniform(400, 1000), 17.0)
+                yaw = sign * math.pi / 2
+                cs.rot_mat = rsim.Angle(pitch=0.0, yaw=yaw, roll=0.0).as_rot_mat()
+                cs.vel = rsim.Vec(0, sign * 600, 0)
+
+            cs.ang_vel = rsim.Vec(0, 0, 0)
+            car.set_state(cs)
+
+
 class WeightedScenarioSetter:
     """
-    Composite Scenario Manager. Samples across kickoffs, replays, aerials, wall plays, and saves
+    Composite Scenario Manager. Samples across kickoffs, replays, aerials, wall plays, saves, and turnarounds
     according to live user-configured probability weights.
     """
     def __init__(
         self,
-        kickoff_prob: float = 0.35,
+        kickoff_prob: float = 0.30,
         replay_prob: float = 0.25,
         aerial_prob: float = 0.15,
-        wall_prob: float = 0.15,
+        wall_prob: float = 0.10,
         save_prob: float = 0.10,
+        turnaround_prob: float = 0.10,
         replay_parser: Optional[ReplayParser] = None
     ):
         self.kickoff_prob = kickoff_prob
@@ -266,11 +313,13 @@ class WeightedScenarioSetter:
         self.aerial_prob = aerial_prob
         self.wall_prob = wall_prob
         self.save_prob = save_prob
+        self.turnaround_prob = turnaround_prob
 
         self.kickoff_setter = KickoffSetter()
         self.aerial_setter = AerialScenarioSetter()
         self.wall_setter = WallPlaySetter()
         self.goalie_setter = GoalieSaveSetter()
+        self.turnaround_setter = TurnaroundRecoverySetter()
         self.replay_setter = ReplayStateSetter(parser=replay_parser)
 
     def update_weights(self, config_dict: Dict[str, Any]):
@@ -281,13 +330,14 @@ class WeightedScenarioSetter:
         if "aerial_prob" in sc: self.aerial_prob = float(sc["aerial_prob"])
         if "wall_prob" in sc: self.wall_prob = float(sc["wall_prob"])
         if "save_prob" in sc: self.save_prob = float(sc["save_prob"])
+        if "turnaround_prob" in sc: self.turnaround_prob = float(sc["turnaround_prob"])
 
     def reset(self, rsim_arena: Any, num_players: int) -> str:
         """
         Samples a scenario based on current distribution and resets the RocketSim arena.
         Returns the chosen scenario name.
         """
-        weights = [self.kickoff_prob, self.replay_prob, self.aerial_prob, self.wall_prob, self.save_prob]
+        weights = [self.kickoff_prob, self.replay_prob, self.aerial_prob, self.wall_prob, self.save_prob, self.turnaround_prob]
         total = sum(weights)
         if total <= 1e-6:
             self.kickoff_setter.reset(rsim_arena, num_players)
@@ -307,7 +357,6 @@ class WeightedScenarioSetter:
         if r <= cumulative:
             if self.replay_setter.reset(rsim_arena, num_players):
                 return "replay"
-            # Fallback to kickoff if no replays available
             self.kickoff_setter.reset(rsim_arena, num_players)
             return "kickoff"
 
@@ -323,6 +372,12 @@ class WeightedScenarioSetter:
             self.wall_setter.reset(rsim_arena, num_players)
             return "wall_play"
 
-        # 5. Goalie Save
+        # 5. Turnaround Recovery
+        cumulative += self.turnaround_prob
+        if r <= cumulative:
+            self.turnaround_setter.reset(rsim_arena, num_players)
+            return "turnaround"
+
+        # 6. Goalie Save
         self.goalie_setter.reset(rsim_arena, num_players)
         return "goalie_save"
