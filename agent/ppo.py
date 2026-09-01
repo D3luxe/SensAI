@@ -410,13 +410,11 @@ class PPOTrainer:
                 logp_buf[step] = logprob
 
                 # Environment step
-                act_np = action.cpu().numpy().reshape(self.num_envs, self.num_agents_per_env, -1)
-                if not self.continuous_actions:
-                    act_np = action.cpu().numpy().reshape(self.num_envs, self.num_agents_per_env)
+                act_np = action.numpy().reshape(self.num_envs, self.num_agents_per_env, -1) if self.continuous_actions else action.numpy().reshape(self.num_envs, self.num_agents_per_env)
 
                 next_obs, rews, dones, infos = self.env.step(act_np)
 
-                rew_tensor = torch.tensor(rews, dtype=torch.float32, device=self.device).flatten()
+                rew_tensor = torch.from_numpy(rews).float().flatten()
                 rew_buf[step] = rew_tensor
 
                 for info in infos:
@@ -426,8 +424,8 @@ class PPOTrainer:
                         episode_touches_list.extend(info.get("episode_touches", []))
                         episode_goals_list.append(sum(info.get("episode_goals", [0, 0])))
 
-                obs_tensor = torch.tensor(next_obs, dtype=torch.float32, device=self.device).reshape(-1, self.obs_dim)
-                done_tensor = torch.tensor(dones, dtype=torch.float32, device=self.device).flatten()
+                obs_tensor = torch.from_numpy(next_obs).float().reshape(-1, self.obs_dim)
+                done_tensor = torch.from_numpy(dones).float().flatten()
 
             # 3. Generalized Advantage Estimation (GAE)
             with torch.no_grad():
@@ -504,7 +502,6 @@ class PPOTrainer:
                     ratio = logratio.exp()
 
                     with torch.no_grad():
-                        # Calculate approx_kl for monitoring
                         clipfracs += [((ratio - 1.0).abs() > self.clip_range).float().mean().item()]
 
                     # Advantage normalization
@@ -532,7 +529,7 @@ class PPOTrainer:
 
                     loss = pg_loss - self.ent_coef * entropy_loss + v_loss * self.vf_coef
 
-                    # Decaying Behavioral Cloning (BC) Regularization
+                    # Decaying Behavioral Cloning (BC) Regularization (Fast Actor-Only Forward Pass)
                     current_bc_weight = float(self.bc_regularization_weight * max(0.0, 1.0 - (self.global_step / max(1, self.bc_decay_steps))))
                     if current_bc_weight > 1e-4:
                         self._ensure_bc_dataset()
@@ -543,13 +540,12 @@ class PPOTrainer:
                             sample_bc_o = self.bc_obs_tensor[bc_idx]
                             sample_bc_a = self.bc_act_tensor[bc_idx]
 
-                            pred_bc_act, _, _, _ = self.agent.get_action_and_value(sample_bc_o, deterministic=True)
-                            # Regularize continuous vehicle dynamics (throttle, steer, pitch, yaw, roll).
-                            # Binary button channels (5: Jump, 6: Boost, 7: Handbrake) are masked out to prevent
-                            # human replay button class imbalances from suppressing RL exploration.
-                            bc_mask = torch.tensor([1.0, 1.0, 1.0, 1.0, 1.0, 0.0, 0.0, 0.0], device=self.device)
-                            bc_loss_raw = nn.functional.smooth_l1_loss(pred_bc_act, sample_bc_a, reduction='none')
-                            bc_loss = (bc_loss_raw * bc_mask).sum(dim=-1).mean() / bc_mask.sum()
+                            # Fast Actor-only forward pass (skips Critic network)
+                            feat = self.agent.actor_backbone(sample_bc_o)
+                            pred_bc_continuous = torch.tanh(self.agent.actor_mean(feat))
+                            target_bc_continuous = sample_bc_a[:, :5]
+
+                            bc_loss = nn.functional.smooth_l1_loss(pred_bc_continuous, target_bc_continuous)
                             loss = loss + current_bc_weight * bc_loss
                             bc_losses.append(bc_loss.item())
 
@@ -562,7 +558,7 @@ class PPOTrainer:
                     v_losses.append(v_loss.item())
                     entropy_losses.append(entropy_loss.item())
 
-            # 5. Metrics Compilation & Behavioral Telemetry
+            # 5. Metrics Compilation & Fast Vectorized Behavioral Telemetry
             mean_ep_rew = float(np.mean(episode_rewards_list)) if episode_rewards_list else float(rew_buf.mean().item() * self.num_steps)
             mean_touches = float(np.mean(episode_touches_list)) if episode_touches_list else float(rollout_touches_total)
             total_goals = int(sum(episode_goals_list)) if episode_goals_list else 0
@@ -571,13 +567,9 @@ class PPOTrainer:
             mean_entropy = float(np.mean(entropy_losses))
             sps = int(self.total_actors * self.num_steps / (time.time() - iter_start_time))
 
-            # Compute rollout behavioral telemetry using actual parsed actions
-            if self.continuous_actions:
-                act_np = self.env.envs[0].action_parser.parse_actions(b_actions.cpu().numpy())
-            else:
-                act_indices = b_actions.cpu().numpy().astype(int)
-                act_np = self.env.envs[0].action_parser.parse_actions(act_indices)
-            obs_np = b_obs.cpu().numpy()
+            # Fast zero-copy telemetry directly from rollout tensors
+            act_np = b_actions.numpy()
+            obs_np = b_obs.numpy()
 
             thr_col = act_np[:, 0]
             str_col = act_np[:, 1]

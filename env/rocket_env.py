@@ -70,7 +70,7 @@ class RocketLeagueEnv:
             obs.append(self.obs_builder.build_obs(car, self.arena))
         return np.array(obs, dtype=np.float32)
 
-    def step(self, raw_actions: np.ndarray) -> Tuple[np.ndarray, np.ndarray, np.ndarray, Dict[str, Any]]:
+    def step(self, raw_actions: np.ndarray, out_obs: Optional[np.ndarray] = None, out_rews: Optional[np.ndarray] = None) -> Tuple[np.ndarray, np.ndarray, np.ndarray, Dict[str, Any]]:
         """
         Step simulation by tick_skip sub-ticks.
         raw_actions: shape (num_players, action_dim)
@@ -92,17 +92,20 @@ class RocketLeagueEnv:
         is_goal, scoring_team = self.arena.step(parsed_actions, dt=float(self.tick_skip) / 120.0)
 
         # Calculate rewards and observations
-        obs = []
-        rewards = []
+        if out_obs is None:
+            out_obs = np.empty((self.num_players, self.obs_dim), dtype=np.float32)
+        if out_rews is None:
+            out_rews = np.empty(self.num_players, dtype=np.float32)
+
         info_rewards = {}
         prev_touches_sum = sum(self.episode_touches)
 
         for i, car in enumerate(self.arena.cars):
             r, r_dict = self.reward_manager.get_reward(car, self.arena, parsed_actions[i], is_goal, scoring_team)
-            rewards.append(r)
+            out_rews[i] = r
             self.episode_rewards[i] += r
             self.episode_touches[i] = car.ball_touches
-            obs.append(self.obs_builder.build_obs(car, self.arena))
+            self.obs_builder.build_obs(car, self.arena, out=out_obs[i])
             if i == 0:
                 info_rewards = r_dict
 
@@ -112,7 +115,9 @@ class RocketLeagueEnv:
         step_touches = max(0, sum(self.episode_touches) - prev_touches_sum)
 
         # RLGym Kickoff Stagnation Rule: If ball is untouched on kickoff after 75 steps (5.0s), terminate episode!
-        is_kickoff_stalled = (self.current_step > 75 and abs(self.arena.ball.pos[0]) < 20.0 and abs(self.arena.ball.pos[1]) < 20.0 and np.linalg.norm(self.arena.ball.vel) < 80.0)
+        bx, by = self.arena.ball.pos[0], self.arena.ball.pos[1]
+        bvx, bvy = self.arena.ball.vel[0], self.arena.ball.vel[1]
+        is_kickoff_stalled = (self.current_step > 75 and abs(bx) < 20.0 and abs(by) < 20.0 and (abs(bvx) + abs(bvy)) < 80.0)
         done = (self.current_step >= self.max_episode_steps) or is_goal or is_kickoff_stalled
         dones = np.array([done] * self.num_players, dtype=bool)
 
@@ -121,9 +126,9 @@ class RocketLeagueEnv:
             "scoring_team": scoring_team,
             "step": self.current_step,
             "step_touches": step_touches,
-            "episode_rewards": list(self.episode_rewards),
-            "episode_touches": list(self.episode_touches),
-            "episode_goals": list(self.episode_goals),
+            "episode_rewards": list(self.episode_rewards) if done else self.episode_rewards,
+            "episode_touches": list(self.episode_touches) if done else self.episode_touches,
+            "episode_goals": list(self.episode_goals) if done else self.episode_goals,
             "reward_breakdown": info_rewards,
             "is_baseline_env": self.is_baseline_env
         }
@@ -132,13 +137,13 @@ class RocketLeagueEnv:
         if done:
             self.reset()
 
-        return np.array(obs, dtype=np.float32), np.array(rewards, dtype=np.float32), dones, info
+        return out_obs, out_rews, dones, info
 
 
 class VectorizedRocketEnv:
     """
     Vectorized parallel environment container running multiple RocketLeagueEnv instances simultaneously.
-    Supports dynamic partitioning between self-play environments and baseline bot opponents.
+    Provides fast, pre-allocated zero-copy observation and reward tensor aggregation.
     """
     def __init__(
         self,
@@ -177,6 +182,11 @@ class VectorizedRocketEnv:
         self.obs_dim = self.envs[0].obs_dim
         self.act_dim = self.envs[0].act_dim
 
+        # Pre-allocated zero-copy continuous rollout buffers
+        self._obs_buffer = np.zeros((num_envs, self.num_players_per_env, self.obs_dim), dtype=np.float32)
+        self._rew_buffer = np.zeros((num_envs, self.num_players_per_env), dtype=np.float32)
+        self._done_buffer = np.zeros((num_envs, self.num_players_per_env), dtype=bool)
+
     def update_baseline_ratio(self, ratio: float):
         """Dynamically reconfigures the number of environments running against the baseline opponent."""
         self.baseline_opponent_ratio = max(0.0, min(1.0, ratio))
@@ -208,32 +218,29 @@ class VectorizedRocketEnv:
             env.update_scenarios(config_dict)
 
     def reset(self) -> np.ndarray:
-        all_obs = []
-        for env in self.envs:
+        for i, env in enumerate(self.envs):
             obs = env.reset()
-            all_obs.append(obs)
-        # Shape: (num_envs, num_players, obs_dim)
-        return np.array(all_obs, dtype=np.float32)
+            self._obs_buffer[i] = obs
+        return self._obs_buffer.copy()
 
     def step(self, actions: np.ndarray) -> Tuple[np.ndarray, np.ndarray, np.ndarray, List[Dict[str, Any]]]:
         """
         actions shape: (num_envs, num_players, act_dim)
+        Zero-copy step updating pre-allocated internal numpy buffers.
         """
-        all_obs = []
-        all_rews = []
-        all_dones = []
         all_infos = []
-
         for i, env in enumerate(self.envs):
-            obs, rews, dones, info = env.step(actions[i])
-            all_obs.append(obs)
-            all_rews.append(rews)
-            all_dones.append(dones)
+            _, _, dones, info = env.step(
+                actions[i],
+                out_obs=self._obs_buffer[i],
+                out_rews=self._rew_buffer[i]
+            )
+            self._done_buffer[i] = dones
             all_infos.append(info)
 
         return (
-            np.array(all_obs, dtype=np.float32),
-            np.array(all_rews, dtype=np.float32),
-            np.array(all_dones, dtype=bool),
+            self._obs_buffer,
+            self._rew_buffer,
+            self._done_buffer,
             all_infos
         )

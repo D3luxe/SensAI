@@ -1,11 +1,11 @@
 {
-  "updated_at": 1788215257.1666465,
+  "updated_at": 1788220557.7718341,
   "learning_rate": 0.0003,
   "ent_coef": 0.001,
   "clip_range": 0.2,
   "bc_regularization_weight": 0.1,
   "bc_decay_steps": 150000000,
-  "baseline_opponent_ratio": 0.15,
+  "baseline_opponent_ratio": 0.1,
   "paused": false,
   "save_checkpoint_requested": false,
   "rewards": {
@@ -20,10 +20,10 @@
     "boost_lose_weight": 0.3
   },
   "scenarios": {
-    "kickoff_prob": 0.4,
-    "replay_prob": 0.33,
-    "aerial_prob": 0.09,
-    "wall_prob": 0.09,
-    "save_prob": 0.09
+    "kickoff_prob": 0.3,
+    "replay_prob": 0.37,
+    "aerial_prob": 0.11,
+    "wall_prob": 0.11,
+    "save_prob": 0.11
   }
 }

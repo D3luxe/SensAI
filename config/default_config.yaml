@@ -1,5 +1,5 @@
 environment:
-  baseline_opponent_ratio: 0.15
+  baseline_opponent_ratio: 0.1
   game_mode: 1v1
   max_episode_steps: 3000
   num_envs: 64
@@ -9,12 +9,12 @@ hyperparameters:
   bc_decay_steps: 150000000
   bc_regularization_weight: 0.1
   clip_range: 0.2
-  ent_coef: 0.001
+  ent_coef: 0.005
   gae_lambda: 0.95
   gamma: 0.995
   learning_rate: 0.0003
   mini_batch_size: 1024
-  n_epochs: 2
+  n_epochs: 4
 logging:
   checkpoint_interval: 20
   log_dir: logs
@@ -39,8 +39,8 @@ rewards:
   save_weight: 8.0
   touch_weight: 1.2
 scenarios:
-  aerial_prob: 0.09
-  kickoff_prob: 0.4
-  replay_prob: 0.33
-  save_prob: 0.09
-  wall_prob: 0.09
+  aerial_prob: 0.11
+  kickoff_prob: 0.3
+  replay_prob: 0.37
+  save_prob: 0.11
+  wall_prob: 0.11
