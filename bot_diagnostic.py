@@ -1,10 +1,14 @@
 """
 RLBot In-Game Verification & Diagnostic Agent.
-Confirmed In-Game Hardware/Physics Conventions:
-  - Steer: steer = -1.0 turns RIGHT (+X), steer = +1.0 turns LEFT (-X)
-  - Pitch: pitch = +1.0 is PITCH DOWN (Front-Flip), pitch = -1.0 is PITCH UP (Aerial Climb)
-  - Yaw:   yaw = -1.0 is YAW RIGHT, yaw = +1.0 is YAW LEFT
-  - Roll:  roll = -1.0 is ROLL RIGHT, roll = +1.0 is ROLL LEFT
+Key Features:
+  1. Kickoff Countdown Detection: Waits for 3-2-1 countdown to end before starting Test 1.
+  2. Spaced-out Inter-Test Cooldown: 3.0s pause between tests with on-screen countdown.
+  3. Extended Test Durations (4.0s per test) for easy visual verification.
+  4. Confirmed In-Game Hardware/Physics Conventions:
+     - Steer: steer = -1.0 turns RIGHT (+X), steer = +1.0 turns LEFT (-X)
+     - Pitch: pitch = +1.0 is PITCH DOWN (Front-Flip), pitch = -1.0 is PITCH UP (Aerial Climb)
+     - Yaw:   yaw = -1.0 is YAW RIGHT, yaw = +1.0 is YAW LEFT
+     - Roll:  roll = -1.0 is ROLL RIGHT, roll = +1.0 is ROLL LEFT
 """
 
 import math
@@ -38,8 +42,11 @@ class DiagnosticBot(BaseAgent):
         self.index = index
         self.tick_count = 0
         
+        # State machine: "TEST" or "COOLDOWN"
+        self.state = "TEST"
         self.current_test = 0
         self.test_tick = 0
+        self.cooldown_tick = 0
         self.total_tests = 5
         
         self.test_names = [
@@ -56,7 +63,6 @@ class DiagnosticBot(BaseAgent):
     def get_output(self, packet: GameTickPacket) -> SimpleControllerState:
         controller = SimpleControllerState()
         self.tick_count += 1
-        self.test_tick += 1
         
         my_car = packet.game_cars[self.index]
         ball = packet.game_ball
@@ -66,6 +72,50 @@ class DiagnosticBot(BaseAgent):
         is_on_ground = bool(my_car.has_wheel_contact)
         speed = math.sqrt(car_vel.x ** 2 + car_vel.y ** 2 + car_vel.z ** 2)
 
+        # ─────────────────────────────────────────────────────────────────────
+        # 1. KICKOFF COUNTDOWN DETECTION (Wait for "GO!")
+        # ─────────────────────────────────────────────────────────────────────
+        is_kickoff_pause = getattr(packet.game_info, "is_kickoff_pause", False)
+        is_round_active = getattr(packet.game_info, "is_round_active", True)
+
+        if is_kickoff_pause or not is_round_active:
+            controller.throttle = 1.0  # Hold gas ready for green light
+            self.test_tick = 0
+            self.state = "TEST"
+            self._render_hud(controller, "KICKOFF COUNTDOWN (Waiting for GO!)...", speed, car_pos, is_on_ground, countdown="3... 2... 1...")
+            return controller
+
+        # ─────────────────────────────────────────────────────────────────────
+        # 2. INTER-TEST COOLDOWN PHASE (3.0s pause between tests)
+        # ─────────────────────────────────────────────────────────────────────
+        if self.state == "COOLDOWN":
+            self.cooldown_tick += 1
+            remaining_sec = max(0.0, (360 - self.cooldown_tick) / 120.0)
+            
+            # Coast gently forward / stabilize on ground
+            controller.throttle = 0.2 if speed < 500 else 0.0
+            controller.steer = 0.0
+            controller.pitch = 0.0
+            
+            next_test_name = self.test_names[(self.current_test + 1) % self.total_tests]
+            status_msg = f"PAUSED: Next test in {remaining_sec:.1f}s -> {next_test_name}"
+            
+            if self.cooldown_tick >= 360:
+                self.current_test = (self.current_test + 1) % self.total_tests
+                self.state = "TEST"
+                self.test_tick = 0
+                self.cooldown_tick = 0
+                print(f"\n=======================================================")
+                print(f"[SensAI Diag] STARTING TEST {self.current_test + 1}/{self.total_tests}: {self.test_names[self.current_test]}")
+                print(f"=======================================================")
+
+            self._render_hud(controller, status_msg, speed, car_pos, is_on_ground)
+            return controller
+
+        # ─────────────────────────────────────────────────────────────────────
+        # 3. ACTIVE TEST EXECUTION
+        # ─────────────────────────────────────────────────────────────────────
+        self.test_tick += 1
         t = self.test_tick
         mode = self.current_test
         status_msg = ""
@@ -75,18 +125,18 @@ class DiagnosticBot(BaseAgent):
             controller.throttle = 1.0
             controller.boost = True
 
-            if t < 22:
+            if t < 25:
                 controller.jump = False
-                status_msg = "Charging forward down center with boost..."
-            elif 22 <= t < 26:
+                status_msg = "Charging forward with boost..."
+            elif 25 <= t < 29:
                 # 4-tick ground jump liftoff
                 controller.jump = True
                 status_msg = "Step 1: Ground Jump Liftoff (jump=True)"
-            elif 26 <= t < 29:
+            elif 29 <= t < 32:
                 # 3-tick jump release
                 controller.jump = False
                 status_msg = "Step 2: Jump Release (jump=False)"
-            elif 29 <= t < 33:
+            elif 32 <= t < 36:
                 # Front-flip: Pitch Down (+1.0 in RLBot) + Jump
                 controller.jump = True
                 controller.pitch = 1.0
@@ -96,22 +146,22 @@ class DiagnosticBot(BaseAgent):
                 controller.pitch = 0.0
                 status_msg = f"Front-flip complete! Peak Speed: {speed:.0f} uu/s"
 
-            if t >= 160:
-                self._finish_test()
+            if t >= 240:
+                self._start_cooldown()
 
         # ── Test 1: Steering Calibration (Right with -1.0, Left with +1.0) ───
         elif mode == 1:
-            controller.throttle = 0.7
+            controller.throttle = 0.75
 
-            if t < 40:
+            if t < 60:
                 # Steer RIGHT is -0.8
                 controller.steer = -0.8
                 status_msg = "STEERING RIGHT (steer=-0.8) -> Car turns RIGHT (+X)"
-            elif 40 <= t < 80:
+            elif 60 <= t < 120:
                 # Steer LEFT is +0.8
                 controller.steer = 0.8
                 status_msg = "STEERING LEFT (steer=+0.8) -> Car turns LEFT (-X)"
-            elif 80 <= t < 120:
+            elif 120 <= t < 180:
                 # Re-center right
                 controller.steer = -0.8
                 status_msg = "RE-CENTERING (steer=-0.8) -> Straightening"
@@ -119,30 +169,30 @@ class DiagnosticBot(BaseAgent):
                 controller.steer = 0.0
                 status_msg = "Steering test complete! Driving straight"
 
-            if t >= 160:
-                self._finish_test()
+            if t >= 240:
+                self._start_cooldown()
 
         # ── Test 2: True Fast Aerial (Vertical Climb without Backflip) ────────
         elif mode == 2:
             controller.throttle = 1.0
 
-            if t < 15:
+            if t < 18:
                 controller.jump = False
                 status_msg = "Approaching aerial launch..."
-            elif 15 <= t < 19:
+            elif 18 <= t < 22:
                 # Jump 1: Liftoff & Tilt nose UP (-1.0 in RLBot)
                 controller.jump = True
                 controller.pitch = -1.0  # Nose UP
                 controller.boost = True
                 status_msg = "Jump 1: Liftoff + Pitch Up (-1.0)"
-            elif 19 <= t < 22:
+            elif 22 <= t < 25:
                 # Release jump AND center pitch stick to 0.0 to prevent backflip dodge!
                 controller.jump = False
-                controller.pitch = 0.0  # CRITICAL: Neutral stick prevents backflip!
+                controller.pitch = 0.0  # Neutral pitch stick
                 controller.boost = True
                 status_msg = "Jump Release + Stick Centered (pitch=0.0)"
-            elif 22 <= t < 25:
-                # Jump 2: Pure vertical double jump impulse (pitch MUST be 0.0)
+            elif 25 <= t < 28:
+                # Jump 2: Pure vertical double jump impulse
                 controller.jump = True
                 controller.pitch = 0.0  # Neutral pitch = Double Jump impulse (NO BACKFLIP!)
                 controller.boost = True
@@ -154,26 +204,26 @@ class DiagnosticBot(BaseAgent):
                 controller.boost = (car_pos.z < 1600)
                 status_msg = f"AERIAL CLIMB! Height Z: {car_pos.z:.0f} uu | Vz: {car_vel.z:+.0f} uu/s"
 
-            if t >= 200 or (t > 50 and is_on_ground):
-                self._finish_test()
+            if t >= 280 or (t > 70 and is_on_ground):
+                self._start_cooldown()
 
         # ── Test 3: Center Wavedash (Hop -> Tilt Up -> Turf Slam) ────────────
         elif mode == 3:
             controller.throttle = 1.0
 
-            if t < 15:
+            if t < 18:
                 controller.jump = False
                 status_msg = "Rolling forward..."
-            elif 15 <= t < 18:
+            elif 18 <= t < 21:
                 # Short hop
                 controller.jump = True
                 status_msg = "Short hop"
-            elif 18 <= t < 30:
+            elif 21 <= t < 36:
                 # Tilt nose slightly UP (-0.5) while falling back to turf
                 controller.jump = False
                 controller.pitch = -0.5
                 status_msg = "Tilting nose UP (-0.5) waiting for rear wheel touch..."
-            elif 30 <= t < 34:
+            elif 36 <= t < 40:
                 # Frontflip into the turf as wheels touch down
                 controller.jump = True
                 controller.pitch = 1.0  # Frontflip (+1.0) into ground
@@ -182,11 +232,11 @@ class DiagnosticBot(BaseAgent):
             else:
                 controller.jump = False
                 controller.pitch = 0.0
-                controller.handbrake = (t < 55)
+                controller.handbrake = (t < 65)
                 status_msg = f"Wavedash landed! Speed: {speed:.0f} uu/s"
 
-            if t >= 160:
-                self._finish_test()
+            if t >= 240:
+                self._start_cooldown()
 
         # ── Test 4: Autonomous Ball Tracking (Observation Check) ─────────────
         elif mode == 4:
@@ -212,8 +262,8 @@ class DiagnosticBot(BaseAgent):
 
             status_msg = f"Tracking Ball: dist={dist:.0f}, local_right={local_right:+.0f}, steer={controller.steer:+.2f}"
 
-            if t >= 250 or dist < 150.0:
-                self._finish_test()
+            if t >= 360 or dist < 150.0:
+                self._start_cooldown()
 
         # ─────────────────────────────────────────────────────────────────────
         # Console Telemetry Logging (Prints to RLBot Terminal every 15 ticks)
@@ -221,9 +271,16 @@ class DiagnosticBot(BaseAgent):
         if self.tick_count % 15 == 0:
             print(f"[SensAI Diag | Test {mode+1}] {status_msg} | Speed: {speed:.0f} uu/s | Pos: ({car_pos.x:.0f}, {car_pos.y:.0f}, {car_pos.z:.0f})")
 
-        # ─────────────────────────────────────────────────────────────────────
-        # On-Screen 2D HUD Rendering
-        # ─────────────────────────────────────────────────────────────────────
+        self._render_hud(controller, status_msg, speed, car_pos, is_on_ground)
+        return controller
+
+    def _start_cooldown(self):
+        print(f"[SensAI Diag] Test {self.current_test + 1} Complete. Pausing for 3.0s before next test...\n")
+        self.state = "COOLDOWN"
+        self.cooldown_tick = 0
+        self.test_tick = 0
+
+    def _render_hud(self, controller, status_msg, speed, car_pos, is_on_ground, countdown=None):
         if RLBOT_AVAILABLE and hasattr(self, "renderer"):
             try:
                 self.renderer.begin_rendering("DiagnosticBot_HUD")
@@ -232,10 +289,17 @@ class DiagnosticBot(BaseAgent):
                 yell = self.renderer.yellow()
                 c = self.renderer.cyan()
                 g = self.renderer.green()
+                red = self.renderer.red()
 
                 self.renderer.draw_string_2d(20, y, 2, 2, "SensAI Hardware & Control Diagnostic Bot", yell)
                 y += 35
-                self.renderer.draw_string_2d(20, y, 2, 2, f"Active Test: {self.test_names[mode]}", c)
+                if countdown:
+                    self.renderer.draw_string_2d(20, y, 2, 2, f"KICKOFF: {countdown}", red)
+                elif self.state == "COOLDOWN":
+                    self.renderer.draw_string_2d(20, y, 2, 2, f"STATE: {status_msg}", yell)
+                else:
+                    self.renderer.draw_string_2d(20, y, 2, 2, f"Active Test: {self.test_names[self.current_test]}", c)
+                
                 y += 30
                 self.renderer.draw_string_2d(20, y, 1, 1, f"Phase: {status_msg}", g)
                 y += 25
@@ -249,10 +313,3 @@ class DiagnosticBot(BaseAgent):
                 self.renderer.end_rendering()
             except Exception:
                 pass
-
-        return controller
-
-    def _finish_test(self):
-        print(f"[SensAI Diag] Test {self.current_test + 1} Finished.\n")
-        self.current_test = (self.current_test + 1) % self.total_tests
-        self.test_tick = 0
