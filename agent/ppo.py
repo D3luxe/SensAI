@@ -99,6 +99,7 @@ class PPOTrainer:
 
         # Initialize Vectorized Environment
         self.baseline_opponent_ratio = float(env_cfg.get("baseline_opponent_ratio", 0.25))
+        self.baseline_opponent_type = str(env_cfg.get("baseline_opponent_type", "heuristic"))
         self.env = VectorizedRocketEnv(
             num_envs=self.num_envs,
             game_mode=self.game_mode,
@@ -107,7 +108,8 @@ class PPOTrainer:
             reward_weights=rew_cfg,
             continuous_actions=self.continuous_actions,
             self_play=self.self_play,
-            baseline_opponent_ratio=self.baseline_opponent_ratio
+            baseline_opponent_ratio=self.baseline_opponent_ratio,
+            baseline_opponent_type=self.baseline_opponent_type
         )
 
         sc_cfg = self.config.get("scenarios", {})
@@ -219,13 +221,23 @@ class PPOTrainer:
                     self.env.update_scenarios(live["scenarios"])
                     print(f"[Live Config] Scenario distributions dynamically updated.")
 
-                # Update baseline opponent ratio
+                # Update baseline opponent ratio & bot type
+                ratio_changed = False
+                type_changed = False
                 if "baseline_opponent_ratio" in live:
                     new_ratio = float(live["baseline_opponent_ratio"])
                     if abs(new_ratio - getattr(self, "baseline_opponent_ratio", 0.25)) > 1e-4:
                         self.baseline_opponent_ratio = new_ratio
-                        self.env.update_baseline_ratio(self.baseline_opponent_ratio)
-                        print(f"[Live Config] Baseline opponent ratio dynamically updated to: {self.baseline_opponent_ratio:.2f}")
+                        ratio_changed = True
+                
+                new_opp_type = live.get("baseline_opponent_type", live.get("baseline_opponent_model", None))
+                if new_opp_type is not None and str(new_opp_type) != getattr(self, "baseline_opponent_type", "heuristic"):
+                    self.baseline_opponent_type = str(new_opp_type)
+                    type_changed = True
+
+                if ratio_changed or type_changed:
+                    self.env.update_baseline_opponent(self.baseline_opponent_ratio, self.baseline_opponent_type)
+                    print(f"[Live Config] Opponent bot dynamically updated: Ratio={self.baseline_opponent_ratio:.2f}, Type='{self.baseline_opponent_type}'")
 
                 # Check manual save checkpoint trigger
                 if live.get("save_checkpoint_requested", False):

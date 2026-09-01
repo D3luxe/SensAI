@@ -20,6 +20,7 @@ from env.physics_engine import (
 from env.observations import DefaultObservationBuilder, OBS_MIRROR_MASK_NP, ACT_MIRROR_MASK_NP
 from env.actions import ContinuousActionParser, DiscreteActionParser
 from env.rewards import RewardManager
+from env.baseline_agent import BaseOpponent, BaselineChaser, create_opponent_bot
 from agent.models import ActorCritic
 import json
 
@@ -226,16 +227,17 @@ def simulate_match(
     reward_mgr = RewardManager(active_rewards)
     reward_mgr.reset(arena)
 
-    blue_model = load_model(blue_model_path, device=device)
+    blue_bot = create_opponent_bot(blue_model_path, device=device) if blue_model_path else BaselineChaser()
+    
     if orange_model_path == "same_as_blue":
-        orange_model = blue_model
+        orange_bot = blue_bot
         match_type = "Self-Play"
-    elif orange_model_path == "baseline" or orange_model_path is None:
-        orange_model = None
+    elif orange_model_path == "baseline" or orange_model_path is None or str(orange_model_path).lower() in ("heuristic", "baseline"):
+        orange_bot = BaselineChaser()
         match_type = "Bot vs Baseline"
     else:
-        orange_model = load_model(orange_model_path, device=device)
-        match_type = "Checkpoint Comparison"
+        orange_bot = create_opponent_bot(orange_model_path, device=device)
+        match_type = "Checkpoint / Model Comparison"
 
     blue_traj_x, blue_traj_y = [], []
     orange_traj_x, orange_traj_y = [], []
@@ -255,39 +257,9 @@ def simulate_match(
         ball_traj_x.append(arena.ball.pos[0])
         ball_traj_y.append(arena.ball.pos[1])
 
-        # Blue Action
-        if blue_model is not None:
-            obs0 = obs_builder.build_obs(arena.cars[0], arena)
-            with torch.no_grad():
-                obs_t = torch.tensor(obs0, dtype=torch.float32, device=device).unsqueeze(0)
-                act0_t, _, _, _ = blue_model.get_action_and_value(obs_t, deterministic=True)
-                if blue_model.continuous_actions:
-                    act0 = action_parser.parse_actions(act0_t.squeeze(0).cpu().numpy())
-                else:
-                    act0_idx = int(act0_t.squeeze().cpu().item())
-                    act0 = DiscreteActionParser().parse_actions(act0_idx)
-        else:
-            diff = arena.ball.pos - arena.cars[0].pos
-            fwd = arena.cars[0].get_forward_vector()
-            steer = np.clip(diff[0] * fwd[1] - diff[1] * fwd[0], -1.0, 1.0)
-            act0 = np.array([1.0, steer, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0], dtype=np.float32)
-
-        # Orange Action
-        if orange_model is not None:
-            obs1 = obs_builder.build_obs(arena.cars[1], arena)
-            with torch.no_grad():
-                obs_t1 = torch.tensor(obs1, dtype=torch.float32, device=device).unsqueeze(0)
-                act1_t, _, _, _ = orange_model.get_action_and_value(obs_t1, deterministic=True)
-                if orange_model.continuous_actions:
-                    act1 = action_parser.parse_actions(act1_t.squeeze(0).cpu().numpy())
-                else:
-                    act1_idx = int(act1_t.squeeze().cpu().item())
-                    act1 = DiscreteActionParser().parse_actions(act1_idx)
-        else:
-            diff_o = arena.ball.pos - arena.cars[1].pos
-            fwd_o = arena.cars[1].get_forward_vector()
-            steer_o = np.clip(diff_o[0] * fwd_o[1] - diff_o[1] * fwd_o[0], -1.0, 1.0)
-            act1 = np.array([1.0, steer_o, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0], dtype=np.float32)
+        # Blue & Orange Actions
+        act0 = blue_bot.get_action(arena.cars[0], arena)
+        act1 = orange_bot.get_action(arena.cars[1], arena)
 
         actions = [act0, act1]
         goal, scoring_team = arena.step(actions, dt=1.0 / 15.0)
@@ -315,8 +287,13 @@ def simulate_match(
     pitch_fig, ax = plt.subplots(figsize=(8, 10), dpi=100)
     draw_rocket_league_pitch(ax)
 
-    blue_label = "Blue Bot" if blue_model else "Blue (Baseline)"
-    orange_label = "Orange Bot (Self-Play)" if (orange_model is blue_model and blue_model is not None) else ("Orange Bot" if orange_model else "Orange (Baseline)")
+    blue_label = f"Blue: {os.path.basename(blue_model_path)}" if blue_model_path else "Blue (Baseline)"
+    if orange_model_path == "same_as_blue":
+        orange_label = "Orange: Self-Play"
+    elif orange_model_path == "baseline" or orange_model_path is None or str(orange_model_path).lower() in ("heuristic", "baseline"):
+        orange_label = "Orange: Baseline Chaser"
+    else:
+        orange_label = f"Orange: {os.path.basename(orange_model_path)}"
 
     ax.plot(blue_traj_x, blue_traj_y, color="#63b3ed", label=blue_label, linewidth=2.0, alpha=0.85)
     ax.plot(orange_traj_x, orange_traj_y, color="#f6ad55", label=orange_label, linewidth=2.0, alpha=0.85)
@@ -332,7 +309,7 @@ def simulate_match(
     # 2. Reward Breakdown Bar Chart
     reward_fig = render_reward_breakdown_plot(
         blue_rewards=blue_rewards,
-        orange_rewards=orange_rewards if (orange_model is not None) else None,
+        orange_rewards=orange_rewards,
         match_type=match_type
     )
 
@@ -342,7 +319,7 @@ def simulate_match(
         "blue_touches": blue_touches,
         "orange_touches": orange_touches,
         "blue_total_reward": round(sum(blue_rewards.values()), 1),
-        "orange_total_reward": round(sum(orange_rewards.values()), 1) if orange_model else 0.0,
+        "orange_total_reward": round(sum(orange_rewards.values()), 1),
         "simulation_steps": max_steps,
         "match_type": match_type,
         "blue_breakdown": blue_rewards,

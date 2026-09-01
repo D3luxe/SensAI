@@ -9,8 +9,10 @@ logs/
 scratch/
 checkpoints/checkpoint_iter_*.pt
 checkpoints/manual_checkpoint_*.pt
+checkpoints/*Copy*
 checkpoints/bak/
 *.bak
 *.pid
 .system_generated/
 runs/
+

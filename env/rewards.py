@@ -318,86 +318,7 @@ class TouchBallReward(BaseReward):
 
 
 # ==============================================================================
-# 5. SPEED & FLIP MOMENTUM (Supersonic Traversal on Low Boost)
-# ==============================================================================
-class SpeedReward(BaseReward):
-    """
-    Velocity Projection & Supersonic Traversal Reward.
-    Rewards car forward speed directed toward the ball.
-    Incentivizes speed-flipping and forward dodges to break the 1400 uu/s ground drive limit
-    up to supersonic (2200 - 2300 uu/s) even when boost is empty.
-    Strictly gates on positive forward vehicle velocity (zero reward for reversing across the pitch).
-    """
-    def __init__(self, weight: float = 0.35):
-        super().__init__(weight)
-
-    def get_reward(self, car: CarState, arena: RocketSimArena, action: np.ndarray, is_goal: bool, scoring_team: Optional[int]) -> float:
-        car_to_ball = arena.ball.pos - car.pos
-        dist = float(np.linalg.norm(car_to_ball))
-        if dist < 1e-4:
-            return 0.0
-
-        # Only reward FORWARD driving speed (car moving in the direction it is facing)
-        fwd_speed = float(np.dot(car.vel, car.get_forward_vector()))
-        if fwd_speed <= 50.0:
-            return 0.0
-
-        unit_to_ball = car_to_ball / dist
-        vel_toward_ball = float(np.dot(car.vel, unit_to_ball))
-
-        # Positive normalized forward speed towards ball with strike-zone taper
-        speed_taper = min(1.0, max(0.0, (dist - 180.0) / 320.0))
-        norm_vel = (max(0.0, vel_toward_ball) / CAR_MAX_SPEED) * speed_taper
-
-        # Supersonic bonus (downfield traversal only)
-        supersonic_bonus = (0.15 * speed_taper) if car.is_supersonic else 0.0
-
-        return self.weight * (norm_vel + supersonic_bonus)
-
-
-# ==============================================================================
-# 6. FACE BALL POTENTIAL DELTA (PBRS Nose Alignment without Per-Tick Farming)
-# ==============================================================================
-class FaceBallReward(BaseReward):
-    """
-    Potential-Based Alignment Delta Reward (PBRS).
-    Rewards the rate of angular convergence toward the ball (alignment_next - alignment_prev).
-    Yields strictly 0.0 reward when maintaining heading or driving straight, completely preventing
-    per-tick reward farming while providing a direct gradient to rotate the nose toward the ball.
-    """
-    def __init__(self, weight: float = 0.0):
-        super().__init__(weight)
-        self._prev_alignment: Dict[int, float] = {}
-
-    def reset(self, initial_state: RocketSimArena):
-        self._prev_alignment = {}
-        for car in initial_state.cars:
-            d = initial_state.ball.pos - car.pos
-            dist = float(np.linalg.norm(d))
-            if dist > 1e-4:
-                self._prev_alignment[car.id] = float(np.dot(car.get_forward_vector(), d / dist))
-            else:
-                self._prev_alignment[car.id] = 1.0
-
-    def get_reward(self, car: CarState, arena: RocketSimArena, action: np.ndarray, is_goal: bool, scoring_team: Optional[int]) -> float:
-        car_to_ball = arena.ball.pos - car.pos
-        dist = float(np.linalg.norm(car_to_ball))
-        if dist < 1e-4:
-            return 0.0
-
-        unit_to_ball = car_to_ball / dist
-        curr_alignment = float(np.dot(car.get_forward_vector(), unit_to_ball))
-        prev_align = self._prev_alignment.get(car.id, curr_alignment)
-        self._prev_alignment[car.id] = curr_alignment
-
-        # Pure potential difference delta: (align_t+1 - align_t)
-        # Strictly 0.0 when driving straight; positive when rotating toward ball; negative when yawing away.
-        delta_alignment = curr_alignment - prev_align
-        return self.weight * delta_alignment
-
-
-# ==============================================================================
-# 7. JUMP MOMENTUM BRIDGE (Eliminates First-Jump Latency Barrier)
+# 5. JUMP MOMENTUM BRIDGE (Eliminates First-Jump Latency Barrier)
 # ==============================================================================
 class JumpBridgeReward(BaseReward):
     """
@@ -562,12 +483,6 @@ class CombinedReward:
             "player_to_ball": PlayerToBallVelocityReward(
                 weight=weights.get("player_to_ball_weight", 0.15)
             ),
-            "speed": SpeedReward(
-                weight=weights.get("speed_weight", 0.0)
-            ),
-            "face_ball": FaceBallReward(
-                weight=weights.get("face_ball_weight", 0.0)
-            ),
             "jump_bridge": JumpBridgeReward(
                 weight=weights.get("jump_bridge_weight", 0.35)
             ),
@@ -603,12 +518,6 @@ class CombinedReward:
 
         if "player_to_ball_weight" in new_weights and "player_to_ball" in self.rewards:
             self.rewards["player_to_ball"].weight = float(new_weights["player_to_ball_weight"])
-
-        if "speed_weight" in new_weights and "speed" in self.rewards:
-            self.rewards["speed"].weight = float(new_weights["speed_weight"])
-
-        if "face_ball_weight" in new_weights and "face_ball" in self.rewards:
-            self.rewards["face_ball"].weight = float(new_weights["face_ball_weight"])
 
         if "powerslide_weight" in new_weights and "powerslide" in self.rewards:
             self.rewards["powerslide"].weight = float(new_weights["powerslide_weight"])

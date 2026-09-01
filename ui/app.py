@@ -45,10 +45,18 @@ def save_yaml_config(cfg: dict, path: str = "config/default_config.yaml"):
 
 
 def get_available_checkpoints() -> list:
-    pts = glob.glob("checkpoints/*.pt")
+    pts = glob.glob("checkpoints/*.pt") + glob.glob("checkpoints/**/*.pt")
+    # Normalize paths and eliminate duplicates
+    pts = list(dict.fromkeys([os.path.normpath(p).replace("\\", "/") for p in pts]))
     if not pts:
         return ["checkpoints/latest_model.pt (none saved yet)"]
-    return sorted(pts, key=os.path.getmtime, reverse=True)
+    return sorted(pts, key=lambda x: os.path.getmtime(x) if os.path.exists(x) else 0.0, reverse=True)
+
+
+def get_available_opponent_options() -> list:
+    base_options = ["Heuristic Chaser (Rule-Based Aggressive Bot)"]
+    ckpts = get_available_checkpoints()
+    return base_options + ckpts
 
 
 CUSTOM_CSS = """
@@ -415,6 +423,10 @@ def create_ui():
                     hp_cfg["clip_range"] = float(live_data["clip_range"])
                 if "baseline_opponent_ratio" in live_data:
                     env_cfg["baseline_opponent_ratio"] = float(live_data["baseline_opponent_ratio"])
+                if "baseline_opponent_type" in live_data:
+                    env_cfg["baseline_opponent_type"] = str(live_data["baseline_opponent_type"])
+                elif "baseline_opponent_model" in live_data:
+                    env_cfg["baseline_opponent_type"] = str(live_data["baseline_opponent_model"])
         except Exception:
             pass
 
@@ -534,8 +546,32 @@ def create_ui():
                 with gr.Group():
                     with gr.Row():
                         with gr.Column():
-                            gr.Markdown("### 👥 Opponent Matchup Distribution")
-                            baseline_opp_slider = gr.Slider(0.0, 1.0, value=float(env_cfg.get("baseline_opponent_ratio", 0.25)), step=0.01, label="Baseline Bot Matchup Ratio", info="Proportion of match environments paired against heuristic baseline bot vs self-play.")
+                            gr.Markdown("### 👥 Opponent Bot Matchup & Mixup Training")
+                            with gr.Row():
+                                initial_opp = env_cfg.get("baseline_opponent_type", "heuristic")
+                                opp_choices = get_available_opponent_options()
+                                default_opp_val = opp_choices[0]
+                                for opt in opp_choices:
+                                    if initial_opp.lower() in opt.lower() or opt.replace("\\", "/").endswith(initial_opp.replace("\\", "/")):
+                                        default_opp_val = opt
+                                        break
+                                
+                                opponent_bot_dropdown = gr.Dropdown(
+                                    choices=opp_choices,
+                                    value=default_opp_val,
+                                    label="Opponent Bot Model / Checkpoint",
+                                    info="Select the opponent model to spar against (Necto, Nexto, ActorCritic Checkpoints, or Heuristic Chaser).",
+                                    scale=3
+                                )
+                                refresh_opponent_btn = gr.Button("🔄 Scan", scale=1)
+
+                            baseline_opp_slider = gr.Slider(
+                                0.0, 1.0,
+                                value=float(env_cfg.get("baseline_opponent_ratio", 0.25)),
+                                step=0.01,
+                                label="Opponent Bot Matchup Ratio (Mixup Proportion)",
+                                info="Proportion of match environments paired against selected opponent bot vs self-play (0% = Pure Self-Play, 100% = Pure Opponent Sparring)."
+                            )
                         with gr.Column():
                             gr.Markdown("### 👤 Human Replay Guidance (BC)")
                             bc_weight_slider = gr.Slider(0.0, 1.0, value=float(hp_cfg.get("bc_regularization_weight", 0.10)), step=0.01, label="Replay Guidance Weight (Continuous Trajectory)", info="Nudges vehicle steering, throttle pacing, and aerial orientation from human replays.")
@@ -938,17 +974,17 @@ def create_ui():
             running = status.get("running", False)
             paused = status.get("paused", False)
 
-            start_btn_update = gr.Button(
+            start_btn_update = gr.update(
                 value="🚀 Start Training" if not running else "🟢 Training Active",
                 variant="primary" if not running else "secondary",
                 interactive=not running
             )
-            pause_btn_update = gr.Button(
+            pause_btn_update = gr.update(
                 value="▶️ Resume Training" if paused else "⏸️ Pause Training",
                 variant="primary" if paused else "secondary",
                 interactive=running
             )
-            stop_btn_update = gr.Button(
+            stop_btn_update = gr.update(
                 value="🛑 Stop Training",
                 variant="stop" if running else "secondary",
                 interactive=running
@@ -956,7 +992,7 @@ def create_ui():
             return card_html, start_btn_update, pause_btn_update, stop_btn_update
 
         # Training Controls
-        def on_start(resume_latest):
+        def on_start(resume_latest: bool = True):
             ckpt = "checkpoints/latest_model.pt" if (resume_latest and os.path.exists("checkpoints/latest_model.pt")) else None
             success, msg = mgr.start_training(checkpoint_path=ckpt)
             time.sleep(0.3)
@@ -993,7 +1029,7 @@ def create_ui():
             b2g_w, p2b_w, jb_w, pw_w, tch_w,
             bg_w, bl_w,
             k_p, r_p, a_p, tr_p, w_p, s_p,
-            base_opp, bc_w, bc_dec
+            opp_bot, base_opp, bc_w, bc_dec
         ):
             rewards = {
                 "goal_weight": float(g_w),
@@ -1015,9 +1051,15 @@ def create_ui():
                 "wall_prob": float(w_p),
                 "save_prob": float(s_p)
             }
+
+            clean_opp_type = "heuristic"
+            if opp_bot and not str(opp_bot).startswith("Heuristic"):
+                clean_opp_type = str(opp_bot).strip()
+
             payload = {
                 "rewards": rewards,
                 "scenarios": scenarios,
+                "baseline_opponent_type": clean_opp_type,
                 "baseline_opponent_ratio": float(base_opp),
                 "bc_regularization_weight": float(bc_w),
                 "bc_decay_steps": int(bc_dec)
@@ -1029,6 +1071,7 @@ def create_ui():
                 base_cfg["scenarios"] = scenarios
                 if "environment" not in base_cfg:
                     base_cfg["environment"] = {}
+                base_cfg["environment"]["baseline_opponent_type"] = clean_opp_type
                 base_cfg["environment"]["baseline_opponent_ratio"] = float(base_opp)
                 if "hyperparameters" not in base_cfg:
                     base_cfg["hyperparameters"] = {}
@@ -1037,7 +1080,7 @@ def create_ui():
                 save_yaml_config(base_cfg, "config/default_config.yaml")
             except Exception:
                 pass
-            return f"✅ **Live Training Dials applied and saved at {time.strftime('%H:%M:%S')}!** Rewards, scenarios, opponent matchups, and replay guidance updated dynamically."
+            return f"✅ **Live Training Dials applied and saved at {time.strftime('%H:%M:%S')}!** Opponent: `{os.path.basename(clean_opp_type)}` (Ratio: `{float(base_opp):.0%}`), Rewards & Scenarios updated."
 
         apply_rewards_btn.click(
             fn=on_apply_rewards,
@@ -1046,9 +1089,14 @@ def create_ui():
                 ball_to_goal_slider, player_to_ball_slider, jump_bridge_slider, powerslide_slider, touch_slider,
                 boost_gain_slider, boost_lose_slider,
                 kickoff_prob_slider, replay_prob_slider, aerial_prob_slider, turnaround_prob_slider, wall_prob_slider, save_prob_slider,
-                baseline_opp_slider, bc_weight_slider, bc_decay_input
+                opponent_bot_dropdown, baseline_opp_slider, bc_weight_slider, bc_decay_input
             ],
             outputs=[reward_apply_msg]
+        )
+
+        refresh_opponent_btn.click(
+            fn=lambda: gr.Dropdown(choices=get_available_opponent_options()),
+            outputs=[opponent_bot_dropdown]
         )
 
         # Dynamic 100% Normalized Scenario Rebalancing Handler (6 Scenario Mix)
@@ -1230,9 +1278,17 @@ def create_ui():
             ]
         )
 
-        # Periodic timer if auto-refresh is active
-        timer = gr.Timer(3.0, active=True)
-        auto_refresh_chk.change(fn=lambda v: gr.Timer(active=v), inputs=[auto_refresh_chk], outputs=[timer])
+        # Periodic timer if auto-refresh is active (starts inactive matching checkbox value)
+        timer = gr.Timer(3.0, active=False)
+        
+        def on_toggle_auto_refresh(val=False):
+            return gr.Timer(active=bool(val))
+
+        auto_refresh_chk.change(
+            fn=on_toggle_auto_refresh,
+            inputs=[auto_refresh_chk],
+            outputs=[timer]
+        )
         timer.tick(
             fn=on_refresh_metrics,
             outputs=[

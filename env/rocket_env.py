@@ -11,7 +11,7 @@ from env.physics_engine import RocketSimArena, CarState
 from env.rewards import RewardManager
 from env.observations import DefaultObservationBuilder
 from env.actions import ContinuousActionParser, DiscreteActionParser
-from env.baseline_agent import BaselineChaser
+from env.baseline_agent import BaselineChaser, BaseOpponent, create_opponent_bot
 
 
 class RocketLeagueEnv:
@@ -27,7 +27,8 @@ class RocketLeagueEnv:
         reward_weights: Optional[Dict[str, float]] = None,
         continuous_actions: bool = True,
         self_play: bool = True,
-        is_baseline_env: bool = False
+        is_baseline_env: bool = False,
+        baseline_opponent_type: str = "heuristic"
     ):
         self.game_mode = game_mode
         self.num_players = 2 if game_mode == "1v1" else (4 if game_mode == "2v2" else 6)
@@ -36,7 +37,8 @@ class RocketLeagueEnv:
         self.self_play = self_play
         self.is_baseline_env = is_baseline_env
         self.continuous_actions = continuous_actions
-        self.baseline_bot = BaselineChaser(continuous_actions=continuous_actions) if is_baseline_env else None
+        self.baseline_opponent_type = baseline_opponent_type
+        self.baseline_bot = create_opponent_bot(baseline_opponent_type, continuous_actions=continuous_actions) if is_baseline_env else None
 
         self.arena = RocketSimArena(num_players=self.num_players, game_mode=game_mode)
         self.obs_builder = DefaultObservationBuilder(symmetric=True)
@@ -79,9 +81,9 @@ class RocketLeagueEnv:
         self.current_step += 1
         actions_to_parse = raw_actions.copy()
 
-        # If baseline environment in 1v1, override Orange bot action with BaselineChaser
+        # If baseline environment in 1v1, override Orange bot action with BaselineChaser / Opponent Bot
         if self.is_baseline_env and self.baseline_bot is not None and len(self.arena.cars) > 1:
-            actions_to_parse[1] = self.baseline_bot.get_action(self.arena.cars[1], self.arena.ball)
+            actions_to_parse[1] = self.baseline_bot.get_action(self.arena.cars[1], self.arena)
 
         parsed_actions = self.action_parser.parse_actions(actions_to_parse)
 
@@ -154,7 +156,8 @@ class VectorizedRocketEnv:
         reward_weights: Optional[Dict[str, float]] = None,
         continuous_actions: bool = True,
         self_play: bool = True,
-        baseline_opponent_ratio: float = 0.25
+        baseline_opponent_ratio: float = 0.25,
+        baseline_opponent_type: str = "heuristic"
     ):
         self.num_envs = num_envs
         self.game_mode = game_mode
@@ -164,6 +167,7 @@ class VectorizedRocketEnv:
         self.continuous_actions = continuous_actions
         self.self_play = self_play
         self.baseline_opponent_ratio = max(0.0, min(1.0, baseline_opponent_ratio))
+        self.baseline_opponent_type = baseline_opponent_type
 
         num_baseline = int(round(num_envs * self.baseline_opponent_ratio)) if game_mode == "1v1" else 0
         self.envs = [
@@ -174,7 +178,8 @@ class VectorizedRocketEnv:
                 reward_weights=reward_weights,
                 continuous_actions=continuous_actions,
                 self_play=self_play,
-                is_baseline_env=(i >= num_envs - num_baseline)
+                is_baseline_env=(i >= num_envs - num_baseline),
+                baseline_opponent_type=baseline_opponent_type
             )
             for i in range(num_envs)
         ]
@@ -189,12 +194,20 @@ class VectorizedRocketEnv:
 
     def update_baseline_ratio(self, ratio: float):
         """Dynamically reconfigures the number of environments running against the baseline opponent."""
+        self.update_baseline_opponent(ratio=ratio, opponent_type=self.baseline_opponent_type)
+
+    def update_baseline_opponent(self, ratio: float, opponent_type: Optional[str] = None):
+        """Dynamically reconfigures baseline ratio and/or opponent bot type across all vectorized environments."""
         self.baseline_opponent_ratio = max(0.0, min(1.0, ratio))
+        if opponent_type is not None:
+            self.baseline_opponent_type = opponent_type
+
         num_baseline = int(round(self.num_envs * self.baseline_opponent_ratio)) if self.game_mode == "1v1" else 0
         for i, env in enumerate(self.envs):
             is_baseline = (i >= self.num_envs - num_baseline)
             env.is_baseline_env = is_baseline
-            env.baseline_bot = BaselineChaser(continuous_actions=self.continuous_actions) if is_baseline else None
+            env.baseline_opponent_type = self.baseline_opponent_type
+            env.baseline_bot = create_opponent_bot(self.baseline_opponent_type, continuous_actions=self.continuous_actions) if is_baseline else None
 
     def get_learner_mask(self) -> np.ndarray:
         """
