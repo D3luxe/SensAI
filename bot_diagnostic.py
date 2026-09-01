@@ -44,11 +44,14 @@ class DiagnosticBot(BaseAgent):
         self.cooldown_tick = 0
         self.total_tests = 5
         
+        # Wavedash internal state
+        self.wavedash_phase = "INIT"
+        
         self.test_names = [
             "1. KICKOFF FRONT-FLIP (pitch=-1.0, jump=True)",
             "2. STEER RIGHT (steer=+1.0) & STEER LEFT (steer=-1.0)",
             "3. VERTICAL FAST AERIAL (pitch=+1.0 + Boost Climb)",
-            "4. WAVEDASH (Hop -> Tilt Up -> Turf Slam)",
+            "4. TEXTBOOK WAVEDASH (Hop -> Tilt Up -> Touchdown Slam)",
             "5. AUTONOMOUS BALL TRACKING (Observation Check)"
         ]
 
@@ -74,10 +77,11 @@ class DiagnosticBot(BaseAgent):
         is_round_active = getattr(packet.game_info, "is_round_active", True)
 
         if is_kickoff_pause or not is_round_active:
-            controller.throttle = 1.0  # Hold gas ready for green light
+            controller.throttle = 1.0
             self.test_tick = 0
             self.state = "TEST"
             self.current_test = 0
+            self.wavedash_phase = "INIT"
             self._render_hud(controller, "KICKOFF COUNTDOWN (Waiting for GO!)...", speed, car_pos, is_on_ground, countdown="3... 2... 1...")
             return controller
 
@@ -100,6 +104,7 @@ class DiagnosticBot(BaseAgent):
                 self.state = "TEST"
                 self.test_tick = 0
                 self.cooldown_tick = 0
+                self.wavedash_phase = "INIT"
                 print(f"\n=======================================================")
                 print(f"[SensAI Diag] STARTING TEST {self.current_test + 1}/{self.total_tests}: {self.test_names[self.current_test]}")
                 print(f"=======================================================")
@@ -121,19 +126,15 @@ class DiagnosticBot(BaseAgent):
             controller.boost = True
 
             if t < 55:
-                # Drive forward down center line
                 controller.jump = False
                 status_msg = f"Charging toward ball with boost... (Speed: {speed:.0f} uu/s)"
             elif 55 <= t < 59:
-                # Ground jump liftoff
                 controller.jump = True
                 status_msg = "Step 1: Ground Jump Liftoff (jump=True)"
             elif 59 <= t < 62:
-                # Airborne jump release
                 controller.jump = False
                 status_msg = "Step 2: Jump Release (jump=False)"
             elif 62 <= t < 66:
-                # FRONT-FLIP TRIGGER: pitch = -1.0 (Down) + jump = True
                 controller.jump = True
                 controller.pitch = -1.0
                 status_msg = "Step 3: FRONT-FLIP TRIGGER (pitch=-1.0, jump=True)"
@@ -150,15 +151,12 @@ class DiagnosticBot(BaseAgent):
             controller.throttle = 0.75
 
             if t < 50:
-                # Steer RIGHT is +0.8
                 controller.steer = 0.8
                 status_msg = "STEERING RIGHT (steer=+0.8) -> Car turns RIGHT (+X)"
             elif 50 <= t < 100:
-                # Steer LEFT is -0.8
                 controller.steer = -0.8
                 status_msg = "STEERING LEFT (steer=-0.8) -> Car turns LEFT (-X)"
             elif 100 <= t < 150:
-                # Re-center right
                 controller.steer = 0.8
                 status_msg = "RE-CENTERING (steer=+0.8) -> Straightening"
             else:
@@ -176,25 +174,21 @@ class DiagnosticBot(BaseAgent):
                 controller.jump = False
                 status_msg = "Approaching aerial launch..."
             elif 18 <= t < 22:
-                # Jump 1: Liftoff & Tilt nose UP (+1.0 in RLBot)
                 controller.jump = True
                 controller.pitch = 1.0  # Nose UP is +1.0
                 controller.boost = True
                 status_msg = "Jump 1: Liftoff + Pitch Up (pitch=+1.0)"
             elif 22 <= t < 25:
-                # Release jump AND center pitch stick to 0.0 to prevent backflip dodge!
                 controller.jump = False
                 controller.pitch = 0.0  # Neutral pitch stick
                 controller.boost = True
                 status_msg = "Jump Release + Stick Centered (pitch=0.0)"
             elif 25 <= t < 28:
-                # Jump 2: Pure vertical double jump impulse
                 controller.jump = True
                 controller.pitch = 0.0  # Neutral pitch = Double Jump impulse (NO FLIP!)
                 controller.boost = True
                 status_msg = "Jump 2: Double Jump Pulse (jump=True, pitch=0.0)"
             else:
-                # Airborne flight: Pitch up and boost into the ceiling!
                 controller.jump = False
                 controller.pitch = 0.8 if car_pos.z < 800 else 0.2
                 controller.boost = (car_pos.z < 1600)
@@ -203,33 +197,46 @@ class DiagnosticBot(BaseAgent):
             if t >= 260 or (t > 70 and is_on_ground):
                 self._start_cooldown()
 
-        # ── Test 3: Center Wavedash (Hop -> Tilt Up -> Turf Slam) ────────────
+        # ── Test 3: Sensor-Driven Textbook Wavedash ──────────────────────────
         elif mode == 3:
             controller.throttle = 1.0
 
-            if t < 18:
+            if t < 15:
+                # Roll forward
                 controller.jump = False
+                self.wavedash_phase = "DRIVE"
                 status_msg = "Rolling forward..."
-            elif 18 <= t < 21:
-                # Short hop
+            elif 15 <= t < 18:
+                # 3-tick short hop
                 controller.jump = True
-                status_msg = "Short hop"
-            elif 21 <= t < 36:
-                # Tilt nose slightly UP (+0.5) while falling back to turf
+                self.wavedash_phase = "HOP"
+                status_msg = "Short hop liftoff"
+            elif self.wavedash_phase in ["HOP", "TILT"]:
+                # Airborne: Tilt nose UP (pitch=+0.4) while monitoring descent!
                 controller.jump = False
-                controller.pitch = 0.5  # Nose UP is +0.5
-                status_msg = "Tilting nose UP (+0.5) waiting for rear wheel touch..."
-            elif 36 <= t < 40:
-                # Frontflip into the turf as wheels touch down (pitch = -1.0)
-                controller.jump = True
-                controller.pitch = -1.0  # Frontflip (-1.0) into ground
-                controller.handbrake = True
-                status_msg = "WAVEDASH SLAM (pitch=-1.0, jump=True, handbrake=True)"
-            else:
-                controller.jump = False
-                controller.pitch = 0.0
-                controller.handbrake = (t < 65)
-                status_msg = f"Wavedash landed! Speed: {speed:.0f} uu/s"
+                controller.pitch = 0.4
+                self.wavedash_phase = "TILT"
+                status_msg = f"Airborne: Nose tilted UP (+0.4) | Z={car_pos.z:.0f} Vz={car_vel.z:+.0f}"
+
+                # Trigger condition: Car is falling (Vz < -30) and altitude is near ground touchdown (Z < 42 uu)
+                if car_vel.z < -30.0 and car_pos.z <= 42.0:
+                    self.wavedash_phase = "SLAM"
+                    self.slam_tick = t
+
+            if self.wavedash_phase == "SLAM":
+                # Frontflip into the grass as rear wheels touch down!
+                slam_elapsed = t - self.slam_tick
+                if slam_elapsed < 4:
+                    controller.jump = True
+                    controller.pitch = -1.0  # Slam frontflip into turf
+                    controller.handbrake = True
+                    status_msg = "REAR TOUCHDOWN: WAVEDASH FRONT-FLIP SLAM! (pitch=-1.0, jump=True)"
+                else:
+                    controller.jump = False
+                    controller.pitch = 0.0
+                    controller.handbrake = True
+                    self.wavedash_phase = "LANDED"
+                    status_msg = f"WAVEDASH LANDED! Speed: {speed:.0f} uu/s (+500 uu/s speed burst!)"
 
             if t >= 220:
                 self._start_cooldown()
