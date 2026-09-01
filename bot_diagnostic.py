@@ -1,11 +1,10 @@
 """
 RLBot In-Game Verification & Diagnostic Agent.
-Routines with precise in-game timing:
-  1. Test 1: Kickoff Speedflip/Frontflip - Charges downfield for 0.5s -> crisp frontflip -> supersonic smash into center ball!
-  2. Test 2: Steering Calibration - Steer Right (steer=-0.8) -> Steer Left (steer=+0.8) -> Straighten
-  3. Test 3: Vertical Fast Aerial - Jump 1 (pitch=-1.0) -> Jump 2 (neutral stick pitch=0.0) -> rocket climb to ceiling
-  4. Test 4: Wavedash - Short hop -> tilt up -> turf slam into instant acceleration
-  5. Test 5: Autonomous Ball Tracking - Computes angle to ball and steers directly into it
+EXACT VERIFIED IN-GAME HARDWARE/CONTROLLER MAPPINGS:
+  - Steering: steer = +1.0 turns RIGHT (+X), steer = -1.0 turns LEFT (-X)
+  - Pitch:    pitch = -1.0 is PITCH DOWN / FRONT-FLIP, pitch = +1.0 is PITCH UP / BACK-FLIP / AERIAL CLIMB
+  - Yaw:      yaw = +1.0 is YAW RIGHT, yaw = -1.0 is YAW LEFT
+  - Roll:     roll = +1.0 is ROLL RIGHT, roll = -1.0 is ROLL LEFT
 """
 
 import math
@@ -46,9 +45,9 @@ class DiagnosticBot(BaseAgent):
         self.total_tests = 5
         
         self.test_names = [
-            "1. KICKOFF FRONT-FLIP (pitch=+1.0, jump=True)",
-            "2. STEER RIGHT (steer=-1.0) & STEER LEFT (steer=+1.0)",
-            "3. VERTICAL FAST AERIAL (pitch=-1.0 + Boost Climb)",
+            "1. KICKOFF FRONT-FLIP (pitch=-1.0, jump=True)",
+            "2. STEER RIGHT (steer=+1.0) & STEER LEFT (steer=-1.0)",
+            "3. VERTICAL FAST AERIAL (pitch=+1.0 + Boost Climb)",
             "4. WAVEDASH (Hop -> Tilt Up -> Turf Slam)",
             "5. AUTONOMOUS BALL TRACKING (Observation Check)"
         ]
@@ -116,30 +115,29 @@ class DiagnosticBot(BaseAgent):
         mode = self.current_test
         status_msg = ""
 
-        # ── Test 0: Kickoff Front-Flip Smash ─────────────────────────────────
+        # ── Test 0: Kickoff Front-Flip Smash (pitch = -1.0) ───────────────────
         if mode == 0:
             controller.throttle = 1.0
             controller.boost = True
 
             if t < 55:
-                # Drive forward & build speed toward center ball (approx 0.45s)
+                # Drive forward down center line
                 controller.jump = False
                 status_msg = f"Charging toward ball with boost... (Speed: {speed:.0f} uu/s)"
             elif 55 <= t < 59:
-                # Ground jump liftoff (4 ticks = 33ms)
+                # Ground jump liftoff
                 controller.jump = True
                 status_msg = "Step 1: Ground Jump Liftoff (jump=True)"
             elif 59 <= t < 62:
-                # Airborne jump release (3 ticks = 25ms)
+                # Airborne jump release
                 controller.jump = False
                 status_msg = "Step 2: Jump Release (jump=False)"
             elif 62 <= t < 66:
-                # Trigger crisp forward dodge (frontflip): pitch=+1.0 + jump=True
+                # FRONT-FLIP TRIGGER: pitch = -1.0 (Down) + jump = True
                 controller.jump = True
-                controller.pitch = 1.0
-                status_msg = "Step 3: FRONT-FLIP TRIGGER (pitch=+1.0, jump=True)"
+                controller.pitch = -1.0
+                status_msg = "Step 3: FRONT-FLIP TRIGGER (pitch=-1.0, jump=True)"
             else:
-                # Boost through ball impact at supersonic speed (2200 uu/s)
                 controller.jump = False
                 controller.pitch = 0.0
                 status_msg = f"Front-flip complete! Peak Speed: {speed:.0f} uu/s (Supersonic Smash!)"
@@ -147,22 +145,22 @@ class DiagnosticBot(BaseAgent):
             if t >= 220:
                 self._start_cooldown()
 
-        # ── Test 1: Steering Calibration (Right with -1.0, Left with +1.0) ───
+        # ── Test 1: Steering Calibration (Right with +1.0, Left with -1.0) ───
         elif mode == 1:
             controller.throttle = 0.75
 
             if t < 50:
-                # Steer RIGHT is -0.8
-                controller.steer = -0.8
-                status_msg = "STEERING RIGHT (steer=-0.8) -> Car turns RIGHT (+X)"
-            elif 50 <= t < 100:
-                # Steer LEFT is +0.8
+                # Steer RIGHT is +0.8
                 controller.steer = 0.8
-                status_msg = "STEERING LEFT (steer=+0.8) -> Car turns LEFT (-X)"
+                status_msg = "STEERING RIGHT (steer=+0.8) -> Car turns RIGHT (+X)"
+            elif 50 <= t < 100:
+                # Steer LEFT is -0.8
+                controller.steer = -0.8
+                status_msg = "STEERING LEFT (steer=-0.8) -> Car turns LEFT (-X)"
             elif 100 <= t < 150:
                 # Re-center right
-                controller.steer = -0.8
-                status_msg = "RE-CENTERING (steer=-0.8) -> Straightening"
+                controller.steer = 0.8
+                status_msg = "RE-CENTERING (steer=+0.8) -> Straightening"
             else:
                 controller.steer = 0.0
                 status_msg = "Steering test complete! Driving straight"
@@ -178,11 +176,11 @@ class DiagnosticBot(BaseAgent):
                 controller.jump = False
                 status_msg = "Approaching aerial launch..."
             elif 18 <= t < 22:
-                # Jump 1: Liftoff & Tilt nose UP (-1.0 in RLBot)
+                # Jump 1: Liftoff & Tilt nose UP (+1.0 in RLBot)
                 controller.jump = True
-                controller.pitch = -1.0  # Nose UP
+                controller.pitch = 1.0  # Nose UP is +1.0
                 controller.boost = True
-                status_msg = "Jump 1: Liftoff + Pitch Up (-1.0)"
+                status_msg = "Jump 1: Liftoff + Pitch Up (pitch=+1.0)"
             elif 22 <= t < 25:
                 # Release jump AND center pitch stick to 0.0 to prevent backflip dodge!
                 controller.jump = False
@@ -192,13 +190,13 @@ class DiagnosticBot(BaseAgent):
             elif 25 <= t < 28:
                 # Jump 2: Pure vertical double jump impulse
                 controller.jump = True
-                controller.pitch = 0.0  # Neutral pitch = Double Jump impulse (NO BACKFLIP!)
+                controller.pitch = 0.0  # Neutral pitch = Double Jump impulse (NO FLIP!)
                 controller.boost = True
                 status_msg = "Jump 2: Double Jump Pulse (jump=True, pitch=0.0)"
             else:
                 # Airborne flight: Pitch up and boost into the ceiling!
                 controller.jump = False
-                controller.pitch = -0.8 if car_pos.z < 800 else -0.2
+                controller.pitch = 0.8 if car_pos.z < 800 else 0.2
                 controller.boost = (car_pos.z < 1600)
                 status_msg = f"AERIAL CLIMB! Height Z: {car_pos.z:.0f} uu | Vz: {car_vel.z:+.0f} uu/s"
 
@@ -217,16 +215,16 @@ class DiagnosticBot(BaseAgent):
                 controller.jump = True
                 status_msg = "Short hop"
             elif 21 <= t < 36:
-                # Tilt nose slightly UP (-0.5) while falling back to turf
+                # Tilt nose slightly UP (+0.5) while falling back to turf
                 controller.jump = False
-                controller.pitch = -0.5
-                status_msg = "Tilting nose UP (-0.5) waiting for rear wheel touch..."
+                controller.pitch = 0.5  # Nose UP is +0.5
+                status_msg = "Tilting nose UP (+0.5) waiting for rear wheel touch..."
             elif 36 <= t < 40:
-                # Frontflip into the turf as wheels touch down
+                # Frontflip into the turf as wheels touch down (pitch = -1.0)
                 controller.jump = True
-                controller.pitch = 1.0  # Frontflip (+1.0) into ground
+                controller.pitch = -1.0  # Frontflip (-1.0) into ground
                 controller.handbrake = True
-                status_msg = "WAVEDASH SLAM (pitch=+1.0, jump=True, handbrake=True)"
+                status_msg = "WAVEDASH SLAM (pitch=-1.0, jump=True, handbrake=True)"
             else:
                 controller.jump = False
                 controller.pitch = 0.0
@@ -253,8 +251,8 @@ class DiagnosticBot(BaseAgent):
             local_right = (dx * right_x + dy * right_y)
             angle_to_ball = math.atan2(local_right, local_fwd)
 
-            # Steer = -angle because steer = -1.0 is Right, +1.0 is Left
-            controller.steer = float(np.clip(-angle_to_ball * 2.5, -1.0, 1.0))
+            # Steer = +angle because steer = +1.0 is Right, -1.0 is Left
+            controller.steer = float(np.clip(angle_to_ball * 2.5, -1.0, 1.0))
             if abs(controller.steer) > 0.6:
                 controller.handbrake = (speed > 800)
 

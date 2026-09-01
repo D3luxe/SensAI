@@ -127,7 +127,7 @@ class TestPhysicsAndControls(unittest.TestCase):
         # In-Game Rocket League gamepad stick input mapping:
         self.assertAlmostEqual(ctrl.throttle, 0.8, places=4, msg="Throttle maps direct (+0.8 Forward)!")
         self.assertAlmostEqual(ctrl.steer, -0.7, places=4, msg="Steer is act[1] (act[1]=-0.7 Left maps to ctrl.steer=-0.7 Left)!")
-        self.assertAlmostEqual(ctrl.pitch, -0.9, places=4, msg="Pitch is act[2] (act[2]=-0.9 Pitch Up maps to ctrl.pitch=-0.9 Pull Stick Back)!")
+        self.assertAlmostEqual(ctrl.pitch, 0.9, places=4, msg="Pitch is -act[2] (act[2]=-0.9 Pitch Up maps to ctrl.pitch=+0.9 Pull Stick Back)!")
         self.assertAlmostEqual(ctrl.yaw, 0.6, places=4, msg="Yaw is act[3] (act[3]=+0.6 Right maps to ctrl.yaw=+0.6 Right)!")
         self.assertAlmostEqual(ctrl.roll, -0.5, places=4, msg="Roll is act[4] (act[4]=-0.5 Left maps to ctrl.roll=-0.5 Roll Left)!")
         self.assertTrue(ctrl.boost)
@@ -290,7 +290,7 @@ class TestPhysicsAndControls(unittest.TestCase):
         bot.ticks_since_last_action = 1
         ctrl_jump = bot.get_output(packet)
         self.assertTrue(ctrl_jump.jump, "Jump must be True when act[5] > 0.0")
-        self.assertAlmostEqual(ctrl_jump.pitch, -1.0, places=4, msg="Pitch must be active when jump is requested")
+        self.assertAlmostEqual(ctrl_jump.pitch, 1.0, places=4, msg="Pitch must be active when jump is requested")
 
     def test_kickoff_touch_state_tracking(self):
         """
