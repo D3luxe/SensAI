@@ -495,6 +495,7 @@ def create_ui():
                         ball_to_goal_slider = gr.Slider(0.0, 5.0, value=float(rew_cfg.get("ball_to_goal_weight", 1.5)), step=0.1, label="Ball-to-Goal Velocity Weight", info="Continuous field progression toward opponent net.")
                         player_to_ball_slider = gr.Slider(0.0, 3.0, value=float(rew_cfg.get("player_to_ball_weight", 0.6)), step=0.1, label="Player-to-Ball Approach & Control Weight", info="Distance-gated speed rush downfield with strike-zone pacing.")
                         jump_bridge_slider = gr.Slider(0.0, 1.0, value=float(rew_cfg.get("jump_bridge_weight", 0.35)), step=0.05, label="Jump & Aerial Takeoff Incentive", info="Takeoff & speed-flip transition bounty (2.0x on elevated aerials).")
+                        powerslide_slider = gr.Slider(0.0, 2.0, value=float(rew_cfg.get("powerslide_weight", 0.30)), step=0.05, label="Powerslide & Drift Cut Bounty (+pts)", info="Rewards handbrake powerslides on sharp ground recovery turns.")
                         touch_slider = gr.Slider(0.0, 5.0, value=float(rew_cfg.get("touch_weight", 1.2)), step=0.1, label="Directional Ball Strike Quality", info="Touch impact scaled by speed & goal alignment.")
 
                 with gr.Row():
@@ -521,13 +522,14 @@ def create_ui():
                             )
                     with gr.Row():
                         with gr.Column():
-                            kickoff_prob_slider = gr.Slider(0.0, 1.0, value=float(sc_cfg.get("kickoff_prob", 0.25)), step=0.01, label="Kickoff Scenario Probability", info="Standard 1v1 kickoff formations (diagonal, off-center, straight).")
-                            replay_prob_slider = gr.Slider(0.0, 1.0, value=float(sc_cfg.get("replay_prob", 0.30)), step=0.01, label="Human Replay Scenario Probability", info="Authentic match situations sampled from ingested replays.")
-                            aerial_prob_slider = gr.Slider(0.0, 1.0, value=float(sc_cfg.get("aerial_prob", 0.20)), step=0.01, label="High Aerial Scenario Probability", info="Floating & rising balls (z: 600-1500) for aerial training.")
+                            kickoff_prob_slider = gr.Slider(0.0, 1.0, value=float(sc_cfg.get("kickoff_prob", 0.30)), step=0.01, label="Kickoff Scenario Probability", info="Standard 1v1 kickoff formations (diagonal, off-center, straight).")
+                            replay_prob_slider = gr.Slider(0.0, 1.0, value=float(sc_cfg.get("replay_prob", 0.26)), step=0.01, label="Human Replay Scenario Probability", info="Authentic match situations sampled from ingested replays.")
+                            aerial_prob_slider = gr.Slider(0.0, 1.0, value=float(sc_cfg.get("aerial_prob", 0.12)), step=0.01, label="High Aerial Scenario Probability", info="Floating & rising balls (z: 600-1500) for aerial training.")
 
                         with gr.Column():
+                            turnaround_prob_slider = gr.Slider(0.0, 1.0, value=float(sc_cfg.get("turnaround_prob", 0.12)), step=0.01, label="Turnaround Recovery Probability", info="Fast downfield spawns moving away from ball to force 180° cuts.")
                             wall_prob_slider = gr.Slider(0.0, 1.0, value=float(sc_cfg.get("wall_prob", 0.10)), step=0.01, label="Wall Play Scenario Probability", info="Sidewall rolling and backboard rebound situations.")
-                            save_prob_slider = gr.Slider(0.0, 1.0, value=float(sc_cfg.get("save_prob", 0.15)), step=0.01, label="Goalie Save Scenario Probability", info="Fast opponent shots heading on target into defending net.")
+                            save_prob_slider = gr.Slider(0.0, 1.0, value=float(sc_cfg.get("save_prob", 0.10)), step=0.01, label="Goalie Save Scenario Probability", info="Fast opponent shots heading on target into defending net.")
 
                 with gr.Group():
                     with gr.Row():
@@ -988,9 +990,9 @@ def create_ui():
         # Apply Live Training Dials (Rewards, Scenarios, Opponents, BC Guidance)
         def on_apply_rewards(
             g_w, c_w, sv_w,
-            b2g_w, p2b_w, jb_w, tch_w,
+            b2g_w, p2b_w, jb_w, pw_w, tch_w,
             bg_w, bl_w,
-            k_p, r_p, a_p, w_p, s_p,
+            k_p, r_p, a_p, tr_p, w_p, s_p,
             base_opp, bc_w, bc_dec
         ):
             rewards = {
@@ -1000,6 +1002,7 @@ def create_ui():
                 "ball_to_goal_weight": float(b2g_w),
                 "player_to_ball_weight": float(p2b_w),
                 "jump_bridge_weight": float(jb_w),
+                "powerslide_weight": float(pw_w),
                 "touch_weight": float(tch_w),
                 "boost_gain_weight": float(bg_w),
                 "boost_lose_weight": float(bl_w)
@@ -1008,6 +1011,7 @@ def create_ui():
                 "kickoff_prob": float(k_p),
                 "replay_prob": float(r_p),
                 "aerial_prob": float(a_p),
+                "turnaround_prob": float(tr_p),
                 "wall_prob": float(w_p),
                 "save_prob": float(s_p)
             }
@@ -1039,23 +1043,23 @@ def create_ui():
             fn=on_apply_rewards,
             inputs=[
                 goal_slider, concede_slider, save_slider,
-                ball_to_goal_slider, player_to_ball_slider, jump_bridge_slider, touch_slider,
+                ball_to_goal_slider, player_to_ball_slider, jump_bridge_slider, powerslide_slider, touch_slider,
                 boost_gain_slider, boost_lose_slider,
-                kickoff_prob_slider, replay_prob_slider, aerial_prob_slider, wall_prob_slider, save_prob_slider,
+                kickoff_prob_slider, replay_prob_slider, aerial_prob_slider, turnaround_prob_slider, wall_prob_slider, save_prob_slider,
                 baseline_opp_slider, bc_weight_slider, bc_decay_input
             ],
             outputs=[reward_apply_msg]
         )
 
-        # Dynamic 100% Normalized Scenario Rebalancing Handler
-        def rebalance_scenarios_handler(changed_idx, new_val, k, r, a, w, s):
-            current_vals = [float(k), float(r), float(a), float(w), float(s)]
+        # Dynamic 100% Normalized Scenario Rebalancing Handler (6 Scenario Mix)
+        def rebalance_scenarios_handler(changed_idx, new_val, k, r, a, tr, w, s):
+            current_vals = [float(k), float(r), float(a), float(tr), float(w), float(s)]
             new_val = round(max(0.0, min(1.0, float(new_val))), 2)
             vals = list(current_vals)
             vals[changed_idx] = new_val
 
             rem = round(1.0 - new_val, 4)
-            other_indices = [i for i in range(5) if i != changed_idx]
+            other_indices = [i for i in range(6) if i != changed_idx]
             other_sum = sum(vals[i] for i in other_indices)
 
             if other_sum > 1e-6:
@@ -1079,33 +1083,34 @@ def create_ui():
                 <span class="status-badge-running" style="font-size: 1.0em; padding: 6px 16px;">● Total Mix: {tot_pct}%</span>
             </div>
             """
-            return out[0], out[1], out[2], out[3], out[4], badge_html
+            return out[0], out[1], out[2], out[3], out[4], out[5], badge_html
 
-        scenario_sliders = [kickoff_prob_slider, replay_prob_slider, aerial_prob_slider, wall_prob_slider, save_prob_slider]
-        scenario_outputs = [kickoff_prob_slider, replay_prob_slider, aerial_prob_slider, wall_prob_slider, save_prob_slider, scenario_total_badge]
+        scenario_sliders = [kickoff_prob_slider, replay_prob_slider, aerial_prob_slider, turnaround_prob_slider, wall_prob_slider, save_prob_slider]
+        scenario_outputs = [kickoff_prob_slider, replay_prob_slider, aerial_prob_slider, turnaround_prob_slider, wall_prob_slider, save_prob_slider, scenario_total_badge]
 
-        kickoff_prob_slider.release(fn=lambda v, k, r, a, w, s: rebalance_scenarios_handler(0, v, k, r, a, w, s), inputs=[kickoff_prob_slider] + scenario_sliders, outputs=scenario_outputs)
-        replay_prob_slider.release(fn=lambda v, k, r, a, w, s: rebalance_scenarios_handler(1, v, k, r, a, w, s), inputs=[replay_prob_slider] + scenario_sliders, outputs=scenario_outputs)
-        aerial_prob_slider.release(fn=lambda v, k, r, a, w, s: rebalance_scenarios_handler(2, v, k, r, a, w, s), inputs=[aerial_prob_slider] + scenario_sliders, outputs=scenario_outputs)
-        wall_prob_slider.release(fn=lambda v, k, r, a, w, s: rebalance_scenarios_handler(3, v, k, r, a, w, s), inputs=[wall_prob_slider] + scenario_sliders, outputs=scenario_outputs)
-        save_prob_slider.release(fn=lambda v, k, r, a, w, s: rebalance_scenarios_handler(4, v, k, r, a, w, s), inputs=[save_prob_slider] + scenario_sliders, outputs=scenario_outputs)
+        kickoff_prob_slider.release(fn=lambda v, k, r, a, tr, w, s: rebalance_scenarios_handler(0, v, k, r, a, tr, w, s), inputs=[kickoff_prob_slider] + scenario_sliders, outputs=scenario_outputs)
+        replay_prob_slider.release(fn=lambda v, k, r, a, tr, w, s: rebalance_scenarios_handler(1, v, k, r, a, tr, w, s), inputs=[replay_prob_slider] + scenario_sliders, outputs=scenario_outputs)
+        aerial_prob_slider.release(fn=lambda v, k, r, a, tr, w, s: rebalance_scenarios_handler(2, v, k, r, a, tr, w, s), inputs=[aerial_prob_slider] + scenario_sliders, outputs=scenario_outputs)
+        turnaround_prob_slider.release(fn=lambda v, k, r, a, tr, w, s: rebalance_scenarios_handler(3, v, k, r, a, tr, w, s), inputs=[turnaround_prob_slider] + scenario_sliders, outputs=scenario_outputs)
+        wall_prob_slider.release(fn=lambda v, k, r, a, tr, w, s: rebalance_scenarios_handler(4, v, k, r, a, tr, w, s), inputs=[wall_prob_slider] + scenario_sliders, outputs=scenario_outputs)
+        save_prob_slider.release(fn=lambda v, k, r, a, tr, w, s: rebalance_scenarios_handler(5, v, k, r, a, tr, w, s), inputs=[save_prob_slider] + scenario_sliders, outputs=scenario_outputs)
 
         def on_reset_rewards():
             return (
-                20.0, -20.0, 3.0,
-                1.5, 0.6, 0.35, 1.2,
+                30.0, -30.0, 8.0,
+                1.5, 0.6, 0.35, 0.30, 1.2,
                 0.6, 0.3,
-                0.25, 0.30, 0.20, 0.10, 0.15,
-                0.25, 0.10, 150000000
+                0.30, 0.26, 0.12, 0.12, 0.10, 0.10,
+                0.05, 0.15, 150000000
             )
 
         reset_rewards_btn.click(
             fn=on_reset_rewards,
             outputs=[
                 goal_slider, concede_slider, save_slider,
-                ball_to_goal_slider, player_to_ball_slider, jump_bridge_slider, touch_slider,
+                ball_to_goal_slider, player_to_ball_slider, jump_bridge_slider, powerslide_slider, touch_slider,
                 boost_gain_slider, boost_lose_slider,
-                kickoff_prob_slider, replay_prob_slider, aerial_prob_slider, wall_prob_slider, save_prob_slider,
+                kickoff_prob_slider, replay_prob_slider, aerial_prob_slider, turnaround_prob_slider, wall_prob_slider, save_prob_slider,
                 baseline_opp_slider, bc_weight_slider, bc_decay_input
             ]
         )
