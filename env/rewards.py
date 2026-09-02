@@ -266,7 +266,12 @@ class PlayerToBallVelocityReward(BaseReward):
                 fwd_speed_to_ball = max(0.0, float(np.dot(car.vel, unit_to_ball)))
                 vel_toward_ball = (fwd_speed_to_ball / 2300.0) * 0.20 * max(0.0, fwd_alignment) * speed_taper
 
-        total_reward = (self.weight * delta_dist) + vel_toward_ball + vel_matching_bonus + brake_incentive + overshoot_penalty + ceiling_penalty + wrong_side_push_penalty
+        # 5. Wrong-Way Ground Rush Penalty (Incentivizes coasting/braking/turning when facing away)
+        wrong_way_throttle_penalty = 0.0
+        if car.on_ground and fwd_alignment < -0.3 and float(action[0]) > 0.4:
+            wrong_way_throttle_penalty = -0.15 * float(action[0]) * abs(fwd_alignment)
+
+        total_reward = (self.weight * delta_dist) + vel_toward_ball + vel_matching_bonus + brake_incentive + overshoot_penalty + ceiling_penalty + wrong_side_push_penalty + wrong_way_throttle_penalty
         return float(total_reward)
 
 
@@ -463,10 +468,10 @@ class BoostReward(BaseReward):
             height_factor = max(0.2, 1.0 - (car.pos[2] / GOAL_HEIGHT))
             loss_rew = self.lose_weight * boost_diff * height_factor
 
-            # Supersonic boost waste penalty: burning boost when already at max speed (>= 2100 uu/s)
+            # Supersonic boost waste penalty: burning boost when already at max speed (>= 2150 uu/s)
             speed = float(np.linalg.norm(car.vel))
-            if speed >= 2100.0 and action[6] > 0.0:
-                loss_rew -= 0.15
+            if speed >= 2150.0 and action[6] > 0.0:
+                loss_rew -= 0.20
 
             # Ceiling boost waste penalty: burning boost along ceiling while ball is below
             if car.pos[2] > 1750.0 and action[6] > 0.0 and arena.ball.pos[2] < car.pos[2] - 250.0:

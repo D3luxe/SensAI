@@ -53,6 +53,11 @@ class ActorCritic(nn.Module):
 
         self.register_buffer("obs_mirror_mask", torch.tensor(OBS_MIRROR_MASK_NP, dtype=torch.float32), persistent=False)
         self.register_buffer("act_mirror_mask", torch.tensor(ACT_MIRROR_MASK_NP, dtype=torch.float32), persistent=False)
+        # Calibrated deterministic activation thresholds for binary Bernoulli buttons:
+        # Index 0 (Jump): p > 0.35 (logit > -0.6190)
+        # Index 1 (Boost): p > 0.25 (logit > -1.0986)
+        # Index 2 (Handbrake): p > 0.20 (logit > -1.3863)
+        self.register_buffer("bin_thresh_logits", torch.tensor([-0.6190, -1.0986, -1.3863], dtype=torch.float32), persistent=False)
 
         act_cls = get_activation_cls(activation)
 
@@ -91,7 +96,8 @@ class ActorCritic(nn.Module):
     def debias_symmetric_actions(self):
         """
         Re-centers the actor output layer biases for antisymmetric action axes (steer, yaw, roll)
-        to strictly zero, and defaults binary button biases (jump, boost, handbrake) to neutral 0.0.
+        to strictly zero, defaults binary button biases (jump, boost, handbrake) to neutral 0.0,
+        and bounds actor_log_std within healthy exploration ranges.
         """
         with torch.no_grad():
             if self.continuous_actions and hasattr(self, "actor_mean"):
@@ -107,6 +113,13 @@ class ActorCritic(nn.Module):
                     self.actor_binary.bias.data[0] = torch.clamp(self.actor_binary.bias.data[0], min=-0.5, max=0.5)
                     self.actor_binary.bias.data[1] = torch.clamp(self.actor_binary.bias.data[1], min=-0.5, max=0.5)
                     self.actor_binary.bias.data[2] = torch.clamp(self.actor_binary.bias.data[2], min=-0.5, max=0.5)
+
+                if hasattr(self, "actor_log_std") and self.actor_log_std is not None:
+                    # Recover from underflow or parameter drift
+                    if torch.isnan(self.actor_log_std).any() or (self.actor_log_std.abs() < 1e-6).any() or (self.actor_log_std > -1.0).any():
+                        self.actor_log_std.data.fill_(-1.5)
+                    else:
+                        self.actor_log_std.data.clamp_(min=-2.5, max=-1.2)
 
                 # Desaturate actor_mean weights if they exceeded linear analog range
                 weight_norm = self.actor_mean.weight.data.norm(dim=1, keepdim=True)
@@ -181,7 +194,8 @@ class ActorCritic(nn.Module):
             if action is None:
                 if deterministic:
                     act_cont = action_mean
-                    act_bin = (bin_logits > 0.0).float() * 2.0 - 1.0
+                    thresh = self.bin_thresh_logits.to(bin_logits.device)
+                    act_bin = (bin_logits > thresh).float() * 2.0 - 1.0
                 else:
                     act_cont = dist_cont.rsample()
                     act_bin = dist_bin.sample() * 2.0 - 1.0

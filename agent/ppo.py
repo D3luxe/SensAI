@@ -573,6 +573,10 @@ class PPOTrainer:
                     nn.utils.clip_grad_norm_(self.agent.parameters(), self.max_grad_norm)
                     self.optimizer.step()
 
+                    # In-place guard for exploration standard deviation parameter
+                    if self.continuous_actions and hasattr(self.agent, "actor_log_std"):
+                        self.agent.actor_log_std.data.clamp_(min=-2.5, max=-1.2)
+
                     pg_losses.append(pg_loss.item())
                     v_losses.append(v_loss.item())
                     entropy_losses.append(entropy_loss.item())
