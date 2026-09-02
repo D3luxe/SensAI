@@ -8,6 +8,7 @@ import os
 import sys
 import glob
 import time
+import math
 import json
 import yaml
 import torch
@@ -28,6 +29,12 @@ from utils.diagnostics import (
     render_action_biases_plot,
     render_positional_biases_plot,
     generate_ai_coach_diagnostics
+)
+from utils.scenario_manager import (
+    ScenarioManager,
+    render_scenario_visual_guide,
+    simulate_custom_scenario,
+    DEFAULT_CUSTOM_SCENARIOS
 )
 
 
@@ -535,14 +542,25 @@ def create_ui():
                             )
                     with gr.Row():
                         with gr.Column():
-                            kickoff_prob_slider = gr.Slider(0.0, 1.0, value=float(sc_cfg.get("kickoff_prob", 0.30)), step=0.01, label="Kickoff Scenario Probability", info="Standard 1v1 kickoff formations (diagonal, off-center, straight).")
-                            replay_prob_slider = gr.Slider(0.0, 1.0, value=float(sc_cfg.get("replay_prob", 0.26)), step=0.01, label="Human Replay Scenario Probability", info="Authentic match situations sampled from ingested replays.")
+                            kickoff_prob_slider = gr.Slider(0.0, 1.0, value=float(sc_cfg.get("kickoff_prob", 0.28)), step=0.01, label="Kickoff Scenario Probability", info="Standard 1v1 kickoff formations (diagonal, off-center, straight).")
+                            replay_prob_slider = gr.Slider(0.0, 1.0, value=float(sc_cfg.get("replay_prob", 0.22)), step=0.01, label="Human Replay Scenario Probability", info="Authentic match situations sampled from ingested replays.")
                             aerial_prob_slider = gr.Slider(0.0, 1.0, value=float(sc_cfg.get("aerial_prob", 0.12)), step=0.01, label="High Aerial Scenario Probability", info="Floating & rising balls (z: 600-1500) for aerial training.")
+                            custom_prob_slider = gr.Slider(0.0, 1.0, value=float(sc_cfg.get("custom_prob", 0.10)), step=0.01, label="🎯 Custom Scenarios Probability", info="User-designed custom situations (Opposing 1/3rd powershots, dribbles, custom drills).")
 
                         with gr.Column():
-                            turnaround_prob_slider = gr.Slider(0.0, 1.0, value=float(sc_cfg.get("turnaround_prob", 0.12)), step=0.01, label="Turnaround Recovery Probability", info="Fast downfield spawns moving away from ball to force 180° cuts.")
+                            turnaround_prob_slider = gr.Slider(0.0, 1.0, value=float(sc_cfg.get("turnaround_prob", 0.08)), step=0.01, label="Turnaround Recovery Probability", info="Fast downfield spawns moving away from ball to force 180° cuts.")
                             wall_prob_slider = gr.Slider(0.0, 1.0, value=float(sc_cfg.get("wall_prob", 0.10)), step=0.01, label="Wall Play Scenario Probability", info="Sidewall rolling and backboard rebound situations.")
                             save_prob_slider = gr.Slider(0.0, 1.0, value=float(sc_cfg.get("save_prob", 0.10)), step=0.01, label="Goalie Save Scenario Probability", info="Fast opponent shots heading on target into defending net.")
+
+                    custom_sc_count = len(ScenarioManager.get_instance().get_active_scenarios())
+                    gr.HTML(
+                        f"""
+                        <div style="background: rgba(15, 23, 42, 0.65); border: 1px solid #334155; border-radius: 8px; padding: 9px 16px; margin-top: 8px; font-size: 0.9em; display: flex; justify-content: space-between; align-items: center; box-shadow: inset 0 1px 3px rgba(0,0,0,0.3);">
+                            <span>📦 <b>Custom Scenarios Distribution Pool:</b> <b style="color: #38bdf8;">{custom_sc_count} Active Scenarios</b> enabled in training rotation.</span>
+                            <span style="color: #94a3b8;">Design & test scenarios in the <b>🎯 Custom Scenario Generator</b> tab.</span>
+                        </div>
+                        """
+                    )
 
                 with gr.Group():
                     with gr.Row():
@@ -585,7 +603,138 @@ def create_ui():
                 reward_apply_msg = gr.Markdown("")
 
             # ---------------------------------------------------------
-            # TAB 2: HYPERPARAMETERS & ENVIRONMENT
+            # TAB 2: 🎯 CUSTOM SCENARIO GENERATOR & BUILDER
+            # ---------------------------------------------------------
+            with gr.TabItem("🎯 Custom Scenario Generator"):
+                gr.Markdown(
+                    """
+                    > **🎯 Interactive RocketSim Scenario Generator & Visual Builder:**
+                    > * **🗺️ Visual Guide Preview:** Live 2D pitch showing vehicle positions, yaw heading, velocity momentum arrows (green), and ball height & trajectory vectors (orange).
+                    > * **⚡ One-Click Presets:** Instant loading for **Opposing 1/3rd Bouncing Powershots / Dribbles**, Breakaway Sprints, Air Dribble setups, and Shadow Defense.
+                    > * **💾 Dynamic Persistence:** Saved scenarios automatically join the **Custom Scenarios** pool in the Dynamic Scenario Setter Distribution.
+                    """
+                )
+                sc_mgr = ScenarioManager.get_instance()
+                all_scenarios = sc_mgr.get_all_scenarios()
+                initial_sc = all_scenarios[0] if all_scenarios else DEFAULT_CUSTOM_SCENARIOS[0]
+
+                with gr.Row():
+                    # Left Column: 2D Visual Guide Preview & Simulation Rollout
+                    with gr.Column(scale=5):
+                        gr.Markdown("### 🗺️ Live 2D Pitch Visual Guide")
+                        sc_preview_plot = gr.Plot(
+                            value=render_scenario_visual_guide(initial_sc),
+                            label="Interactive 2D Pitch Preview"
+                        )
+                        with gr.Row():
+                            preset_dropdown = gr.Dropdown(
+                                choices=["(Select Template Preset...)"] + [sc["name"] for sc in DEFAULT_CUSTOM_SCENARIOS],
+                                value="(Select Template Preset...)",
+                                label="⚡ Quick Template Presets",
+                                scale=3
+                            )
+                            refresh_preview_btn = gr.Button("🔄 Refresh Guide", scale=1)
+
+                        with gr.Accordion("🧪 2-Second Trajectory Rollout Simulation", open=False):
+                            gr.Markdown("*Runs 150 steps in RocketSim from this custom scenario with active bot policy to preview physics response.*")
+                            sim_scenario_btn = gr.Button("🚀 Simulate Scenario Physics (2s Rollout)", variant="primary")
+                            sc_sim_plot = gr.Plot(label="Trajectory Rollout Plot")
+                            sc_sim_stats = gr.JSON(label="Rollout Diagnostics")
+
+                    # Right Column: Interactive Parameter Controls
+                    with gr.Column(scale=6):
+                        with gr.Group():
+                            gr.Markdown("### 📝 Scenario Metadata")
+                            with gr.Row():
+                                sc_id_input = gr.Textbox(label="Scenario ID (Unique Key)", value=initial_sc.get("id", "opposing_third_bouncing_ball"), scale=2)
+                                sc_name_input = gr.Textbox(label="Scenario Name", value=initial_sc.get("name", "Opposing 1/3rd Bouncing Powershot / Dribble"), scale=3)
+                                sc_enabled_cb = gr.Checkbox(label="Active in Training Pool", value=initial_sc.get("enabled", True), scale=1)
+                            sc_desc_input = gr.Textbox(
+                                label="Tactical Intent / Description",
+                                value=initial_sc.get("description", "Bot spawns in opposing 1/3rd behind bouncing ball."),
+                                lines=2
+                            )
+
+                        with gr.Group():
+                            gr.Markdown("### 🏎️ Bot State (Car 0 / Blue)")
+                            with gr.Row():
+                                car_pos_x = gr.Slider(-3800.0, 3800.0, value=float(initial_sc["car"]["pos"][0]), step=25.0, label="Pos X (Left / Right)")
+                                car_pos_y = gr.Slider(-4800.0, 4800.0, value=float(initial_sc["car"]["pos"][1]), step=25.0, label="Pos Y (Goal to Goal)")
+                                car_pos_z = gr.Slider(17.0, 1600.0, value=float(initial_sc["car"]["pos"][2]), step=10.0, label="Pos Z (Altitude)")
+                            with gr.Row():
+                                car_yaw = gr.Slider(-180.0, 180.0, value=float(initial_sc["car"].get("yaw", 90.0)), step=5.0, label="Heading / Yaw (deg: 90° = +Y, -90° = -Y)")
+                                car_speed = gr.Slider(0.0, 2300.0, value=float(math.hypot(initial_sc["car"]["vel"][0], initial_sc["car"]["vel"][1])), step=25.0, label="Forward Velocity Speed (uu/s)")
+                                car_boost = gr.Slider(0.0, 100.0, value=float(initial_sc["car"].get("boost", 50.0)), step=5.0, label="Starting Boost Amount (%)")
+
+                        with gr.Group():
+                            gr.Markdown("### ⚽ Ball State")
+                            with gr.Row():
+                                ball_pos_x = gr.Slider(-3800.0, 3800.0, value=float(initial_sc["ball"]["pos"][0]), step=25.0, label="Ball Pos X")
+                                ball_pos_y = gr.Slider(-4800.0, 4800.0, value=float(initial_sc["ball"]["pos"][1]), step=25.0, label="Ball Pos Y")
+                                ball_pos_z = gr.Slider(93.15, 1800.0, value=float(initial_sc["ball"]["pos"][2]), step=10.0, label="Ball Pos Z (Height)")
+                            with gr.Row():
+                                ball_vel_x = gr.Slider(-2500.0, 2500.0, value=float(initial_sc["ball"]["vel"][0]), step=25.0, label="Ball Vel X (uu/s)")
+                                ball_vel_y = gr.Slider(-2500.0, 2500.0, value=float(initial_sc["ball"]["vel"][1]), step=25.0, label="Ball Vel Y (uu/s)")
+                                ball_vel_z = gr.Slider(-1500.0, 1500.0, value=float(initial_sc["ball"]["vel"][2]), step=25.0, label="Ball Vel Z (uu/s)")
+
+                        with gr.Group():
+                            gr.Markdown("### 👤 Opponent State (Car 1 / Orange)")
+                            with gr.Row():
+                                opp_mode_radio = gr.Radio(["goalie", "shadow", "custom", "none"], value=initial_sc.get("opponent", {}).get("mode", "goalie"), label="Opponent Placement Mode")
+                                opp_boost = gr.Slider(0.0, 100.0, value=float(initial_sc.get("opponent", {}).get("boost", 60.0)), step=5.0, label="Opponent Boost (%)")
+                            with gr.Row(visible=(initial_sc.get("opponent", {}).get("mode", "goalie") == "custom")) as opp_custom_row:
+                                opp_pos_x = gr.Slider(-3800.0, 3800.0, value=float(initial_sc.get("opponent", {}).get("pos", [0, 4800, 17])[0]), step=25.0, label="Custom Opponent Pos X")
+                                opp_pos_y = gr.Slider(-4800.0, 4800.0, value=float(initial_sc.get("opponent", {}).get("pos", [0, 4800, 17])[1]), step=25.0, label="Custom Opponent Pos Y")
+                                opp_yaw = gr.Slider(-180.0, 180.0, value=float(initial_sc.get("opponent", {}).get("yaw", -90.0)), step=5.0, label="Custom Opponent Yaw (deg)")
+
+                        with gr.Group():
+                            gr.Markdown("### 🎲 Training Variance & Symmetry")
+                            with gr.Row():
+                                pos_jitter = gr.Slider(0.0, 300.0, value=float(initial_sc.get("variance", {}).get("pos_jitter", 80.0)), step=10.0, label="Positional Jitter (±uu)", info="Adds natural positional randomness each spawn.")
+                                vel_jitter = gr.Slider(0.0, 300.0, value=float(initial_sc.get("variance", {}).get("vel_jitter", 60.0)), step=10.0, label="Velocity Jitter (±uu/s)", info="Adds velocity variance each spawn.")
+                                mirror_symmetry = gr.Checkbox(value=bool(initial_sc.get("variance", {}).get("mirror_symmetry", True)), label="Left/Right Mirror Symmetry (50% Chance)", info="Mirrors scenario across X-axis so bot trains left & right sides equally.")
+
+                        with gr.Row():
+                            save_scenario_btn = gr.Button("💾 Save / Update Custom Scenario", variant="primary")
+                            new_scenario_btn = gr.Button("➕ New / Clear Form", variant="secondary")
+                            delete_scenario_btn = gr.Button("🗑️ Delete Scenario", variant="stop")
+
+                        scenario_action_msg = gr.Markdown("")
+
+                gr.Markdown("### 📚 Saved Custom Scenarios Library")
+                def build_scenarios_table():
+                    items = ScenarioManager.get_instance().get_all_scenarios()
+                    rows = []
+                    for s in items:
+                        bp = s.get("ball", {}).get("pos", [0, 0, 93])
+                        cp = s.get("car", {}).get("pos", [0, 0, 17])
+                        rows.append([
+                            s.get("id", ""),
+                            s.get("name", ""),
+                            s.get("enabled", True),
+                            f"({bp[0]:.0f}, {bp[1]:.0f}, {bp[2]:.0f})",
+                            f"({cp[0]:.0f}, {cp[1]:.0f}, {cp[2]:.0f})",
+                            s.get("description", "")
+                        ])
+                    return pd.DataFrame(rows, columns=["ID", "Name", "Active", "Ball Pos", "Car Pos", "Description"]) if rows else pd.DataFrame(columns=["ID", "Name", "Active", "Ball Pos", "Car Pos", "Description"])
+
+                saved_scenarios_table = gr.Dataframe(
+                    value=build_scenarios_table(),
+                    interactive=False,
+                    label="Custom Scenarios Pool"
+                )
+                with gr.Row():
+                    load_scenario_dropdown = gr.Dropdown(
+                        choices=[f"{sc['name']} ({sc['id']})" for sc in all_scenarios],
+                        value=f"{initial_sc['name']} ({initial_sc['id']})" if all_scenarios else None,
+                        label="Select Scenario from Library to Load / Edit",
+                        scale=3
+                    )
+                    load_scenario_btn = gr.Button("📥 Load Selected Scenario", scale=1)
+                    refresh_library_btn = gr.Button("🔄 Refresh Library Table", scale=1)
+
+            # ---------------------------------------------------------
+            # TAB 3: HYPERPARAMETERS & ENVIRONMENT
             # ---------------------------------------------------------
             with gr.TabItem("⚙️ Hyperparameters & Environment"):
                 with gr.Row():
@@ -976,7 +1125,7 @@ def create_ui():
             g_w, c_w, sv_w,
             b2g_w, p2b_w, jb_w, ar_w, pw_w, tch_w,
             bg_w, bl_w,
-            k_p, r_p, a_p, tr_p, w_p, s_p,
+            k_p, r_p, a_p, tr_p, w_p, s_p, c_p,
             opp_bot, base_opp, bc_w, bc_dec
         ):
             rewards = {
@@ -998,7 +1147,8 @@ def create_ui():
                 "aerial_prob": float(a_p),
                 "turnaround_prob": float(tr_p),
                 "wall_prob": float(w_p),
-                "save_prob": float(s_p)
+                "save_prob": float(s_p),
+                "custom_prob": float(c_p)
             }
 
             clean_opp_type = "heuristic"
@@ -1037,7 +1187,7 @@ def create_ui():
                 goal_slider, concede_slider, save_slider,
                 ball_to_goal_slider, player_to_ball_slider, jump_bridge_slider, air_roll_recovery_slider, powerslide_slider, touch_slider,
                 boost_gain_slider, boost_lose_slider,
-                kickoff_prob_slider, replay_prob_slider, aerial_prob_slider, turnaround_prob_slider, wall_prob_slider, save_prob_slider,
+                kickoff_prob_slider, replay_prob_slider, aerial_prob_slider, turnaround_prob_slider, wall_prob_slider, save_prob_slider, custom_prob_slider,
                 opponent_bot_dropdown, baseline_opp_slider, bc_weight_slider, bc_decay_input
             ],
             outputs=[reward_apply_msg]
@@ -1048,15 +1198,15 @@ def create_ui():
             outputs=[opponent_bot_dropdown]
         )
 
-        # Dynamic 100% Normalized Scenario Rebalancing Handler (6 Scenario Mix)
-        def rebalance_scenarios_handler(changed_idx, new_val, k, r, a, tr, w, s):
-            current_vals = [float(k), float(r), float(a), float(tr), float(w), float(s)]
+        # Dynamic 100% Normalized Scenario Rebalancing Handler (7 Scenario Mix)
+        def rebalance_scenarios_handler(changed_idx, new_val, k, r, a, tr, w, s, c):
+            current_vals = [float(k), float(r), float(a), float(tr), float(w), float(s), float(c)]
             new_val = round(max(0.0, min(1.0, float(new_val))), 2)
             vals = list(current_vals)
             vals[changed_idx] = new_val
 
             rem = round(1.0 - new_val, 4)
-            other_indices = [i for i in range(6) if i != changed_idx]
+            other_indices = [i for i in range(7) if i != changed_idx]
             other_sum = sum(vals[i] for i in other_indices)
 
             if other_sum > 1e-6:
@@ -1080,24 +1230,25 @@ def create_ui():
                 <span class="status-badge-running" style="font-size: 1.0em; padding: 6px 16px;">● Total Mix: {tot_pct}%</span>
             </div>
             """
-            return out[0], out[1], out[2], out[3], out[4], out[5], badge_html
+            return out[0], out[1], out[2], out[3], out[4], out[5], out[6], badge_html
 
-        scenario_sliders = [kickoff_prob_slider, replay_prob_slider, aerial_prob_slider, turnaround_prob_slider, wall_prob_slider, save_prob_slider]
-        scenario_outputs = [kickoff_prob_slider, replay_prob_slider, aerial_prob_slider, turnaround_prob_slider, wall_prob_slider, save_prob_slider, scenario_total_badge]
+        scenario_sliders = [kickoff_prob_slider, replay_prob_slider, aerial_prob_slider, turnaround_prob_slider, wall_prob_slider, save_prob_slider, custom_prob_slider]
+        scenario_outputs = [kickoff_prob_slider, replay_prob_slider, aerial_prob_slider, turnaround_prob_slider, wall_prob_slider, save_prob_slider, custom_prob_slider, scenario_total_badge]
 
-        kickoff_prob_slider.release(fn=lambda v, k, r, a, tr, w, s: rebalance_scenarios_handler(0, v, k, r, a, tr, w, s), inputs=[kickoff_prob_slider] + scenario_sliders, outputs=scenario_outputs)
-        replay_prob_slider.release(fn=lambda v, k, r, a, tr, w, s: rebalance_scenarios_handler(1, v, k, r, a, tr, w, s), inputs=[replay_prob_slider] + scenario_sliders, outputs=scenario_outputs)
-        aerial_prob_slider.release(fn=lambda v, k, r, a, tr, w, s: rebalance_scenarios_handler(2, v, k, r, a, tr, w, s), inputs=[aerial_prob_slider] + scenario_sliders, outputs=scenario_outputs)
-        turnaround_prob_slider.release(fn=lambda v, k, r, a, tr, w, s: rebalance_scenarios_handler(3, v, k, r, a, tr, w, s), inputs=[turnaround_prob_slider] + scenario_sliders, outputs=scenario_outputs)
-        wall_prob_slider.release(fn=lambda v, k, r, a, tr, w, s: rebalance_scenarios_handler(4, v, k, r, a, tr, w, s), inputs=[wall_prob_slider] + scenario_sliders, outputs=scenario_outputs)
-        save_prob_slider.release(fn=lambda v, k, r, a, tr, w, s: rebalance_scenarios_handler(5, v, k, r, a, tr, w, s), inputs=[save_prob_slider] + scenario_sliders, outputs=scenario_outputs)
+        kickoff_prob_slider.release(fn=lambda v, k, r, a, tr, w, s, c: rebalance_scenarios_handler(0, v, k, r, a, tr, w, s, c), inputs=[kickoff_prob_slider] + scenario_sliders, outputs=scenario_outputs)
+        replay_prob_slider.release(fn=lambda v, k, r, a, tr, w, s, c: rebalance_scenarios_handler(1, v, k, r, a, tr, w, s, c), inputs=[replay_prob_slider] + scenario_sliders, outputs=scenario_outputs)
+        aerial_prob_slider.release(fn=lambda v, k, r, a, tr, w, s, c: rebalance_scenarios_handler(2, v, k, r, a, tr, w, s, c), inputs=[aerial_prob_slider] + scenario_sliders, outputs=scenario_outputs)
+        turnaround_prob_slider.release(fn=lambda v, k, r, a, tr, w, s, c: rebalance_scenarios_handler(3, v, k, r, a, tr, w, s, c), inputs=[turnaround_prob_slider] + scenario_sliders, outputs=scenario_outputs)
+        wall_prob_slider.release(fn=lambda v, k, r, a, tr, w, s, c: rebalance_scenarios_handler(4, v, k, r, a, tr, w, s, c), inputs=[wall_prob_slider] + scenario_sliders, outputs=scenario_outputs)
+        save_prob_slider.release(fn=lambda v, k, r, a, tr, w, s, c: rebalance_scenarios_handler(5, v, k, r, a, tr, w, s, c), inputs=[save_prob_slider] + scenario_sliders, outputs=scenario_outputs)
+        custom_prob_slider.release(fn=lambda v, k, r, a, tr, w, s, c: rebalance_scenarios_handler(6, v, k, r, a, tr, w, s, c), inputs=[custom_prob_slider] + scenario_sliders, outputs=scenario_outputs)
 
         def on_reset_rewards():
             return (
                 30.0, -30.0, 8.0,
                 1.5, 0.6, 0.35, 0.35, 0.30, 1.2,
                 0.6, 0.3,
-                0.30, 0.26, 0.12, 0.12, 0.10, 0.10,
+                0.28, 0.22, 0.12, 0.08, 0.10, 0.10, 0.10,
                 0.05, 0.15, 150000000
             )
 
@@ -1107,9 +1258,271 @@ def create_ui():
                 goal_slider, concede_slider, save_slider,
                 ball_to_goal_slider, player_to_ball_slider, jump_bridge_slider, air_roll_recovery_slider, powerslide_slider, touch_slider,
                 boost_gain_slider, boost_lose_slider,
-                kickoff_prob_slider, replay_prob_slider, aerial_prob_slider, turnaround_prob_slider, wall_prob_slider, save_prob_slider,
+                kickoff_prob_slider, replay_prob_slider, aerial_prob_slider, turnaround_prob_slider, wall_prob_slider, save_prob_slider, custom_prob_slider,
                 baseline_opp_slider, bc_weight_slider, bc_decay_input
             ]
+        )
+
+        # -------------------------------------------------------------
+        # CUSTOM SCENARIO GENERATOR EVENT HANDLERS & CALLBACKS
+        # -------------------------------------------------------------
+        def assemble_scenario_payload(
+            sc_id, sc_name, sc_desc, sc_enabled,
+            cx, cy, cz, cyaw, cspeed, cboost,
+            bx, by, bz, bvx, bvy, bvz,
+            opp_mode, opp_boost, ox, oy, oyaw,
+            pos_jit, vel_jit, mirror
+        ) -> Dict[str, Any]:
+            yaw_rad = math.radians(float(cyaw))
+            speed = float(cspeed)
+            cvx = math.cos(yaw_rad) * speed
+            cvy = math.sin(yaw_rad) * speed
+
+            return {
+                "id": str(sc_id).strip().lower().replace(" ", "_"),
+                "name": str(sc_name).strip(),
+                "description": str(sc_desc).strip(),
+                "enabled": bool(sc_enabled),
+                "car": {
+                    "pos": [float(cx), float(cy), float(cz)],
+                    "yaw": float(cyaw),
+                    "pitch": 0.0,
+                    "roll": 0.0,
+                    "vel": [cvx, cvy, 0.0],
+                    "boost": float(cboost)
+                },
+                "ball": {
+                    "pos": [float(bx), float(by), float(bz)],
+                    "vel": [float(bvx), float(bvy), float(bvz)]
+                },
+                "opponent": {
+                    "mode": str(opp_mode),
+                    "pos": [float(ox), float(oy), 17.0],
+                    "yaw": float(oyaw),
+                    "pitch": 0.0,
+                    "roll": 0.0,
+                    "vel": [0.0, 0.0, 0.0],
+                    "boost": float(opp_boost)
+                },
+                "variance": {
+                    "pos_jitter": float(pos_jit),
+                    "vel_jitter": float(vel_jit),
+                    "mirror_symmetry": bool(mirror)
+                }
+            }
+
+        scenario_input_components = [
+            sc_id_input, sc_name_input, sc_desc_input, sc_enabled_cb,
+            car_pos_x, car_pos_y, car_pos_z, car_yaw, car_speed, car_boost,
+            ball_pos_x, ball_pos_y, ball_pos_z, ball_vel_x, ball_vel_y, ball_vel_z,
+            opp_mode_radio, opp_boost, opp_pos_x, opp_pos_y, opp_yaw,
+            pos_jitter, vel_jitter, mirror_symmetry
+        ]
+
+        def on_update_visual_preview(*args):
+            sc_dict = assemble_scenario_payload(*args)
+            return render_scenario_visual_guide(sc_dict)
+
+        # Refresh Guide on demand
+        refresh_preview_btn.click(
+            fn=on_update_visual_preview,
+            inputs=scenario_input_components,
+            outputs=[sc_preview_plot]
+        )
+
+        # Reactive preview on key sliders
+        for comp in [car_pos_x, car_pos_y, car_pos_z, car_yaw, car_speed, car_boost, ball_pos_x, ball_pos_y, ball_pos_z, ball_vel_x, ball_vel_y, ball_vel_z, opp_mode_radio, opp_pos_x, opp_pos_y, opp_yaw]:
+            comp.change(
+                fn=on_update_visual_preview,
+                inputs=scenario_input_components,
+                outputs=[sc_preview_plot]
+            )
+
+        # Opponent Mode toggle visibility helper
+        def on_opp_mode_change(mode):
+            return gr.Row(visible=(mode == "custom"))
+        opp_mode_radio.change(fn=on_opp_mode_change, inputs=[opp_mode_radio], outputs=[opp_custom_row])
+
+        # Preset Loader Callback
+        def on_select_preset_template(preset_name):
+            if not preset_name or preset_name.startswith("("):
+                return [gr.update()] * 24 + [gr.update()]
+            target = None
+            for sc in DEFAULT_CUSTOM_SCENARIOS:
+                if sc["name"] == preset_name or sc["id"] == preset_name:
+                    target = sc
+                    break
+            if not target:
+                return [gr.update()] * 24 + [gr.update()]
+
+            c_vel = target["car"]["vel"]
+            speed = math.hypot(c_vel[0], c_vel[1])
+            opp = target.get("opponent", {})
+            var = target.get("variance", {})
+
+            sc_plot = render_scenario_visual_guide(target)
+
+            return (
+                target["id"],
+                target["name"],
+                target["description"],
+                target.get("enabled", True),
+                float(target["car"]["pos"][0]),
+                float(target["car"]["pos"][1]),
+                float(target["car"]["pos"][2]),
+                float(target["car"].get("yaw", 90.0)),
+                float(speed),
+                float(target["car"].get("boost", 50.0)),
+                float(target["ball"]["pos"][0]),
+                float(target["ball"]["pos"][1]),
+                float(target["ball"]["pos"][2]),
+                float(target["ball"]["vel"][0]),
+                float(target["ball"]["vel"][1]),
+                float(target["ball"]["vel"][2]),
+                opp.get("mode", "goalie"),
+                float(opp.get("boost", 60.0)),
+                float(opp.get("pos", [0, 4800, 17])[0]),
+                float(opp.get("pos", [0, 4800, 17])[1]),
+                float(opp.get("yaw", -90.0)),
+                float(var.get("pos_jitter", 80.0)),
+                float(var.get("vel_jitter", 60.0)),
+                bool(var.get("mirror_symmetry", True)),
+                sc_plot
+            )
+
+        preset_dropdown.change(
+            fn=on_select_preset_template,
+            inputs=[preset_dropdown],
+            outputs=scenario_input_components + [sc_preview_plot]
+        )
+
+        # Save Scenario Callback
+        def on_save_custom_scenario(*args):
+            sc_dict = assemble_scenario_payload(*args)
+            success, msg = ScenarioManager.get_instance().save_scenario(sc_dict)
+            table_df = build_scenarios_table()
+            all_sc = ScenarioManager.get_instance().get_all_scenarios()
+            choices = [f"{s['name']} ({s['id']})" for s in all_sc]
+            status_text = f"✅ **{msg}**" if success else f"❌ **{msg}**"
+            new_dropdown = gr.Dropdown(choices=choices, value=f"{sc_dict['name']} ({sc_dict['id']})")
+            return status_text, table_df, new_dropdown
+
+        save_scenario_btn.click(
+            fn=on_save_custom_scenario,
+            inputs=scenario_input_components,
+            outputs=[scenario_action_msg, saved_scenarios_table, load_scenario_dropdown]
+        )
+
+        # Clear / New Scenario Callback
+        def on_new_scenario_form():
+            new_sc = {
+                "id": f"custom_scenario_{int(time.time()) % 10000}",
+                "name": "New Custom Training Drill",
+                "description": "Custom training situation designed in Sensei ML Studio.",
+                "enabled": True,
+                "car": {"pos": [0.0, 0.0, 17.0], "yaw": 90.0, "vel": [0.0, 500.0, 0.0], "boost": 50.0},
+                "ball": {"pos": [0.0, 1500.0, 93.15], "vel": [0.0, 0.0, 0.0]},
+                "opponent": {"mode": "goalie", "pos": [0.0, 4800.0, 17.0], "yaw": -90.0, "boost": 60.0},
+                "variance": {"pos_jitter": 50.0, "vel_jitter": 50.0, "mirror_symmetry": True}
+            }
+            plot = render_scenario_visual_guide(new_sc)
+            return (
+                new_sc["id"], new_sc["name"], new_sc["description"], True,
+                0.0, 0.0, 17.0, 90.0, 500.0, 50.0,
+                0.0, 1500.0, 93.15, 0.0, 0.0, 0.0,
+                "goalie", 60.0, 0.0, 4800.0, -90.0,
+                50.0, 50.0, True,
+                plot, "ℹ️ Form cleared for new custom scenario creation."
+            )
+
+        new_scenario_btn.click(
+            fn=on_new_scenario_form,
+            outputs=scenario_input_components + [sc_preview_plot, scenario_action_msg]
+        )
+
+        # Delete Scenario Callback
+        def on_delete_custom_scenario(sc_id):
+            success, msg = ScenarioManager.get_instance().delete_scenario(str(sc_id).strip())
+            table_df = build_scenarios_table()
+            all_sc = ScenarioManager.get_instance().get_all_scenarios()
+            choices = [f"{s['name']} ({s['id']})" for s in all_sc]
+            status_text = f"🗑️ **{msg}**" if success else f"⚠️ **{msg}**"
+            new_dropdown = gr.Dropdown(choices=choices, value=choices[0] if choices else None)
+            return status_text, table_df, new_dropdown
+
+        delete_scenario_btn.click(
+            fn=on_delete_custom_scenario,
+            inputs=[sc_id_input],
+            outputs=[scenario_action_msg, saved_scenarios_table, load_scenario_dropdown]
+        )
+
+        # Load from Library Callback
+        def on_load_scenario_from_library(selected_choice):
+            if not selected_choice or "(" not in selected_choice:
+                return [gr.update()] * 24 + [gr.update(), "⚠️ Please select a scenario from the library."]
+            sc_id = selected_choice.split("(")[-1].rstrip(")")
+            target = ScenarioManager.get_instance().get_scenario(sc_id)
+            if not target:
+                return [gr.update()] * 24 + [gr.update(), f"⚠️ Scenario '{sc_id}' not found."]
+
+            c_vel = target.get("car", {}).get("vel", [0, 0, 0])
+            speed = math.hypot(c_vel[0], c_vel[1])
+            opp = target.get("opponent", {})
+            var = target.get("variance", {})
+            sc_plot = render_scenario_visual_guide(target)
+
+            return (
+                target["id"],
+                target.get("name", target["id"]),
+                target.get("description", ""),
+                target.get("enabled", True),
+                float(target["car"]["pos"][0]),
+                float(target["car"]["pos"][1]),
+                float(target["car"]["pos"][2]),
+                float(target["car"].get("yaw", 90.0)),
+                float(speed),
+                float(target["car"].get("boost", 50.0)),
+                float(target["ball"]["pos"][0]),
+                float(target["ball"]["pos"][1]),
+                float(target["ball"]["pos"][2]),
+                float(target["ball"]["vel"][0]),
+                float(target["ball"]["vel"][1]),
+                float(target["ball"]["vel"][2]),
+                opp.get("mode", "goalie"),
+                float(opp.get("boost", 60.0)),
+                float(opp.get("pos", [0, 4800, 17])[0]),
+                float(opp.get("pos", [0, 4800, 17])[1]),
+                float(opp.get("yaw", -90.0)),
+                float(var.get("pos_jitter", 80.0)),
+                float(var.get("vel_jitter", 60.0)),
+                bool(var.get("mirror_symmetry", True)),
+                sc_plot,
+                f"📥 Loaded '{target.get('name', target['id'])}' into editor."
+            )
+
+        load_scenario_btn.click(
+            fn=on_load_scenario_from_library,
+            inputs=[load_scenario_dropdown],
+            outputs=scenario_input_components + [sc_preview_plot, scenario_action_msg]
+        )
+
+        refresh_library_btn.click(
+            fn=lambda: (build_scenarios_table(), gr.Dropdown(choices=[f"{s['name']} ({s['id']})" for s in ScenarioManager.get_instance().get_all_scenarios()])),
+            outputs=[saved_scenarios_table, load_scenario_dropdown]
+        )
+
+        # Simulate Scenario Rollout Callback
+        def on_run_scenario_simulation(*args):
+            sc_dict = assemble_scenario_payload(*args)
+            ckpts = get_available_checkpoints()
+            model_path = ckpts[0] if ckpts and os.path.exists(ckpts[0]) else None
+            sim_fig, stats = simulate_custom_scenario(sc_dict, model_path=model_path, num_steps=150)
+            return sim_fig, stats
+
+        sim_scenario_btn.click(
+            fn=on_run_scenario_simulation,
+            inputs=scenario_input_components,
+            outputs=[sc_sim_plot, sc_sim_stats]
         )
 
         # Apply Live LR

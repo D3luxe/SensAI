@@ -10,7 +10,13 @@ import RocketSim as rsim
 from utils.replay_parser import ReplayParser
 from env.state_setters import (
     KickoffSetter, AerialScenarioSetter, WallPlaySetter,
-    GoalieSaveSetter, ReplayStateSetter, WeightedScenarioSetter
+    GoalieSaveSetter, ReplayStateSetter, WeightedScenarioSetter,
+    CustomScenarioSetter
+)
+from utils.scenario_manager import (
+    ScenarioManager,
+    render_scenario_visual_guide,
+    simulate_custom_scenario
 )
 from env.physics_engine import RocketSimArena
 
@@ -91,7 +97,8 @@ class TestScenariosAndReplays(unittest.TestCase):
             ("Aerial", AerialScenarioSetter()),
             ("Wall", WallPlaySetter()),
             ("Goalie", GoalieSaveSetter()),
-            ("Replay", ReplayStateSetter())
+            ("Replay", ReplayStateSetter()),
+            ("Custom", CustomScenarioSetter())
         ]
 
         for name, setter in setters:
@@ -109,22 +116,68 @@ class TestScenariosAndReplays(unittest.TestCase):
                 self.assertTrue(abs(car.pos[1]) <= 5120.0, f"{name}: Car Y out of bounds")
                 self.assertTrue(0.0 <= car.boost <= 100.0, f"{name}: Boost out of range")
 
+    def test_custom_scenario_manager_and_visual_guide(self):
+        test_cfg_path = "config/test_custom_scenarios.json"
+        mgr = ScenarioManager(config_path=test_cfg_path)
+        mgr.reset_to_defaults()
+
+        scenarios = mgr.get_all_scenarios()
+        self.assertGreaterEqual(len(scenarios), 4, "Must have at least 4 default presets")
+
+        # Verify Opposing 1/3rd Bouncing Ball preset
+        opp_third_sc = mgr.get_scenario("opposing_third_bouncing_ball")
+        self.assertIsNotNone(opp_third_sc)
+        self.assertIn("Opposing 1/3rd", opp_third_sc["name"])
+        self.assertEqual(opp_third_sc["car"]["pos"][1], 1800.0)
+        self.assertEqual(opp_third_sc["ball"]["pos"][1], 2600.0)
+
+        # Test Save New Scenario
+        new_sc = {
+            "id": "unit_test_drill",
+            "name": "Unit Test Practice Drill",
+            "description": "Test drill for validation.",
+            "enabled": True,
+            "car": {"pos": [100.0, 500.0, 17.0], "yaw": 45.0, "vel": [200.0, 200.0, 0.0], "boost": 75.0},
+            "ball": {"pos": [200.0, 800.0, 150.0], "vel": [0.0, 100.0, 0.0]},
+            "opponent": {"mode": "goalie", "pos": [0.0, 4800.0, 17.0], "yaw": -90.0, "boost": 50.0},
+            "variance": {"pos_jitter": 20.0, "vel_jitter": 20.0, "mirror_symmetry": True}
+        }
+        success, msg = mgr.save_scenario(new_sc)
+        self.assertTrue(success)
+        self.assertIsNotNone(mgr.get_scenario("unit_test_drill"))
+
+        # Test Visual Guide Plot Generation
+        fig = render_scenario_visual_guide(new_sc)
+        self.assertIsNotNone(fig)
+        import matplotlib.pyplot as plt
+        plt.close(fig)
+
+        # Test Delete Scenario
+        del_success, del_msg = mgr.delete_scenario("unit_test_drill")
+        self.assertTrue(del_success)
+        self.assertIsNone(mgr.get_scenario("unit_test_drill"))
+
+        if os.path.exists(test_cfg_path):
+            os.remove(test_cfg_path)
+
     def test_weighted_scenario_setter(self):
         weighted_setter = WeightedScenarioSetter(
-            kickoff_prob=0.2,
-            replay_prob=0.2,
-            aerial_prob=0.2,
-            wall_prob=0.2,
-            save_prob=0.2
+            kickoff_prob=0.15,
+            replay_prob=0.15,
+            aerial_prob=0.15,
+            wall_prob=0.15,
+            save_prob=0.15,
+            turnaround_prob=0.10,
+            custom_prob=0.15
         )
         rsim_arena = self.arena._rsim_arena
 
         sampled_scenarios = set()
-        for _ in range(50):
+        for _ in range(70):
             scenario_name = weighted_setter.reset(rsim_arena, num_players=2)
             sampled_scenarios.add(scenario_name)
 
-        # Should sample multiple distinct scenarios
+        # Should sample multiple distinct scenarios including custom
         self.assertGreater(len(sampled_scenarios), 1, "Weighted setter must sample multiple scenario types")
 
     def test_arena_dynamic_scenario_weights(self):
@@ -134,11 +187,26 @@ class TestScenariosAndReplays(unittest.TestCase):
             "replay_prob": 0.0,
             "wall_prob": 0.0,
             "turnaround_prob": 0.0,
-            "save_prob": 0.0
+            "save_prob": 0.0,
+            "custom_prob": 0.0
         })
         self.arena.reset(random_kickoff=True)
         # In pure aerial mode, ball should be high up in the air
         self.assertGreater(self.arena.ball.pos[2], 300.0, "100% Aerial scenario must spawn elevated ball")
+
+        # Test 100% Custom Scenarios Mode
+        self.arena.set_scenario_weights({
+            "aerial_prob": 0.0,
+            "kickoff_prob": 0.0,
+            "replay_prob": 0.0,
+            "wall_prob": 0.0,
+            "turnaround_prob": 0.0,
+            "save_prob": 0.0,
+            "custom_prob": 1.0
+        })
+        self.arena.reset(random_kickoff=True)
+        self.assertTrue(abs(self.arena.ball.pos[0]) <= 4096.0)
+        self.assertTrue(abs(self.arena.cars[0].pos[0]) <= 4096.0)
 
     def test_behavioral_cloning_pretrainer(self):
         from agent.pretrainer import BehavioralCloningTrainer

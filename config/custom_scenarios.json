@@ -1,0 +1,130 @@
+[
+  {
+    "id": "opposing_third_bouncing_ball",
+    "name": "Opposing 1/3rd Bouncing Powershot / Dribble",
+    "description": "Bot spawns in the opposing 1/3rd directly behind a slow forward-bouncing ball to practice power strikes and ground dribble pickups.",
+    "enabled": true,
+    "car": {
+      "pos": [0.0, 1800.0, 17.0],
+      "yaw": 90.0,
+      "pitch": 0.0,
+      "roll": 0.0,
+      "vel": [0.0, 800.0, 0.0],
+      "boost": 50.0
+    },
+    "ball": {
+      "pos": [0.0, 2600.0, 220.0],
+      "vel": [0.0, 250.0, -150.0]
+    },
+    "opponent": {
+      "mode": "goalie",
+      "pos": [0.0, 4800.0, 17.0],
+      "yaw": -90.0,
+      "pitch": 0.0,
+      "roll": 0.0,
+      "vel": [0.0, 0.0, 0.0],
+      "boost": 60.0
+    },
+    "variance": {
+      "pos_jitter": 80.0,
+      "vel_jitter": 60.0,
+      "mirror_symmetry": true
+    }
+  },
+  {
+    "id": "fast_breakaway_open_net",
+    "name": "Midfield Fast Breakaway Sprint",
+    "description": "Bot starts near midfield chasing a fast rolling ball toward an open net to practice boost feathering and supersonic power finishes.",
+    "enabled": true,
+    "car": {
+      "pos": [-600.0, -200.0, 17.0],
+      "yaw": 75.0,
+      "pitch": 0.0,
+      "roll": 0.0,
+      "vel": [300.0, 1200.0, 0.0],
+      "boost": 40.0
+    },
+    "ball": {
+      "pos": [-300.0, 900.0, 93.15],
+      "vel": [150.0, 800.0, 0.0]
+    },
+    "opponent": {
+      "mode": "shadow",
+      "pos": [400.0, 2400.0, 17.0],
+      "yaw": 90.0,
+      "pitch": 0.0,
+      "roll": 0.0,
+      "vel": [0.0, 600.0, 0.0],
+      "boost": 33.3
+    },
+    "variance": {
+      "pos_jitter": 100.0,
+      "vel_jitter": 80.0,
+      "mirror_symmetry": true
+    }
+  },
+  {
+    "id": "air_dribble_pop_setup",
+    "name": "Air Dribble & Aerial Pop Setup",
+    "description": "Ball popped up floating at 700uu height with the car positioned underneath for aerial takeoff and carry practice.",
+    "enabled": true,
+    "car": {
+      "pos": [400.0, 0.0, 17.0],
+      "yaw": 85.0,
+      "pitch": 0.0,
+      "roll": 0.0,
+      "vel": [100.0, 900.0, 0.0],
+      "boost": 80.0
+    },
+    "ball": {
+      "pos": [450.0, 600.0, 750.0],
+      "vel": [50.0, 300.0, 200.0]
+    },
+    "opponent": {
+      "mode": "goalie",
+      "pos": [0.0, 4800.0, 17.0],
+      "yaw": -90.0,
+      "pitch": 0.0,
+      "roll": 0.0,
+      "vel": [0.0, 0.0, 0.0],
+      "boost": 70.0
+    },
+    "variance": {
+      "pos_jitter": 60.0,
+      "vel_jitter": 40.0,
+      "mirror_symmetry": true
+    }
+  },
+  {
+    "id": "shadow_defense_1v1",
+    "name": "Shadow Defense & 1v1 Retreat",
+    "description": "Bot retreating toward its own defending net while shadowing an incoming opponent dribble.",
+    "enabled": true,
+    "car": {
+      "pos": [200.0, -2600.0, 17.0],
+      "yaw": -90.0,
+      "pitch": 0.0,
+      "roll": 0.0,
+      "vel": [0.0, -900.0, 0.0],
+      "boost": 45.0
+    },
+    "ball": {
+      "pos": [-150.0, -1200.0, 93.15],
+      "vel": [50.0, -750.0, 0.0]
+    },
+    "opponent": {
+      "mode": "custom",
+      "pos": [-150.0, -600.0, 17.0],
+      "yaw": -90.0,
+      "pitch": 0.0,
+      "roll": 0.0,
+      "vel": [0.0, -950.0, 0.0],
+      "boost": 50.0
+    },
+    "variance": {
+      "pos_jitter": 80.0,
+      "vel_jitter": 60.0,
+      "mirror_symmetry": true
+    }
+  }
+]

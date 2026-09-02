@@ -373,23 +373,36 @@ class TouchBallReward(BaseReward):
 
 
 # ==============================================================================
-# 5. JUMP MOMENTUM BRIDGE (Eliminates First-Jump Latency Barrier)
+# 5. JUMP MOMENTUM BRIDGE (50/50 Blocks, Aerial Takeoffs & Tactical Traversal)
 # ==============================================================================
 class JumpBridgeReward(BaseReward):
     """
-    Eliminates the initial jump latency barrier when initiating dodges/aerials toward the ball.
-    Provides an immediate transition incentive on:
-      1. Ground -> Air Takeoff: on the exact frame the car jumps off the ground toward the ball (2.0x on aerials).
-      2. Airborne Dodge / Flip: on the exact frame an airborne front-flip/dodge is triggered toward the ball.
+    Context-Aware Jump & Momentum Bridge:
+      1. 50/50 Challenge Jump (dist <= 650 uu):
+         Rewards single-jump liftoff regardless of car facing angle, allowing front, side,
+         and rear center-mass absorption blocks. Grants an Airborne Challenge Completion Bonus
+         if the ball is intercepted before landing.
+      2. Aerial & Wall Launch (ball.pos[2] > 250 uu or Wall zone):
+         Requires forward alignment with the high ball (3.0x multiplier) or wall closing velocity.
+      3. Open-Field Traversal (dist > 650 uu, ball grounded):
+         Raw ground liftoff is unrewarded (eliminates bunny-hop farming). Instead, rewards
+         tactically aligned flips and wavedash speed impulses (delta_v > 0) towards the active
+         objective (ball/goal when attacking, defensive third when retreating).
     """
     def __init__(self, weight: float = 0.35):
         super().__init__(weight)
         self._prev_on_ground: Dict[int, bool] = {}
         self._prev_has_flip: Dict[int, bool] = {}
+        self._prev_touches: Dict[int, int] = {}
+        self._prev_vel: Dict[int, np.ndarray] = {}
+        self._challenge_jump_active: Dict[int, bool] = {}
 
     def reset(self, initial_state: RocketSimArena):
         self._prev_on_ground = {car.id: car.on_ground for car in initial_state.cars}
         self._prev_has_flip = {car.id: car.has_flip for car in initial_state.cars}
+        self._prev_touches = {car.id: car.ball_touches for car in initial_state.cars}
+        self._prev_vel = {car.id: car.vel.copy() for car in initial_state.cars}
+        self._challenge_jump_active = {car.id: False for car in initial_state.cars}
 
     def get_reward(self, car: CarState, arena: RocketSimArena, action: np.ndarray, is_goal: bool, scoring_team: Optional[int]) -> float:
         prev_ground = self._prev_on_ground.get(car.id, car.on_ground)
@@ -398,38 +411,89 @@ class JumpBridgeReward(BaseReward):
         prev_flip = self._prev_has_flip.get(car.id, car.has_flip)
         self._prev_has_flip[car.id] = car.has_flip
 
+        prev_touch = self._prev_touches.get(car.id, car.ball_touches)
+        self._prev_touches[car.id] = car.ball_touches
+
+        prev_vel = self._prev_vel.get(car.id, car.vel)
+        self._prev_vel[car.id] = car.vel.copy()
+
         car_to_ball = arena.ball.pos - car.pos
         dist = float(np.linalg.norm(car_to_ball))
-        if dist > 200.0:
-            unit_to_ball = car_to_ball / dist
-            forward_alignment = float(np.dot(car.get_forward_vector(), unit_to_ball))
-            takeoff_closing_vel = float(np.dot(car.vel, unit_to_ball))
+        unit_to_ball = car_to_ball / max(1e-4, dist)
+        forward_alignment = float(np.dot(car.get_forward_vector(), unit_to_ball))
+        takeoff_closing_vel = float(np.dot(car.vel, unit_to_ball))
+        ball_z = float(arena.ball.pos[2])
 
-            # 1. Takeoff Transition (Ground -> Air)
-            if prev_ground and not car.on_ground:
-                is_on_wall_zone = bool(abs(car.pos[0]) > 3400.0 or abs(car.pos[1]) > 4400.0)
-                is_aerial_ball = bool(arena.ball.pos[2] > 250.0)
+        # Defensive & tactical context
+        defend_goal_y = -ARENA_EXTENT_Y if car.team == 0 else ARENA_EXTENT_Y
+        dist_car_to_defend = abs(car.pos[1] - defend_goal_y)
+        dist_ball_to_defend = abs(arena.ball.pos[1] - defend_goal_y)
+        is_wrong_side = bool(dist_car_to_defend > dist_ball_to_defend + 100.0)
 
-                # 1a. Floor Takeoff: Jumping up from floor toward ball
-                if car.pos[2] < 300.0 and car.vel[2] > 100.0 and forward_alignment > 0.1:
-                    aerial_mult = 3.0 if is_aerial_ball else 1.2
-                    return self.weight * forward_alignment * aerial_mult
+        # Tactical vector (toward defensive goal when retreating, toward ball when attacking/contesting)
+        if is_wrong_side:
+            retreat_vec = np.array([0.0 - car.pos[0], defend_goal_y - car.pos[1], 0.0], dtype=np.float32)
+            tactical_dir = retreat_vec / max(1e-4, float(np.linalg.norm(retreat_vec)))
+        else:
+            tactical_dir = unit_to_ball
 
-                # 1b. Wall Takeoff / Air Dribble Pop: Jumping off the sidewall/backwall into the arena toward ball
-                if is_on_wall_zone and car.pos[2] > 200.0 and (takeoff_closing_vel > 150.0 or forward_alignment > 0.15):
-                    return self.weight * max(0.2, forward_alignment) * 3.5
+        reward = 0.0
 
-            # 2. Dodge / Flip Transition (Airborne Flip toward the ball)
-            if not car.on_ground and prev_flip and not car.has_flip and forward_alignment > 0.2:
-                stick_deflection = max(abs(float(action[2])), abs(float(action[3])))
-                # Genuine directional flip requires analog stick deflection >= 0.50
-                if stick_deflection >= 0.50:
-                    return self.weight * forward_alignment * (1.5 + stick_deflection)
-                elif arena.ball.pos[2] > 350.0:
-                    # Double jump for high aerial balls
-                    return self.weight * forward_alignment * 0.75
+        # ── 1. Takeoff Transition (Ground -> Air) ─────────────────────────────
+        if prev_ground and not car.on_ground and car.vel[2] > 80.0:
+            is_on_wall_zone = bool(abs(car.pos[0]) > 3400.0 or abs(car.pos[1]) > 4400.0)
+            is_aerial_ball = bool(ball_z > 250.0)
 
-        return 0.0
+            # 1a. Close-Quarters 50/50 Challenge Liftoff (dist <= 650 uu)
+            # Center-mass coverage: orientation-independent (rewards front, side, or rear blocks)
+            if dist <= 650.0 and car.pos[2] < 300.0:
+                self._challenge_jump_active[car.id] = True
+                reward += self.weight * 1.2
+
+            # 1b. Wall Takeoff / Air Dribble Pop
+            elif is_on_wall_zone and car.pos[2] > 200.0 and (takeoff_closing_vel > 150.0 or forward_alignment > 0.15):
+                reward += self.weight * max(0.2, forward_alignment) * 3.5
+
+            # 1c. Aerial Floor Launch (Ball elevated in air)
+            elif is_aerial_ball and car.pos[2] < 300.0 and forward_alignment > 0.15:
+                reward += self.weight * forward_alignment * 3.0
+
+            # 1d. Open-field ground traversal (dist > 650 uu, ball grounded)
+            # Liftoff alone gets 0.0 (prevents open-field bunny hopping)
+
+        # ── 2. Airborne 50/50 Challenge Completion Bonus ──────────────────────
+        if not car.on_ground and self._challenge_jump_active.get(car.id, False):
+            if car.ball_touches > prev_touch:
+                # Intercepted/blocked ball during 50/50 jump window!
+                reward += self.weight * 1.5
+                self._challenge_jump_active[car.id] = False
+        elif car.on_ground:
+            self._challenge_jump_active[car.id] = False
+
+        # ── 3. Airborne Dodge / Flip & Traversal Impulse ──────────────────────
+        tactical_align = max(forward_alignment, float(np.dot(car.get_forward_vector(), tactical_dir)))
+
+        if not car.on_ground and prev_flip and not car.has_flip:
+            stick_deflection = max(abs(float(action[2])), abs(float(action[3])))
+            if stick_deflection >= 0.50 and tactical_align > 0.10:
+                # Directional dodge aligned with tactical objective
+                reward += self.weight * tactical_align * (1.2 + stick_deflection)
+            elif ball_z > 350.0 and forward_alignment > 0.20:
+                # Double jump for high aerial balls
+                reward += self.weight * forward_alignment * 0.75
+
+        # ── 4. Wavedash & Speed Impulse on Touchdown / Flip Acceleration ─────
+        # Rewards speed increases (delta_v > 0) along tactical vector resulting from flips/wavedashes
+        tactical_speed_curr = float(np.dot(car.vel[:2], tactical_dir[:2]))
+        tactical_speed_prev = float(np.dot(prev_vel[:2], tactical_dir[:2]))
+        delta_tactical_speed = tactical_speed_curr - tactical_speed_prev
+
+        if delta_tactical_speed > 80.0 and tactical_speed_curr > 500.0:
+            speed_factor = min(1.0, tactical_speed_curr / 2200.0)
+            impulse_factor = min(1.0, delta_tactical_speed / 400.0)
+            reward += self.weight * 0.8 * impulse_factor * speed_factor
+
+        return float(reward)
 
 
 # ==============================================================================
@@ -543,38 +607,68 @@ class PowerslideReward(BaseReward):
 class AirRollRecoveryReward(BaseReward):
     """
     Incentivizes 3D air-roll recoveries, clean landing orientations, and aerial attitude control:
-      1. Wheels-Down Pitch Recovery: When airborne and falling (vel[2] < 0, pos[2] < 600),
-         rewards aligning the car's up vector with world up [0, 0, 1] so the car lands on 4 wheels
-         without bouncing on its roof or side.
-      2. Wall Landing Recovery: When airborne and close to sidewall/backwall, rewards aligning
-         car up-vector with the surface normal.
-      3. Aerial Attitude & Roll Stabilization: When airborne and pursuing a high ball (ball.pos[2] > 300),
-         rewards matching roll alignment to prevent spinning disorientations.
+      1. Active Inversion Roll Recovery: When falling toward the ground, rewards the active rate of
+         re-orienting wheels-down (delta_up > 0), scaled up to 2.5x when rotating from an inverted (wheels up) state.
+      2. Aerial Ball Decoupling: Landing bias is suppressed when actively contesting/carrying high aerial
+         balls (ball_z > 350 uu, dist < 450 uu), protecting intentional upside-down air dribble flight.
+      3. Wall Landing Recovery: When airborne near sidewall/backwall, rewards aligning car up-vector
+         with the wall normal.
+      4. Aerial Attitude & Roll Stabilization: When pursuing high balls, rewards matching roll alignment.
     """
     def __init__(self, weight: float = 0.35):
         super().__init__(weight)
+        self._prev_up_z: Dict[int, float] = {}
+        self._airborne_ticks: Dict[int, int] = {}
+
+    def reset(self, initial_state: RocketSimArena):
+        self._prev_up_z = {car.id: float(car.get_up_vector()[2]) for car in initial_state.cars}
+        self._airborne_ticks = {car.id: 0 for car in initial_state.cars}
 
     def get_reward(self, car: CarState, arena: RocketSimArena, action: np.ndarray, is_goal: bool, scoring_team: Optional[int]) -> float:
         if car.on_ground:
+            self._airborne_ticks[car.id] = 0
+            self._prev_up_z[car.id] = 1.0
             return 0.0
+
+        air_ticks = self._airborne_ticks.get(car.id, 0) + 1
+        self._airborne_ticks[car.id] = air_ticks
 
         up = car.get_up_vector()
         up_z = float(up[2])
+        prev_up_z = self._prev_up_z.get(car.id, up_z)
+        self._prev_up_z[car.id] = up_z
+
         car_z = float(car.pos[2])
         vel_z = float(car.vel[2])
+
+        car_to_ball = arena.ball.pos - car.pos
+        dist_to_ball = float(np.linalg.norm(car_to_ball))
+        ball_z = float(arena.ball.pos[2])
+
+        # Aerial engagement check (protects inverted flight during air dribbles / flip resets)
+        is_aerial_engagement = bool(ball_z > 350.0 and dist_to_ball < 450.0)
 
         total_reward = 0.0
 
         # 1. Wheels-Down Ground Landing Recovery (Falling toward pitch floor)
-        if vel_z < -50.0 and car_z < 600.0:
+        # Gated on falling speed, descent altitude, minimum airtime, and no aerial ball conflict
+        if vel_z < -80.0 and car_z < 600.0 and (air_ticks >= 3 or car_z > 250.0) and not is_aerial_engagement:
             urgency = min(1.0, max(0.2, (600.0 - car_z) / 450.0))
-            if up_z < 0.0:
-                # Upside down landing penalty
+            delta_up = up_z - prev_up_z
+
+            # 1a. Active Inversion Roll Reward: Highly scale active rotation toward wheels-down
+            if delta_up > 0.0:
+                # Inversion multiplier: rotating from wheels-up (prev_up_z < 0) yields up to 2.5x reward
+                inversion_mult = 1.0 + max(0.0, -prev_up_z) * 1.5
+                total_reward += (delta_up * 3.0) * inversion_mult * urgency
+
+            # 1b. Late descent touchdown alignment bonus (only close to ground)
+            if up_z > 0.6 and car_z < 350.0:
+                total_reward += (up_z * 0.25) * urgency
+
+            # 1c. Upside down landing crash penalty
+            if up_z < 0.0 and car_z < 450.0:
                 total_reward += (up_z * 0.5) * urgency
-            else:
-                # Wheels down landing alignment reward
-                landing_alignment = (up_z + 1.0) * 0.5
-                total_reward += landing_alignment * urgency
 
         # 2. Wall Landing Recovery (Airborne near side or back wall)
         dist_x_wall = ARENA_EXTENT_X - abs(car.pos[0])
@@ -589,12 +683,9 @@ class AirRollRecoveryReward(BaseReward):
             total_reward += max(0.0, wall_align) * 0.5
 
         # 3. Aerial Challenge Attitude Control (Ball elevated > 350 uu)
-        ball_z = float(arena.ball.pos[2])
         if ball_z > 350.0 and car_z > 200.0:
-            car_to_ball = arena.ball.pos - car.pos
-            dist = float(np.linalg.norm(car_to_ball))
-            if dist > 1e-4:
-                unit_to_ball = car_to_ball / dist
+            if dist_to_ball > 1e-4:
+                unit_to_ball = car_to_ball / dist_to_ball
                 fwd_align = float(np.dot(car.get_forward_vector(), unit_to_ball))
                 if fwd_align > 0.3:
                     upright_bonus = max(0.0, up_z) * 0.4

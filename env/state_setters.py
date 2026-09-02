@@ -337,19 +337,135 @@ class TurnaroundRecoverySetter(BaseStateSetter):
                 car.set_state(cs)
 
 
+class CustomScenarioSetter(BaseStateSetter):
+    """
+    Samples user-defined custom scenarios configured in the Scenario Generator.
+    Supports random positional/velocity jitter and left-right pitch mirroring.
+    """
+    def __init__(self, scenario_manager: Optional[Any] = None):
+        if scenario_manager is None:
+            from utils.scenario_manager import ScenarioManager
+            self.manager = ScenarioManager.get_instance()
+        else:
+            self.manager = scenario_manager
+
+    def reset(self, rsim_arena: Any, num_players: int) -> bool:
+        active_scenarios = self.manager.get_active_scenarios()
+        if not active_scenarios:
+            return False
+
+        scenario = random.choice(active_scenarios)
+        variance = scenario.get("variance", {})
+        pos_jit = float(variance.get("pos_jitter", 0.0))
+        vel_jit = float(variance.get("vel_jitter", 0.0))
+        mirror = bool(variance.get("mirror_symmetry", True)) and (random.random() < 0.5)
+        mirror_sign = -1.0 if mirror else 1.0
+
+        # 1. Reset Ball State
+        b_cfg = scenario.get("ball", {})
+        bx = float(b_cfg.get("pos", [0, 0, 93.15])[0]) * mirror_sign + random.uniform(-pos_jit, pos_jit)
+        by = float(b_cfg.get("pos", [0, 0, 93.15])[1]) + random.uniform(-pos_jit, pos_jit)
+        bz = max(93.15, min(ARENA_HEIGHT_Z - 100.0, float(b_cfg.get("pos", [0, 0, 93.15])[2]) + random.uniform(-pos_jit * 0.5, pos_jit * 0.5)))
+
+        bvx = float(b_cfg.get("vel", [0, 0, 0])[0]) * mirror_sign + random.uniform(-vel_jit, vel_jit)
+        bvy = float(b_cfg.get("vel", [0, 0, 0])[1]) + random.uniform(-vel_jit, vel_jit)
+        bvz = float(b_cfg.get("vel", [0, 0, 0])[2]) + random.uniform(-vel_jit * 0.5, vel_jit * 0.5)
+
+        bs = rsim_arena.ball.get_state()
+        bs.pos = rsim.Vec(
+            max(-ARENA_EXTENT_X + 150.0, min(ARENA_EXTENT_X - 150.0, bx)),
+            max(-ARENA_EXTENT_Y + 150.0, min(ARENA_EXTENT_Y - 150.0, by)),
+            bz
+        )
+        bs.vel = rsim.Vec(bvx, bvy, bvz)
+        bs.ang_vel = rsim.Vec(0, 0, 0)
+        rsim_arena.ball.set_state(bs)
+
+        # 2. Reset Cars
+        cars = rsim_arena.get_cars()
+        if len(cars) > 0:
+            c_cfg = scenario.get("car", {})
+            cx = float(c_cfg.get("pos", [0, 0, 17])[0]) * mirror_sign + random.uniform(-pos_jit, pos_jit)
+            cy = float(c_cfg.get("pos", [0, 0, 17])[1]) + random.uniform(-pos_jit, pos_jit)
+            cz = max(17.0, min(ARENA_HEIGHT_Z - 100.0, float(c_cfg.get("pos", [0, 0, 17])[2])))
+
+            yaw_deg = float(c_cfg.get("yaw", 90.0))
+            if mirror:
+                yaw_deg = 180.0 - yaw_deg
+            yaw_rad = math.radians(yaw_deg)
+            pitch_rad = math.radians(float(c_cfg.get("pitch", 0.0)))
+            roll_rad = math.radians(float(c_cfg.get("roll", 0.0)))
+
+            cvx = float(c_cfg.get("vel", [0, 0, 0])[0]) * mirror_sign + random.uniform(-vel_jit, vel_jit)
+            cvy = float(c_cfg.get("vel", [0, 0, 0])[1]) + random.uniform(-vel_jit, vel_jit)
+            cvz = float(c_cfg.get("vel", [0, 0, 0])[2])
+
+            cs = cars[0].get_state()
+            cs.pos = rsim.Vec(
+                max(-ARENA_EXTENT_X + 150.0, min(ARENA_EXTENT_X - 150.0, cx)),
+                max(-ARENA_EXTENT_Y + 150.0, min(ARENA_EXTENT_Y - 150.0, cy)),
+                cz
+            )
+            cs.rot_mat = rsim.Angle(pitch=pitch_rad, yaw=yaw_rad, roll=roll_rad).as_rot_mat()
+            cs.vel = rsim.Vec(cvx, cvy, cvz)
+            cs.ang_vel = rsim.Vec(0, 0, 0)
+            cs.boost = float(c_cfg.get("boost", 50.0))
+            cars[0].set_state(cs)
+
+        if len(cars) > 1:
+            opp_cfg = scenario.get("opponent", {})
+            opp_mode = opp_cfg.get("mode", "goalie")
+            cs1 = cars[1].get_state()
+            if opp_mode == "goalie":
+                cs1.pos = rsim.Vec(random.uniform(-400, 400), 4800.0, 17.0)
+                cs1.rot_mat = rsim.Angle(pitch=0.0, yaw=-math.pi / 2, roll=0.0).as_rot_mat()
+                cs1.vel = rsim.Vec(0, 0, 0)
+            elif opp_mode == "shadow":
+                ox = float(opp_cfg.get("pos", [200, 2600, 17])[0]) * mirror_sign + random.uniform(-pos_jit, pos_jit)
+                oy = float(opp_cfg.get("pos", [200, 2600, 17])[1]) + random.uniform(-pos_jit, pos_jit)
+                cs1.pos = rsim.Vec(ox, oy, 17.0)
+                cs1.rot_mat = rsim.Angle(pitch=0.0, yaw=math.pi / 2, roll=0.0).as_rot_mat()
+                cs1.vel = rsim.Vec(0, 600, 0)
+            elif opp_mode == "custom":
+                ox = float(opp_cfg.get("pos", [0, 3000, 17])[0]) * mirror_sign + random.uniform(-pos_jit, pos_jit)
+                oy = float(opp_cfg.get("pos", [0, 3000, 17])[1]) + random.uniform(-pos_jit, pos_jit)
+                oz = max(17.0, float(opp_cfg.get("pos", [0, 3000, 17])[2]))
+                o_yaw_deg = float(opp_cfg.get("yaw", -90.0))
+                if mirror:
+                    o_yaw_deg = 180.0 - o_yaw_deg
+                cs1.pos = rsim.Vec(ox, oy, oz)
+                cs1.rot_mat = rsim.Angle(pitch=0.0, yaw=math.radians(o_yaw_deg), roll=0.0).as_rot_mat()
+                cs1.vel = rsim.Vec(
+                    float(opp_cfg.get("vel", [0, 0, 0])[0]) * mirror_sign,
+                    float(opp_cfg.get("vel", [0, 0, 0])[1]),
+                    float(opp_cfg.get("vel", [0, 0, 0])[2])
+                )
+            else: # none / fallback
+                cs1.pos = rsim.Vec(0.0, 4800.0, 17.0)
+                cs1.rot_mat = rsim.Angle(pitch=0.0, yaw=-math.pi / 2, roll=0.0).as_rot_mat()
+                cs1.vel = rsim.Vec(0, 0, 0)
+
+            cs1.ang_vel = rsim.Vec(0, 0, 0)
+            cs1.boost = float(opp_cfg.get("boost", 50.0))
+            cars[1].set_state(cs1)
+
+        return True
+
+
 class WeightedScenarioSetter:
     """
-    Composite Scenario Manager. Samples across kickoffs, replays, aerials, wall plays, saves, and turnarounds
-    according to live user-configured probability weights.
+    Composite Scenario Manager. Samples across kickoffs, replays, aerials, wall plays, saves, turnarounds,
+    and user custom scenarios according to live user-configured probability weights.
     """
     def __init__(
         self,
-        kickoff_prob: float = 0.30,
-        replay_prob: float = 0.25,
-        aerial_prob: float = 0.15,
+        kickoff_prob: float = 0.28,
+        replay_prob: float = 0.22,
+        aerial_prob: float = 0.12,
         wall_prob: float = 0.10,
         save_prob: float = 0.10,
-        turnaround_prob: float = 0.10,
+        turnaround_prob: float = 0.08,
+        custom_prob: float = 0.10,
         replay_parser: Optional[ReplayParser] = None
     ):
         self.kickoff_prob = kickoff_prob
@@ -358,6 +474,7 @@ class WeightedScenarioSetter:
         self.wall_prob = wall_prob
         self.save_prob = save_prob
         self.turnaround_prob = turnaround_prob
+        self.custom_prob = custom_prob
 
         self.kickoff_setter = KickoffSetter()
         self.aerial_setter = AerialScenarioSetter()
@@ -365,6 +482,7 @@ class WeightedScenarioSetter:
         self.goalie_setter = GoalieSaveSetter()
         self.turnaround_setter = TurnaroundRecoverySetter()
         self.replay_setter = ReplayStateSetter(parser=replay_parser)
+        self.custom_setter = CustomScenarioSetter()
 
     def update_weights(self, config_dict: Dict[str, Any]):
         """Dynamically updates scenario distribution from live config."""
@@ -375,13 +493,22 @@ class WeightedScenarioSetter:
         if "wall_prob" in sc: self.wall_prob = float(sc["wall_prob"])
         if "save_prob" in sc: self.save_prob = float(sc["save_prob"])
         if "turnaround_prob" in sc: self.turnaround_prob = float(sc["turnaround_prob"])
+        if "custom_prob" in sc: self.custom_prob = float(sc["custom_prob"])
 
     def reset(self, rsim_arena: Any, num_players: int) -> str:
         """
         Samples a scenario based on current distribution and resets the RocketSim arena.
         Returns the chosen scenario name.
         """
-        weights = [self.kickoff_prob, self.replay_prob, self.aerial_prob, self.wall_prob, self.save_prob, self.turnaround_prob]
+        weights = [
+            self.kickoff_prob,
+            self.replay_prob,
+            self.aerial_prob,
+            self.wall_prob,
+            self.save_prob,
+            self.turnaround_prob,
+            self.custom_prob
+        ]
         total = sum(weights)
         if total <= 1e-6:
             self.kickoff_setter.reset(rsim_arena, num_players)
@@ -422,6 +549,15 @@ class WeightedScenarioSetter:
             self.turnaround_setter.reset(rsim_arena, num_players)
             return "turnaround"
 
-        # 6. Goalie Save
+        # 6. Custom Scenarios
+        cumulative += self.custom_prob
+        if r <= cumulative:
+            if self.custom_setter.reset(rsim_arena, num_players):
+                return "custom"
+            self.kickoff_setter.reset(rsim_arena, num_players)
+            return "kickoff"
+
+        # 7. Goalie Save
         self.goalie_setter.reset(rsim_arena, num_players)
         return "goalie_save"
+
