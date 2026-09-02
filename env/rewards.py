@@ -72,6 +72,7 @@ class BallToGoalVelocityReward(BaseReward):
     Rewards ball velocity directed toward the opponent's goal opening (X in [-GOAL_HALF_WIDTH, +GOAL_HALF_WIDTH]).
     Heavily bonuses on-target trajectories that enter the net (1.6x), while dampening
     wide shots that roll into the backwall/corner beside the goal.
+    Applies an asymmetric 1.5x penalty when ball velocity is directed towards the defending net.
     """
     def __init__(self, weight: float = 1.5):
         super().__init__(weight)
@@ -88,6 +89,11 @@ class BallToGoalVelocityReward(BaseReward):
 
         unit_to_goal = ball_to_goal / dist
         ball_velocity_toward_goal = float(np.dot(arena.ball.vel, unit_to_goal))
+
+        # Asymmetric penalty for advancing ball toward defending net
+        if ball_velocity_toward_goal < 0.0:
+            normalized_progress = (ball_velocity_toward_goal / BALL_MAX_SPEED) * 1.5
+            return self.weight * normalized_progress
 
         # On-Target Trajectory & Backwall Miss Multiplier:
         # If ball is moving downfield, calculate where its trajectory intersects the opponent endline
@@ -121,6 +127,7 @@ class PlayerToBallVelocityReward(BaseReward):
     - Strike Zone Pacing (< 450 uu): Seamlessly transitions from downfield rush to strike-zone velocity matching.
     - Anti-Overshoot Penalty: Punishes blasting past the ball along the attack axis without touching it.
     - Deceleration / Braking Incentive: Rewards braking (throttle < 0) when closing dangerously fast on a slow ball from behind.
+    - Wrong-Side & Own-Goal Guard: Suppresses velocity matching and pursuit rewards when driving behind the ball towards own net, and eliminates distance-delta cliffs when peeling away.
     """
     def __init__(self, weight: float = 0.15):
         super().__init__(weight)
@@ -156,8 +163,15 @@ class PlayerToBallVelocityReward(BaseReward):
         unit_to_ball = car_to_ball / max(1e-4, curr_dist)
         fwd_alignment = float(np.dot(car.get_forward_vector(), unit_to_ball))
 
+        # Defensive coordinate context
+        defend_goal_y = -ARENA_EXTENT_Y if car.team == 0 else ARENA_EXTENT_Y
+        dist_car_to_defend = abs(car.pos[1] - defend_goal_y)
+        dist_ball_to_defend = abs(arena.ball.pos[1] - defend_goal_y)
+        car_vy_defend = -car.vel[1] if car.team == 0 else car.vel[1]  # >0 when moving towards own goal
+        is_wrong_side = bool(dist_car_to_defend > dist_ball_to_defend + 50.0)
+
         # Kickoff sprint multiplier & anti-peel penalty (guarantees full-throttle rush on kickoff)
-        is_kickoff = bool(abs(arena.ball.pos[0]) < 50.0 and abs(arena.ball.pos[1]) < 50.0 and float(np.linalg.norm(arena.ball.vel)) < 100.0)
+        is_kickoff = bool(abs(arena.ball.pos[0]) < 50.0 and abs(arena.ball.pos[1]) < 50.0 and arena.ball.pos[2] < 120.0 and float(np.linalg.norm(arena.ball.vel)) < 100.0)
         if is_kickoff:
             delta_dist = (prev_dist - curr_dist) / 2000.0
             if abs(car.pos[0]) > 1200.0 and abs(car.pos[1]) > 3200.0:
@@ -171,6 +185,9 @@ class PlayerToBallVelocityReward(BaseReward):
         ball_z = float(arena.ball.pos[2])
         is_elevated_aerial = (ball_z > 350.0)
 
+        is_on_ceiling = bool((car.pos[2] > 1750.0 and car.on_ground) or car.pos[2] > 1900.0)
+        is_on_wall = bool((abs(car.pos[0]) > 3450.0 or abs(car.pos[1]) > 4450.0) and car.pos[2] > 200.0 and car.on_ground)
+
         # 1. Anti-Overshoot Penalty & Strike Zone Tracking
         overshoot_penalty = 0.0
         in_strike = (curr_dist < 400.0)
@@ -181,13 +198,30 @@ class PlayerToBallVelocityReward(BaseReward):
             # Car was in the strike zone and flew past the ball without touching it!
             overshoot_penalty = -0.30
 
-        # 2. Distance Delta with Strike Zone Pacing
-        raw_delta_dist = (prev_dist - curr_dist) / 2000.0
+        # Ceiling Exploit Prevention:
+        # If car is riding the ceiling and the ball is below it, eliminate distance closure rewards
+        # and penalize burning boost to sprint across the ceiling
+        ceiling_penalty = 0.0
+        if is_on_ceiling and is_elevated_aerial and ball_z < car.pos[2] - 200.0:
+            raw_delta_dist = min(0.0, (prev_dist - curr_dist) / 2000.0)
+            if action[6] > 0.0:
+                ceiling_penalty = -0.20
+        else:
+            raw_delta_dist = (prev_dist - curr_dist) / 2000.0
 
+        # 2. Distance Delta with Strike Zone Pacing
         # Downfield (> 450 uu): 100% distance closure rewarded
         # Inside strike zone (< 450 uu): Paces approach so car doesn't blindly barrel past ball
         strike_pacing = min(1.0, max(0.15, (curr_dist - 150.0) / 300.0))
         delta_dist = raw_delta_dist * strike_pacing
+
+        # If on wall when ball is in the air, dampen grounded wall-crawling so leaping off into an aerial is preferred
+        if is_on_wall and is_elevated_aerial:
+            delta_dist *= 0.25
+
+        # If car is on the wrong side and peeling away / rotating around, eliminate distance penalty cliff
+        if is_wrong_side and car_vy_defend > 0.0 and delta_dist < 0.0:
+            delta_dist = 0.0
 
         if curr_dist <= 300.0:
             if delta_dist < 0.0 and fwd_alignment > 0.0:
@@ -198,11 +232,17 @@ class PlayerToBallVelocityReward(BaseReward):
         # 3. Strike-Zone Velocity Matching & Brake Incentives (< 450 uu)
         vel_matching_bonus = 0.0
         brake_incentive = 0.0
+        wrong_side_push_penalty = 0.0
 
         if curr_dist < 450.0 and fwd_alignment > 0.2:
             rel_speed = float(np.linalg.norm(car.vel - arena.ball.vel))
-            # Reward matching velocity with the ball inside the strike zone
-            vel_matching_bonus = 0.15 * max(0.0, 1.0 - (rel_speed / 900.0))
+            
+            # Gated Velocity Matching: Only reward matching velocity if advancing ball toward opponent goal
+            if not (is_wrong_side and car_vy_defend > 100.0):
+                vel_matching_bonus = 0.15 * max(0.0, 1.0 - (rel_speed / 900.0))
+            else:
+                # Car is pushing ball toward own net: apply wrong-side push penalty
+                wrong_side_push_penalty = -0.25 * max(0.0, car_vy_defend / 1500.0) * max(0.0, fwd_alignment)
 
             # If closing dangerously fast (> 1100 uu/s) on a slower ball (< 600 uu/s), reward braking to pace arrival
             car_speed = float(np.linalg.norm(car.vel))
@@ -218,17 +258,15 @@ class PlayerToBallVelocityReward(BaseReward):
                 air_climb_speed = max(0.0, float(np.dot(car.vel, unit_to_ball)))
                 vel_toward_ball = (air_climb_speed / 2300.0) * 0.35 * max(0.0, fwd_alignment)
             else:
-                # Car is staying grounded while ball is floating high in the air
-                # Dampen grounded speed reward so bot doesn't exploit circling on floor underneath ball
-                fwd_speed_to_ball = max(0.0, float(np.dot(car.vel, unit_to_ball)))
-                vel_toward_ball = (fwd_speed_to_ball / 2300.0) * 0.05 * max(0.0, fwd_alignment)
+                vel_toward_ball = 0.0
         else:
-            # Grounded or low ball: Distance-gated downfield rush
-            speed_taper = min(1.0, max(0.0, (curr_dist - 180.0) / 320.0))
-            fwd_speed_to_ball = max(0.0, float(np.dot(car.vel, unit_to_ball)))
-            vel_toward_ball = (fwd_speed_to_ball / 2300.0) * 0.20 * max(0.0, fwd_alignment) * speed_taper
+            # Grounded or low ball: Gate downfield rush when pushing towards defending goal
+            if not (is_wrong_side and car_vy_defend > 100.0):
+                speed_taper = min(1.0, max(0.0, (curr_dist - 180.0) / 320.0))
+                fwd_speed_to_ball = max(0.0, float(np.dot(car.vel, unit_to_ball)))
+                vel_toward_ball = (fwd_speed_to_ball / 2300.0) * 0.20 * max(0.0, fwd_alignment) * speed_taper
 
-        total_reward = (self.weight * delta_dist) + vel_toward_ball + vel_matching_bonus + brake_incentive + overshoot_penalty
+        total_reward = (self.weight * delta_dist) + vel_toward_ball + vel_matching_bonus + brake_incentive + overshoot_penalty + ceiling_penalty + wrong_side_push_penalty
         return float(total_reward)
 
 
@@ -241,7 +279,9 @@ class TouchBallReward(BaseReward):
     Rewarded at the exact moment of ball contact, adapting intelligently to tactical context:
       1. Tactical Boom / Shot on Net: Booming strikes scaled heavily by goal alignment.
       2. Possession & Control Catch: Soft touches and pops that keep the ball under close control.
-      3. Vertical Aerials: Heavy height scaling (up to 2.5x) and airborne bonuses for aerial challenges.
+      3. Defensive Saves / Clears: Rewarded when clearing the ball out of the defensive sector.
+      4. Own-Goal Touch Guard: Strictly penalizes touches that project the ball towards the defending net.
+      5. Vertical Aerials: Heavy height scaling (up to 2.5x) and airborne bonuses for aerial challenges.
     """
     def __init__(self, weight: float = 1.2):
         super().__init__(weight)
@@ -260,6 +300,8 @@ class TouchBallReward(BaseReward):
             ball_speed = float(np.linalg.norm(arena.ball.vel))
             # Target goal opening rather than pure +Y direction
             target_goal_y = ARENA_EXTENT_Y if car.team == 0 else -ARENA_EXTENT_Y
+            defend_goal_y = -ARENA_EXTENT_Y if car.team == 0 else ARENA_EXTENT_Y
+
             target_x = float(np.clip(arena.ball.pos[0], -GOAL_HALF_WIDTH * 0.75, GOAL_HALF_WIDTH * 0.75))
             target_pos = np.array([target_x, target_goal_y, GOAL_HEIGHT * 0.35], dtype=np.float32)
 
@@ -271,35 +313,6 @@ class TouchBallReward(BaseReward):
                 unit_ball_vel = arena.ball.vel / ball_speed
                 goal_alignment = float(np.dot(unit_ball_vel, unit_to_goal))
 
-            # On-Target Trajectory Bonus: Check if touch velocity produces a direct shot into the net
-            vy_forward = arena.ball.vel[1] if car.team == 0 else -arena.ball.vel[1]
-            if vy_forward > 80.0:
-                delta_y = abs(target_goal_y - arena.ball.pos[1])
-                dt = delta_y / vy_forward
-                x_impact = arena.ball.pos[0] + arena.ball.vel[0] * dt
-                if abs(x_impact) <= GOAL_HALF_WIDTH:
-                    # Direct shot on target into the net opening!
-                    goal_alignment = max(goal_alignment, 0.7) + 0.35
-
-            # Directional multiplier: heavy boost for hits toward opponent net
-            if goal_alignment >= 0.0:
-                direction_multiplier = 1.0 + (min(1.0, goal_alignment) * 1.5)  # 1.0x -> 2.5x
-            else:
-                direction_multiplier = max(0.1, (goal_alignment + 1.0) * 0.5)
-
-            # Dual-Path Context Evaluator:
-            # Context A: Tactical Boom (Power shot on net / clearing hit)
-            power_bonus = 0.0
-            if goal_alignment > 0.4:
-                power_bonus = min(1.0, ball_speed / 2000.0)
-
-            # Context B: Possession & Controlled Catch (Soft touch / pop that keeps car and ball close)
-            rel_speed = float(np.linalg.norm(car.vel - arena.ball.vel))
-            control_bonus = max(0.0, 1.0 - (rel_speed / 600.0)) * 0.8
-
-            # Take the best tactical execution (either booming shot on target or surgical possession catch)
-            tactical_bonus = max(power_bonus, control_bonus)
-
             # Height scaling: Ground touch (Z=93) = 1.0x, High Aerial touch (Z=1500) = 2.5x
             ball_z = float(arena.ball.pos[2])
             height_multiplier = 1.0 + 1.5 * max(0.0, min(1.0, (ball_z - 150.0) / 1850.0))
@@ -308,11 +321,48 @@ class TouchBallReward(BaseReward):
             airborne_bonus = 1.2 if (not car.on_ground and ball_z > 350.0) else 0.0
 
             # Kickoff first-touch race bounty
-            is_kickoff_touch = bool(abs(arena.ball.pos[0]) < 200.0 and abs(arena.ball.pos[1]) < 200.0 and all(c.ball_touches <= 1 for c in arena.cars))
+            is_kickoff_touch = bool(abs(arena.ball.pos[0]) < 200.0 and abs(arena.ball.pos[1]) < 200.0 and arena.ball.pos[2] < 150.0 and all(c.ball_touches <= 1 for c in arena.cars))
             kickoff_bounty = 1.0 if is_kickoff_touch else 0.0
 
-            base_touch = 0.8
-            return (self.weight * (base_touch + tactical_bonus) * direction_multiplier * height_multiplier) + airborne_bonus + kickoff_bounty
+            # Check for defensive sector save / clear (ball moving away from defending net)
+            dist_ball_to_defend = abs(arena.ball.pos[1] - defend_goal_y)
+            ball_vy_out = arena.ball.vel[1] if car.team == 0 else -arena.ball.vel[1]
+            is_defensive_clear = bool(dist_ball_to_defend < 1800.0 and ball_vy_out > 200.0)
+
+            # --- CASE 1: Ball hit directed toward opponent half / goal ---
+            if goal_alignment >= 0.0:
+                # On-Target Trajectory Bonus: Check if touch velocity produces a direct shot into the net
+                vy_forward = arena.ball.vel[1] if car.team == 0 else -arena.ball.vel[1]
+                if vy_forward > 80.0:
+                    delta_y = abs(target_goal_y - arena.ball.pos[1])
+                    dt = delta_y / vy_forward
+                    x_impact = arena.ball.pos[0] + arena.ball.vel[0] * dt
+                    if abs(x_impact) <= GOAL_HALF_WIDTH:
+                        # Direct shot on target into the net opening!
+                        goal_alignment = max(goal_alignment, 0.7) + 0.35
+
+                direction_multiplier = 1.0 + (min(1.0, goal_alignment) * 1.5)  # 1.0x -> 2.5x
+
+                # Dual-Path Context Evaluator:
+                power_bonus = 0.0
+                if goal_alignment > 0.4:
+                    power_bonus = min(1.0, ball_speed / 2000.0)
+
+                rel_speed = float(np.linalg.norm(car.vel - arena.ball.vel))
+                control_bonus = max(0.0, 1.0 - (rel_speed / 600.0)) * 0.8
+                tactical_bonus = max(power_bonus, control_bonus)
+                base_touch = 0.8
+                return (self.weight * (base_touch + tactical_bonus) * direction_multiplier * height_multiplier) + airborne_bonus + kickoff_bounty
+
+            # --- CASE 2: Ball hit directed backward toward defending half / goal ---
+            else:
+                if is_defensive_clear:
+                    # Pinch / side clear out of defensive third
+                    return self.weight * 0.8 * height_multiplier + airborne_bonus
+                else:
+                    # Direct touch toward own goal: Strictly penalized to prevent own-goal dribbling
+                    penalty_scale = max(0.3, abs(goal_alignment))
+                    return -self.weight * 1.5 * penalty_scale * height_multiplier
 
         return 0.0
 
@@ -348,11 +398,21 @@ class JumpBridgeReward(BaseReward):
         if dist > 200.0:
             unit_to_ball = car_to_ball / dist
             forward_alignment = float(np.dot(car.get_forward_vector(), unit_to_ball))
+            takeoff_closing_vel = float(np.dot(car.vel, unit_to_ball))
 
             # 1. Takeoff Transition (Ground -> Air)
-            if prev_ground and not car.on_ground and car.vel[2] > 100.0 and forward_alignment > 0.1:
-                aerial_mult = 3.0 if arena.ball.pos[2] > 250.0 else 1.2
-                return self.weight * forward_alignment * aerial_mult
+            if prev_ground and not car.on_ground:
+                is_on_wall_zone = bool(abs(car.pos[0]) > 3400.0 or abs(car.pos[1]) > 4400.0)
+                is_aerial_ball = bool(arena.ball.pos[2] > 250.0)
+
+                # 1a. Floor Takeoff: Jumping up from floor toward ball
+                if car.pos[2] < 300.0 and car.vel[2] > 100.0 and forward_alignment > 0.1:
+                    aerial_mult = 3.0 if is_aerial_ball else 1.2
+                    return self.weight * forward_alignment * aerial_mult
+
+                # 1b. Wall Takeoff / Air Dribble Pop: Jumping off the sidewall/backwall into the arena toward ball
+                if is_on_wall_zone and car.pos[2] > 200.0 and (takeoff_closing_vel > 150.0 or forward_alignment > 0.15):
+                    return self.weight * max(0.2, forward_alignment) * 3.5
 
             # 2. Dodge / Flip Transition (Airborne Flip toward the ball)
             if not car.on_ground and prev_flip and not car.has_flip and forward_alignment > 0.2:
@@ -385,7 +445,7 @@ class BoostReward(BaseReward):
         self._prev_boost[car.id] = curr
 
         # Suspend all boost collection rewards and usage penalties during active kickoff (until ball is first touched/moving)
-        is_kickoff = bool(abs(arena.ball.pos[0]) < 50.0 and abs(arena.ball.pos[1]) < 50.0 and float(np.linalg.norm(arena.ball.vel)) < 100.0)
+        is_kickoff = bool(abs(arena.ball.pos[0]) < 50.0 and abs(arena.ball.pos[1]) < 50.0 and arena.ball.pos[2] < 120.0 and float(np.linalg.norm(arena.ball.vel)) < 100.0)
         if is_kickoff:
             return 0.0
 
@@ -401,6 +461,10 @@ class BoostReward(BaseReward):
             speed = float(np.linalg.norm(car.vel))
             if speed >= 2100.0 and action[6] > 0.0:
                 loss_rew -= 0.15
+
+            # Ceiling boost waste penalty: burning boost along ceiling while ball is below
+            if car.pos[2] > 1750.0 and action[6] > 0.0 and arena.ball.pos[2] < car.pos[2] - 250.0:
+                loss_rew -= 0.20
 
             # Off-axis boost waste penalty: burning boost when facing away from ball on ground (causes wide orbiting)
             if car.on_ground and action[6] > 0.0:

@@ -155,10 +155,11 @@ button.primary-btn {
 """
 
 
-def format_elapsed_time(seconds: int) -> str:
-    h = seconds // 3600
-    m = (seconds % 3600) // 60
-    s = seconds % 60
+def format_elapsed_time(seconds: Union[int, float]) -> str:
+    sec = int(seconds or 0)
+    h = sec // 3600
+    m = (sec % 3600) // 60
+    s = sec % 60
     if h > 0:
         return f"{h:02d}h {m:02d}m {s:02d}s"
     return f"{m:02d}m {s:02d}s"
@@ -473,7 +474,6 @@ def create_ui():
                         interactive=init_status["running"]
                     )
                     ckpt_btn = gr.Button("💾 Save Checkpoint", variant="secondary")
-                    tb_btn = gr.Button("📊 TensorBoard", variant="secondary")
 
         # -------------------------------------------------------------
         # MAIN TAB INTERFACE
@@ -670,55 +670,7 @@ def create_ui():
                 cfg_save_msg = gr.Markdown("")
 
             # ---------------------------------------------------------
-            # TAB 3: REAL-TIME METRICS & MONITORING
-            # ---------------------------------------------------------
-            with gr.TabItem("📈 Real-Time Metrics"):
-                with gr.Row():
-                    refresh_metrics_btn = gr.Button("🔄 Refresh Metrics", variant="primary")
-                    auto_refresh_chk = gr.Checkbox(label="Auto Refresh (Every 3s)", value=False)
-
-                with gr.Row():
-                    kpi_iteration = gr.Textbox(label="Iteration", value="0", interactive=False)
-                    kpi_step = gr.Textbox(label="Global Timestep", value="0", interactive=False)
-                    kpi_reward = gr.Textbox(label="Mean Episode Reward", value="0.00", interactive=False)
-                    kpi_loss = gr.Textbox(label="Policy / Value Loss", value="0.000 / 0.000", interactive=False)
-                    kpi_sps = gr.Textbox(label="Steps Per Sec (SPS)", value="0", interactive=False)
-
-                with gr.Row():
-                    chart_reward = gr.LinePlot(
-                        x="iteration",
-                        y="mean_reward",
-                        title="Mean Episode Reward per Iteration",
-                        tooltip=["iteration", "mean_reward", "global_step"],
-                        height=280
-                    )
-                    chart_losses = gr.LinePlot(
-                        x="iteration",
-                        y="policy_loss",
-                        title="Policy Loss over Iterations",
-                        tooltip=["iteration", "policy_loss", "value_loss"],
-                        height=280
-                    )
-
-                with gr.Row():
-                    chart_touches = gr.LinePlot(
-                        x="iteration",
-                        y="ball_touches",
-                        title="Ball Touches per Episode",
-                        tooltip=["iteration", "ball_touches", "goals"],
-                        height=280
-                    )
-                    chart_entropy = gr.LinePlot(
-                        x="iteration",
-                        y="entropy",
-                        title="Policy Entropy (Exploration Decay)",
-                        tooltip=["iteration", "entropy"],
-                        height=280
-                    )
-
-            # ---------------------------------------------------------
-            # ---------------------------------------------------------
-            # TAB 4: 📁 REPLAY INGESTION & IMITATION PRETRAINER
+            # TAB 3: 📁 REPLAY INGESTION & IMITATION PRETRAINER
             # ---------------------------------------------------------
             with gr.TabItem("📁 Replays & Imitation Pretrainer"):
                 def build_replay_stats_md():
@@ -1011,17 +963,12 @@ def create_ui():
             success, msg = mgr.trigger_save_checkpoint()
             return sync_ui_state(f"{'💾' if success else '⚠️'} {msg}")
 
-        def on_tensorboard():
-            success, msg = mgr.start_tensorboard()
-            return sync_ui_state(f"{'📊' if success else '⚠️'} {msg}")
-
         control_outputs = [status_card, start_btn, pause_btn, stop_btn]
 
         start_btn.click(fn=on_start, inputs=[resume_chk], outputs=control_outputs)
         stop_btn.click(fn=on_stop, outputs=control_outputs)
         pause_btn.click(fn=on_pause, outputs=control_outputs)
         ckpt_btn.click(fn=on_save_checkpoint, outputs=control_outputs)
-        tb_btn.click(fn=on_tensorboard, outputs=control_outputs)
 
         # Apply Live Training Dials (Rewards, Scenarios, Opponents, BC Guidance)
         def on_apply_rewards(
@@ -1226,76 +1173,14 @@ def create_ui():
         refresh_logs_btn.click(fn=on_get_logs, outputs=[console_output])
         clear_logs_btn.click(fn=lambda: "", outputs=[console_output])
 
-        # Metrics & Charts Handler
-        def on_refresh_metrics():
-            card_html, start_u, pause_u, stop_u = sync_ui_state()
-            status = mgr.get_status_info()
-            metrics = status.get("metrics", {})
-
-            iter_val = str(metrics.get("iteration", 0))
-            step_val = f"{metrics.get('global_step', 0):,}"
-            rew_val = f"{metrics.get('mean_reward', 0.0):+.2f}"
-            loss_val = f"{metrics.get('policy_loss', 0.0):.4f} / {metrics.get('value_loss', 0.0):.4f}"
-            sps_val = str(metrics.get("sps", 0))
-
-            # Load history dataframe with downsampling to prevent browser lag
-            history_file = os.path.join("logs", "history.jsonl")
-            if os.path.exists(history_file):
-                records = []
-                try:
-                    with open(history_file, "r") as f:
-                        for line in f:
-                            if line.strip():
-                                records.append(json.loads(line.strip()))
-                    if records:
-                        df = pd.DataFrame(records)
-                        # Downsample to ~300 smooth points so browser charts render instantaneously
-                        if len(df) > 300:
-                            stride = max(1, len(df) // 300)
-                            df_sampled = df.iloc[::stride].copy()
-                            if df.index[-1] not in df_sampled.index:
-                                df_sampled = pd.concat([df_sampled, df.iloc[[-1]]])
-                            df = df_sampled
-                    else:
-                        df = pd.DataFrame({"iteration": [0], "mean_reward": [0.0], "policy_loss": [0.0], "value_loss": [0.0], "ball_touches": [0.0], "entropy": [0.0]})
-                except Exception:
-                    df = pd.DataFrame({"iteration": [0], "mean_reward": [0.0], "policy_loss": [0.0], "value_loss": [0.0], "ball_touches": [0.0], "entropy": [0.0]})
-            else:
-                df = pd.DataFrame({"iteration": [0], "mean_reward": [0.0], "policy_loss": [0.0], "value_loss": [0.0], "ball_touches": [0.0], "entropy": [0.0]})
-
-            return (
-                card_html, start_u, pause_u, stop_u,
-                iter_val, step_val, rew_val, loss_val, sps_val,
-                df, df, df, df
-            )
-
-        refresh_metrics_btn.click(
-            fn=on_refresh_metrics,
-            outputs=[
-                status_card, start_btn, pause_btn, stop_btn,
-                kpi_iteration, kpi_step, kpi_reward, kpi_loss, kpi_sps,
-                chart_reward, chart_losses, chart_touches, chart_entropy
-            ]
-        )
-
-        # Periodic timer if auto-refresh is active (starts inactive matching checkbox value)
-        timer = gr.Timer(3.0, active=False)
-        
-        def on_toggle_auto_refresh(val=False):
-            return gr.Timer(active=bool(val))
-
-        auto_refresh_chk.change(
-            fn=on_toggle_auto_refresh,
-            inputs=[auto_refresh_chk],
-            outputs=[timer]
-        )
-        timer.tick(
-            fn=on_refresh_metrics,
-            outputs=[
-                status_card, start_btn, pause_btn, stop_btn,
-                kpi_iteration, kpi_step, kpi_reward, kpi_loss, kpi_sps,
-                chart_reward, chart_losses, chart_touches, chart_entropy
-            ]
+        # -------------------------------------------------------------
+        # REAL-TIME BACKGROUND REFRESH & LOAD
+        # -------------------------------------------------------------
+        # Ultra-lightweight Real-Time Top Status Hero Banner Timer (every 2s across all tabs)
+        status_timer = gr.Timer(2.0, active=True)
+        status_timer.tick(
+            fn=sync_ui_state,
+            outputs=[status_card, start_btn, pause_btn, stop_btn]
         )
 
         # Initialize UI on page load

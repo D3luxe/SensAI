@@ -107,6 +107,40 @@ class TestRocketLeagueEnvironment(unittest.TestCase):
         verified = verify_physics_and_controls_pipeline(verbose=False)
         self.assertTrue(verified)
 
+    def test_anti_own_goal_rewards(self):
+        """Verify that pushing/touching the ball towards defending net is strictly penalized."""
+        from env.physics_engine import CarState, BallState, RocketSimArena
+        from env.rewards import TouchBallReward, PlayerToBallVelocityReward, BallToGoalVelocityReward
+
+        arena = RocketSimArena(num_players=2, game_mode="1v1")
+        car0 = arena.cars[0]  # Team 0: Defending -5120, attacking +5120
+        car0.pos = np.array([0.0, 1000.0, 17.0], dtype=np.float32)
+        car0.vel = np.array([0.0, -1200.0, 0.0], dtype=np.float32)  # Moving towards defending net (-Y)
+        car0.rot = np.array([0.0, -np.pi/2, 0.0], dtype=np.float32) # Facing -Y
+
+        # Ball in front of car, also moving towards defending net
+        arena.ball.pos = np.array([0.0, 800.0, 93.15], dtype=np.float32)
+        arena.ball.vel = np.array([0.0, -1200.0, 0.0], dtype=np.float32)
+
+        # 1. Test BallToGoalVelocityReward (asymmetric penalty)
+        b2g = BallToGoalVelocityReward(weight=1.5)
+        rew_b2g = b2g.get_reward(car0, arena, np.zeros(8), False, None)
+        self.assertLess(rew_b2g, 0.0, "Ball moving towards defending goal must yield negative progression reward")
+
+        # 2. Test PlayerToBallVelocityReward (wrong-side penalty)
+        p2b = PlayerToBallVelocityReward(weight=0.15)
+        p2b.reset(arena)
+        rew_p2b = p2b.get_reward(car0, arena, np.array([1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]), False, None)
+        self.assertLessEqual(rew_p2b, 0.0, "Chasing/pushing ball towards defending goal must not give positive matching reward")
+
+        # 3. Test TouchBallReward on bad touch towards own net
+        touch_rew = TouchBallReward(weight=1.2)
+        touch_rew.reset(arena)
+        car0.ball_touches += 1
+        rew_touch = touch_rew.get_reward(car0, arena, np.zeros(8), False, None)
+        self.assertLess(rew_touch, 0.0, "Touching ball directly towards defending goal must yield a negative penalty")
+
 
 if __name__ == "__main__":
     unittest.main()
+

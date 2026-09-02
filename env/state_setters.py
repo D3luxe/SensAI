@@ -249,48 +249,88 @@ class ReplayStateSetter(BaseStateSetter):
 
 class TurnaroundRecoverySetter(BaseStateSetter):
     """
-    Spawns cars traveling fast downfield with the ball positioned behind or to the side.
-    Forces the agent to execute powerslide 180° hairpin cuts, tap-braking, and turnarounds.
+    Spawns turnaround recoveries and wrong-side ball scenarios.
+    Forces the agent to execute powerslide 180° hairpin cuts, tap-braking, peeling away,
+    and avoiding pushing/accelerating the ball into its own net.
     """
     def reset(self, rsim_arena: Any, num_players: int) -> None:
         target_team = random.choice([0, 1])
         sign = 1.0 if target_team == 0 else -1.0
+        mode = random.choice(["turnaround", "wrong_side_dribble"])
 
-        # Ball grounded behind the midfield line
-        bx = random.uniform(-1200, 1200)
-        by = -sign * random.uniform(800, 2400)
-        bz = 93.15
+        if mode == "wrong_side_dribble":
+            # Scenario A: Bot is directly behind the ball facing its own goal
+            # Forces policy to brake / peel off rather than accelerating into own net
+            bx = random.uniform(-1000, 1000)
+            by = sign * random.uniform(0, 2000)
+            bz = 93.15
 
-        bs = rsim_arena.ball.get_state()
-        bs.pos = rsim.Vec(bx, by, bz)
-        bs.vel = rsim.Vec(random.uniform(-100, 100), -sign * random.uniform(0, 300), 0)
-        bs.ang_vel = rsim.Vec(0, 0, 0)
-        rsim_arena.ball.set_state(bs)
+            bs = rsim_arena.ball.get_state()
+            bs.pos = rsim.Vec(bx, by, bz)
+            # Ball rolling slowly towards target team's defending net (-sign Y direction)
+            bs.vel = rsim.Vec(random.uniform(-50, 50), -sign * random.uniform(100, 400), 0)
+            bs.ang_vel = rsim.Vec(0, 0, 0)
+            rsim_arena.ball.set_state(bs)
 
-        for i, car in enumerate(rsim_arena.get_cars()):
-            cs = car.get_state()
-            cs.boost = random.uniform(30.0, 80.0)
-            team = i % 2
+            for i, car in enumerate(rsim_arena.get_cars()):
+                cs = car.get_state()
+                cs.boost = random.uniform(20.0, 70.0)
+                team = i % 2
 
-            if team == target_team:
-                # Car moving fast away from ball towards opponent end
-                cx = random.uniform(-1000, 1000)
-                cy = sign * random.uniform(200, 1800)
-                cs.pos = rsim.Vec(cx, cy, 17.0)
-                yaw = sign * math.pi / 2 + random.uniform(-0.3, 0.3)
-                cs.rot_mat = rsim.Angle(pitch=0.0, yaw=yaw, roll=0.0).as_rot_mat()
-                # Fast forward momentum (1200 - 1800 uu/s) moving away from ball
-                speed = random.uniform(1200, 1800)
-                cs.vel = rsim.Vec(math.cos(yaw) * speed, math.sin(yaw) * speed, 0)
-            else:
-                # Opponent challenging or rotating back
-                cs.pos = rsim.Vec(random.uniform(-800, 800), by - sign * random.uniform(400, 1000), 17.0)
-                yaw = sign * math.pi / 2
-                cs.rot_mat = rsim.Angle(pitch=0.0, yaw=yaw, roll=0.0).as_rot_mat()
-                cs.vel = rsim.Vec(0, sign * 600, 0)
+                if team == target_team:
+                    # Car placed slightly behind ball facing defending goal
+                    cx = bx + random.uniform(-40, 40)
+                    cy = by + sign * random.uniform(150, 300)
+                    cs.pos = rsim.Vec(cx, cy, 17.0)
+                    yaw = -sign * math.pi / 2 + random.uniform(-0.1, 0.1)
+                    cs.rot_mat = rsim.Angle(pitch=0.0, yaw=yaw, roll=0.0).as_rot_mat()
+                    cs.vel = rsim.Vec(0, -sign * random.uniform(300, 700), 0)
+                else:
+                    # Opponent further back or challenging
+                    cs.pos = rsim.Vec(random.uniform(-800, 800), by - sign * random.uniform(1200, 2000), 17.0)
+                    yaw = sign * math.pi / 2
+                    cs.rot_mat = rsim.Angle(pitch=0.0, yaw=yaw, roll=0.0).as_rot_mat()
+                    cs.vel = rsim.Vec(0, sign * 500, 0)
 
-            cs.ang_vel = rsim.Vec(0, 0, 0)
-            car.set_state(cs)
+                cs.ang_vel = rsim.Vec(0, 0, 0)
+                car.set_state(cs)
+
+        else:
+            # Scenario B: Ball grounded behind midfield line, car sprinting downfield away from ball
+            bx = random.uniform(-1200, 1200)
+            by = -sign * random.uniform(800, 2400)
+            bz = 93.15
+
+            bs = rsim_arena.ball.get_state()
+            bs.pos = rsim.Vec(bx, by, bz)
+            bs.vel = rsim.Vec(random.uniform(-100, 100), -sign * random.uniform(0, 300), 0)
+            bs.ang_vel = rsim.Vec(0, 0, 0)
+            rsim_arena.ball.set_state(bs)
+
+            for i, car in enumerate(rsim_arena.get_cars()):
+                cs = car.get_state()
+                cs.boost = random.uniform(30.0, 80.0)
+                team = i % 2
+
+                if team == target_team:
+                    # Car moving fast away from ball towards opponent end
+                    cx = random.uniform(-1000, 1000)
+                    cy = sign * random.uniform(200, 1800)
+                    cs.pos = rsim.Vec(cx, cy, 17.0)
+                    yaw = sign * math.pi / 2 + random.uniform(-0.3, 0.3)
+                    cs.rot_mat = rsim.Angle(pitch=0.0, yaw=yaw, roll=0.0).as_rot_mat()
+                    # Fast forward momentum (1200 - 1800 uu/s) moving away from ball
+                    speed = random.uniform(1200, 1800)
+                    cs.vel = rsim.Vec(math.cos(yaw) * speed, math.sin(yaw) * speed, 0)
+                else:
+                    # Opponent challenging or rotating back
+                    cs.pos = rsim.Vec(random.uniform(-800, 800), by - sign * random.uniform(400, 1000), 17.0)
+                    yaw = sign * math.pi / 2
+                    cs.rot_mat = rsim.Angle(pitch=0.0, yaw=yaw, roll=0.0).as_rot_mat()
+                    cs.vel = rsim.Vec(0, sign * 600, 0)
+
+                cs.ang_vel = rsim.Vec(0, 0, 0)
+                car.set_state(cs)
 
 
 class WeightedScenarioSetter:
