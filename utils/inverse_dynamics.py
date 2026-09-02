@@ -106,19 +106,19 @@ class InverseDynamicsSolver:
         measured_omega = delta_rot / dt
 
         if on_ground_t and on_ground_next:
-            # Ground Steering
+            # Ground Steering (Turning Left / +yaw_rate requires act[1] < 0; Turning Right / -yaw_rate requires act[1] > 0)
             yaw_rate = float(measured_omega[1])
             if abs(speed_fwd) > 100.0:
-                # Steer is proportional to yaw_rate * radius / speed
-                steer_val = (yaw_rate * 500.0) / max(200.0, abs(speed_fwd))
+                # Steer is proportional to -yaw_rate * radius / speed
+                steer_val = -(yaw_rate * 500.0) / max(200.0, abs(speed_fwd))
                 steer_act = float(np.clip(steer_val, -1.0, 1.0))
             else:
-                steer_act = float(np.clip(yaw_rate * 0.5, -1.0, 1.0))
+                steer_act = float(np.clip(-yaw_rate * 0.5, -1.0, 1.0))
 
             # Handbrake / Powerslide Detection
             # High lateral slip with low yaw curvature or rapid direction snap
             lateral_slip = abs(float(np.dot(vel_t, right)))
-            if lateral_slip > 350.0 and abs(steer_act) > 0.2:
+            if lateral_slip > 400.0 or (abs(yaw_rate) > 3.0 and speed_fwd > 600.0):
                 handbrake_act = 1.0
             else:
                 handbrake_act = -1.0
@@ -131,17 +131,17 @@ class InverseDynamicsSolver:
             steer_act = 0.0
             handbrake_act = -1.0
 
-            # Pitch (in RocketSim/RLGym: -1.0 is nose down, +1.0 is nose up)
+            # Pitch (in RocketSim/RLGym: -1.0 is nose up, +1.0 is nose down)
             pitch_rate = float(measured_omega[0])
             pitch_act = float(np.clip(pitch_rate / PITCH_TORQUE, -1.0, 1.0))
 
-            # Yaw
+            # Yaw (Left is -1.0, Right is +1.0)
             yaw_rate = float(measured_omega[1])
-            yaw_act = float(np.clip(yaw_rate / YAW_TORQUE, -1.0, 1.0))
+            yaw_act = float(np.clip(-yaw_rate / YAW_TORQUE, -1.0, 1.0))
 
-            # Roll
+            # Roll (Left is -1.0, Right is +1.0)
             roll_rate = float(measured_omega[2])
-            roll_act = float(np.clip(roll_rate / ROLL_TORQUE, -1.0, 1.0))
+            roll_act = float(np.clip(-roll_rate / ROLL_TORQUE, -1.0, 1.0))
 
         # 5. Jump & Dodge Detection
         # Initial jump: ground -> air with upward vertical impulse (vz >= 250 uu/s)

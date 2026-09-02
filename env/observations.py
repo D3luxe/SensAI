@@ -83,8 +83,11 @@ class DefaultObservationBuilder:
         rm = car.rot_mat
         if rm is not None:
             fx, fy, fz = float(rm[0, 0]), float(rm[0, 1]), float(rm[0, 2])
-            rx, ry, rz = float(rm[1, 0]), float(rm[1, 1]), float(rm[1, 2])
             ux, uy, uz = float(rm[2, 0]), float(rm[2, 1]), float(rm[2, 2])
+            # True Right vector from fwd x up (In C++ RocketSim basis, row 1 is Left / -Right)
+            rx = fy * uz - fz * uy
+            ry = fz * ux - fx * uz
+            rz = fx * uy - fy * ux
         else:
             f = car.get_forward_vector()
             u = car.get_up_vector()

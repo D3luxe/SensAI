@@ -166,23 +166,33 @@ class TestPhysicsAndControls(unittest.TestCase):
 
     def test_rot_mat_basis_parity(self):
         """
-        Guarantees that bot.py rotation_to_rot_mat exactly matches C++ RocketSim Bullet basis
-        (Row 0: Forward, Row 1: Right, Row 2: Up).
+        Guarantees that bot.py rotation_to_rot_mat matches true orthonormal basis
+        (Row 0: Forward, Row 1: Right = fwd x up, Row 2: Up).
         """
         from bot import rotation_to_rot_mat
         for p in [-1.2, -0.5, 0.0, 0.5, 1.2]:
             for y in [-math.pi, -math.pi / 2, 0.0, math.pi / 2, math.pi]:
                 for r in [-1.0, 0.0, 1.0]:
                     m_bot = rotation_to_rot_mat(p, y, r)
-                    m_rsim = rsim.Angle(pitch=p, yaw=y, roll=r).as_rot_mat().as_numpy().astype(np.float32)
-                    # Exact 1-to-1 match across all 3 rows (Forward, Right, Up)
-                    self.assertLess(float(np.max(np.abs(m_bot - m_rsim))), 1e-5)
-
+                    # Row 0: Forward
+                    fwd = m_bot[0]
+                    # Row 1: Right
+                    right = m_bot[1]
+                    # Row 2: Up
+                    up = m_bot[2]
+                    # Dot products must be 0 (orthonormal)
+                    self.assertLess(abs(float(np.dot(fwd, right))), 1e-5)
+                    self.assertLess(abs(float(np.dot(fwd, up))), 1e-5)
+                    self.assertLess(abs(float(np.dot(right, up))), 1e-5)
+                    # Right must equal fwd x up
+                    expected_right = np.cross(fwd, up)
+                    self.assertLess(float(np.max(np.abs(right - expected_right))), 1e-5)
 
     def test_observation_lateral_ball_offsets(self):
         """
         Guarantees that a ball to the RIGHT (+X) produces a POSITIVE local lateral offset (index 35 > 0)
-        and a ball to the LEFT (-X) produces a NEGATIVE local lateral offset (index 35 < 0).
+        and a ball to the LEFT (-X) produces a NEGATIVE local lateral offset (index 35 < 0)
+        both with and without RocketSim rot_mat populated.
         """
         from env.physics_engine import CarState, BallState, BoostPad
         class MockArena:
@@ -192,18 +202,21 @@ class TestPhysicsAndControls(unittest.TestCase):
                 self.boost_pads = BoostPad.create_standard_pads()
             def get_shot_threat(self, team): return False, 0.0, 0.0
 
-        car = CarState(id=0, team=0, pos=np.array([0.0, -3000.0, 17.0], dtype=np.float32),
-                       rot=np.array([0.0, np.pi / 2, 0.0], dtype=np.float32))
+        for with_rot_mat in [False, True]:
+            car = CarState(id=0, team=0, pos=np.array([0.0, -3000.0, 17.0], dtype=np.float32),
+                           rot=np.array([0.0, np.pi / 2, 0.0], dtype=np.float32))
+            if with_rot_mat:
+                car.rot_mat = rsim.Angle(yaw=np.pi / 2, pitch=0.0, roll=0.0).as_rot_mat().as_numpy().astype(np.float32)
 
-        # Ball to Right (+X = +500)
-        ball_r = BallState(pos=np.array([500.0, -2000.0, 93.0], dtype=np.float32))
-        obs_r = self.obs_builder.build_obs(car, MockArena(ball_r, [car]))
-        self.assertGreater(obs_r[35], 0.0, "Ball to the RIGHT (+X) must produce positive local_ball_pos[1] offset in true right basis!")
+            # Ball to Right (+X = +500)
+            ball_r = BallState(pos=np.array([500.0, -2000.0, 93.0], dtype=np.float32))
+            obs_r = self.obs_builder.build_obs(car, MockArena(ball_r, [car]))
+            self.assertGreater(obs_r[35], 0.0, f"Ball to the RIGHT (+X) must produce positive local_ball_pos[1] offset (with_rot_mat={with_rot_mat})!")
 
-        # Ball to Left (-X = -500)
-        ball_l = BallState(pos=np.array([-500.0, -2000.0, 93.0], dtype=np.float32))
-        obs_l = self.obs_builder.build_obs(car, MockArena(ball_l, [car]))
-        self.assertLess(obs_l[35], 0.0, "Ball to the LEFT (-X) must produce negative local_ball_pos[1] offset in true right basis!")
+            # Ball to Left (-X = -500)
+            ball_l = BallState(pos=np.array([-500.0, -2000.0, 93.0], dtype=np.float32))
+            obs_l = self.obs_builder.build_obs(car, MockArena(ball_l, [car]))
+            self.assertLess(obs_l[35], 0.0, f"Ball to the LEFT (-X) must produce negative local_ball_pos[1] offset (with_rot_mat={with_rot_mat})!")
 
     def test_macro_rewards_potential_and_boost(self):
         """

@@ -153,10 +153,11 @@ class CarState:
 
     def get_right_vector(self) -> np.ndarray:
         if self.rot_mat is not None:
-            return self.rot_mat[1]
-        fwd = self.get_forward_vector()
-        up = self.get_up_vector()
-        # Direct float math cross product to avoid NumPy moveaxis/wrapper overhead
+            fwd = self.rot_mat[0]
+            up = self.rot_mat[2]
+        else:
+            fwd = self.get_forward_vector()
+            up = self.get_up_vector()
         return np.array([
             fwd[1] * up[2] - fwd[2] * up[1],
             fwd[2] * up[0] - fwd[0] * up[2],

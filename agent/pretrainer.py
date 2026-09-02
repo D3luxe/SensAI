@@ -187,7 +187,7 @@ class BehavioralCloningTrainer:
 
                     if is_on_wall:
                         # On vertical wall: steer toward floor/ball (inverted lateral mapping on vertical surfaces)
-                        steer = float(np.clip(local_ball_y * 6.0, -1.0, 1.0))
+                        steer = float(np.clip(local_ball_y * 3.0, -1.0, 1.0))
                         throttle = 1.0
                         handbrake = -1.0
                         roll = 0.0
@@ -197,7 +197,7 @@ class BehavioralCloningTrainer:
                         handbrake = 1.0 if (abs(local_ball_y) > 0.6 and car.on_ground) else -1.0
                         roll = 0.0
                     else:
-                        steer = float(np.clip(local_ball_y * 6.0, -1.0, 1.0))
+                        steer = float(np.clip(local_ball_y * 3.0, -1.0, 1.0))
                         # Pacing throttle in close strike zone
                         throttle = min(1.0, max(0.3, local_ball_x * 2.0)) if (car.on_ground and abs(local_ball_y) < 0.3 and local_ball_x < 0.5) else 1.0
                         handbrake = -1.0
@@ -228,7 +228,8 @@ class BehavioralCloningTrainer:
                 is_kickoff = bool(obs_vec[52] > 0.5)
                 if is_kickoff:
                     expert_act[0] = 1.0  # Full forward throttle
-                    expert_act[1] = float(np.clip(-float(obs_vec[35]) * 4.0, -0.2, 0.2))  # Precise nose-to-ball alignment
+                    # Ball to right (obs_vec[35] > 0) -> Steer right (expert_act[1] > 0)
+                    expert_act[1] = float(np.clip(float(obs_vec[35]) * 2.5, -0.6, 0.6))
                     expert_act[6] = 1.0 if car.boost > 0 else -1.0  # Boost on kickoff
 
                 # Add direct sample
@@ -257,7 +258,7 @@ class BehavioralCloningTrainer:
                             for by in [-1500.0, 0.0, 1500.0]:
                                 ball_floor = BallState(pos=np.array([bx, by, 93.0], dtype=np.float32), vel=np.zeros(3, dtype=np.float32))
                                 obs_w = self.obs_builder.build_obs(car_wall, MockArenaForObs(ball_floor, [car_wall]))
-                                steer_down = float(side * heading_sign)
+                                steer_down = -float(side * heading_sign)
                                 act_w = np.array([1.0, steer_down, 0.0, 0.0, float(side), 1.0, -1.0, -1.0], dtype=np.float32)
 
                                 obs_list.append(obs_w)
