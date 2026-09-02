@@ -457,6 +457,12 @@ class RocketSimArena:
                         pitch_val = -float(act[2])
                         yaw_val = -float(act[3])
                         roll_val = -float(act[4])
+                        # Deadzone compensation for airborne dodge impulse (RocketSim flip deadzone = 0.50)
+                        if jump_val:
+                            if abs(pitch_val) > 0.05:
+                                pitch_val = float(math.copysign(max(abs(pitch_val), 0.90), pitch_val))
+                            if abs(yaw_val) > 0.05:
+                                yaw_val = float(math.copysign(max(abs(yaw_val), 0.90), yaw_val))
 
                     hnd_val = bool(act[7] > 0.0 and is_on_gnd)
                     r_car.set_controls(rsim.CarControls(
