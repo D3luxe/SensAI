@@ -433,15 +433,6 @@ class SenseiRLBot(BaseAgent):
                 controller.jump = bool(want_jump and substep_tick <= 3)
             else:
                 controller.jump = bool(want_jump and has_flip and substep_tick <= 2)
-                # Dodge Deadzone Compensation:
-                # Rocket League and RocketSim require analog stick deflection >= 0.50 to execute a directional flip/dodge.
-                # Continuous policy analog outputs (e.g. pitch=0.13) fall into the game engine's deadzone, resulting in an empty double jump.
-                # When an airborne flip is triggered on ticks 0..2, scale directional intentions past the deadzone threshold.
-                if controller.jump:
-                    if abs(controller.pitch) > 0.05:
-                        controller.pitch = float(math.copysign(max(abs(controller.pitch), 0.90), controller.pitch))
-                    if abs(controller.yaw) > 0.05:
-                        controller.yaw = float(math.copysign(max(abs(controller.yaw), 0.90), controller.yaw))
 
             # Ground stabilization:
             # When driving on the ground without jumping, keep pitch, yaw, and roll neutral

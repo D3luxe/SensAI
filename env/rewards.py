@@ -416,7 +416,13 @@ class JumpBridgeReward(BaseReward):
 
             # 2. Dodge / Flip Transition (Airborne Flip toward the ball)
             if not car.on_ground and prev_flip and not car.has_flip and forward_alignment > 0.2:
-                return self.weight * forward_alignment * 1.5
+                stick_deflection = max(abs(float(action[2])), abs(float(action[3])))
+                # Genuine directional flip requires analog stick deflection >= 0.50
+                if stick_deflection >= 0.50:
+                    return self.weight * forward_alignment * (1.5 + stick_deflection)
+                elif arena.ball.pos[2] > 350.0:
+                    # Double jump for high aerial balls
+                    return self.weight * forward_alignment * 0.75
 
         return 0.0
 

@@ -133,6 +133,7 @@ class TestScenariosAndReplays(unittest.TestCase):
             "kickoff_prob": 0.0,
             "replay_prob": 0.0,
             "wall_prob": 0.0,
+            "turnaround_prob": 0.0,
             "save_prob": 0.0
         })
         self.arena.reset(random_kickoff=True)
