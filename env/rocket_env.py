@@ -103,7 +103,8 @@ class RocketLeagueEnv:
         prev_touches_sum = sum(self.episode_touches)
 
         for i, car in enumerate(self.arena.cars):
-            r, r_dict = self.reward_manager.get_reward(car, self.arena, parsed_actions[i], is_goal, scoring_team)
+            # Only generate detailed reward breakdown dictionary for car 0 to avoid wasteful allocations
+            r, r_dict = self.reward_manager.get_reward(car, self.arena, parsed_actions[i], is_goal, scoring_team, include_breakdown=(i == 0))
             out_rews[i] = r
             self.episode_rewards[i] += r
             self.episode_touches[i] = car.ball_touches
@@ -145,7 +146,8 @@ class RocketLeagueEnv:
 class VectorizedRocketEnv:
     """
     Vectorized parallel environment container running multiple RocketLeagueEnv instances simultaneously.
-    Provides fast, pre-allocated zero-copy observation and reward tensor aggregation.
+    Provides fast, pre-allocated zero-copy observation and reward tensor aggregation with
+    persistent multi-threaded chunked parallel environment stepping.
     """
     def __init__(
         self,
@@ -157,7 +159,8 @@ class VectorizedRocketEnv:
         continuous_actions: bool = True,
         self_play: bool = True,
         baseline_opponent_ratio: float = 0.25,
-        baseline_opponent_type: str = "heuristic"
+        baseline_opponent_type: str = "heuristic",
+        num_workers: Optional[int] = None
     ):
         self.num_envs = num_envs
         self.game_mode = game_mode
@@ -191,6 +194,58 @@ class VectorizedRocketEnv:
         self._obs_buffer = np.zeros((num_envs, self.num_players_per_env, self.obs_dim), dtype=np.float32)
         self._rew_buffer = np.zeros((num_envs, self.num_players_per_env), dtype=np.float32)
         self._done_buffer = np.zeros((num_envs, self.num_players_per_env), dtype=bool)
+
+        # Multi-threaded worker engine for parallel environment stepping (default 1 for zero-overhead in-memory execution)
+        import threading
+        if num_workers is None:
+            num_workers = 1
+        self.num_workers = max(1, min(num_workers, num_envs))
+
+
+        if self.num_workers > 1:
+            self.chunk_size = (num_envs + self.num_workers - 1) // self.num_workers
+            self.chunks = []
+            for w in range(self.num_workers):
+                start = w * self.chunk_size
+                end = min(num_envs, start + self.chunk_size)
+                if start < end:
+                    self.chunks.append((start, end))
+            self.num_workers = len(self.chunks)
+
+            self.step_events = [threading.Event() for _ in range(self.num_workers)]
+            self.done_events = [threading.Event() for _ in range(self.num_workers)]
+            self.stop_flag = False
+            self.worker_threads = []
+            self._actions_ref = None
+            self._worker_infos = [[] for _ in range(self.num_workers)]
+
+            for w_idx, (start, end) in enumerate(self.chunks):
+                t = threading.Thread(target=self._worker_loop, args=(w_idx, start, end), daemon=True)
+                t.start()
+                self.worker_threads.append(t)
+        else:
+            self.chunks = [(0, num_envs)]
+            self.worker_threads = []
+
+    def _worker_loop(self, w_idx: int, start: int, end: int):
+        while True:
+            self.step_events[w_idx].wait()
+            if self.stop_flag:
+                break
+            self.step_events[w_idx].clear()
+
+            chunk_infos = []
+            for i in range(start, end):
+                _, _, dones, info = self.envs[i].step(
+                    self._actions_ref[i],
+                    out_obs=self._obs_buffer[i],
+                    out_rews=self._rew_buffer[i]
+                )
+                self._done_buffer[i] = dones
+                chunk_infos.append(info)
+
+            self._worker_infos[w_idx] = chunk_infos
+            self.done_events[w_idx].set()
 
     def update_baseline_ratio(self, ratio: float):
         """Dynamically reconfigures the number of environments running against the baseline opponent."""
@@ -239,21 +294,42 @@ class VectorizedRocketEnv:
     def step(self, actions: np.ndarray) -> Tuple[np.ndarray, np.ndarray, np.ndarray, List[Dict[str, Any]]]:
         """
         actions shape: (num_envs, num_players, act_dim)
-        Zero-copy step updating pre-allocated internal numpy buffers.
+        Parallel step updating pre-allocated internal numpy buffers across persistent worker threads.
         """
-        all_infos = []
-        for i, env in enumerate(self.envs):
-            _, _, dones, info = env.step(
-                actions[i],
-                out_obs=self._obs_buffer[i],
-                out_rews=self._rew_buffer[i]
-            )
-            self._done_buffer[i] = dones
-            all_infos.append(info)
+        if self.num_workers > 1:
+            self._actions_ref = actions
+            for w in range(self.num_workers):
+                self.done_events[w].clear()
+                self.step_events[w].set()
 
-        return (
-            self._obs_buffer,
-            self._rew_buffer,
-            self._done_buffer,
-            all_infos
-        )
+            for w in range(self.num_workers):
+                self.done_events[w].wait()
+
+            all_infos = []
+            for w in range(self.num_workers):
+                all_infos.extend(self._worker_infos[w])
+
+            return (
+                self._obs_buffer,
+                self._rew_buffer,
+                self._done_buffer,
+                all_infos
+            )
+        else:
+            all_infos = []
+            for i, env in enumerate(self.envs):
+                _, _, dones, info = env.step(
+                    actions[i],
+                    out_obs=self._obs_buffer[i],
+                    out_rews=self._rew_buffer[i]
+                )
+                self._done_buffer[i] = dones
+                all_infos.append(info)
+
+            return (
+                self._obs_buffer,
+                self._rew_buffer,
+                self._done_buffer,
+                all_infos
+            )
+

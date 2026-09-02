@@ -145,20 +145,27 @@ class CarState:
 
     def get_forward_vector(self) -> np.ndarray:
         if self.rot_mat is not None:
-            return self.rot_mat[0].copy()
+            return self.rot_mat[0]
         p, y, _ = self.rot
         cp, sp = math.cos(p), math.sin(p)
         cy, sy = math.cos(y), math.sin(y)
         return np.array([cp * cy, cp * sy, sp], dtype=np.float32)
 
     def get_right_vector(self) -> np.ndarray:
+        if self.rot_mat is not None:
+            return self.rot_mat[1]
         fwd = self.get_forward_vector()
         up = self.get_up_vector()
-        return np.cross(fwd, up).astype(np.float32)
+        # Direct float math cross product to avoid NumPy moveaxis/wrapper overhead
+        return np.array([
+            fwd[1] * up[2] - fwd[2] * up[1],
+            fwd[2] * up[0] - fwd[0] * up[2],
+            fwd[0] * up[1] - fwd[1] * up[0]
+        ], dtype=np.float32)
 
     def get_up_vector(self) -> np.ndarray:
         if self.rot_mat is not None:
-            return self.rot_mat[2].copy()
+            return self.rot_mat[2]
         p, y, r = self.rot
         cp, sp = math.cos(p), math.sin(p)
         cy, sy = math.cos(y), math.sin(y)
@@ -352,6 +359,7 @@ class RocketSimArena:
                     rc.set_state(rc_s)
             return
 
+        spawn_idx = np.random.randint(len(kickoff_spawns_team0))
         for i in range(half_players):
             idx = (spawn_idx + i) % len(kickoff_spawns_team0)
             x, y, yaw = kickoff_spawns_team0[idx]
@@ -388,12 +396,10 @@ class RocketSimArena:
 
         for i, r_car in enumerate(self._rsim_cars):
             c_state = r_car.get_state()
-            ang = c_state.rot_mat.as_angle()
             car = self.cars[i]
             car.pos = c_state.pos.as_numpy().astype(np.float32)
             car.vel = c_state.vel.as_numpy().astype(np.float32)
-            r_mat = c_state.rot_mat.as_numpy().astype(np.float32)
-            car.rot_mat = r_mat.copy()
+            car.rot_mat = c_state.rot_mat.as_numpy().astype(np.float32)
             car.ang_vel = c_state.ang_vel.as_numpy().astype(np.float32)
             car.boost = float(c_state.boost)
             car.on_ground = bool(c_state.is_on_ground)

@@ -25,25 +25,17 @@ class ContinuousActionParser:
         self.action_dim = 8
 
     def parse_actions(self, raw_actions: np.ndarray) -> np.ndarray:
-        actions = np.array(raw_actions, dtype=np.float32).copy()
-
-        # True continuous analog throttle with deadband around zero to eliminate micro-jitter
+        actions = np.array(raw_actions, dtype=np.float32, copy=True)
+        # In-place clipping and deadband filtering
+        np.clip(actions[..., :5], -1.0, 1.0, out=actions[..., :5])
+        # Deadband around zero for throttle
         thr = actions[..., 0]
-        thr_deadband = (np.abs(thr) < 0.05)
-        thr[thr_deadband] = 0.0
-        actions[..., 0] = np.clip(thr, -1.0, 1.0)
+        thr[np.abs(thr) < 0.05] = 0.0
 
-        # Steering & aerial rotations: pure continuous in [-1.0, 1.0]
-        actions[..., 1] = np.clip(actions[..., 1], -1.0, 1.0)
-        actions[..., 2] = np.clip(actions[..., 2], -1.0, 1.0)
-        actions[..., 3] = np.clip(actions[..., 3], -1.0, 1.0)
-        actions[..., 4] = np.clip(actions[..., 4], -1.0, 1.0)
-
-        # Binary button thresholds for Jump, Boost, and Handbrake (Hybrid Bernoulli actions in {-1.0, +1.0})
-        actions[..., 5] = (actions[..., 5] > 0.0).astype(np.float32)  # Jump (> 0.0 Bernoulli threshold)
-        actions[..., 6] = (actions[..., 6] > 0.0).astype(np.float32)  # Boost
-        actions[..., 7] = (actions[..., 7] > 0.0).astype(np.float32)  # Handbrake
+        # Binary button thresholds for Jump, Boost, and Handbrake
+        actions[..., 5:] = (actions[..., 5:] > 0.0).astype(np.float32)
         return actions
+
 
 
 class DiscreteActionParser:

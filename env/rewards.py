@@ -669,24 +669,27 @@ class CombinedReward:
         if "boost_lose_weight" in new_weights and "boost" in self.rewards:
             self.rewards["boost"].lose_weight = float(new_weights["boost_lose_weight"])
 
-    def get_reward(self, car: CarState, arena: RocketSimArena, action: np.ndarray, is_goal: bool, scoring_team: Optional[int]) -> Tuple[float, Dict[str, float]]:
+    def get_reward(self, car: CarState, arena: RocketSimArena, action: np.ndarray, is_goal: bool, scoring_team: Optional[int], include_breakdown: bool = True) -> Tuple[float, Dict[str, float]]:
         total = 0.0
-        breakdown = {}
+        breakdown = {} if include_breakdown else None
         for name, r in self.rewards.items():
             rew = float(r.get_reward(car, arena, action, is_goal, scoring_team))
             total += rew
-            breakdown[name] = rew
+            if include_breakdown:
+                breakdown[name] = rew
 
         # Handbrake Economy Regularization:
         # Penalize holding handbrake while driving forward on straightaways
         if car.on_ground and float(action[7]) > 0.2 and abs(float(action[1])) < 0.2:
-            fwd_speed = float(np.dot(car.vel, car.get_forward_vector()))
+            fwd = car.get_forward_vector()
+            fwd_speed = float(car.vel[0] * fwd[0] + car.vel[1] * fwd[1] + car.vel[2] * fwd[2])
             if fwd_speed > 300.0:
                 pen = -0.10 * float(action[7])
                 total += pen
-                breakdown["handbrake_penalty"] = pen
+                if include_breakdown:
+                    breakdown["handbrake_penalty"] = pen
 
-        return float(total), breakdown
+        return float(total), breakdown if breakdown is not None else {}
 
 
 class RewardManager:
@@ -702,5 +705,7 @@ class RewardManager:
     def update_weights(self, new_weights: Dict[str, float]):
         self.combined.update_weights(new_weights)
 
-    def get_reward(self, car: CarState, arena: RocketSimArena, action: np.ndarray, is_goal: bool, scoring_team: Optional[int]) -> Tuple[float, Dict[str, float]]:
-        return self.combined.get_reward(car, arena, action, is_goal, scoring_team)
+    def get_reward(self, car: CarState, arena: RocketSimArena, action: np.ndarray, is_goal: bool, scoring_team: Optional[int], include_breakdown: bool = True) -> Tuple[float, Dict[str, float]]:
+        return self.combined.get_reward(car, arena, action, is_goal, scoring_team, include_breakdown=include_breakdown)
+
+

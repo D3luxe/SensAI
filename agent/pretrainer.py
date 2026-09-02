@@ -24,10 +24,31 @@ from bot import rotation_to_rot_mat
 
 
 class MockArenaForObs:
+    _SHARED_PADS = None
+    _SM_PAD_INDICES = None
+    _BG_PAD_INDICES = None
+    _SMALL_PAD_POS_3D = None
+    _BIG_PAD_POS_3D = None
+    _SMALL_PAD_ACTIVE = None
+    _BIG_PAD_ACTIVE = None
+
     def __init__(self, ball: BallState, cars: list[CarState]):
+        if MockArenaForObs._SHARED_PADS is None:
+            MockArenaForObs._SHARED_PADS = BoostPad.create_standard_pads()
+            MockArenaForObs._SM_PAD_INDICES = np.array([i for i, p in enumerate(MockArenaForObs._SHARED_PADS) if not p.is_big], dtype=int)
+            MockArenaForObs._BG_PAD_INDICES = np.array([i for i, p in enumerate(MockArenaForObs._SHARED_PADS) if p.is_big], dtype=int)
+            MockArenaForObs._SMALL_PAD_POS_3D = np.array([MockArenaForObs._SHARED_PADS[i].pos for i in MockArenaForObs._SM_PAD_INDICES], dtype=np.float32)
+            MockArenaForObs._BIG_PAD_POS_3D = np.array([MockArenaForObs._SHARED_PADS[i].pos for i in MockArenaForObs._BG_PAD_INDICES], dtype=np.float32)
+            MockArenaForObs._SMALL_PAD_ACTIVE = np.array([MockArenaForObs._SHARED_PADS[i].is_active for i in MockArenaForObs._SM_PAD_INDICES], dtype=bool)
+            MockArenaForObs._BIG_PAD_ACTIVE = np.array([MockArenaForObs._SHARED_PADS[i].is_active for i in MockArenaForObs._BG_PAD_INDICES], dtype=bool)
+
         self.ball = ball
         self.cars = cars
-        self.boost_pads = BoostPad.create_standard_pads()
+        self.boost_pads = MockArenaForObs._SHARED_PADS
+        self._small_pad_pos_3d = MockArenaForObs._SMALL_PAD_POS_3D
+        self._big_pad_pos_3d = MockArenaForObs._BIG_PAD_POS_3D
+        self._small_pad_active = MockArenaForObs._SMALL_PAD_ACTIVE
+        self._big_pad_active = MockArenaForObs._BIG_PAD_ACTIVE
 
     def get_shot_threat(self, team: int) -> Tuple[bool, float, float]:
         return False, 0.0, 0.0
@@ -38,6 +59,7 @@ class MockArenaForObs:
         py = self.ball.pos[1] + self.ball.vel[1] * dt
         pz = max(93.0, self.ball.pos[2] + self.ball.vel[2] * dt + 0.5 * (-650.0) * (dt ** 2))
         return np.array([px, py, pz], dtype=np.float32)
+
 
 
 class BehavioralCloningTrainer:
