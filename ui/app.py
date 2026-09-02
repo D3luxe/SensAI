@@ -507,6 +507,7 @@ def create_ui():
                         ball_to_goal_slider = gr.Slider(0.0, 5.0, value=float(rew_cfg.get("ball_to_goal_weight", 1.5)), step=0.1, label="Ball-to-Goal Velocity Weight", info="Continuous field progression toward opponent net.")
                         player_to_ball_slider = gr.Slider(0.0, 3.0, value=float(rew_cfg.get("player_to_ball_weight", 0.6)), step=0.1, label="Player-to-Ball Approach & Control Weight", info="Distance-gated speed rush downfield with strike-zone pacing.")
                         jump_bridge_slider = gr.Slider(0.0, 1.0, value=float(rew_cfg.get("jump_bridge_weight", 0.35)), step=0.05, label="Jump & Aerial Takeoff Incentive", info="Takeoff & speed-flip transition bounty (2.0x on elevated aerials).")
+                        air_roll_recovery_slider = gr.Slider(0.0, 2.0, value=float(rew_cfg.get("air_roll_recovery_weight", 0.35)), step=0.05, label="Air-Roll & Landing Recovery Weight", info="Rewards wheels-down recovery on descent and aerial alignment.")
                         powerslide_slider = gr.Slider(0.0, 2.0, value=float(rew_cfg.get("powerslide_weight", 0.30)), step=0.05, label="Powerslide & Drift Cut Bounty (+pts)", info="Rewards handbrake powerslides on sharp ground recovery turns.")
                         touch_slider = gr.Slider(0.0, 5.0, value=float(rew_cfg.get("touch_weight", 1.2)), step=0.1, label="Directional Ball Strike Quality", info="Touch impact scaled by speed & goal alignment.")
 
@@ -973,7 +974,7 @@ def create_ui():
         # Apply Live Training Dials (Rewards, Scenarios, Opponents, BC Guidance)
         def on_apply_rewards(
             g_w, c_w, sv_w,
-            b2g_w, p2b_w, jb_w, pw_w, tch_w,
+            b2g_w, p2b_w, jb_w, ar_w, pw_w, tch_w,
             bg_w, bl_w,
             k_p, r_p, a_p, tr_p, w_p, s_p,
             opp_bot, base_opp, bc_w, bc_dec
@@ -985,6 +986,7 @@ def create_ui():
                 "ball_to_goal_weight": float(b2g_w),
                 "player_to_ball_weight": float(p2b_w),
                 "jump_bridge_weight": float(jb_w),
+                "air_roll_recovery_weight": float(ar_w),
                 "powerslide_weight": float(pw_w),
                 "touch_weight": float(tch_w),
                 "boost_gain_weight": float(bg_w),
@@ -1033,7 +1035,7 @@ def create_ui():
             fn=on_apply_rewards,
             inputs=[
                 goal_slider, concede_slider, save_slider,
-                ball_to_goal_slider, player_to_ball_slider, jump_bridge_slider, powerslide_slider, touch_slider,
+                ball_to_goal_slider, player_to_ball_slider, jump_bridge_slider, air_roll_recovery_slider, powerslide_slider, touch_slider,
                 boost_gain_slider, boost_lose_slider,
                 kickoff_prob_slider, replay_prob_slider, aerial_prob_slider, turnaround_prob_slider, wall_prob_slider, save_prob_slider,
                 opponent_bot_dropdown, baseline_opp_slider, bc_weight_slider, bc_decay_input
@@ -1093,7 +1095,7 @@ def create_ui():
         def on_reset_rewards():
             return (
                 30.0, -30.0, 8.0,
-                1.5, 0.6, 0.35, 0.30, 1.2,
+                1.5, 0.6, 0.35, 0.35, 0.30, 1.2,
                 0.6, 0.3,
                 0.30, 0.26, 0.12, 0.12, 0.10, 0.10,
                 0.05, 0.15, 150000000
@@ -1103,7 +1105,7 @@ def create_ui():
             fn=on_reset_rewards,
             outputs=[
                 goal_slider, concede_slider, save_slider,
-                ball_to_goal_slider, player_to_ball_slider, jump_bridge_slider, powerslide_slider, touch_slider,
+                ball_to_goal_slider, player_to_ball_slider, jump_bridge_slider, air_roll_recovery_slider, powerslide_slider, touch_slider,
                 boost_gain_slider, boost_lose_slider,
                 kickoff_prob_slider, replay_prob_slider, aerial_prob_slider, turnaround_prob_slider, wall_prob_slider, save_prob_slider,
                 baseline_opp_slider, bc_weight_slider, bc_decay_input

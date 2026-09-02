@@ -555,9 +555,15 @@ class PPOTrainer:
                             # Fast Actor-only forward pass (skips Critic network)
                             feat = self.agent.actor_backbone(sample_bc_o)
                             pred_bc_continuous = torch.tanh(self.agent.actor_mean(feat))
-                            target_bc_continuous = sample_bc_a[:, :5]
+                            pred_bc_binary = self.agent.actor_binary(feat)
 
-                            bc_loss = nn.functional.smooth_l1_loss(pred_bc_continuous, target_bc_continuous)
+                            target_bc_continuous = sample_bc_a[:, :5]
+                            target_bc_binary = (sample_bc_a[:, 5:] > 0.0).float()
+
+                            bc_cont_loss = nn.functional.smooth_l1_loss(pred_bc_continuous, target_bc_continuous)
+                            bc_bin_loss = nn.functional.binary_cross_entropy_with_logits(pred_bc_binary, target_bc_binary)
+                            bc_loss = bc_cont_loss + 0.5 * bc_bin_loss
+
                             loss = loss + current_bc_weight * bc_loss
                             bc_losses.append(bc_loss.item())
 

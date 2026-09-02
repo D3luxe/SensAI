@@ -7,6 +7,7 @@ import math
 import unittest
 import numpy as np
 import torch
+import torch.nn as nn
 import RocketSim as rsim
 
 from env.physics_engine import RocketSimArena
@@ -401,6 +402,91 @@ class TestPhysicsAndControls(unittest.TestCase):
         bot.get_output(packet)
         # Verify arena constructed in get_output contains active boost pad vector arrays
         self.assertIsNotNone(bot.obs_builder)
+
+    def test_binary_action_gradients_in_pretrainer(self):
+        """
+        Guarantees that actor_binary (Jump, Boost, Handbrake) receives non-zero gradients
+        under BCEWithLogitsLoss during pretraining.
+        """
+        model = ActorCritic(obs_dim=74, act_dim=8, continuous_actions=True, use_layer_norm=True)
+        obs = torch.randn(16, 74)
+        target_acts = torch.randn(16, 8)
+        target_acts[:, 5:] = (target_acts[:, 5:] > 0.0).float() * 2.0 - 1.0
+
+        feat = model.actor_backbone(obs)
+        pred_cont = torch.tanh(model.actor_mean(feat))
+        pred_bin_logits = model.actor_binary(feat)
+
+        target_cont = target_acts[:, :5]
+        target_bin = (target_acts[:, 5:] > 0.0).float()
+
+        loss = nn.functional.smooth_l1_loss(pred_cont, target_cont) + 0.5 * nn.functional.binary_cross_entropy_with_logits(pred_bin_logits, target_bin)
+        loss.backward()
+
+        self.assertIsNotNone(model.actor_binary.weight.grad)
+        self.assertGreater(float(model.actor_binary.weight.grad.norm()), 0.0, "actor_binary must receive non-zero gradients!")
+        self.assertIsNotNone(model.actor_binary.bias.grad)
+        self.assertGreater(float(model.actor_binary.bias.grad.norm()), 0.0, "actor_binary bias must receive non-zero gradients!")
+
+    def test_air_roll_recovery_reward(self):
+        """
+        Guarantees that AirRollRecoveryReward rewards wheels-down upright orientation when descending
+        and penalizes upside-down orientation.
+        """
+        from env.rewards import AirRollRecoveryReward
+        from env.physics_engine import CarState, BallState, BoostPad
+
+        class MockArena:
+            def __init__(self, ball, cars):
+                self.ball, self.cars = ball, cars
+                self.boost_pads = BoostPad.create_standard_pads()
+
+        ball = BallState(pos=np.array([0, 0, 93], dtype=np.float32))
+        rew_fn = AirRollRecoveryReward(weight=1.0)
+
+        # 1. Upright descending car (wheels down, up_vector = [0, 0, 1])
+        car_upright = CarState(id=0, team=0, pos=np.array([0, 0, 300], dtype=np.float32),
+                               vel=np.array([0, 0, -300], dtype=np.float32),
+                               rot=np.array([0, 0, 0], dtype=np.float32), on_ground=False)
+        r_upright = rew_fn.get_reward(car_upright, MockArena(ball, [car_upright]), np.zeros(8), False, None)
+        self.assertGreater(r_upright, 0.0, "Upright descending car must receive positive recovery reward!")
+
+        # 2. Inverted descending car (roof down, roll = pi, up_vector = [0, 0, -1])
+        car_inverted = CarState(id=0, team=0, pos=np.array([0, 0, 300], dtype=np.float32),
+                                vel=np.array([0, 0, -300], dtype=np.float32),
+                                rot=np.array([0, 0, math.pi], dtype=np.float32), on_ground=False)
+        r_inverted = rew_fn.get_reward(car_inverted, MockArena(ball, [car_inverted]), np.zeros(8), False, None)
+        self.assertLess(r_inverted, 0.0, "Inverted descending car must receive penalty for upside-down descent!")
+
+    def test_strike_zone_throttle_pacing_reward(self):
+        """
+        Guarantees that PlayerToBallVelocityReward provides braking incentive when closing fast on a slower ball.
+        """
+        from env.rewards import PlayerToBallVelocityReward
+        from env.physics_engine import CarState, BallState, BoostPad
+
+        class MockArena:
+            def __init__(self, ball, cars):
+                self.ball, self.cars = ball, cars
+                self.boost_pads = BoostPad.create_standard_pads()
+
+        ball = BallState(pos=np.array([0, -2800, 93], dtype=np.float32), vel=np.array([0, 200, 0], dtype=np.float32))
+        car = CarState(id=0, team=0, pos=np.array([0, -3000, 17], dtype=np.float32),
+                       vel=np.array([0, 1500, 0], dtype=np.float32),
+                       rot=np.array([0, math.pi / 2, 0], dtype=np.float32), on_ground=True)
+
+        p2b = PlayerToBallVelocityReward(weight=1.0)
+        p2b.reset(MockArena(ball, [car]))
+
+        # Braking action (act[0] = -1.0)
+        act_brake = np.array([-1.0, 0, 0, 0, 0, 0, 0, 0], dtype=np.float32)
+        rew_brake = p2b.get_reward(car, MockArena(ball, [car]), act_brake, False, None)
+
+        # Full throttle action (act[0] = +1.0)
+        act_thr = np.array([1.0, 0, 0, 0, 0, 0, 0, 0], dtype=np.float32)
+        rew_thr = p2b.get_reward(car, MockArena(ball, [car]), act_thr, False, None)
+
+        self.assertGreater(rew_brake, rew_thr, "Braking when closing too fast on slow ball must yield higher reward than full throttle!")
 
 
 def verify_physics_and_controls_pipeline(verbose: bool = False) -> bool:

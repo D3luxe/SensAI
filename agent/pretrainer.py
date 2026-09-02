@@ -168,26 +168,34 @@ class BehavioralCloningTrainer:
                         steer = float(np.clip(local_ball_y * 6.0, -1.0, 1.0))
                         throttle = 1.0
                         handbrake = -1.0
+                        roll = 0.0
                     elif local_ball_x < -0.3:
                         steer = 1.0 if local_ball_y > 0 else -1.0
                         throttle = 1.0
                         handbrake = 1.0 if (abs(local_ball_y) > 0.6 and car.on_ground) else -1.0
+                        roll = 0.0
                     else:
                         steer = float(np.clip(local_ball_y * 6.0, -1.0, 1.0))
-                        throttle = 1.0
+                        # Pacing throttle in close strike zone
+                        throttle = min(1.0, max(0.3, local_ball_x * 2.0)) if (car.on_ground and abs(local_ball_y) < 0.3 and local_ball_x < 0.5) else 1.0
                         handbrake = -1.0
+                        roll = 0.0
 
-                    pitch, yaw, roll, jump, boost = 0.0, 0.0, 0.0, -1.0, -1.0
+                    pitch, yaw, jump, boost = 0.0, 0.0, -1.0, -1.0
                     if is_on_wall and ball.pos[2] < 200.0:
                         jump = 1.0  # Wall-dodge jump recovery back down to pitch floor
+                        roll = float(np.clip(-local_ball_y * 2.0, -1.0, 1.0))
                     elif car.on_ground:
                         if abs(local_ball_y) < 0.2 and local_ball_x > 0.3 and car.boost > 5.0:
                             boost = 1.0
                         if (abs(ball.pos[0]) < 50.0 and abs(ball.pos[1]) < 50.0) and 0.4 < local_ball_x < 1.1:
                             jump = 1.0
+                        elif ball.pos[2] > 250.0 and local_ball_x > 0.2:
+                            jump = 1.0  # Aerial liftoff jump
                     else:
                         pitch = float(np.clip(local_ball_z * 3.0, -1.0, 1.0))
                         yaw = steer
+                        roll = float(np.clip(-local_ball_y * 1.5, -1.0, 1.0))
                         if local_ball_z > 0.15 and car.boost > 10.0:
                             boost = 1.0
 
@@ -205,7 +213,6 @@ class BehavioralCloningTrainer:
                 obs_list.append(obs_vec)
                 act_list.append(expert_act)
 
-                # Add exact bilateral mirrored sample to enforce 100% left-right symmetry
         # ── Inject Synthetic Wall Recovery & Corner Exit Samples ──
         for side in [-1.0, 1.0]:  # Left (-1) and Right (+1) sidewalls
             wall_x = side * (ARENA_EXTENT_X - 96.0)
@@ -229,7 +236,7 @@ class BehavioralCloningTrainer:
                                 ball_floor = BallState(pos=np.array([bx, by, 93.0], dtype=np.float32), vel=np.zeros(3, dtype=np.float32))
                                 obs_w = self.obs_builder.build_obs(car_wall, MockArenaForObs(ball_floor, [car_wall]))
                                 steer_down = float(side * heading_sign)
-                                act_w = np.array([1.0, steer_down, 0.0, 0.0, 0.0, 1.0, -1.0, -1.0], dtype=np.float32)
+                                act_w = np.array([1.0, steer_down, 0.0, 0.0, float(side), 1.0, -1.0, -1.0], dtype=np.float32)
 
                                 obs_list.append(obs_w)
                                 act_list.append(act_w)
@@ -243,6 +250,7 @@ class BehavioralCloningTrainer:
         epochs: int = 50,
         batch_size: int = 512,
         lr: float = 0.001,
+        max_samples: int = 50000,
         base_checkpoint: Optional[str] = None,
         progress_cb: Optional[Callable[[Dict[str, Any]], None]] = None
     ) -> Dict[str, Any]:
@@ -260,7 +268,7 @@ class BehavioralCloningTrainer:
         if progress_cb:
             progress_cb(self.status)
 
-        obs_data, act_data = self.generate_expert_dataset(parser, max_samples=5000)
+        obs_data, act_data = self.generate_expert_dataset(parser, max_samples=max_samples)
         if len(obs_data) == 0:
             self._is_running = False
             self.status["message"] = "Error: Replay pool is empty. Ingest .replay files first."
@@ -281,7 +289,6 @@ class BehavioralCloningTrainer:
                 print(f"[Pretrainer] Warning: Could not load base checkpoint: {e}")
 
         optimizer = optim.Adam(model.parameters(), lr=lr, weight_decay=1e-5)
-        criterion = nn.MSELoss()
 
         obs_tensor = torch.tensor(obs_data, dtype=torch.float32, device=self.device)
         act_tensor = torch.tensor(act_data, dtype=torch.float32, device=self.device)
@@ -300,7 +307,9 @@ class BehavioralCloningTrainer:
             model.train()
             perm = torch.randperm(dataset_size)
             epoch_loss = 0.0
-            epoch_acc = 0.0
+            epoch_steer_acc = 0.0
+            epoch_jump_acc = 0.0
+            epoch_boost_acc = 0.0
 
             for b in range(num_batches):
                 idx = perm[b * batch_size : (b + 1) * batch_size]
@@ -308,25 +317,48 @@ class BehavioralCloningTrainer:
                 b_act = act_tensor[idx]
 
                 optimizer.zero_grad()
-                pred_act, _, _, _ = model.get_action_and_value(b_obs, deterministic=True)
-                loss = criterion(pred_act, b_act)
+                
+                # Dual Differentiable Loss (Continuous SmoothL1 + Binary BCEWithLogits)
+                feat = model.actor_backbone(b_obs)
+                pred_cont = torch.tanh(model.actor_mean(feat))
+                pred_bin_logits = model.actor_binary(feat)
+
+                target_cont = b_act[:, :5]
+                target_bin = (b_act[:, 5:] > 0.0).float()
+
+                loss_cont = nn.functional.smooth_l1_loss(pred_cont, target_cont)
+                loss_bin = nn.functional.binary_cross_entropy_with_logits(pred_bin_logits, target_bin)
+                loss = loss_cont + 0.5 * loss_bin
+
                 loss.backward()
                 nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
                 optimizer.step()
 
                 epoch_loss += loss.item()
-                # Sign accuracy for steer and throttle
-                steer_acc = (torch.sign(pred_act[:, 1]) == torch.sign(b_act[:, 1])).float().mean().item()
-                epoch_acc += steer_acc
+                # Telemetry accuracy metrics
+                steer_acc = (torch.sign(pred_cont[:, 1]) == torch.sign(target_cont[:, 1])).float().mean().item()
+                jump_acc = ((pred_bin_logits[:, 0] > 0.0) == (target_bin[:, 0] > 0.5)).float().mean().item()
+                boost_acc = ((pred_bin_logits[:, 1] > 0.0) == (target_bin[:, 1] > 0.5)).float().mean().item()
+                
+                epoch_steer_acc += steer_acc
+                epoch_jump_acc += jump_acc
+                epoch_boost_acc += boost_acc
 
             mean_loss = epoch_loss / num_batches
-            mean_acc = (epoch_acc / num_batches) * 100.0
+            mean_steer = (epoch_steer_acc / num_batches) * 100.0
+            mean_jump = (epoch_jump_acc / num_batches) * 100.0
+            mean_boost = (epoch_boost_acc / num_batches) * 100.0
 
             self.status["epoch"] = epoch
             self.status["loss"] = round(mean_loss, 4)
-            self.status["action_accuracy"] = round(mean_acc, 1)
+            self.status["action_accuracy"] = round(mean_steer, 1)
+            self.status["jump_accuracy"] = round(mean_jump, 1)
+            self.status["boost_accuracy"] = round(mean_boost, 1)
             self.status["progress_pct"] = round((epoch / epochs) * 100.0, 1)
-            self.status["message"] = f"Epoch {epoch}/{epochs} | Loss: {mean_loss:.4f} | Steer Accuracy: {mean_acc:.1f}%"
+            self.status["message"] = (
+                f"Epoch {epoch}/{epochs} | Loss: {mean_loss:.4f} | "
+                f"Steer: {mean_steer:.1f}% | Jump: {mean_jump:.1f}% | Boost: {mean_boost:.1f}%"
+            )
 
             if progress_cb and (epoch % 5 == 0 or epoch == epochs):
                 progress_cb(self.status)
@@ -351,7 +383,7 @@ class BehavioralCloningTrainer:
         elapsed = round(time.time() - start_time, 1)
         self._is_running = False
         self.status["running"] = False
-        self.status["message"] = f"✅ Pretraining finished in {elapsed}s ({dataset_size:,} frames). Baseline model saved to {self.checkpoint_path}!"
+        self.status["message"] = f"[Pretrainer] Pretraining finished in {elapsed}s ({dataset_size:,} frames). Baseline model saved to {self.checkpoint_path}!"
 
         if progress_cb:
             progress_cb(self.status)

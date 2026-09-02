@@ -10,7 +10,7 @@ import numpy as np
 from typing import Dict, Any, List, Optional, Tuple
 from env.physics_engine import (
     CarState, BallState, RocketSimArena,
-    CAR_MAX_SPEED, BALL_MAX_SPEED, GOAL_HALF_WIDTH, GOAL_HEIGHT, ARENA_EXTENT_Y
+    CAR_MAX_SPEED, BALL_MAX_SPEED, GOAL_HALF_WIDTH, GOAL_HEIGHT, ARENA_EXTENT_X, ARENA_EXTENT_Y
 )
 
 
@@ -239,16 +239,16 @@ class PlayerToBallVelocityReward(BaseReward):
             
             # Gated Velocity Matching: Only reward matching velocity if advancing ball toward opponent goal
             if not (is_wrong_side and car_vy_defend > 100.0):
-                vel_matching_bonus = 0.15 * max(0.0, 1.0 - (rel_speed / 900.0))
+                vel_matching_bonus = 0.30 * max(0.0, 1.0 - (rel_speed / 700.0))
             else:
                 # Car is pushing ball toward own net: apply wrong-side push penalty
-                wrong_side_push_penalty = -0.25 * max(0.0, car_vy_defend / 1500.0) * max(0.0, fwd_alignment)
+                wrong_side_push_penalty = -0.30 * max(0.0, car_vy_defend / 1500.0) * max(0.0, fwd_alignment)
 
-            # If closing dangerously fast (> 1100 uu/s) on a slower ball (< 600 uu/s), reward braking to pace arrival
+            # If closing dangerously fast (> 1000 uu/s) on a slower ball (< 700 uu/s), reward braking to pace arrival
             car_speed = float(np.linalg.norm(car.vel))
             ball_speed = float(np.linalg.norm(arena.ball.vel))
-            if car_speed > 1100.0 and ball_speed < 600.0 and action[0] < -0.05:
-                brake_incentive = 0.12 * min(1.0, -action[0])
+            if car_speed > 1000.0 and ball_speed < 700.0 and action[0] < -0.05:
+                brake_incentive = 0.25 * min(1.0, -action[0])
 
         # 4. Projected Velocity Toward Ball (Airborne Climbing vs Ground Traversal)
         vel_toward_ball = 0.0
@@ -256,7 +256,7 @@ class PlayerToBallVelocityReward(BaseReward):
             if not car.on_ground:
                 # Airborne flight: Directly reward 3D closing velocity toward high ball!
                 air_climb_speed = max(0.0, float(np.dot(car.vel, unit_to_ball)))
-                vel_toward_ball = (air_climb_speed / 2300.0) * 0.35 * max(0.0, fwd_alignment)
+                vel_toward_ball = (air_climb_speed / 2300.0) * 0.40 * max(0.0, fwd_alignment)
             else:
                 vel_toward_ball = 0.0
         else:
@@ -527,12 +527,78 @@ class PowerslideReward(BaseReward):
 
 
 # ==============================================================================
+# 10. AIR-ROLL ORIENTATION & LANDING RECOVERY REWARD
+# ==============================================================================
+class AirRollRecoveryReward(BaseReward):
+    """
+    Incentivizes 3D air-roll recoveries, clean landing orientations, and aerial attitude control:
+      1. Wheels-Down Pitch Recovery: When airborne and falling (vel[2] < 0, pos[2] < 600),
+         rewards aligning the car's up vector with world up [0, 0, 1] so the car lands on 4 wheels
+         without bouncing on its roof or side.
+      2. Wall Landing Recovery: When airborne and close to sidewall/backwall, rewards aligning
+         car up-vector with the surface normal.
+      3. Aerial Attitude & Roll Stabilization: When airborne and pursuing a high ball (ball.pos[2] > 300),
+         rewards matching roll alignment to prevent spinning disorientations.
+    """
+    def __init__(self, weight: float = 0.35):
+        super().__init__(weight)
+
+    def get_reward(self, car: CarState, arena: RocketSimArena, action: np.ndarray, is_goal: bool, scoring_team: Optional[int]) -> float:
+        if car.on_ground:
+            return 0.0
+
+        up = car.get_up_vector()
+        up_z = float(up[2])
+        car_z = float(car.pos[2])
+        vel_z = float(car.vel[2])
+
+        total_reward = 0.0
+
+        # 1. Wheels-Down Ground Landing Recovery (Falling toward pitch floor)
+        if vel_z < -50.0 and car_z < 600.0:
+            urgency = min(1.0, max(0.2, (600.0 - car_z) / 450.0))
+            if up_z < 0.0:
+                # Upside down landing penalty
+                total_reward += (up_z * 0.5) * urgency
+            else:
+                # Wheels down landing alignment reward
+                landing_alignment = (up_z + 1.0) * 0.5
+                total_reward += landing_alignment * urgency
+
+        # 2. Wall Landing Recovery (Airborne near side or back wall)
+        dist_x_wall = ARENA_EXTENT_X - abs(car.pos[0])
+        dist_y_wall = ARENA_EXTENT_Y - abs(car.pos[1])
+        if dist_x_wall < 300.0 and car_z > 200.0:
+            wall_norm_x = -math.copysign(1.0, car.pos[0])
+            wall_align = float(up[0] * wall_norm_x)
+            total_reward += max(0.0, wall_align) * 0.5
+        elif dist_y_wall < 300.0 and car_z > 200.0:
+            wall_norm_y = -math.copysign(1.0, car.pos[1])
+            wall_align = float(up[1] * wall_norm_y)
+            total_reward += max(0.0, wall_align) * 0.5
+
+        # 3. Aerial Challenge Attitude Control (Ball elevated > 350 uu)
+        ball_z = float(arena.ball.pos[2])
+        if ball_z > 350.0 and car_z > 200.0:
+            car_to_ball = arena.ball.pos - car.pos
+            dist = float(np.linalg.norm(car_to_ball))
+            if dist > 1e-4:
+                unit_to_ball = car_to_ball / dist
+                fwd_align = float(np.dot(car.get_forward_vector(), unit_to_ball))
+                if fwd_align > 0.3:
+                    upright_bonus = max(0.0, up_z) * 0.4
+                    total_reward += fwd_align * 0.5 + upright_bonus
+
+        return self.weight * total_reward
+
+
+# ==============================================================================
 # COMBINED MACRO REWARD ENGINE & MANAGER
 # ==============================================================================
 class CombinedReward:
     """
     Unified Macro Potential-Based Reward Manager.
-    Aggregates Macro Goal, Ball-to-Goal, Player-to-Ball, Speed/Flip, Face-Ball, Jump-Bridge, Touch Quality, and Boost.
+    Aggregates Macro Goal, Ball-to-Goal, Player-to-Ball, Speed/Flip, Face-Ball, Jump-Bridge, Touch Quality, Boost, Powerslide, and Air Roll Recovery.
     """
     def __init__(self, weights: Dict[str, float]):
         self.rewards: Dict[str, BaseReward] = {
@@ -559,6 +625,9 @@ class CombinedReward:
             ),
             "powerslide": PowerslideReward(
                 weight=weights.get("powerslide_weight", 0.30)
+            ),
+            "air_roll_recovery": AirRollRecoveryReward(
+                weight=weights.get("air_roll_recovery_weight", 0.35)
             )
         }
 
@@ -588,6 +657,9 @@ class CombinedReward:
 
         if "jump_bridge_weight" in new_weights and "jump_bridge" in self.rewards:
             self.rewards["jump_bridge"].weight = float(new_weights["jump_bridge_weight"])
+
+        if "air_roll_recovery_weight" in new_weights and "air_roll_recovery" in self.rewards:
+            self.rewards["air_roll_recovery"].weight = float(new_weights["air_roll_recovery_weight"])
 
         if "touch_weight" in new_weights and "touch" in self.rewards:
             self.rewards["touch"].weight = float(new_weights["touch_weight"])
