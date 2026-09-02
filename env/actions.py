@@ -62,19 +62,19 @@ class DiscreteActionParser:
 
             # ── JUMPS & FLIPS ──
             [ 1.0,  0.0,  0.0,  0.0,  0.0, 1, 0, 0],  # 12: Jump / Hop Forward
-            [ 1.0,  0.0, -1.0,  0.0,  0.0, 1, 0, 0],  # 13: Front Flip / Speed Dodge
-            [ 1.0, -1.0, -1.0, -1.0, -1.0, 1, 0, 0],  # 14: Left Diagonal Flip (Pitch -1, Yaw -1, Roll -1)
-            [ 1.0,  1.0, -1.0,  1.0,  1.0, 1, 0, 0],  # 15: Right Diagonal Flip (Pitch -1, Yaw +1, Roll +1)
-            [-1.0,  0.0,  1.0,  0.0,  0.0, 1, 0, 0],  # 16: Back Flip
+            [ 1.0,  0.0,  1.0,  0.0,  0.0, 1, 0, 0],  # 13: Front Flip / Speed Dodge (Pitch +1 Down)
+            [ 1.0, -1.0,  1.0, -1.0, -1.0, 1, 0, 0],  # 14: Left Diagonal Flip (Pitch +1, Yaw -1, Roll -1)
+            [ 1.0,  1.0,  1.0,  1.0,  1.0, 1, 0, 0],  # 15: Right Diagonal Flip (Pitch +1, Yaw +1, Roll +1)
+            [-1.0,  0.0, -1.0,  0.0,  0.0, 1, 0, 0],  # 16: Back Flip (Pitch -1 Up)
             [ 0.0, -1.0,  0.0, -1.0, -1.0, 1, 0, 0],  # 17: Side Dodge Left (Yaw -1, Roll -1)
             [ 0.0,  1.0,  0.0,  1.0,  1.0, 1, 0, 0],  # 18: Side Dodge Right (Yaw +1, Roll +1)
 
             # ── 3D AERIAL FLIGHT & AIR-ROLL ──
-            [ 1.0,  0.0,  1.0,  0.0,  0.0, 0, 1, 0],  # 19: Fast Aerial Climb (Nose UP + Boost)
-            [ 1.0,  0.0,  1.0, -1.0,  0.0, 0, 1, 0],  # 20: Aerial Climb + Yaw Left + Boost
-            [ 1.0,  0.0,  1.0,  1.0,  0.0, 0, 1, 0],  # 21: Aerial Climb + Yaw Right + Boost
-            [ 1.0,  0.0,  1.0,  0.0, -1.0, 0, 1, 0],  # 22: Directional Air-Roll Left + Pitch UP + Boost
-            [ 1.0,  0.0,  1.0,  0.0,  1.0, 0, 1, 0],  # 23: Directional Air-Roll Right + Pitch UP + Boost
+            [ 1.0,  0.0, -1.0,  0.0,  0.0, 0, 1, 0],  # 19: Fast Aerial Climb (Nose UP -1 + Boost)
+            [ 1.0,  0.0, -1.0, -1.0,  0.0, 0, 1, 0],  # 20: Aerial Climb + Yaw Left + Boost
+            [ 1.0,  0.0, -1.0,  1.0,  0.0, 0, 1, 0],  # 21: Aerial Climb + Yaw Right + Boost
+            [ 1.0,  0.0, -1.0,  0.0, -1.0, 0, 1, 0],  # 22: Directional Air-Roll Left + Pitch UP + Boost
+            [ 1.0,  0.0, -1.0,  0.0,  1.0, 0, 1, 0],  # 23: Directional Air-Roll Right + Pitch UP + Boost
         ], dtype=np.float32)
         self.action_dim = len(self.lookup_table)
 

@@ -1,10 +1,14 @@
 environment:
+  baseline_opponent_ratio: 0.2
+  baseline_opponent_type: checkpoints/necto-model.pt
   game_mode: 1v1
   max_episode_steps: 3000
   num_envs: 64
   tick_skip: 8
 hyperparameters:
   batch_size: 8192
+  bc_decay_steps: 150000000
+  bc_regularization_weight: 0.1
   clip_range: 0.2
   ent_coef: 0.002
   gae_lambda: 0.95
@@ -26,7 +30,7 @@ ppo:
   bc_decay_steps: 30000000
   bc_regularization_weight: 0.5
 rewards:
-  air_roll_recovery_weight: 0.35
+  air_roll_recovery_weight: 0.1
   ball_to_goal_weight: 1.5
   boost_gain_weight: 0.6
   boost_lose_weight: 0.3

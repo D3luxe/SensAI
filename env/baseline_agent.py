@@ -67,7 +67,7 @@ class BaselineChaser(BaseOpponent):
             # Flip / Dodge into the ball when close
             if dist_2d < 350.0 and car.on_ground:
                 jump = 1.0
-                pitch = -1.0  # Front flip
+                pitch = 1.0  # Front flip (+1.0 in training physics)
         else:
             # General Open-Field Pursuit
             if car.on_ground:

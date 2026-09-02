@@ -433,6 +433,13 @@ class SenseiRLBot(BaseAgent):
                 controller.jump = bool(want_jump and substep_tick <= 3)
             else:
                 controller.jump = bool(want_jump and has_flip and substep_tick <= 2)
+                # If airborne and executing a flip while driving forward, ensure stick deflection
+                # is active so RLBot executes a genuine directional dodge/flip instead of a dead double jump
+                if controller.jump and abs(controller.pitch) < 0.15 and abs(controller.yaw) < 0.15:
+                    if act[0] > 0.3:
+                        controller.pitch = -1.0  # Front-flip speed dodge
+                        if abs(act[1]) > 0.2:
+                            controller.yaw = -float(np.clip(act[1], -1.0, 1.0))  # Diagonal flip
 
             # Ground stabilization:
             # When driving on the ground without jumping, keep pitch, yaw, and roll neutral
