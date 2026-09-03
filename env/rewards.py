@@ -514,15 +514,16 @@ class JumpBridgeReward(BaseReward):
             is_aerial_ball = bool(ball_z > 250.0)
             car_boost = float(car.boost)
 
-            # 1a. Close-Quarters 50/50 Challenge Liftoff (opponents contesting within 650 uu, self in strike zone <= 450 uu)
-            # Center-mass coverage: orientation-independent (rewards front, side, or rear blocks when actively contested)
+            # 1a. Close-Quarters Strike Liftoff & 50/50 Challenge (dist <= 500 uu, closing toward ball)
             opponents = [c for c in arena.cars if c.team != car.team and not c.demoed]
             opp_dist_to_ball = min([float(np.linalg.norm(c.pos - arena.ball.pos)) for c in opponents], default=9999.0)
             is_contested_5050 = bool(dist <= 450.0 and opp_dist_to_ball <= 650.0 and ball_z < 220.0 and car.pos[2] < 150.0)
+            is_strike_liftoff = bool(dist <= 500.0 and ball_z < 250.0 and car.pos[2] < 150.0 and forward_alignment > 0.20 and takeoff_closing_vel > 150.0)
 
-            if is_contested_5050:
+            if is_contested_5050 or is_strike_liftoff:
                 self._challenge_jump_active[car.id] = True
-                reward += self.weight * 1.2
+                bonus_scale = 1.2 if is_contested_5050 else (0.8 + 0.4 * forward_alignment)
+                reward += self.weight * bonus_scale
 
             # 1b. Wall Takeoff / Air Dribble Pop / Wall Bang Setup
             elif is_on_wall_zone and car.pos[2] > 200.0 and (takeoff_closing_vel > 150.0 or forward_alignment > 0.15):
@@ -580,7 +581,7 @@ class JumpBridgeReward(BaseReward):
             dodge_align = 0.0
 
         if not car.on_ground and prev_flip and not car.has_flip:
-            if stick_deflection >= 0.50 and dodge_align > 0.25:
+            if stick_deflection >= 0.30 and dodge_align > 0.25:
                 # Directional dodge strictly aligned with tactical objective (including backward half-flip dodges)
                 reward += self.weight * dodge_align * (0.4 + 0.3 * stick_deflection)
             elif ball_z > 350.0 and forward_alignment > 0.30:

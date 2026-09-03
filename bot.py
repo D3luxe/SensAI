@@ -168,6 +168,7 @@ class SenseiRLBot(BaseAgent):
                     self.model.load_state_dict(model_state)
                 else:
                     self.model.load_state_dict(saved_state)
+                self.model.bin_thresh_logits.data = torch.tensor([-2.944, -1.0986, -0.4055], dtype=torch.float32, device=self.device)
                 self.model.debias_symmetric_actions()
                 self.model.eval()
                 self.loaded_ckpt_mtime = os.path.getmtime(ckpt_path) if os.path.exists(ckpt_path) else 0.0
