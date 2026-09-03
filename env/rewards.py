@@ -501,7 +501,6 @@ class JumpBridgeReward(BaseReward):
             self._challenge_jump_active[car.id] = False
 
         # ── 3. Airborne Dodge / Flip & Traversal Impulse ──────────────────────
-        # Directional dodge vector based on stick inputs
         pitch_input = float(action[2])
         yaw_input = float(action[3])
         roll_input = float(action[4])
@@ -521,17 +520,15 @@ class JumpBridgeReward(BaseReward):
             dodge_impulse_world = (dodge_dir_local[0] * fwd_vec + dodge_dir_local[1] * right_vec) / dodge_norm
             dodge_align = float(np.dot(dodge_impulse_world[:2], tactical_dir[:2]))
         else:
-            dodge_align = float(np.dot(fwd_vec[:2], tactical_dir[:2]))
-
-        tactical_align = max(forward_alignment, float(np.dot(car.get_forward_vector(), tactical_dir)), dodge_align)
+            dodge_align = 0.0
 
         if not car.on_ground and prev_flip and not car.has_flip:
-            if stick_deflection >= 0.50 and tactical_align > 0.10:
-                # Directional dodge aligned with tactical objective (including backward half-flip dodges)
-                reward += self.weight * max(tactical_align, dodge_align) * (1.2 + stick_deflection)
-            elif ball_z > 350.0 and forward_alignment > 0.20:
+            if stick_deflection >= 0.50 and dodge_align > 0.25:
+                # Directional dodge strictly aligned with tactical objective (including backward half-flip dodges)
+                reward += self.weight * dodge_align * (0.4 + 0.3 * stick_deflection)
+            elif ball_z > 350.0 and forward_alignment > 0.30:
                 # Double jump for high aerial balls
-                reward += self.weight * forward_alignment * 0.75
+                reward += self.weight * forward_alignment * 0.4
 
         # ── 4. Wavedash & Speed Impulse on Touchdown / Flip Acceleration ─────
         # Rewards speed increases (delta_v > 0) along tactical vector resulting from flips/wavedashes
@@ -730,8 +727,8 @@ class AirRollRecoveryReward(BaseReward):
         prev_heading = self._prev_heading.get(car.id, curr_heading)
         self._prev_heading[car.id] = curr_heading
 
-        # Track if car was knocked off-axis / disoriented during this airborne sequence
-        if up_z < 0.85 or curr_heading < 0.50:
+        # Track if car was genuinely knocked off-axis / inverted during this airborne sequence
+        if up_z < 0.3 or curr_heading < -0.2:
             self._was_disoriented[car.id] = True
 
         car_to_ball = arena.ball.pos - car.pos
@@ -753,32 +750,28 @@ class AirRollRecoveryReward(BaseReward):
 
             # 1a. Active Roll & Inversion Recovery (delta_up > 0)
             delta_up = up_z - prev_up_z
-            if delta_up > 0.0 and prev_up_z < 0.95:
-                # Inversion multiplier: rotating from wheels-up (prev_up_z < 0) yields up to 2.5x reward
-                inversion_mult = 1.0 + max(0.0, -prev_up_z) * 1.5
-                total_reward += (delta_up * 2.5) * inversion_mult * urgency
+            if delta_up > 0.0 and prev_up_z < 0.90:
+                # Inversion multiplier: rotating from wheels-up (prev_up_z < 0) yields up to 2.0x reward
+                inversion_mult = 1.0 + max(0.0, -prev_up_z) * 1.0
+                total_reward += (delta_up * 1.5) * inversion_mult * urgency
 
             # 1b. Active Yaw & Momentum Heading Recovery (delta_heading > 0)
             delta_heading = curr_heading - prev_heading
-            if delta_heading > 0.0 and prev_heading < 0.95 and speed_horiz > 250.0:
-                # Heading inversion multiplier: rotating from backwards (prev_heading < 0) yields up to 2.5x reward
-                heading_inversion_mult = 1.0 + max(0.0, -prev_heading) * 1.5
-                total_reward += (delta_heading * 2.0) * heading_inversion_mult * urgency
+            if delta_heading > 0.0 and prev_heading < 0.90 and speed_horiz > 250.0:
+                heading_inversion_mult = 1.0 + max(0.0, -prev_heading) * 1.0
+                total_reward += (delta_heading * 1.0) * heading_inversion_mult * urgency
 
-            # ── 2. Touchdown Alignment (Only when actively recovering from disorientation/maneuvers) ──
-            if car_z < 350.0:
-                # Touchdown wheels alignment
+            # ── 2. Touchdown Alignment (Evaluated as a single impulse near ground contact) ──
+            if car_z < 60.0 and vel_z < -50.0:
                 if up_z > 0.70:
-                    total_reward += (up_z * 0.15) * urgency
-
-                    # Momentum Heading Alignment: reward pointing nose in travel direction for seamless velocity retention
-                    if speed_horiz > 300.0:
-                        if curr_heading > 0.30:
-                            total_reward += (curr_heading * 0.20) * urgency
-                        elif curr_heading < -0.50:
-                            # Reverse/half-flip landing alignment with reverse or handbrake
-                            if float(action[0]) < -0.1 or float(action[7]) > 0.0:
-                                total_reward += (abs(curr_heading) * 0.15) * urgency
+                    total_reward += (up_z * 0.5)
+                    if speed_horiz > 300.0 and curr_heading > 0.30:
+                        total_reward += (curr_heading * 0.5)
+                    elif speed_horiz > 300.0 and curr_heading < -0.50:
+                        if float(action[0]) < -0.1 or float(action[7]) > 0.0:
+                            total_reward += (abs(curr_heading) * 0.5)
+                # Consume disorientation so touchdown reward only fires once per landing
+                self._was_disoriented[car.id] = False
 
                 # Upside down landing crash penalty (forgiven during active flip-cancels & quick half-flip air-rolls)
                 if up_z < 0.0 and not is_active_halfflip_cancel:

@@ -457,21 +457,23 @@ class TestPhysicsAndControls(unittest.TestCase):
         ball = BallState(pos=np.array([0, 0, 93], dtype=np.float32))
         rew_fn = AirRollRecoveryReward(weight=1.0)
 
-        # 1. Upright descending car recovering from disorientation (wheels down, up_vector = [0, 0, 1])
-        car_upright = CarState(id=0, team=0, pos=np.array([0, 0, 300], dtype=np.float32),
-                               vel=np.array([0, 0, -300], dtype=np.float32),
+        # 1. Upright touchdown recovering car (wheels down, up_vector = [0, 0, 1])
+        car_upright = CarState(id=0, team=0, pos=np.array([0, 0, 50], dtype=np.float32),
+                               vel=np.array([0, 0, -150], dtype=np.float32),
                                rot=np.array([0, 0, 0], dtype=np.float32), on_ground=False)
         rew_fn._airborne_ticks[0] = 4
         rew_fn._was_disoriented[0] = True
+        rew_fn._prev_up_z[0] = 0.5
         r_upright = rew_fn.get_reward(car_upright, MockArena(ball, [car_upright]), np.zeros(8), False, None)
         self.assertGreater(r_upright, 0.0, "Upright recovering car must receive positive recovery reward!")
 
         # 2. Inverted descending car (roof down, roll = pi, up_vector = [0, 0, -1])
-        car_inverted = CarState(id=0, team=0, pos=np.array([0, 0, 300], dtype=np.float32),
-                                vel=np.array([0, 0, -300], dtype=np.float32),
+        car_inverted = CarState(id=0, team=0, pos=np.array([0, 0, 50], dtype=np.float32),
+                                vel=np.array([0, 0, -150], dtype=np.float32),
                                 rot=np.array([0, 0, math.pi], dtype=np.float32), on_ground=False)
         rew_fn._airborne_ticks[0] = 4
         rew_fn._was_disoriented[0] = True
+        rew_fn._prev_up_z[0] = -1.0
         r_inverted = rew_fn.get_reward(car_inverted, MockArena(ball, [car_inverted]), np.zeros(8), False, None)
         self.assertLess(r_inverted, 0.0, "Inverted descending car must receive penalty for upside-down descent!")
 
