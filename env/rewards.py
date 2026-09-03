@@ -255,8 +255,12 @@ class PlayerToBallVelocityReward(BaseReward):
         if is_elevated_aerial:
             if not car.on_ground:
                 # Airborne flight: Directly reward 3D closing velocity toward high ball!
-                air_climb_speed = max(0.0, float(np.dot(car.vel, unit_to_ball)))
-                vel_toward_ball = (air_climb_speed / 2300.0) * 0.40 * max(0.0, fwd_alignment)
+                air_climb_speed = float(np.dot(car.vel, unit_to_ball))
+                if air_climb_speed > 0.0:
+                    vel_toward_ball = (air_climb_speed / 2300.0) * 0.40 * max(0.0, fwd_alignment)
+                elif air_climb_speed < -100.0 and curr_dist > 300.0:
+                    # Penalize actively flying away from elevated aerial ball in mid-air
+                    vel_toward_ball = (air_climb_speed / 2300.0) * 0.25
             else:
                 vel_toward_ball = 0.0
         else:
@@ -443,20 +447,34 @@ class JumpBridgeReward(BaseReward):
         if prev_ground and not car.on_ground and car.vel[2] > 80.0:
             is_on_wall_zone = bool(abs(car.pos[0]) > 3400.0 or abs(car.pos[1]) > 4400.0)
             is_aerial_ball = bool(ball_z > 250.0)
+            car_boost = float(car.boost)
 
-            # 1a. Close-Quarters 50/50 Challenge Liftoff (dist <= 650 uu)
+            # 1a. Close-Quarters 50/50 Challenge Liftoff (grounded ball Z < 220 uu, dist <= 650 uu)
             # Center-mass coverage: orientation-independent (rewards front, side, or rear blocks)
-            if dist <= 650.0 and car.pos[2] < 300.0:
+            if dist <= 650.0 and ball_z < 220.0 and car.pos[2] < 150.0:
                 self._challenge_jump_active[car.id] = True
                 reward += self.weight * 1.2
 
-            # 1b. Wall Takeoff / Air Dribble Pop
+            # 1b. Wall Takeoff / Air Dribble Pop / Wall Bang Setup
             elif is_on_wall_zone and car.pos[2] > 200.0 and (takeoff_closing_vel > 150.0 or forward_alignment > 0.15):
-                reward += self.weight * max(0.2, forward_alignment) * 3.5
+                # Close-proximity wall strike / dodge setup (dist <= 450 uu): rewarded for all boost levels
+                if dist <= 450.0:
+                    reward += self.weight * max(0.2, forward_alignment) * 2.5
+                elif car_boost >= 30.0:
+                    # Air dribble carry setup into open pitch: requires >= 30 boost
+                    reward += self.weight * max(0.2, forward_alignment) * 3.5
 
             # 1c. Aerial Floor Launch (Ball elevated in air)
             elif is_aerial_ball and car.pos[2] < 300.0 and forward_alignment > 0.15:
-                reward += self.weight * forward_alignment * 3.0
+                # Moderate ball (Z <= 450 uu): double-jump or pop reachable with minimal boost
+                if ball_z <= 450.0:
+                    reward += self.weight * forward_alignment * 2.0
+                # High aerial ball (Z > 450 uu): requires >= 30 boost to fly
+                elif car_boost >= 30.0:
+                    reward += self.weight * forward_alignment * 3.0
+                elif car_boost < 20.0:
+                    # Hopeless floor takeoff under high ball with low/no boost
+                    reward += -0.15
 
             # 1d. Open-field ground traversal (dist > 650 uu, ball grounded)
             # Liftoff alone gets 0.0 (prevents open-field bunny hopping)
@@ -542,14 +560,25 @@ class BoostReward(BaseReward):
                 loss_rew -= 0.20
 
             # Off-axis boost waste penalty: burning boost when facing away from ball on ground (causes wide orbiting)
+            car_to_ball = arena.ball.pos - car.pos
+            dist_to_ball = float(np.linalg.norm(car_to_ball))
+
             if car.on_ground and action[6] > 0.0:
-                car_to_ball = arena.ball.pos - car.pos
-                dist_to_ball = float(np.linalg.norm(car_to_ball))
                 if dist_to_ball > 300.0:
                     unit_to_ball = car_to_ball / dist_to_ball
                     fwd_align = float(np.dot(car.get_forward_vector(), unit_to_ball))
                     if fwd_align < 0.10:
                         loss_rew -= 0.15 * (1.0 - fwd_align)
+
+            # Airborne off-trajectory boost waste penalty:
+            # Burning boost while airborne when car's 3D momentum is moving away from or past the ball
+            elif not car.on_ground and action[6] > 0.0:
+                if dist_to_ball > 250.0:
+                    unit_to_ball = car_to_ball / dist_to_ball
+                    closing_vel = float(np.dot(car.vel, unit_to_ball))
+                    fwd_align = float(np.dot(car.get_forward_vector(), unit_to_ball))
+                    if closing_vel < -100.0 or (closing_vel < 100.0 and fwd_align < 0.20):
+                        loss_rew -= 0.25 * min(1.0, max(0.2, -closing_vel / 1000.0 if closing_vel < 0 else 0.5))
 
             return loss_rew
 
@@ -590,12 +619,13 @@ class PowerslideReward(BaseReward):
         prev_align = self._prev_alignment.get(car.id, fwd_alignment)
         self._prev_alignment[car.id] = fwd_alignment
 
-        # Active on ground when ball is off-axis and handbrake is applied
-        if car.on_ground and fwd_alignment < 0.75 and float(action[7]) > 0.0:
+        # Active on ground during sharp off-axis cuts (fwd_alignment < 0.40, steer > 0.40)
+        speed = float(np.linalg.norm(car.vel))
+        steer_mag = abs(float(action[1]))
+        if car.on_ground and fwd_alignment < 0.40 and steer_mag > 0.40 and speed > 300.0 and float(action[7]) > 0.0:
             alignment_rate = max(0.0, fwd_alignment - prev_align)
-            steer_mag = abs(float(action[1]))
             handbrake_intensity = max(0.0, float(action[7]))
-            turn_bonus = alignment_rate * 5.0 * (0.5 + 0.5 * steer_mag) * handbrake_intensity
+            turn_bonus = alignment_rate * 4.0 * (0.5 + 0.5 * steer_mag) * handbrake_intensity
             return self.weight * turn_bonus
 
         return 0.0
@@ -683,11 +713,13 @@ class AirRollRecoveryReward(BaseReward):
             total_reward += max(0.0, wall_align) * 0.5
 
         # 3. Aerial Challenge Attitude Control (Ball elevated > 350 uu)
+        # Only reward attitude alignment if car is actually closing toward ball or in close strike range (< 350 uu)
         if ball_z > 350.0 and car_z > 200.0:
             if dist_to_ball > 1e-4:
                 unit_to_ball = car_to_ball / dist_to_ball
                 fwd_align = float(np.dot(car.get_forward_vector(), unit_to_ball))
-                if fwd_align > 0.3:
+                closing_vel = float(np.dot(car.vel, unit_to_ball))
+                if fwd_align > 0.3 and (closing_vel > 0.0 or dist_to_ball < 350.0):
                     upright_bonus = max(0.0, up_z) * 0.4
                     total_reward += fwd_align * 0.5 + upright_bonus
 
@@ -781,12 +813,16 @@ class CombinedReward:
                 breakdown[name] = rew
 
         # Handbrake Economy Regularization:
-        # Penalize holding handbrake while driving forward on straightaways
-        if car.on_ground and float(action[7]) > 0.2 and abs(float(action[1])) < 0.2:
+        # Penalize dragging handbrake while driving forward on straightaways or gentle curves
+        if car.on_ground and float(action[7]) > 0.10:
             fwd = car.get_forward_vector()
             fwd_speed = float(car.vel[0] * fwd[0] + car.vel[1] * fwd[1] + car.vel[2] * fwd[2])
-            if fwd_speed > 300.0:
-                pen = -0.10 * float(action[7])
+            steer_mag = abs(float(action[1]))
+            car_to_ball = arena.ball.pos - car.pos
+            dist = float(np.linalg.norm(car_to_ball))
+            fwd_align = float(np.dot(fwd, car_to_ball / max(1e-4, dist)))
+            if fwd_speed > 300.0 and (steer_mag < 0.40 or fwd_align > 0.50):
+                pen = -0.15 * float(action[7]) * min(1.0, fwd_speed / 1500.0)
                 total += pen
                 if include_breakdown:
                     breakdown["handbrake_penalty"] = pen

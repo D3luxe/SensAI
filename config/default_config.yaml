@@ -10,7 +10,7 @@ hyperparameters:
   bc_decay_steps: 150000000
   bc_regularization_weight: 0.02
   clip_range: 0.2
-  ent_coef: 0.004
+  ent_coef: 0.002
   gae_lambda: 0.95
   gamma: 0.995
   learning_rate: 0.0003
@@ -38,14 +38,14 @@ rewards:
   goal_weight: 30.0
   jump_bridge_weight: 0.35
   player_to_ball_weight: 0.6
-  powerslide_weight: 0.3
+  powerslide_weight: 0.2
   save_weight: 8.0
   touch_weight: 1.2
 scenarios:
-  aerial_prob: 0.03
-  custom_prob: 0.18
-  kickoff_prob: 0.34
-  replay_prob: 0.26
+  aerial_prob: 0.11
+  custom_prob: 0.17
+  kickoff_prob: 0.3
+  replay_prob: 0.24
   save_prob: 0.05
-  turnaround_prob: 0.1
+  turnaround_prob: 0.09
   wall_prob: 0.04
