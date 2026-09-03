@@ -60,8 +60,8 @@ class TestRewardAuditFixes(unittest.TestCase):
         # Ball is progressing forward from defensive half at 2500 uu/s
         self.assertGreater(r, 0.4, f"Defensive clear forward should yield strong positive progression reward, got {r}")
 
-    def test_jump_bridge_air_roll_dodge(self):
-        """Test that a pure air-roll dodge (action[4] > 0.5) is recognized as a directional dodge."""
+    def test_jump_bridge_directional_dodge(self):
+        """Test that a directional joystick dodge (action[3] > 0.5) is recognized as a directional dodge."""
         rew = JumpBridgeReward(weight=0.35)
         car = CarState(
             id=0, team=0,
@@ -70,7 +70,7 @@ class TestRewardAuditFixes(unittest.TestCase):
             on_ground=False,
             has_flip=False
         )
-        # Ball positioned to the right of car, so a right roll dodge moves towards objective
+        # Ball positioned to the right of car, so a right joystick dodge moves towards objective
         self.arena.ball.pos = np.array([500.0, 0.0, 100.0], dtype=np.float32)
         
         rew._prev_on_ground[car.id] = False
@@ -78,13 +78,13 @@ class TestRewardAuditFixes(unittest.TestCase):
         rew._prev_touches[car.id] = 0
         rew._prev_vel[car.id] = car.vel.copy()
 
-        # Pure roll dodge (Pitch=0, Yaw=0, Roll=1.0)
+        # Pure directional dodge (Pitch=0, Yaw=1.0, Roll=0.0)
         action = np.zeros(8, dtype=np.float32)
-        action[4] = 1.0
+        action[3] = 1.0
         action[5] = 1.0  # jump
 
         r = rew.get_reward(car, self.arena, action, False, None)
-        self.assertGreater(r, 0.2, f"Roll dodge should be rewarded as an airborne directional dodge, got {r}")
+        self.assertGreater(r, 0.2, f"Directional dodge should be rewarded as an airborne directional dodge, got {r}")
 
     def test_jump_bridge_ground_boost_not_falsely_wavedash(self):
         """Test that normal ground boost acceleration is NOT falsely rewarded as a wavedash."""
@@ -301,8 +301,100 @@ class TestRewardAuditFixes(unittest.TestCase):
 
         action = np.zeros(8, dtype=np.float32)
         r = rew.get_reward(car, self.arena, action, False, None)
-        self.assertGreaterEqual(r, 0.0, f"Circling/spacing within strike zone should not incur negative distance cliff, got {r}")
+        # With strike zone pacing, distance delta is damped by 50% (r = -0.0075 instead of full -0.015 penalty cliff),
+        # preventing both severe cliffs and infinite positive reward pumps.
+        self.assertGreater(r, -0.01, f"Spacing within strike zone should be softly paced without steep cliff, got {r}")
+
+    def test_elevated_car_on_wall_evaluates_3d_distance(self):
+        """Test that climbing vertically on the wall away from a low ball increases 3D distance and incurs a penalty."""
+        rew = PlayerToBallVelocityReward(weight=0.6)
+        car = CarState(
+            id=0, team=0,
+            pos=np.array([3600.0, 1000.0, 400.0], dtype=np.float32),
+            rot=np.array([0.0, math.pi / 2, 0.0], dtype=np.float32),
+            vel=np.zeros(3, dtype=np.float32),
+            on_ground=True
+        )
+        self.arena.ball.pos = np.array([3000.0, 2000.0, 93.0], dtype=np.float32)
+        self.arena.cars = [car]
+        rew.reset(self.arena)
+
+        # Car drives vertically up the wall from Z=400 to Z=1200 while moving slightly downfield
+        # In 3D: (1200 - 93)^2 is much larger than (400 - 93)^2, so true 3D distance grew substantially!
+        car.pos = np.array([3600.0, 1200.0, 1200.0], dtype=np.float32)
+        action = np.zeros(8, dtype=np.float32)
+        r = rew.get_reward(car, self.arena, action, False, None)
+
+        self.assertLess(r, 0.0, f"Climbing vertically away from a grounded ball on the wall must not yield positive distance closure, got {r}")
+
+    def test_ceiling_climb_and_boost_waste_penalty_low_ball(self):
+        """Test that riding the ceiling and boosting while the ball is low (Z <= 350) incurs ceiling penalty."""
+        rew = PlayerToBallVelocityReward(weight=0.6)
+        car = CarState(
+            id=0, team=0,
+            pos=np.array([0.0, 1000.0, 1950.0], dtype=np.float32),  # On ceiling
+            rot=np.array([0.0, math.pi / 2, 0.0], dtype=np.float32),
+            vel=np.zeros(3, dtype=np.float32),
+            on_ground=True
+        )
+        self.arena.ball.pos = np.array([0.0, 1500.0, 120.0], dtype=np.float32)  # Low ball (not elevated aerial)
+        self.arena.cars = [car]
+        rew.reset(self.arena)
+
+        action = np.zeros(8, dtype=np.float32)
+        action[6] = 1.0  # boosting along ceiling
+        r = rew.get_reward(car, self.arena, action, False, None)
+
+        self.assertLess(r, 0.0, f"Boosting across the ceiling while ball is below must be penalized even when ball is low, got {r}")
+
+    def test_boost_waste_penalty_when_climbing_above_ball(self):
+        """Test that burning boost when climbing vertically above a lower ball incurs waste penalty."""
+        rew = BoostReward(gain_weight=0.6, lose_weight=0.3)
+        car = CarState(
+            id=0, team=0,
+            pos=np.array([3600.0, 1000.0, 600.0], dtype=np.float32),  # On wall at Z=600
+            vel=np.array([0.0, 500.0, 400.0], dtype=np.float32),     # Climbing up (vel[2] > 100)
+            rot=np.array([0.0, math.pi / 2, 0.0], dtype=np.float32),
+            boost=50.0,
+            on_ground=True
+        )
+        self.arena.ball.pos = np.array([2500.0, 1000.0, 100.0], dtype=np.float32)  # Ball below at Z=100
+        self.arena.cars = [car]
+        rew.reset(self.arena)
+
+        car.boost = 45.0  # Spent 5% boost
+        action = np.zeros(8, dtype=np.float32)
+        action[6] = 1.0   # Actively boosting
+        r = rew.get_reward(car, self.arena, action, False, None)
+
+        self.assertLess(r, -0.20, f"Boosting up the wall away from a lower ball must incur vertical climb boost penalty, got {r}")
+
+    def test_wall_crawling_dampened_when_ball_infield(self):
+        """Test that distance delta is heavily dampened when car stays on the side wall but ball is in the infield."""
+        rew = PlayerToBallVelocityReward(weight=0.6)
+        car = CarState(
+            id=0, team=0,
+            pos=np.array([3600.0, 1000.0, 300.0], dtype=np.float32),  # On side wall
+            rot=np.array([0.0, math.pi / 2, 0.0], dtype=np.float32),
+            vel=np.array([0.0, 100.0, 0.0], dtype=np.float32),
+            on_ground=True
+        )
+        # Ball has bounced into midfield (X = 1500)
+        self.arena.ball.pos = np.array([1500.0, 1500.0, 150.0], dtype=np.float32)
+        self.arena.cars = [car]
+        rew.reset(self.arena)
+
+        # Car moves 100 uu forward down the wall
+        rew._prev_dist[car.id] = 2500.0
+        car.pos = np.array([3600.0, 1100.0, 300.0], dtype=np.float32)
+
+        action = np.zeros(8, dtype=np.float32)
+        r = rew.get_reward(car, self.arena, action, False, None)
+
+        # Undampened delta would be > 0.10. With 0.15 dampening, it is reduced by 85%.
+        self.assertLessEqual(r, 0.025, f"Wall-crawling when ball is infield must be heavily dampened, got {r}")
 
 
 if __name__ == "__main__":
     unittest.main()
+
