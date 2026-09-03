@@ -260,8 +260,10 @@ class TestPhysicsAndControls(unittest.TestCase):
         # Collect pad: 10% -> 22% (0.10 -> 0.22)
         car.boost = 22.0
         rew_boost = boost_fn.get_reward(car, MockArena(ball_fwd, [car]), np.zeros(8), False, None)
-        expected_diff = math.sqrt(0.22) - math.sqrt(0.10)
-        self.assertAlmostEqual(rew_boost, expected_diff, places=4, msg="Boost gain must match sqrt(curr) - sqrt(prev)!")
+        hunger = 1.0 + 2.0 * (1.0 - 0.10)
+        pickup_bonus = 0.45 * (1.0 - 0.10)
+        expected_diff = (math.sqrt(0.22) - math.sqrt(0.10)) * hunger + pickup_bonus
+        self.assertAlmostEqual(rew_boost, expected_diff, places=4, msg="Boost gain must match sqrt(curr) - sqrt(prev) with hunger and pickup bonus!")
 
         # 4. Zero-Sum Goal Reward
         goal_fn = GoalReward(goal_weight=10.0, concede_weight=-10.0)

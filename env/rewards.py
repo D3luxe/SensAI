@@ -633,9 +633,21 @@ class BoostReward(BaseReward):
 
         boost_diff = math.sqrt(curr) - math.sqrt(prev)
 
-        if boost_diff >= 0:
-            return self.gain_weight * boost_diff
-        else:
+        if boost_diff > 1e-5:
+            # ── 1. Boost Pad Collection Event Bonus & Low-Boost Hunger ─────────
+            # Heavy low-boost hunger: picking up pads when near zero boost is critical for mobility & defense
+            hunger_mult = 1.0 + 2.0 * max(0.0, 1.0 - prev)
+            base_gain = self.gain_weight * boost_diff * hunger_mult
+
+            # Discrete pad collection event bonus:
+            # Small pad (+12 boost): +0.45 * hunger
+            # Big orb (+100 boost): +1.20 * hunger
+            is_big_pad = bool((curr - prev) > 0.50)
+            pickup_bonus = (1.20 if is_big_pad else 0.45) * max(0.5, 1.0 - prev)
+            return float(base_gain + pickup_bonus)
+
+        elif boost_diff < -1e-5:
+            # ── 2. Boost Usage, Waste & Negative Momentum Penalties ─────────────
             height_factor = max(0.2, 1.0 - (car.pos[2] / GOAL_HEIGHT))
             loss_rew = self.lose_weight * boost_diff * height_factor
 
@@ -649,13 +661,22 @@ class BoostReward(BaseReward):
             if (car.pos[2] > 1750.0 or is_climbing_above_ball) and action[6] > 0.0 and arena.ball.pos[2] < car.pos[2] - 200.0:
                 loss_rew -= 0.25
 
+            fwd_vec = car.get_forward_vector()
+            fwd_speed = float(np.dot(car.vel, fwd_vec))
+
+            # Reverse-Momentum Boost Waste Penalty:
+            # Burning boost when the car's 3D momentum opposes its forward nose direction (fwd_speed < -150 uu/s).
+            # Attempting to use boost as an emergency airbrake against reverse momentum wastes massive boost
+            # while floating helplessly; the player should coast to ground contact and powerslide/brake instead.
+            if action[6] > 0.0 and fwd_speed < -150.0:
+                rev_waste_scale = min(1.0, abs(fwd_speed) / 1200.0)
+                loss_rew -= 0.35 * rev_waste_scale if not car.on_ground else 0.20 * rev_waste_scale
+
             # Off-axis boost waste penalty: burning boost when facing away from ball on ground (causes wide orbiting)
-            # Exempt when retreating/rotating back to defend own net
+            # Only exempt when genuinely boosting in forward retreat direction toward defending net
             defend_goal_y = -ARENA_EXTENT_Y if car.team == 0 else ARENA_EXTENT_Y
-            dist_car_to_defend = abs(car.pos[1] - defend_goal_y)
-            dist_ball_to_defend = abs(arena.ball.pos[1] - defend_goal_y)
             car_vy_defend = -car.vel[1] if car.team == 0 else car.vel[1]
-            is_retreating_to_defend = bool(car_vy_defend > 100.0)
+            is_retreating_to_defend = bool(car_vy_defend > 100.0 and fwd_speed > 100.0)
 
             car_to_ball = arena.ball.pos - car.pos
             dist_to_ball = float(np.linalg.norm(car_to_ball))
@@ -664,7 +685,7 @@ class BoostReward(BaseReward):
                 if car.on_ground and action[6] > 0.0:
                     if dist_to_ball > 300.0:
                         unit_to_ball = car_to_ball / dist_to_ball
-                        fwd_align = float(np.dot(car.get_forward_vector(), unit_to_ball))
+                        fwd_align = float(np.dot(fwd_vec, unit_to_ball))
                         if fwd_align < 0.10:
                             loss_rew -= 0.15 * (1.0 - fwd_align)
 
@@ -676,13 +697,47 @@ class BoostReward(BaseReward):
                     if dist_to_ball > 250.0 and not is_recovering_halfflip:
                         unit_to_ball = car_to_ball / dist_to_ball
                         closing_vel = float(np.dot(car.vel, unit_to_ball))
-                        fwd_align = float(np.dot(car.get_forward_vector(), unit_to_ball))
+                        fwd_align = float(np.dot(fwd_vec, unit_to_ball))
                         if closing_vel < -100.0 or (closing_vel < 100.0 and fwd_align < 0.20):
-                            loss_rew -= 0.25 * min(1.0, max(0.2, -closing_vel / 1000.0 if closing_vel < 0 else 0.5))
+                            loss_rew -= 0.30 * min(1.0, max(0.2, -closing_vel / 1000.0 if closing_vel < 0 else 0.5))
 
             return loss_rew
+        else:
+            # ── 3. Continuous Transit Pad Approach & Alignment Shaping ──────────
+            # When low on boost (< 65) and driving on the ground, reward steering toward and routing
+            # through active boost pads along the travel path, eliminating straight-line pad skipping.
+            if car.on_ground and car.boost < 65.0 and hasattr(arena, "_small_pad_pos_3d") and hasattr(arena, "_small_pad_active"):
+                sm_act = arena._small_pad_active
+                sm_poses = arena._small_pad_pos_3d
+                cpx, cpy = float(car.pos[0]), float(car.pos[1])
+                min_sm_d2 = 550.0 * 550.0
+                min_sm_idx = -1
+                for p_idx in range(len(sm_act)):
+                    if sm_act[p_idx]:
+                        dx = float(sm_poses[p_idx, 0]) - cpx
+                        dy = float(sm_poses[p_idx, 1]) - cpy
+                        d2 = dx * dx + dy * dy
+                        if d2 < min_sm_d2:
+                            min_sm_d2 = d2
+                            min_sm_idx = p_idx
 
-        return 0.0
+                if min_sm_idx >= 0:
+                    pad_dist = math.sqrt(min_sm_d2)
+                    dx = float(sm_poses[min_sm_idx, 0]) - cpx
+                    dy = float(sm_poses[min_sm_idx, 1]) - cpy
+                    pad_dir_x = dx / max(1e-4, pad_dist)
+                    pad_dir_y = dy / max(1e-4, pad_dist)
+                    fwd = car.get_forward_vector()
+                    pad_align = fwd[0] * pad_dir_x + fwd[1] * pad_dir_y
+                    speed_to_pad = car.vel[0] * pad_dir_x + car.vel[1] * pad_dir_y
+
+                    if pad_align > 0.25 and speed_to_pad > 150.0:
+                        boost_hunger = (65.0 - car.boost) / 65.0
+                        prox = 1.0 - (pad_dist / 550.0)
+                        speed_fac = min(1.0, speed_to_pad / 1000.0)
+                        return float(0.20 * boost_hunger * pad_align * prox * speed_fac)
+
+            return 0.0
 
 
 # ==============================================================================

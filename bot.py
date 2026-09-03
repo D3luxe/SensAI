@@ -447,7 +447,12 @@ class SenseiRLBot(BaseAgent):
                 controller.yaw = 0.0
                 controller.roll = 0.0
 
-            controller.boost = bool(act[6] > 0.0)
+            # Boost Economy & Momentum Safety Gate:
+            # Suppress boost when the vehicle's 3D momentum strongly opposes its nose direction (fwd_speed < -150 uu/s).
+            # Attempting to airbrake with rocket thrust against reverse momentum burns 20-50 boost helplessly;
+            # the bot must coast to ground contact and turn/powerslide instead.
+            fwd_speed = float(np.dot(car_state.vel, car_state.get_forward_vector()))
+            controller.boost = bool(act[6] > 0.0 and fwd_speed > -150.0)
             controller.handbrake = bool(act[7] > 0.0 and is_on_ground)
 
             self.tick_count += 1
