@@ -514,8 +514,8 @@ def create_ui():
                         ball_to_goal_slider = gr.Slider(0.0, 5.0, value=float(rew_cfg.get("ball_to_goal_weight", 1.5)), step=0.1, label="Ball-to-Goal Velocity Weight", info="Continuous field progression toward opponent net.")
                         player_to_ball_slider = gr.Slider(0.0, 3.0, value=float(rew_cfg.get("player_to_ball_weight", 0.6)), step=0.1, label="Player-to-Ball Approach & Control Weight", info="Distance-gated speed rush downfield with strike-zone pacing.")
                         jump_bridge_slider = gr.Slider(0.0, 1.0, value=float(rew_cfg.get("jump_bridge_weight", 0.35)), step=0.05, label="Jump & Aerial Takeoff Incentive", info="Takeoff & speed-flip transition bounty (2.0x on elevated aerials).")
-                        air_roll_recovery_slider = gr.Slider(0.0, 2.0, value=float(rew_cfg.get("air_roll_recovery_weight", 0.35)), step=0.05, label="Air-Roll & Landing Recovery Weight", info="Rewards wheels-down recovery on descent and aerial alignment.")
-                        powerslide_slider = gr.Slider(0.0, 2.0, value=float(rew_cfg.get("powerslide_weight", 0.30)), step=0.05, label="Powerslide & Drift Cut Bounty (+pts)", info="Rewards handbrake powerslides on sharp ground recovery turns.")
+                        air_roll_recovery_slider = gr.Slider(0.0, 2.0, value=float(rew_cfg.get("air_roll_recovery_weight", 0.10)), step=0.05, label="Air-Roll & Landing Recovery Weight", info="Rewards wheels-down recovery on descent and aerial alignment.")
+                        powerslide_slider = gr.Slider(0.0, 2.0, value=float(rew_cfg.get("powerslide_weight", 0.20)), step=0.05, label="Powerslide & Drift Cut Bounty (+pts)", info="Rewards handbrake powerslides on sharp ground recovery turns.")
                         touch_slider = gr.Slider(0.0, 5.0, value=float(rew_cfg.get("touch_weight", 1.2)), step=0.1, label="Directional Ball Strike Quality", info="Touch impact scaled by speed & goal alignment.")
 
                 with gr.Row():
@@ -1246,7 +1246,7 @@ def create_ui():
         def on_reset_rewards():
             return (
                 30.0, -30.0, 8.0,
-                1.5, 0.6, 0.35, 0.35, 0.30, 1.2,
+                1.5, 0.6, 0.35, 0.10, 0.20, 1.2,
                 0.6, 0.3,
                 0.28, 0.22, 0.12, 0.08, 0.10, 0.10, 0.10,
                 0.05, 0.15, 150000000

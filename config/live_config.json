@@ -1,5 +1,5 @@
 {
-  "updated_at": 1788394556.0791183,
+  "updated_at": 1788404200.415876,
   "learning_rate": 0.0003,
   "ent_coef": 0.001,
   "clip_range": 0.2,
@@ -12,7 +12,7 @@
   "rewards": {
     "goal_weight": 30.0,
     "concede_weight": -30.0,
-    "save_weight": 8.0,
+    "save_weight": 12.0,
     "ball_to_goal_weight": 1.5,
     "player_to_ball_weight": 0.6,
     "jump_bridge_weight": 0.35,
@@ -23,12 +23,12 @@
     "boost_lose_weight": 0.3
   },
   "scenarios": {
-    "kickoff_prob": 0.3,
-    "replay_prob": 0.24,
-    "aerial_prob": 0.11,
-    "turnaround_prob": 0.09,
-    "wall_prob": 0.04,
-    "save_prob": 0.05,
-    "custom_prob": 0.17
+    "kickoff_prob": 0.28,
+    "replay_prob": 0.23,
+    "aerial_prob": 0.1,
+    "turnaround_prob": 0.08,
+    "wall_prob": 0.1,
+    "save_prob": 0.1,
+    "custom_prob": 0.11
   }
 }

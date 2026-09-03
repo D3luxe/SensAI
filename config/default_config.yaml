@@ -39,13 +39,13 @@ rewards:
   jump_bridge_weight: 0.35
   player_to_ball_weight: 0.6
   powerslide_weight: 0.2
-  save_weight: 8.0
+  save_weight: 12.0
   touch_weight: 1.2
 scenarios:
-  aerial_prob: 0.11
-  custom_prob: 0.17
-  kickoff_prob: 0.3
-  replay_prob: 0.24
-  save_prob: 0.05
-  turnaround_prob: 0.09
-  wall_prob: 0.04
+  aerial_prob: 0.1
+  custom_prob: 0.11
+  kickoff_prob: 0.28
+  replay_prob: 0.23
+  save_prob: 0.1
+  turnaround_prob: 0.08
+  wall_prob: 0.1
