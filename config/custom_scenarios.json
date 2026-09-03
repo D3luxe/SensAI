@@ -126,5 +126,37 @@
       "vel_jitter": 60.0,
       "mirror_symmetry": true
     }
+  },
+  {
+    "id": "half_flip_defensive_retreat",
+    "name": "Half-Flip 180° Defensive Retreat",
+    "description": "Bot starts stopped facing forward near midfield as a boomed clear flies over its head, forcing an immediate half-flip turnaround to defend.",
+    "enabled": true,
+    "car": {
+      "pos": [0.0, 800.0, 17.0],
+      "yaw": 90.0,
+      "pitch": 0.0,
+      "roll": 0.0,
+      "vel": [0.0, -150.0, 0.0],
+      "boost": 40.0
+    },
+    "ball": {
+      "pos": [0.0, -2200.0, 200.0],
+      "vel": [0.0, -1100.0, 100.0]
+    },
+    "opponent": {
+      "mode": "custom",
+      "pos": [0.0, 2000.0, 17.0],
+      "yaw": -90.0,
+      "pitch": 0.0,
+      "roll": 0.0,
+      "vel": [0.0, -900.0, 0.0],
+      "boost": 50.0
+    },
+    "variance": {
+      "pos_jitter": 100.0,
+      "vel_jitter": 60.0,
+      "mirror_symmetry": true
+    }
   }
 ]

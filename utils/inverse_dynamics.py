@@ -131,9 +131,15 @@ class InverseDynamicsSolver:
             steer_act = 0.0
             handbrake_act = -1.0
 
-            # Pitch (in RocketSim/RLGym: -1.0 is nose up, +1.0 is nose down)
+            # Pitch (in RocketSim/RLGym: -1.0 is nose up / backflip, +1.0 is nose down / frontflip / flip-cancel)
             pitch_rate = float(measured_omega[0])
             pitch_act = float(np.clip(pitch_rate / PITCH_TORQUE, -1.0, 1.0))
+
+            # Flip-Cancel Detection:
+            # If the car is inverted (up vector z < 0.2) and pitch rate is near-zero while having backward/downward flight momentum,
+            # the player is actively holding opposite stick (+1.0 nose-down) to cancel the backflip pitch rotation.
+            if up[2] < 0.2 and abs(pitch_rate) < 2.5 and (a_fwd < -200.0 or speed_fwd < -300.0 or (speed_fwd > 300.0 and abs(fwd[2]) < 0.5)):
+                pitch_act = 1.0
 
             # Yaw (Left is -1.0, Right is +1.0)
             yaw_rate = float(measured_omega[1])
@@ -144,17 +150,25 @@ class InverseDynamicsSolver:
             roll_act = float(np.clip(-roll_rate / ROLL_TORQUE, -1.0, 1.0))
 
         # 5. Jump & Dodge Detection
-        # Initial jump: ground -> air with upward vertical impulse (vz >= 250 uu/s)
+        # Initial jump: ground -> air with upward vertical impulse (vz >= 200 uu/s)
         jump_act = -1.0
         if on_ground_t and not on_ground_next and vel_next[2] > 200.0:
             jump_act = 1.0
         elif not on_ground_t and not on_ground_next:
-            # Airborne dodge / double jump impulse (sudden velocity spike > 400 uu/s)
+            # Airborne dodge / double jump impulse (sudden non-gravitational velocity spike > 400 uu/s)
             delta_v_mag = float(np.linalg.norm(vel_next - vel_t))
-            if delta_v_mag > 450.0 and a_fwd > 600.0:
+            if delta_v_mag > 400.0:
                 jump_act = 1.0
-                if abs(pitch_act) < 0.2:
-                    pitch_act = -1.0  # Front-flip dodge default
+                if a_fwd > 500.0:
+                    pitch_act = 1.0   # Front-flip dodge (nose down +1)
+                elif a_fwd < -500.0:
+                    pitch_act = -1.0  # Backflip dodge (nose up -1)
+                elif a_right > 500.0:
+                    yaw_act = 1.0     # Right side dodge
+                    roll_act = 1.0
+                elif a_right < -500.0:
+                    yaw_act = -1.0    # Left side dodge
+                    roll_act = -1.0
 
         return np.array([
             float(np.clip(throttle_act, -1.0, 1.0)),

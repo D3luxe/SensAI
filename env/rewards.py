@@ -227,7 +227,10 @@ class PlayerToBallVelocityReward(BaseReward):
         if is_wrong_side and car_vy_defend > 0.0 and delta_dist < 0.0:
             delta_dist = 0.0
 
-        if fwd_alignment < 0.0 and delta_dist > 0.0:
+        # If car is moving in reverse or executing a turnaround/half-flip towards target, do not damp distance delta
+        car_fwd_vel = float(np.dot(car.vel[:2], car.get_forward_vector()[:2]))
+        is_reversing_to_target = (car_fwd_vel < -100.0 or delta_dist > 0.0) and float(np.dot(car.vel[:2], unit_to_ball[:2])) > 100.0
+        if fwd_alignment < 0.0 and delta_dist > 0.0 and not is_reversing_to_target:
             delta_dist = delta_dist * max(0.0, fwd_alignment + 1.0) * 0.2
 
         # 3. Strike-Zone Velocity Matching & Brake Incentives (< 450 uu)
@@ -498,14 +501,34 @@ class JumpBridgeReward(BaseReward):
             self._challenge_jump_active[car.id] = False
 
         # ── 3. Airborne Dodge / Flip & Traversal Impulse ──────────────────────
-        tactical_align = max(forward_alignment, float(np.dot(car.get_forward_vector(), tactical_dir)))
+        # Directional dodge vector based on stick inputs
+        pitch_input = float(action[2])
+        yaw_input = float(action[3])
+        roll_input = float(action[4])
+        stick_deflection = max(abs(pitch_input), abs(yaw_input), abs(roll_input))
+
+        # Reconstruct dodge impulse unit vector in world coordinates
+        # In RocketSim: Pitch -1 is nose up (backflip / backward impulse -fwd), Pitch +1 is nose down (frontflip / forward impulse +fwd)
+        fwd_vec = car.get_forward_vector()
+        right_vec = car.get_right_vector()
+        dodge_dir_local = np.array([
+            1.0 if pitch_input > 0.3 else (-1.0 if pitch_input < -0.3 else 0.0),
+            1.0 if (yaw_input > 0.3 or roll_input > 0.3) else (-1.0 if (yaw_input < -0.3 or roll_input < -0.3) else 0.0),
+            0.0
+        ], dtype=np.float32)
+        dodge_norm = float(np.linalg.norm(dodge_dir_local))
+        if dodge_norm > 1e-4:
+            dodge_impulse_world = (dodge_dir_local[0] * fwd_vec + dodge_dir_local[1] * right_vec) / dodge_norm
+            dodge_align = float(np.dot(dodge_impulse_world[:2], tactical_dir[:2]))
+        else:
+            dodge_align = float(np.dot(fwd_vec[:2], tactical_dir[:2]))
+
+        tactical_align = max(forward_alignment, float(np.dot(car.get_forward_vector(), tactical_dir)), dodge_align)
 
         if not car.on_ground and prev_flip and not car.has_flip:
-            # Include Pitch (2), Yaw (3), and Roll (4) in stick deflection check
-            stick_deflection = max(abs(float(action[2])), abs(float(action[3])), abs(float(action[4])))
             if stick_deflection >= 0.50 and tactical_align > 0.10:
-                # Directional dodge aligned with tactical objective
-                reward += self.weight * tactical_align * (1.2 + stick_deflection)
+                # Directional dodge aligned with tactical objective (including backward half-flip dodges)
+                reward += self.weight * max(tactical_align, dodge_align) * (1.2 + stick_deflection)
             elif ball_z > 350.0 and forward_alignment > 0.20:
                 # Double jump for high aerial balls
                 reward += self.weight * forward_alignment * 0.75
@@ -583,8 +606,10 @@ class BoostReward(BaseReward):
 
             # Airborne off-trajectory boost waste penalty:
             # Burning boost while airborne when car's 3D momentum is moving away from or past the ball
+            # (Exempt during active flip-cancels and half-flip recoveries)
             elif not car.on_ground and action[6] > 0.0:
-                if dist_to_ball > 250.0:
+                is_recovering_halfflip = bool(car.just_dodged or (float(action[2]) > 0.4 and abs(float(action[4])) > 0.2))
+                if dist_to_ball > 250.0 and not is_recovering_halfflip:
                     unit_to_ball = car_to_ball / dist_to_ball
                     closing_vel = float(np.dot(car.vel, unit_to_ball))
                     fwd_align = float(np.dot(car.get_forward_vector(), unit_to_ball))
@@ -719,7 +744,11 @@ class AirRollRecoveryReward(BaseReward):
         total_reward = 0.0
 
         # ── 1. Active 3D Disorientation Recovery (Roll & Yaw) ────────────────
-        if not is_aerial_engagement:
+        # Only active when the car was genuinely knocked off-axis, inverted, or executed a flip turnaround
+        is_recovering = bool(self._was_disoriented.get(car.id, False))
+        is_active_halfflip_cancel = bool(air_ticks <= 16 and (float(action[2]) > 0.3 or abs(float(action[4])) > 0.2 or float(action[0]) > 0.5))
+
+        if not is_aerial_engagement and is_recovering:
             urgency = min(1.0, max(0.4, (800.0 - car_z) / 600.0))
 
             # 1a. Active Roll & Inversion Recovery (delta_up > 0)
@@ -727,20 +756,17 @@ class AirRollRecoveryReward(BaseReward):
             if delta_up > 0.0 and prev_up_z < 0.95:
                 # Inversion multiplier: rotating from wheels-up (prev_up_z < 0) yields up to 2.5x reward
                 inversion_mult = 1.0 + max(0.0, -prev_up_z) * 1.5
-                total_reward += (delta_up * 3.0) * inversion_mult * urgency
+                total_reward += (delta_up * 2.5) * inversion_mult * urgency
 
             # 1b. Active Yaw & Momentum Heading Recovery (delta_heading > 0)
             delta_heading = curr_heading - prev_heading
             if delta_heading > 0.0 and prev_heading < 0.95 and speed_horiz > 250.0:
                 # Heading inversion multiplier: rotating from backwards (prev_heading < 0) yields up to 2.5x reward
                 heading_inversion_mult = 1.0 + max(0.0, -prev_heading) * 1.5
-                total_reward += (delta_heading * 2.5) * heading_inversion_mult * urgency
+                total_reward += (delta_heading * 2.0) * heading_inversion_mult * urgency
 
-            # ── 2. Touchdown Alignment (Descent from Height or Disorientation Recovery) ──
-            is_descending = bool(vel_z < -100.0 and air_ticks >= 4)
-            is_recovering = bool(self._was_disoriented.get(car.id, False))
-
-            if car_z < 350.0 and (is_recovering or is_descending):
+            # ── 2. Touchdown Alignment (Only when actively recovering from disorientation/maneuvers) ──
+            if car_z < 350.0:
                 # Touchdown wheels alignment
                 if up_z > 0.70:
                     total_reward += (up_z * 0.15) * urgency
@@ -748,14 +774,14 @@ class AirRollRecoveryReward(BaseReward):
                     # Momentum Heading Alignment: reward pointing nose in travel direction for seamless velocity retention
                     if speed_horiz > 300.0:
                         if curr_heading > 0.30:
-                            total_reward += (curr_heading * 0.25) * urgency
+                            total_reward += (curr_heading * 0.20) * urgency
                         elif curr_heading < -0.50:
                             # Reverse/half-flip landing alignment with reverse or handbrake
                             if float(action[0]) < -0.1 or float(action[7]) > 0.0:
-                                total_reward += (abs(curr_heading) * 0.20) * urgency
+                                total_reward += (abs(curr_heading) * 0.15) * urgency
 
-                # Upside down landing crash penalty
-                if up_z < 0.0:
+                # Upside down landing crash penalty (forgiven during active flip-cancels & quick half-flip air-rolls)
+                if up_z < 0.0 and not is_active_halfflip_cancel:
                     total_reward += (up_z * 0.5) * urgency
 
         # ── 3. Wall Landing Recovery (Airborne near side or back wall) ────────
@@ -764,22 +790,22 @@ class AirRollRecoveryReward(BaseReward):
         if dist_x_wall < 300.0 and car_z > 200.0:
             wall_norm_x = -math.copysign(1.0, car.pos[0])
             wall_align = float(up[0] * wall_norm_x)
-            total_reward += max(0.0, wall_align) * 0.5
+            total_reward += max(0.0, wall_align) * 0.4
         elif dist_y_wall < 300.0 and car_z > 200.0:
             wall_norm_y = -math.copysign(1.0, car.pos[1])
             wall_align = float(up[1] * wall_norm_y)
-            total_reward += max(0.0, wall_align) * 0.5
+            total_reward += max(0.0, wall_align) * 0.4
 
         # ── 4. Aerial Challenge Attitude Control (Ball elevated > 350 uu) ─────
-        # Only reward attitude alignment if car is actually closing toward ball or in close strike range (< 350 uu)
-        if ball_z > 350.0 and car_z > 200.0:
+        # Only reward attitude alignment if car is actively closing toward elevated ball in flight
+        if ball_z > 350.0 and car_z > 200.0 and not car.on_ground:
             if dist_to_ball > 1e-4:
                 unit_to_ball = car_to_ball / dist_to_ball
                 fwd_align = float(np.dot(car.get_forward_vector(), unit_to_ball))
                 closing_vel = float(np.dot(car.vel, unit_to_ball))
-                if fwd_align > 0.3 and (closing_vel > 0.0 or dist_to_ball < 350.0):
-                    upright_bonus = max(0.0, up_z) * 0.4
-                    total_reward += fwd_align * 0.5 + upright_bonus
+                if fwd_align > 0.4 and closing_vel > 200.0:
+                    upright_bonus = max(0.0, up_z) * 0.2
+                    total_reward += (fwd_align * 0.3 + upright_bonus) * 0.5
 
         return self.weight * total_reward
 

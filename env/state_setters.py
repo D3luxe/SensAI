@@ -253,14 +253,14 @@ class ReplayStateSetter(BaseStateSetter):
 
 class TurnaroundRecoverySetter(BaseStateSetter):
     """
-    Spawns turnaround recoveries and wrong-side ball scenarios.
-    Forces the agent to execute powerslide 180° hairpin cuts, tap-braking, peeling away,
-    and avoiding pushing/accelerating the ball into its own net.
+    Spawns turnaround recoveries, wrong-side ball scenarios, reverse half-flip turnarounds,
+    and mid-flip inverted recovery curriculum states.
+    Forces the agent to master half-flips, powerslide 180° hairpin cuts, tap-braking, and peel-aways.
     """
     def reset(self, rsim_arena: Any, num_players: int) -> None:
         target_team = random.choice([0, 1])
         sign = 1.0 if target_team == 0 else -1.0
-        mode = random.choice(["turnaround", "wrong_side_dribble"])
+        mode = random.choice(["turnaround_sprint", "wrong_side_dribble", "reverse_halfflip", "midflip_inverted"])
 
         if mode == "wrong_side_dribble":
             # Scenario A: Bot is directly behind the ball facing its own goal
@@ -295,6 +295,82 @@ class TurnaroundRecoverySetter(BaseStateSetter):
                     yaw = sign * math.pi / 2
                     cs.rot_mat = rsim.Angle(pitch=0.0, yaw=yaw, roll=0.0).as_rot_mat()
                     cs.vel = rsim.Vec(0, sign * 500, 0)
+
+                cs.ang_vel = rsim.Vec(0, 0, 0)
+                car.set_state(cs)
+
+        elif mode == "reverse_halfflip":
+            # Scenario C: Car is stopped or reversing facing forward, ball is cleared over its head toward own net
+            # Optimal response is an immediate half-flip turnaround to chase down the ball
+            bx = random.uniform(-1200, 1200)
+            by = -sign * random.uniform(1000, 2800)
+            bz = random.uniform(93.15, 350.0)
+
+            bs = rsim_arena.ball.get_state()
+            bs.pos = rsim.Vec(bx, by, bz)
+            # Fast cleared ball heading toward defending net
+            bs.vel = rsim.Vec(random.uniform(-200, 200), -sign * random.uniform(800, 1500), random.uniform(0, 300))
+            bs.ang_vel = rsim.Vec(0, 0, 0)
+            rsim_arena.ball.set_state(bs)
+
+            for i, car in enumerate(rsim_arena.get_cars()):
+                cs = car.get_state()
+                cs.boost = random.uniform(35.0, 80.0)
+                team = i % 2
+
+                if team == target_team:
+                    # Car facing away from ball (facing opponent end +sign Y) at rest or reversing slowly
+                    cx = random.uniform(-800, 800)
+                    cy = sign * random.uniform(200, 1400)
+                    cs.pos = rsim.Vec(cx, cy, 17.0)
+                    yaw = sign * math.pi / 2 + random.uniform(-0.2, 0.2)
+                    cs.rot_mat = rsim.Angle(pitch=0.0, yaw=yaw, roll=0.0).as_rot_mat()
+                    rev_speed = random.uniform(-400.0, 0.0)
+                    cs.vel = rsim.Vec(0.0, sign * rev_speed, 0.0)
+                else:
+                    # Opponent chasing the clear
+                    cs.pos = rsim.Vec(random.uniform(-600, 600), sign * random.uniform(1600, 2600), 17.0)
+                    yaw = -sign * math.pi / 2
+                    cs.rot_mat = rsim.Angle(pitch=0.0, yaw=yaw, roll=0.0).as_rot_mat()
+                    cs.vel = rsim.Vec(0, -sign * 900, 0)
+
+                cs.ang_vel = rsim.Vec(0, 0, 0)
+                car.set_state(cs)
+
+        elif mode == "midflip_inverted":
+            # Scenario D: Curriculum reset - car spawned mid-air upside down with backward momentum
+            # Isolates and trains the flip-cancel air-roll recovery landing
+            bx = random.uniform(-1000, 1000)
+            by = -sign * random.uniform(1500, 3200)
+            bz = 93.15
+
+            bs = rsim_arena.ball.get_state()
+            bs.pos = rsim.Vec(bx, by, bz)
+            bs.vel = rsim.Vec(0.0, -sign * random.uniform(600, 1200), 0.0)
+            bs.ang_vel = rsim.Vec(0, 0, 0)
+            rsim_arena.ball.set_state(bs)
+
+            for i, car in enumerate(rsim_arena.get_cars()):
+                cs = car.get_state()
+                cs.boost = random.uniform(40.0, 80.0)
+                team = i % 2
+
+                if team == target_team:
+                    cx = random.uniform(-600, 600)
+                    cy = sign * random.uniform(400, 1200)
+                    cz = random.uniform(120.0, 220.0)
+                    cs.pos = rsim.Vec(cx, cy, cz)
+                    yaw = sign * math.pi / 2
+                    # Inverted orientation (roll = +/- pi)
+                    roll_val = math.pi if random.random() < 0.5 else -math.pi
+                    cs.rot_mat = rsim.Angle(pitch=0.0, yaw=yaw, roll=roll_val).as_rot_mat()
+                    # High backward velocity
+                    cs.vel = rsim.Vec(0.0, -sign * random.uniform(900, 1300), random.uniform(-50, 50))
+                else:
+                    cs.pos = rsim.Vec(0.0, sign * 2500, 17.0)
+                    yaw = -sign * math.pi / 2
+                    cs.rot_mat = rsim.Angle(pitch=0.0, yaw=yaw, roll=0.0).as_rot_mat()
+                    cs.vel = rsim.Vec(0, -sign * 700, 0)
 
                 cs.ang_vel = rsim.Vec(0, 0, 0)
                 car.set_state(cs)

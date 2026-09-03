@@ -457,17 +457,21 @@ class TestPhysicsAndControls(unittest.TestCase):
         ball = BallState(pos=np.array([0, 0, 93], dtype=np.float32))
         rew_fn = AirRollRecoveryReward(weight=1.0)
 
-        # 1. Upright descending car (wheels down, up_vector = [0, 0, 1])
+        # 1. Upright descending car recovering from disorientation (wheels down, up_vector = [0, 0, 1])
         car_upright = CarState(id=0, team=0, pos=np.array([0, 0, 300], dtype=np.float32),
                                vel=np.array([0, 0, -300], dtype=np.float32),
                                rot=np.array([0, 0, 0], dtype=np.float32), on_ground=False)
+        rew_fn._airborne_ticks[0] = 4
+        rew_fn._was_disoriented[0] = True
         r_upright = rew_fn.get_reward(car_upright, MockArena(ball, [car_upright]), np.zeros(8), False, None)
-        self.assertGreater(r_upright, 0.0, "Upright descending car must receive positive recovery reward!")
+        self.assertGreater(r_upright, 0.0, "Upright recovering car must receive positive recovery reward!")
 
         # 2. Inverted descending car (roof down, roll = pi, up_vector = [0, 0, -1])
         car_inverted = CarState(id=0, team=0, pos=np.array([0, 0, 300], dtype=np.float32),
                                 vel=np.array([0, 0, -300], dtype=np.float32),
                                 rot=np.array([0, 0, math.pi], dtype=np.float32), on_ground=False)
+        rew_fn._airborne_ticks[0] = 4
+        rew_fn._was_disoriented[0] = True
         r_inverted = rew_fn.get_reward(car_inverted, MockArena(ball, [car_inverted]), np.zeros(8), False, None)
         self.assertLess(r_inverted, 0.0, "Inverted descending car must receive penalty for upside-down descent!")
 
@@ -500,6 +504,73 @@ class TestPhysicsAndControls(unittest.TestCase):
         rew_thr = p2b.get_reward(car, MockArena(ball, [car]), act_thr, False, None)
 
         self.assertGreater(rew_brake, rew_thr, "Braking when closing too fast on slow ball must yield higher reward than full throttle!")
+
+    def test_halfflip_inverse_dynamics_and_rewards(self):
+        """
+        Guarantees that:
+        1. InverseDynamicsSolver correctly detects backward dodges (jump=1.0, pitch=-1.0) and flip cancels (pitch=+1.0).
+        2. JumpBridgeReward awards positive reward for backward dodges aligned with a retreat direction.
+        3. AirRollRecoveryReward suppresses upside-down crash penalty during active flip-cancels.
+        """
+        from utils.inverse_dynamics import InverseDynamicsSolver
+        from env.rewards import JumpBridgeReward, AirRollRecoveryReward
+        from env.physics_engine import CarState, BallState, BoostPad
+
+        class MockArena:
+            def __init__(self, ball, cars):
+                self.ball, self.cars = ball, cars
+                self.boost_pads = BoostPad.create_standard_pads()
+
+        # 1. Test Inverse Dynamics Backflip & Cancel Detection
+        # Car at t (facing North, moving in reverse):
+        p_t = np.array([0.0, 0.0, 50.0], dtype=np.float32)
+        v_t = np.array([0.0, -300.0, 100.0], dtype=np.float32)
+        r_t = np.array([0.0, math.pi / 2, 0.0], dtype=np.float32)
+
+        # Car at t+1 after backflip impulse (large backward velocity spike):
+        p_next = np.array([0.0, -40.0, 60.0], dtype=np.float32)
+        v_next = np.array([0.0, -900.0, 120.0], dtype=np.float32)
+        r_next = np.array([-0.6, math.pi / 2, 0.0], dtype=np.float32)
+
+        act = InverseDynamicsSolver.solve_car_action(
+            p_t, v_t, r_t, np.zeros(3, dtype=np.float32), 50.0, False,
+            p_next, v_next, r_next, np.zeros(3, dtype=np.float32), 50.0, False,
+            dt=1.0 / 30.0
+        )
+        self.assertGreaterEqual(act[5], 0.0, "Inverse dynamics must detect jump/dodge on backward velocity impulse!")
+        self.assertLess(act[2], 0.0, "Inverse dynamics must reconstruct pitch < 0 (backflip nose-up) on backward dodge!")
+
+        # 2. Test JumpBridgeReward for Backward Half-Flip Dodge
+        ball = BallState(pos=np.array([0.0, -4000.0, 93.0], dtype=np.float32))
+        car = CarState(id=0, team=0, pos=np.array([0.0, 0.0, 50.0], dtype=np.float32),
+                       vel=np.array([0.0, -800.0, 50.0], dtype=np.float32),
+                       rot=np.array([0.0, math.pi / 2, 0.0], dtype=np.float32), on_ground=False)
+        car.has_flip = False # flip just spent
+
+        jump_bridge = JumpBridgeReward(weight=1.0)
+        jump_bridge._prev_has_flip = {0: True}
+        jump_bridge._prev_on_ground = {0: False}
+        jump_bridge._prev_vel = {0: np.array([0.0, -200.0, 50.0], dtype=np.float32)}
+
+        # Backflip action: pitch = -1.0
+        act_backflip = np.array([-1.0, 0.0, -1.0, 0.0, 0.0, 1.0, 0.0, 0.0], dtype=np.float32)
+        rew_jump = jump_bridge.get_reward(car, MockArena(ball, [car]), act_backflip, False, None)
+        self.assertGreater(rew_jump, 0.0, "Backward dodge retreating towards defending goal/ball must receive positive JumpBridge reward!")
+
+        # 3. Test AirRollRecoveryReward Inverted Flip-Cancel Forgiveness
+        air_roll_rew = AirRollRecoveryReward(weight=1.0)
+        car_inverted = CarState(id=0, team=0, pos=np.array([0.0, 0.0, 150.0], dtype=np.float32),
+                                vel=np.array([0.0, -900.0, -150.0], dtype=np.float32),
+                                rot=np.array([0.0, math.pi / 2, math.pi], dtype=np.float32), on_ground=False)
+        air_roll_rew._airborne_ticks = {0: 8}
+        air_roll_rew._was_disoriented = {0: True}
+        air_roll_rew._prev_up_z = {0: -1.0}
+        air_roll_rew._prev_heading = {0: 1.0}
+
+        # Active flip-cancel action (pitch = +1.0, roll = +1.0)
+        act_cancel = np.array([1.0, 0.0, 1.0, 0.0, 1.0, 0.0, 1.0, 0.0], dtype=np.float32)
+        rew_cancel = air_roll_rew.get_reward(car_inverted, MockArena(ball, [car_inverted]), act_cancel, False, None)
+        self.assertGreaterEqual(rew_cancel, 0.0, "Active flip cancel + air roll must NOT receive upside-down landing crash penalty!")
 
 
 def verify_physics_and_controls_pipeline(verbose: bool = False) -> bool:

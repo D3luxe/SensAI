@@ -275,7 +275,7 @@ class TestScenariosAndReplays(unittest.TestCase):
             p_air_next, v_air_next, r_air_next, np.zeros(3), 50.0, False,
             dt=1.0 / 30.0
         )
-        self.assertLess(act_air[2], -0.2, "Pitching down must yield negative pitch act[2] < -0.2")
+        self.assertGreater(act_air[2], 0.2, "Pitching down / front-flip must yield positive pitch act[2] > 0.2")
 
         # 3. Test Batch Extraction
         c_pos_seq = np.stack([p_t, p_next], axis=0)

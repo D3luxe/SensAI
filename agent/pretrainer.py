@@ -268,6 +268,76 @@ class BehavioralCloningTrainer:
                                 obs_list.append(obs_w * OBS_MIRROR_MASK_NP)
                                 act_list.append(act_w * ACT_MIRROR_MASK_NP)
 
+        # ── Inject Synthetic Half-Flip Demonstration Trajectories ──
+        for heading_sign in [1.0, -1.0]:  # Facing North (+Y) or South (-Y)
+            init_yaw = math.pi / 2 if heading_sign > 0 else -math.pi / 2
+            target_sign = -heading_sign    # Half-flip target is behind the car
+            target_yaw = -init_yaw
+
+            for roll_dir in [-1.0, 1.0]:   # Air-roll left vs right
+                for x_pos in [-1500.0, 0.0, 1500.0]:
+                    for y_start in [-1000.0, 1000.0]:
+                        # Ball located downfield behind car
+                        ball_hf = BallState(
+                            pos=np.array([x_pos, y_start + target_sign * 3000.0, 93.15], dtype=np.float32),
+                            vel=np.array([0.0, target_sign * 800.0, 0.0], dtype=np.float32)
+                        )
+
+                        # Stage 1: Reverse liftoff jump (car moving backward facing initial yaw)
+                        car_s1 = CarState(
+                            id=0, team=0,
+                            pos=np.array([x_pos, y_start, 25.0], dtype=np.float32),
+                            vel=np.array([0.0, target_sign * 350.0, 180.0], dtype=np.float32),
+                            rot=np.array([0.0, init_yaw, 0.0], dtype=np.float32),
+                            rot_mat=rotation_to_rot_mat(0.0, init_yaw, 0.0),
+                            boost=50.0,
+                            on_ground=False
+                        )
+                        act_s1 = np.array([-1.0, 0.0, 0.0, 0.0, 0.0, 1.0, -1.0, -1.0], dtype=np.float32)
+
+                        # Stage 2: Backflip Dodge Impulse (pitch = -1.0 nose-up backflip, jump = 1.0)
+                        car_s2 = CarState(
+                            id=0, team=0,
+                            pos=np.array([x_pos, y_start + target_sign * 60.0, 75.0], dtype=np.float32),
+                            vel=np.array([0.0, target_sign * 850.0, 120.0], dtype=np.float32),
+                            rot=np.array([-0.75, init_yaw, 0.0], dtype=np.float32),
+                            rot_mat=rotation_to_rot_mat(-0.75, init_yaw, 0.0),
+                            boost=50.0,
+                            on_ground=False
+                        )
+                        act_s2 = np.array([-1.0, 0.0, -1.0, 0.0, 0.0, 1.0, -1.0, -1.0], dtype=np.float32)
+
+                        # Stage 3: Flip Cancel + Air Roll (car inverted, pitch = +1.0 forward cancel, roll = +/-1.0, boost = 1.0)
+                        car_s3 = CarState(
+                            id=0, team=0,
+                            pos=np.array([x_pos, y_start + target_sign * 180.0, 125.0], dtype=np.float32),
+                            vel=np.array([0.0, target_sign * 1250.0, 60.0], dtype=np.float32),
+                            rot=np.array([0.0, target_yaw, math.pi * 0.75 * roll_dir], dtype=np.float32),
+                            rot_mat=rotation_to_rot_mat(0.0, target_yaw, math.pi * 0.75 * roll_dir),
+                            boost=45.0,
+                            on_ground=False
+                        )
+                        act_s3 = np.array([1.0, 0.0, 1.0, 0.0, float(roll_dir), -1.0, 1.0, -1.0], dtype=np.float32)
+
+                        # Stage 4: 4-Wheel Landing Recovery + Supersonic Sprint
+                        car_s4 = CarState(
+                            id=0, team=0,
+                            pos=np.array([x_pos, y_start + target_sign * 350.0, 17.0], dtype=np.float32),
+                            vel=np.array([0.0, target_sign * 1650.0, 0.0], dtype=np.float32),
+                            rot=np.array([0.0, target_yaw, 0.0], dtype=np.float32),
+                            rot_mat=rotation_to_rot_mat(0.0, target_yaw, 0.0),
+                            boost=35.0,
+                            on_ground=True
+                        )
+                        act_s4 = np.array([1.0, 0.0, 0.0, 0.0, 0.0, -1.0, 1.0, -1.0], dtype=np.float32)
+
+                        for cs, act in [(car_s1, act_s1), (car_s2, act_s2), (car_s3, act_s3), (car_s4, act_s4)]:
+                            obs_val = self.obs_builder.build_obs(cs, MockArenaForObs(ball_hf, [cs]))
+                            obs_list.append(obs_val)
+                            act_list.append(act)
+                            obs_list.append(obs_val * OBS_MIRROR_MASK_NP)
+                            act_list.append(act * ACT_MIRROR_MASK_NP)
+
         return np.array(obs_list, dtype=np.float32), np.array(act_list, dtype=np.float32)
 
     def train(
@@ -303,13 +373,19 @@ class BehavioralCloningTrainer:
 
         # Initialize or load model
         model = ActorCritic(obs_dim=74, act_dim=8, continuous_actions=True, use_layer_norm=True).to(self.device)
+        orig_iteration = 0
+        orig_global_step = 0
         if base_checkpoint and os.path.exists(base_checkpoint):
             try:
                 ckpt = torch.load(base_checkpoint, map_location=self.device)
                 if isinstance(ckpt, dict) and "model_state_dict" in ckpt:
                     model.load_state_dict(ckpt["model_state_dict"], strict=False)
+                    orig_iteration = ckpt.get("iteration", 0)
+                    orig_global_step = ckpt.get("global_step", 0)
                 elif isinstance(ckpt, dict):
                     model.load_state_dict(ckpt, strict=False)
+                    orig_iteration = ckpt.get("iteration", 0)
+                    orig_global_step = ckpt.get("global_step", 0)
             except Exception as e:
                 print(f"[Pretrainer] Warning: Could not load base checkpoint: {e}")
 
@@ -399,6 +475,8 @@ class BehavioralCloningTrainer:
             "use_layer_norm": True,
             "pretrained": True,
             "pretrain_samples": dataset_size,
+            "iteration": orig_iteration,
+            "global_step": orig_global_step,
             "timestamp": time.strftime("%Y-%m-%d %H:%M:%S")
         }
         torch.save(payload, self.checkpoint_path)
