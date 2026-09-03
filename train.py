@@ -5,6 +5,15 @@ Standalone CLI Training Script for Rocket League Reinforcement Learning Bot.
 from __future__ import annotations
 import argparse
 import sys
+import torch
+if torch.cuda.is_available():
+    pass
+else:
+    try:
+        torch.set_flush_denormal(True)
+    except Exception:
+        pass
+
 from agent.ppo import PPOTrainer
 
 

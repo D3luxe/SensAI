@@ -754,6 +754,7 @@ class AirRollRecoveryReward(BaseReward):
         self._was_disoriented: Dict[int, bool] = {}
         self._airborne_recovery_total: Dict[int, float] = {}
         self._wall_landed: Dict[int, bool] = {}
+        self._halfflip_cancel_executed: Dict[int, bool] = {}
 
     def reset(self, initial_state: RocketSimArena):
         self._prev_up_z = {car.id: float(car.get_up_vector()[2]) for car in initial_state.cars}
@@ -762,6 +763,7 @@ class AirRollRecoveryReward(BaseReward):
         self._was_disoriented = {car.id: False for car in initial_state.cars}
         self._airborne_recovery_total = {car.id: 0.0 for car in initial_state.cars}
         self._wall_landed = {car.id: False for car in initial_state.cars}
+        self._halfflip_cancel_executed = {car.id: False for car in initial_state.cars}
 
     def get_reward(self, car: CarState, arena: RocketSimArena, action: np.ndarray, is_goal: bool, scoring_team: Optional[int]) -> float:
         if car.on_ground:
@@ -771,6 +773,7 @@ class AirRollRecoveryReward(BaseReward):
             self._was_disoriented[car.id] = False
             self._airborne_recovery_total[car.id] = 0.0
             self._wall_landed[car.id] = False
+            self._halfflip_cancel_executed[car.id] = False
             return 0.0
 
         air_ticks = self._airborne_ticks.get(car.id, 0) + 1
@@ -816,7 +819,9 @@ class AirRollRecoveryReward(BaseReward):
         # ── 1. Active 3D Disorientation Recovery (Roll & Yaw) ────────────────
         # Only active when the car was genuinely knocked off-axis, inverted, or executed a flip turnaround
         is_recovering = bool(self._was_disoriented.get(car.id, False))
-        is_active_halfflip_cancel = bool(air_ticks <= 16 and (float(action[2]) > 0.3 or abs(float(action[4])) > 0.2 or float(action[0]) > 0.5))
+        pitch_input = float(action[2])
+        roll_input = float(action[4])
+        is_active_halfflip_cancel = bool(air_ticks <= 18 and (pitch_input > 0.3 or abs(roll_input) > 0.25))
 
         if not is_aerial_engagement and is_recovering:
             urgency = min(1.0, max(0.4, (800.0 - car_z) / 600.0))
@@ -841,6 +846,21 @@ class AirRollRecoveryReward(BaseReward):
                 total_reward += yaw_rec
                 self._airborne_recovery_total[car.id] = self._airborne_recovery_total.get(car.id, 0.0) + yaw_rec
 
+            # 1c. Active Half-Flip Flip-Cancel & Air-Roll (Freezing flip rotation & rolling wheels down)
+            # When inverted following a backward dodge or during backward retreat:
+            # Actively reward holding forward pitch (pitch_input > 0.3) to cancel the flip rotation,
+            # and actively reward air roll (abs(roll_input) > 0.25) to right the vehicle.
+            if air_ticks <= 18 and up_z < 0.35 and speed_horiz > 300.0:
+                if pitch_input > 0.3:
+                    cancel_bonus = min(rec_budget, (pitch_input * 0.40) * urgency)
+                    total_reward += cancel_bonus
+                    rec_budget = max(0.0, rec_budget - cancel_bonus)
+                    self._halfflip_cancel_executed[car.id] = True
+                if abs(roll_input) > 0.25:
+                    roll_bonus = min(rec_budget, (abs(roll_input) * 0.40) * urgency)
+                    total_reward += roll_bonus
+                    rec_budget = max(0.0, rec_budget - roll_bonus)
+
             # Reset disorientation once upright attitude is fully restored
             if up_z > 0.85 and curr_heading > 0.85:
                 self._was_disoriented[car.id] = False
@@ -851,11 +871,15 @@ class AirRollRecoveryReward(BaseReward):
                     total_reward += (up_z * 0.5)
                     if speed_horiz > 300.0 and curr_heading > 0.30:
                         total_reward += (curr_heading * 0.5)
+                        # 180° Turnaround Half-Flip Completion Bonus:
+                        if self._halfflip_cancel_executed.get(car.id, False) and curr_heading > 0.60 and speed_horiz > 600.0:
+                            total_reward += 0.80
                     elif speed_horiz > 300.0 and curr_heading < -0.50:
                         if float(action[0]) < -0.1 or float(action[7]) > 0.0:
                             total_reward += (abs(curr_heading) * 0.5)
                 # Consume disorientation so touchdown reward only fires once per landing
                 self._was_disoriented[car.id] = False
+                self._halfflip_cancel_executed[car.id] = False
 
                 # Upside down landing crash penalty (forgiven during active flip-cancels & quick half-flip air-rolls)
                 if up_z < 0.0 and not is_active_halfflip_cancel:

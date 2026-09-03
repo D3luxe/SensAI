@@ -1,5 +1,5 @@
 {
-  "updated_at": 1788452520.0415845,
+  "updated_at": 1788477292.594126,
   "learning_rate": 0.0003,
   "ent_coef": 0.001,
   "clip_range": 0.2,
@@ -19,16 +19,16 @@
     "air_roll_recovery_weight": 0.1,
     "powerslide_weight": 0.2,
     "touch_weight": 1.2,
-    "boost_gain_weight": 0.6,
+    "boost_gain_weight": 0.7,
     "boost_lose_weight": 0.35
   },
   "scenarios": {
-    "kickoff_prob": 0.27,
-    "replay_prob": 0.22,
-    "aerial_prob": 0.1,
-    "turnaround_prob": 0.1,
-    "wall_prob": 0.1,
-    "save_prob": 0.1,
-    "custom_prob": 0.11
+    "kickoff_prob": 0.21,
+    "replay_prob": 0.17,
+    "aerial_prob": 0.08,
+    "turnaround_prob": 0.08,
+    "wall_prob": 0.08,
+    "save_prob": 0.08,
+    "custom_prob": 0.3
   }
 }

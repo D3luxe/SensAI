@@ -5,24 +5,48 @@
     "description": "Bot spawns in the opposing 1/3rd directly behind a slow forward-bouncing ball to practice power strikes and ground dribble pickups.",
     "enabled": true,
     "car": {
-      "pos": [0.0, 1800.0, 17.0],
+      "pos": [
+        0.0,
+        1800.0,
+        17.0
+      ],
       "yaw": 90.0,
       "pitch": 0.0,
       "roll": 0.0,
-      "vel": [0.0, 800.0, 0.0],
+      "vel": [
+        0.0,
+        800.0,
+        0.0
+      ],
       "boost": 50.0
     },
     "ball": {
-      "pos": [0.0, 2600.0, 220.0],
-      "vel": [0.0, 250.0, -150.0]
+      "pos": [
+        0.0,
+        2600.0,
+        220.0
+      ],
+      "vel": [
+        0.0,
+        250.0,
+        -150.0
+      ]
     },
     "opponent": {
       "mode": "goalie",
-      "pos": [0.0, 4800.0, 17.0],
+      "pos": [
+        0.0,
+        4800.0,
+        17.0
+      ],
       "yaw": -90.0,
       "pitch": 0.0,
       "roll": 0.0,
-      "vel": [0.0, 0.0, 0.0],
+      "vel": [
+        0.0,
+        0.0,
+        0.0
+      ],
       "boost": 60.0
     },
     "variance": {
@@ -37,28 +61,52 @@
     "description": "Bot starts near midfield chasing a fast rolling ball toward an open net to practice boost feathering and supersonic power finishes.",
     "enabled": true,
     "car": {
-      "pos": [-600.0, -200.0, 17.0],
+      "pos": [
+        -600.0,
+        -200.0,
+        17.0
+      ],
       "yaw": 75.0,
       "pitch": 0.0,
       "roll": 0.0,
-      "vel": [300.0, 1200.0, 0.0],
+      "vel": [
+        320.1414782637583,
+        1194.7842624905534,
+        0.0
+      ],
       "boost": 40.0
     },
     "ball": {
-      "pos": [-300.0, 900.0, 93.15],
-      "vel": [150.0, 800.0, 0.0]
+      "pos": [
+        -300.0,
+        900.0,
+        93.15
+      ],
+      "vel": [
+        150.0,
+        800.0,
+        0.0
+      ]
     },
     "opponent": {
       "mode": "shadow",
-      "pos": [400.0, 2400.0, 17.0],
+      "pos": [
+        400.0,
+        2400.0,
+        17.0
+      ],
       "yaw": 90.0,
       "pitch": 0.0,
       "roll": 0.0,
-      "vel": [0.0, 600.0, 0.0],
+      "vel": [
+        0.0,
+        0.0,
+        0.0
+      ],
       "boost": 33.3
     },
     "variance": {
-      "pos_jitter": 100.0,
+      "pos_jitter": 150.0,
       "vel_jitter": 80.0,
       "mirror_symmetry": true
     }
@@ -69,24 +117,48 @@
     "description": "Ball popped up floating at 700uu height with the car positioned underneath for aerial takeoff and carry practice.",
     "enabled": true,
     "car": {
-      "pos": [400.0, 0.0, 17.0],
+      "pos": [
+        400.0,
+        0.0,
+        17.0
+      ],
       "yaw": 85.0,
       "pitch": 0.0,
       "roll": 0.0,
-      "vel": [100.0, 900.0, 0.0],
+      "vel": [
+        100.0,
+        900.0,
+        0.0
+      ],
       "boost": 80.0
     },
     "ball": {
-      "pos": [450.0, 600.0, 750.0],
-      "vel": [50.0, 300.0, 200.0]
+      "pos": [
+        450.0,
+        600.0,
+        750.0
+      ],
+      "vel": [
+        50.0,
+        300.0,
+        200.0
+      ]
     },
     "opponent": {
       "mode": "goalie",
-      "pos": [0.0, 4800.0, 17.0],
+      "pos": [
+        0.0,
+        4800.0,
+        17.0
+      ],
       "yaw": -90.0,
       "pitch": 0.0,
       "roll": 0.0,
-      "vel": [0.0, 0.0, 0.0],
+      "vel": [
+        0.0,
+        0.0,
+        0.0
+      ],
       "boost": 70.0
     },
     "variance": {
@@ -101,24 +173,48 @@
     "description": "Bot retreating toward its own defending net while shadowing an incoming opponent dribble.",
     "enabled": true,
     "car": {
-      "pos": [200.0, -2600.0, 17.0],
+      "pos": [
+        200.0,
+        -2600.0,
+        17.0
+      ],
       "yaw": -90.0,
       "pitch": 0.0,
       "roll": 0.0,
-      "vel": [0.0, -900.0, 0.0],
+      "vel": [
+        0.0,
+        -900.0,
+        0.0
+      ],
       "boost": 45.0
     },
     "ball": {
-      "pos": [-150.0, -1200.0, 93.15],
-      "vel": [50.0, -750.0, 0.0]
+      "pos": [
+        -150.0,
+        -1200.0,
+        93.15
+      ],
+      "vel": [
+        50.0,
+        -750.0,
+        0.0
+      ]
     },
     "opponent": {
       "mode": "custom",
-      "pos": [-150.0, -600.0, 17.0],
+      "pos": [
+        -150.0,
+        -600.0,
+        17.0
+      ],
       "yaw": -90.0,
       "pitch": 0.0,
       "roll": 0.0,
-      "vel": [0.0, -950.0, 0.0],
+      "vel": [
+        0.0,
+        -950.0,
+        0.0
+      ],
       "boost": 50.0
     },
     "variance": {
@@ -129,32 +225,112 @@
   },
   {
     "id": "half_flip_defensive_retreat",
-    "name": "Half-Flip 180° Defensive Retreat",
+    "name": "Half-Flip 180\u00b0 Defensive Retreat",
     "description": "Bot starts stopped facing forward near midfield as a boomed clear flies over its head, forcing an immediate half-flip turnaround to defend.",
     "enabled": true,
     "car": {
-      "pos": [0.0, 800.0, 17.0],
+      "pos": [
+        0.0,
+        800.0,
+        17.0
+      ],
       "yaw": 90.0,
       "pitch": 0.0,
       "roll": 0.0,
-      "vel": [0.0, -150.0, 0.0],
+      "vel": [
+        9.184850993605149e-15,
+        150.0,
+        0.0
+      ],
       "boost": 40.0
     },
     "ball": {
-      "pos": [0.0, -2200.0, 200.0],
-      "vel": [0.0, -1100.0, 100.0]
+      "pos": [
+        0.0,
+        -1350.0,
+        200.0
+      ],
+      "vel": [
+        0.0,
+        -400.0,
+        100.0
+      ]
     },
     "opponent": {
       "mode": "custom",
-      "pos": [0.0, 2000.0, 17.0],
+      "pos": [
+        0.0,
+        2000.0,
+        17.0
+      ],
       "yaw": -90.0,
       "pitch": 0.0,
       "roll": 0.0,
-      "vel": [0.0, -900.0, 0.0],
+      "vel": [
+        0.0,
+        0.0,
+        0.0
+      ],
       "boost": 50.0
     },
     "variance": {
       "pos_jitter": 100.0,
+      "vel_jitter": 60.0,
+      "mirror_symmetry": true
+    }
+  },
+  {
+    "id": "backwall_bounce_boost_steal",
+    "name": "Opposing 1/3rd Backwall bounce w/ boost steal",
+    "description": "Bot spawns in the opposing 1/3rd facing the opponents corner boost, as the ball bounces slowly off the back wall.",
+    "enabled": true,
+    "car": {
+      "pos": [
+        3300.0,
+        3300.0,
+        17.0
+      ],
+      "yaw": 110.0,
+      "pitch": 0.0,
+      "roll": 0.0,
+      "vel": [
+        -273.61611466053495,
+        751.7540966287268,
+        0.0
+      ],
+      "boost": 50.0
+    },
+    "ball": {
+      "pos": [
+        2400.0,
+        3450.0,
+        393.15
+      ],
+      "vel": [
+        0.0,
+        250.0,
+        -150.0
+      ]
+    },
+    "opponent": {
+      "mode": "goalie",
+      "pos": [
+        0.0,
+        4800.0,
+        17.0
+      ],
+      "yaw": -90.0,
+      "pitch": 0.0,
+      "roll": 0.0,
+      "vel": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "boost": 55.0
+    },
+    "variance": {
+      "pos_jitter": 80.0,
       "vel_jitter": 60.0,
       "mirror_symmetry": true
     }

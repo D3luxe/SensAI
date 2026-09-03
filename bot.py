@@ -10,6 +10,10 @@ import time
 import math
 import numpy as np
 import torch
+try:
+    torch.set_flush_denormal(True)
+except Exception:
+    pass
 
 try:
     from rlbot.agents.base_agent import BaseAgent, SimpleControllerState

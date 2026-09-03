@@ -72,7 +72,7 @@ class RocketLeagueEnv:
             obs.append(self.obs_builder.build_obs(car, self.arena))
         return np.array(obs, dtype=np.float32)
 
-    def step(self, raw_actions: np.ndarray, out_obs: Optional[np.ndarray] = None, out_rews: Optional[np.ndarray] = None) -> Tuple[np.ndarray, np.ndarray, np.ndarray, Dict[str, Any]]:
+    def step(self, raw_actions: np.ndarray, out_obs: Optional[np.ndarray] = None, out_rews: Optional[np.ndarray] = None, include_breakdown: bool = False) -> Tuple[np.ndarray, np.ndarray, np.ndarray, Dict[str, Any]]:
         """
         Step simulation by tick_skip sub-ticks.
         raw_actions: shape (num_players, action_dim)
@@ -103,13 +103,13 @@ class RocketLeagueEnv:
         prev_touches_sum = sum(self.episode_touches)
 
         for i, car in enumerate(self.arena.cars):
-            # Only generate detailed reward breakdown dictionary for car 0 to avoid wasteful allocations
-            r, r_dict = self.reward_manager.get_reward(car, self.arena, parsed_actions[i], is_goal, scoring_team, include_breakdown=(i == 0))
+            # Only generate detailed reward breakdown dictionary if explicitly requested
+            r, r_dict = self.reward_manager.get_reward(car, self.arena, parsed_actions[i], is_goal, scoring_team, include_breakdown=(include_breakdown and i == 0))
             out_rews[i] = r
             self.episode_rewards[i] += r
             self.episode_touches[i] = car.ball_touches
             self.obs_builder.build_obs(car, self.arena, out=out_obs[i])
-            if i == 0:
+            if include_breakdown and i == 0:
                 info_rewards = r_dict
 
         if is_goal and scoring_team is not None:

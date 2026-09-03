@@ -69,6 +69,13 @@ class PPOTrainer:
         os.makedirs(self.save_dir, exist_ok=True)
         os.makedirs(self.log_dir, exist_ok=True)
 
+        # Enable hardware Flush-To-Zero (FTZ) & Denormals-Are-Zero (DAZ)
+        # Prevents costly x86 microcode assist traps on decaying weights & Adam moments
+        try:
+            torch.set_flush_denormal(True)
+        except Exception:
+            pass
+
         # Hardware Thread & CPU Core Optimization (8 P-Cores + 8 E-Cores for Arrow Lake / Core Ultra 9)
         num_threads = int(env_cfg.get("num_threads", 8))
         total_cores = os.cpu_count() or 24
@@ -80,7 +87,7 @@ class PPOTrainer:
                 ctypes.windll.kernel32.SetProcessAffinityMask(handle, ctypes.c_size_t(mask_16))
                 torch.set_num_threads(num_threads)
                 torch.set_num_interop_threads(min(4, num_threads))
-                print(f"[Hardware Optimizer] Configured Process Affinity to Cores 0-15 (8 P-Cores + 8 E-Cores | {num_threads} PyTorch Threads) for peak throughput & sustained boost.")
+                print(f"[Hardware Optimizer] Configured Process Affinity to Cores 0-15 (8 P-Cores + 8 E-Cores | {num_threads} PyTorch Threads | FTZ/DAZ active) for peak throughput.")
             except Exception as e:
                 torch.set_num_threads(num_threads)
                 print(f"[Hardware Optimizer] PyTorch threads set to {num_threads} (Affinity note: {e})")
@@ -373,6 +380,27 @@ class PPOTrainer:
         self.iteration = checkpoint.get("iteration", 0)
         self.global_step = checkpoint.get("global_step", 0)
         self.agent.debias_symmetric_actions()
+
+        # Sanitize any legacy subnormal floating-point numbers in weights and optimizer states
+        # to prevent x86 microcode assist performance traps
+        with torch.no_grad():
+            cleaned_subnormals = 0
+            for p in self.agent.parameters():
+                sub = (p.abs() > 0) & (p.abs() < 1.17549435e-38)
+                if sub.any():
+                    cleaned_subnormals += int(sub.sum().item())
+                    p[sub] = 0.0
+            if hasattr(self, "optimizer") and self.optimizer is not None:
+                for state in self.optimizer.state.values():
+                    for sk, sv in state.items():
+                        if torch.is_tensor(sv) and sv.is_floating_point():
+                            sub = (sv.abs() > 0) & (sv.abs() < 1.17549435e-38)
+                            if sub.any():
+                                cleaned_subnormals += int(sub.sum().item())
+                                sv[sub] = 0.0
+            if cleaned_subnormals > 0:
+                print(f"[PPO Trainer] Performance Sanitizer: Flushed {cleaned_subnormals:,} legacy subnormal numbers to true 0.0.")
+
         print(f"[PPO Trainer] Loaded checkpoint from {path} (Iteration: {self.iteration}, Step: {self.global_step})")
 
     def train(self, max_iterations: Optional[int] = None):

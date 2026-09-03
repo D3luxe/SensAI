@@ -226,9 +226,13 @@ class RocketSimArena:
 
                 self._rsim_arena.set_goal_score_callback(on_goal_cb)
                 self._rsim_arena.set_ball_touch_callback(on_touch_cb)
+                self._rsim_pads = self._rsim_arena.get_boost_pads()
                 self._use_rsim = True
             except Exception:
                 self._use_rsim = False
+                self._rsim_pads = []
+        else:
+            self._rsim_pads = []
 
         # Pre-allocated vectorized boost pad coordinates for fast SIMD distance lookups
         self._sm_pad_indices = np.array([i for i, p in enumerate(self.boost_pads) if not p.is_big], dtype=int)
@@ -411,7 +415,9 @@ class RocketSimArena:
             car.demoed = bool(c_state.is_demoed)
 
         # Synchronize boost pads
-        r_pads = self._rsim_arena.get_boost_pads()
+        r_pads = getattr(self, "_rsim_pads", None)
+        if r_pads is None:
+            r_pads = self._rsim_arena.get_boost_pads()
         for i, pad in enumerate(self.boost_pads):
             if i < len(r_pads):
                 p_state = r_pads[i].get_state()
