@@ -692,9 +692,27 @@ class AirRollRecoveryReward(BaseReward):
                 inversion_mult = 1.0 + max(0.0, -prev_up_z) * 1.5
                 total_reward += (delta_up * 3.0) * inversion_mult * urgency
 
-            # 1b. Late descent touchdown alignment bonus (only close to ground)
+            # 1b. Late descent touchdown alignment & momentum heading bonus
             if up_z > 0.6 and car_z < 350.0:
-                total_reward += (up_z * 0.25) * urgency
+                total_reward += (up_z * 0.20) * urgency
+
+                # Momentum Heading Alignment: reward pointing nose in travel direction for seamless velocity retention
+                v_horiz = car.vel[:2]
+                speed_horiz = float(np.linalg.norm(v_horiz))
+                if speed_horiz > 300.0:
+                    unit_vel_h = v_horiz / speed_horiz
+                    fwd_h = car.get_forward_vector()[:2]
+                    fwd_norm = float(np.linalg.norm(fwd_h))
+                    if fwd_norm > 1e-4:
+                        unit_fwd_h = fwd_h / fwd_norm
+                        heading_align = float(np.dot(unit_fwd_h, unit_vel_h))
+                        if heading_align > 0.0:
+                            # Forward momentum alignment (nose in direction of travel)
+                            total_reward += (heading_align * 0.30) * urgency
+                        elif heading_align < -0.5:
+                            # Reverse/half-flip landing alignment with reverse or handbrake
+                            if float(action[0]) < -0.1 or float(action[7]) > 0.0:
+                                total_reward += (abs(heading_align) * 0.20) * urgency
 
             # 1c. Upside down landing crash penalty
             if up_z < 0.0 and car_z < 450.0:
