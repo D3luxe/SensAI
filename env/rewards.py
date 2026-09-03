@@ -108,11 +108,18 @@ class BallToGoalVelocityReward(BaseReward):
             if abs(x_impact) <= GOAL_HALF_WIDTH:
                 # Shot is directly on target into the net opening!
                 on_target_mult = 1.6
-            elif abs(x_impact) > GOAL_HALF_WIDTH * 1.3 and ball_y_forward > 2000.0:
+            elif ball_y_forward > 1000.0:
                 # Ball is in attacking half and heading wide into the backwall/corner
-                # Dampen reward so the bot is forced to cut the ball inward towards the goal opening
+                # Strictly eliminate progression reward so the bot cannot farm pushing wide
+                miss_dist = abs(x_impact) - GOAL_HALF_WIDTH
+                if miss_dist > 400.0:
+                    on_target_mult = 0.0
+                else:
+                    on_target_mult = max(0.0, 1.0 - (miss_dist / 400.0))
+            elif abs(x_impact) > GOAL_HALF_WIDTH * 1.3 and ball_y_forward > 0.0:
+                # Midfield wide trajectory dampening
                 miss_factor = min(1.0, (abs(x_impact) - GOAL_HALF_WIDTH) / 1500.0)
-                on_target_mult = max(0.15, 1.0 - (0.75 * miss_factor))
+                on_target_mult = max(0.20, 1.0 - (0.80 * miss_factor))
 
         normalized_progress = (ball_velocity_toward_goal / BALL_MAX_SPEED) * on_target_mult
         return self.weight * normalized_progress
@@ -219,6 +226,11 @@ class PlayerToBallVelocityReward(BaseReward):
         strike_pacing = min(1.0, max(0.20, (curr_dist - 150.0) / 300.0))
         delta_dist = raw_delta_dist * strike_pacing
 
+        # If inside strike zone and repositioning/circling around the ball to shoot (not on wrong side),
+        # suppress the distance penalty so peeling off to angle a shot does not incur a penalty cliff
+        if curr_dist < 450.0 and delta_dist < 0.0 and not is_wrong_side and fwd_alignment > -0.2:
+            delta_dist = 0.0
+
         # If on wall when ball is in the air, dampen grounded wall-crawling so leaping off into an aerial is preferred
         if is_on_wall and is_elevated_aerial:
             delta_dist *= 0.25
@@ -241,9 +253,14 @@ class PlayerToBallVelocityReward(BaseReward):
         if curr_dist < 450.0 and fwd_alignment > 0.2:
             rel_speed = float(np.linalg.norm(car.vel - arena.ball.vel))
             
-            # Gated Velocity Matching: Only reward matching velocity if advancing ball toward opponent goal
+            # Gated Velocity Matching:
+            # Prevent continuous reward farming when car is merely nose-pushing a grounded ball (curr_dist < 180 and ball grounded).
+            # Velocity matching should only reward pacing during the approach phase (180 < curr_dist < 450) or aerial/bouncing balls (ball_z > 130).
+            is_ground_pushing = bool(curr_dist < 180.0 and ball_z < 130.0 and car.on_ground)
+
             if not (is_wrong_side and car_vy_defend > 100.0):
-                vel_matching_bonus = 0.30 * max(0.0, 1.0 - (rel_speed / 700.0))
+                if not is_ground_pushing:
+                    vel_matching_bonus = 0.30 * max(0.0, 1.0 - (rel_speed / 700.0))
             else:
                 # Car is pushing ball toward own net: apply wrong-side push penalty
                 wrong_side_push_penalty = -0.30 * max(0.0, car_vy_defend / 1500.0) * max(0.0, fwd_alignment)
@@ -360,15 +377,22 @@ class TouchBallReward(BaseReward):
                 direction_multiplier = 1.0 + (min(1.0, goal_alignment) * 1.5)  # 1.0x -> 2.5x
 
                 # Dual-Path Context Evaluator:
-                power_bonus = 0.0
-                if goal_alignment > 0.4:
-                    power_bonus = min(1.0, ball_speed / 2000.0)
-
                 rel_speed = float(np.linalg.norm(car.vel - arena.ball.vel))
-                control_bonus = max(0.0, 1.0 - (rel_speed / 600.0)) * 0.8
+                is_gentle_ground_push = bool(car.on_ground and ball_z < 130.0 and rel_speed < 150.0)
+
+                power_bonus = 0.0
+                if goal_alignment > 0.4 and not is_gentle_ground_push:
+                    power_bonus = min(1.2, max(ball_speed, rel_speed) / 1800.0)
+
+                if is_gentle_ground_push:
+                    control_bonus = 0.0
+                    base_touch = 0.25
+                else:
+                    control_bonus = max(0.0, 1.0 - (rel_speed / 600.0)) * 0.8
+                    clear_bonus = 0.5 if is_defensive_clear else 0.0
+                    base_touch = 0.8 + clear_bonus
+
                 tactical_bonus = max(power_bonus, control_bonus)
-                clear_bonus = 0.5 if is_defensive_clear else 0.0
-                base_touch = 0.8 + clear_bonus
                 return (self.weight * (base_touch + tactical_bonus) * direction_multiplier * height_multiplier) + airborne_bonus + kickoff_bounty
 
             # --- CASE 2: Ball hit directed backward toward defending half / goal ---

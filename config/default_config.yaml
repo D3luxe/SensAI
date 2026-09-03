@@ -33,7 +33,7 @@ rewards:
   air_roll_recovery_weight: 0.1
   ball_to_goal_weight: 1.5
   boost_gain_weight: 0.6
-  boost_lose_weight: 0.3
+  boost_lose_weight: 0.35
   concede_weight: -30.0
   goal_weight: 30.0
   jump_bridge_weight: 0.35
@@ -42,10 +42,10 @@ rewards:
   save_weight: 12.0
   touch_weight: 1.2
 scenarios:
-  aerial_prob: 0.09
-  custom_prob: 0.1
+  aerial_prob: 0.1
+  custom_prob: 0.11
   kickoff_prob: 0.27
-  replay_prob: 0.21
-  save_prob: 0.09
-  turnaround_prob: 0.15
-  wall_prob: 0.09
+  replay_prob: 0.22
+  save_prob: 0.1
+  turnaround_prob: 0.1
+  wall_prob: 0.1
