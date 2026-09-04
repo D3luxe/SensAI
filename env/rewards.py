@@ -325,16 +325,27 @@ class PlayerToBallVelocityReward(BaseReward):
                 if is_on_wall and (is_ball_infield or is_car_above_ball or is_elevated_aerial):
                     vel_toward_ball *= 0.15
 
-        # 5. Turnaround Incentive vs Straight-Reverse Penalty
-        # When ball is behind the car (fwd_alignment < -0.25):
-        # Penalize creeping backwards in reverse without steering (action[0] < -0.1 and |steer| < 0.3).
-        # Reward active powerslide / turning turnaround (steering hard or handbrake).
+        # 5. Turnaround Incentive & Close-Proximity Rear Quarter Resolution
         turnaround_reward = 0.0
-        if car.on_ground and fwd_alignment < -0.25:
-            if float(action[0]) < -0.10 and abs(float(action[1])) < 0.30:
-                turnaround_reward = -0.20 * abs(fwd_alignment)
-            elif abs(float(action[1])) > 0.35 or float(action[7]) > 0.0:
-                turnaround_reward = +0.20 * max(abs(float(action[1])), 0.5)
+        if car.on_ground:
+            local_x = float(np.dot(car_to_ball[:2], car.get_forward_vector()[:2]))
+            local_y = float(np.dot(car_to_ball[:2], car.get_right_vector()[:2]))
+
+            # Close-Proximity Blindspot (ball at rear bumper or quarter panel < 250 uu):
+            if curr_dist < 250.0 and local_x < 0.0:
+                # Active steering into the ball's lateral side or powersliding to swing around:
+                steer_into_ball = (float(action[1]) > 0.15) if local_y > 15.0 else ((float(action[1]) < -0.15) if local_y < -15.0 else (abs(float(action[1])) > 0.25))
+                if steer_into_ball or float(action[7]) > 0.0:
+                    turnaround_reward = +0.25 * max(abs(float(action[1])), 0.6)
+                elif abs(float(action[1])) < 0.15 and float(action[7]) <= 0.0:
+                    # Penalize zero-steer freeze in blindspot
+                    turnaround_reward = -0.20
+            elif fwd_alignment < -0.25:
+                # Downfield ball-behind: penalize straight reverse creeping, reward powerslides / hard cuts
+                if float(action[0]) < -0.10 and abs(float(action[1])) < 0.30:
+                    turnaround_reward = -0.20 * abs(fwd_alignment)
+                elif abs(float(action[1])) > 0.35 or float(action[7]) > 0.0:
+                    turnaround_reward = +0.20 * max(abs(float(action[1])), 0.5)
 
         total_reward = self.weight * (
             delta_dist + vel_toward_ball + vel_matching_bonus + brake_incentive + dribble_boost_penalty +

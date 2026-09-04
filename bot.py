@@ -273,7 +273,7 @@ class SenseiRLBot(BaseAgent):
             # Extract future ball trajectory from RLBot
             ball_prediction_slice = None
             pred_struct = None
-            if RLBOT_AVAILABLE and hasattr(self, "get_ball_prediction_struct"):
+            if hasattr(self, "get_ball_prediction_struct"):
                 try:
                     pred_struct = self.get_ball_prediction_struct()
                     if pred_struct is not None and getattr(pred_struct, "num_slices", 0) > 30:
@@ -303,6 +303,17 @@ class SenseiRLBot(BaseAgent):
 
                     self._small_pad_active = np.array([self.boost_pads[i].is_active for i in self._sm_pad_indices], dtype=bool)
                     self._big_pad_active = np.array([self.boost_pads[i].is_active for i in self._bg_pad_indices], dtype=bool)
+
+                def get_predicted_ball_pos(self, slice_idx: int = 60) -> np.ndarray:
+                    if self._pred_struct is not None and getattr(self._pred_struct, "num_slices", 0) > 0:
+                        # RLBot ball prediction struct runs at 60Hz. In training, RocketSim predicts at 120Hz (slice 60 = 0.5s).
+                        # Map slice_idx to RLBot's 60Hz timeframe (e.g. slice 60 -> RLBot slice 30 = 0.5s).
+                        rlbot_idx = min(int(round(slice_idx * 0.5)), self._pred_struct.num_slices - 1)
+                        loc = self._pred_struct.slices[rlbot_idx].physics.location
+                        return np.array([loc.x, loc.y, loc.z], dtype=np.float32)
+                    if self.ball_prediction_slice is not None:
+                        return self.ball_prediction_slice
+                    return np.array([self.ball.pos[0], self.ball.pos[1], self.ball.pos[2]], dtype=np.float32)
 
                 def get_shot_threat(self, team: int):
                     defending_goal_y = -ARENA_EXTENT_Y if team == 0 else ARENA_EXTENT_Y
@@ -453,14 +464,6 @@ class SenseiRLBot(BaseAgent):
             want_jump = bool(act[5] > 0.0)
             substep_tick = self.ticks_since_last_action  # 0 to 7 within the 15Hz step
 
-            # Downfield Traversal Speed-Flip Trigger:
-            # When sprinting downfield on open turf toward the ball (dist > 750 uu, speed > 650 uu/s, aligned),
-            # if the policy requests forward drive (act[0] > 0.50) and car is not yet supersonic,
-            # initiate a forward speed-flip if cooldown has elapsed.
-            if is_on_ground and self.dodge_cooldown == 0:
-                if dist_to_ball > 750.0 and fwd_speed > 650.0 and car_speed_total < 1950.0 and abs(act[1]) < 0.25 and fwd_align > 0.65 and act[0] > 0.50:
-                    want_jump = True
-
             # Ground Jump Gating:
             # 1. Flip Cooldown: Require recovery ticks on wheels after a dodge before jumping again.
             # 2. Hard Turning: When steering hard on turf (abs(act[1]) > 0.35), steer on wheels instead of tumbling.
@@ -478,18 +481,6 @@ class SenseiRLBot(BaseAgent):
 
                 if controller.jump:
                     self.dodge_cooldown = 20  # ~1.3 second recovery after dodge
-
-                    # Directional Flip Sanitation:
-                    # In Rocket League:
-                    #  - controller.pitch = -1.0 is nose-DOWN / FRONT-FLIP
-                    #  - controller.pitch = +1.0 is nose-UP / BACKFLIP
-                    # When moving forward downfield or into the ball (fwd_speed > 100 uu/s):
-                    # Any dodge MUST be forward or diagonal. Invert accidental backward stick to front-flip!
-                    if fwd_speed > 100.0:
-                        if controller.pitch > 0.0:
-                            controller.pitch = -controller.pitch
-                        if abs(controller.pitch) < 0.2 and abs(controller.yaw) < 0.2:
-                            controller.pitch = -1.0
 
                     # Dodge Deadzone Compensation:
                     # Rocket League and RocketSim require analog stick deflection >= 0.50 to execute a directional flip/dodge.
@@ -517,27 +508,10 @@ class SenseiRLBot(BaseAgent):
                 controller.roll = 0.0
 
             # Boost Economy & Momentum Safety Gate:
-            # 1. Suppress boost when the vehicle's 3D momentum strongly opposes its nose direction (fwd_speed < -150 uu/s).
+            # 1. Suppress boost when reverse throttle is commanded (act[0] < -0.05) or momentum strongly opposes nose (fwd_speed < -150 uu/s).
             # 2. Suppress boost on the ground when already at supersonic speed (is_supersonic), preventing boost waste.
-            controller.boost = bool(act[6] > 0.0 and fwd_speed > -150.0 and not (is_supersonic and is_on_ground))
+            controller.boost = bool(act[6] > 0.0 and act[0] > -0.05 and fwd_speed > -150.0 and not (is_supersonic and is_on_ground))
             controller.handbrake = bool(act[7] > 0.0 and is_on_ground)
-
-            # Dribble Pacing & Anti-Overshoot:
-            # When alongside the ball (dist < 350 uu, ball on ground), if the car is outrunning the ball,
-            # cut boost and pace throttle to match ball speed so the car can turn/cut the ball toward net!
-            if dist_to_ball < 350.0 and ball_state.pos[2] < 160.0 and is_on_ground:
-                if fwd_speed > ball_spd + 80.0:
-                    controller.boost = False
-                    controller.throttle = float(np.clip(ball_spd / max(1.0, fwd_speed), 0.25, 0.85))
-
-            # Ball-Behind Turnaround Recovery:
-            # If the ball is behind the car (local_x < -60 uu) while moving forward (fwd_speed > 80 uu/s),
-            # powerslide turnaround rapidly toward the ball instead of straight-line reversing into a freeze!
-            if is_on_ground and local_x < -60.0 and fwd_speed > 80.0:
-                turn_dir = float(np.sign(local_y)) if abs(local_y) > 20.0 else 1.0
-                controller.steer = turn_dir
-                controller.handbrake = True
-                controller.throttle = 0.50
 
             self.tick_count += 1
             ball_pos = ball_state.pos

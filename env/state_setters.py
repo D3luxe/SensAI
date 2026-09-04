@@ -260,7 +260,7 @@ class TurnaroundRecoverySetter(BaseStateSetter):
     def reset(self, rsim_arena: Any, num_players: int) -> None:
         target_team = random.choice([0, 1])
         sign = 1.0 if target_team == 0 else -1.0
-        mode = random.choice(["turnaround_sprint", "wrong_side_dribble", "reverse_halfflip", "midflip_inverted", "downfield_speedflip_sprint"])
+        mode = random.choice(["turnaround_sprint", "wrong_side_dribble", "reverse_halfflip", "midflip_inverted", "downfield_speedflip_sprint", "rear_quarter_scramble"])
 
         if mode == "downfield_speedflip_sprint":
             # Scenario E: Downfield breakaway / speed-flip sprint
@@ -409,6 +409,47 @@ class TurnaroundRecoverySetter(BaseStateSetter):
                     yaw = -sign * math.pi / 2
                     cs.rot_mat = rsim.Angle(pitch=0.0, yaw=yaw, roll=0.0).as_rot_mat()
                     cs.vel = rsim.Vec(0, -sign * 700, 0)
+
+                cs.ang_vel = rsim.Vec(0, 0, 0)
+                car.set_state(cs)
+
+        elif mode == "rear_quarter_scramble":
+            # Scenario F: Close-proximity rear quarter-panel / blindspot scramble
+            # Ball rests or bounces slowly at the rear bumper/quarter panel (80-160 uu).
+            # Directly trains low-speed hook turns, powerslide 180 cuts, and reverse ball sweeps.
+            cx = random.uniform(-1500, 1500)
+            cy = sign * random.uniform(0, 2000)
+            yaw = sign * math.pi / 2 + random.uniform(-0.25, 0.25)
+
+            # Place ball right at the rear quarter panel (longitudinal offset in [-130, -50], lateral in [+-35, +-75])
+            side_sign = random.choice([-1.0, 1.0])
+            lat_off = side_sign * random.uniform(35.0, 75.0)
+            long_off = -sign * random.uniform(50.0, 130.0)
+            bx = cx + lat_off
+            by = cy + long_off
+            bz = random.uniform(93.15, 140.0)
+
+            bs = rsim_arena.ball.get_state()
+            bs.pos = rsim.Vec(bx, by, bz)
+            bs.vel = rsim.Vec(random.uniform(-40, 40), random.uniform(-40, 40), random.uniform(0, 100))
+            bs.ang_vel = rsim.Vec(0, 0, 0)
+            rsim_arena.ball.set_state(bs)
+
+            for i, car in enumerate(rsim_arena.get_cars()):
+                cs = car.get_state()
+                cs.boost = random.uniform(0.0, 40.0)
+                team = i % 2
+
+                if team == target_team:
+                    cs.pos = rsim.Vec(cx, cy, 17.0)
+                    cs.rot_mat = rsim.Angle(pitch=0.0, yaw=yaw, roll=0.0).as_rot_mat()
+                    speed = random.uniform(0.0, 200.0)
+                    cs.vel = rsim.Vec(math.cos(yaw) * speed, math.sin(yaw) * speed, 0.0)
+                else:
+                    cs.pos = rsim.Vec(random.uniform(-1000, 1000), by + sign * random.uniform(1500, 2800), 17.0)
+                    yaw_opp = -sign * math.pi / 2
+                    cs.rot_mat = rsim.Angle(pitch=0.0, yaw=yaw_opp, roll=0.0).as_rot_mat()
+                    cs.vel = rsim.Vec(0.0, -sign * random.uniform(400, 800), 0.0)
 
                 cs.ang_vel = rsim.Vec(0, 0, 0)
                 car.set_state(cs)

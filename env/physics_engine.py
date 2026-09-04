@@ -463,17 +463,8 @@ class RocketSimArena:
                         pitch_val = -float(act[2])
                         yaw_val = -float(act[3])
                         roll_val = -float(act[4])
-                        # Dodge deadzone scaling and forward alignment when dodge is triggered
+                        # Dodge deadzone scaling when dodge is triggered
                         if jump_val:
-                            fwd_vec = np.array([c_state.rot_mat.forward.x, c_state.rot_mat.forward.y, c_state.rot_mat.forward.z], dtype=np.float32)
-                            vel_vec = np.array([c_state.vel.x, c_state.vel.y, c_state.vel.z], dtype=np.float32)
-                            fwd_spd = float(np.dot(vel_vec, fwd_vec))
-                            if fwd_spd > 100.0:
-                                if pitch_val > 0.0:
-                                    pitch_val = -pitch_val
-                                if abs(pitch_val) < 0.2 and abs(yaw_val) < 0.2:
-                                    pitch_val = -1.0
-
                             stick_mag = math.hypot(pitch_val, yaw_val)
                             if stick_mag > 0.08:
                                 scale = max(1.0, 0.90 / stick_mag)

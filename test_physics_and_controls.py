@@ -96,6 +96,30 @@ class TestPhysicsAndControls(unittest.TestCase):
         self.assertTrue(c_state2.has_flipped, "Substep sequencer must trigger has_flipped=True in RocketSim!")
         self.assertGreater(c_state2.vel.y, 1400.0, "Front-flip must deliver > 400 uu/s forward velocity impulse!")
 
+    def test_substep_backflip_execution(self):
+        """
+        Guarantees that RocketSimArena.step executes a genuine backflip (decelerating forward motion)
+        without being inverted into a frontflip when forward speed > 100.
+        """
+        arena = RocketSimArena(num_players=2, game_mode="1v1")
+        arena.reset(random_kickoff=False)
+
+        cs = arena._rsim_cars[0].get_state()
+        cs.pos = rsim.Vec(0, -3000, 17)
+        cs.vel = rsim.Vec(0, 1000, 0)
+        cs.rot_mat = rsim.Angle(np.pi / 2, 0.0, 0.0).as_rot_mat()
+        arena._rsim_cars[0].set_state(cs)
+
+        # Step 1: Jump off ground (act[5] = 1.0)
+        arena.step([np.array([1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0]), np.zeros(8)], dt=8.0 / 120.0)
+
+        # Step 2: Backflip dodge (act[5] = 1.0, act[2] = -1.0)
+        arena.step([np.array([1.0, 0.0, -1.0, 0.0, 0.0, 1.0, 0.0, 0.0]), np.zeros(8)], dt=8.0 / 120.0)
+        c_state2 = arena._rsim_cars[0].get_state()
+        self.assertTrue(c_state2.has_flipped, "Substep sequencer must trigger has_flipped=True!")
+        # A backflip delivers backward impulse (-500 uu/s), reducing forward velocity below 800 uu/s
+        self.assertLess(c_state2.vel.y, 800.0, "Backflip must deliver backward impulse, NOT forward acceleration!")
+
     def test_bot_controller_pass_through(self):
         """
         Guarantees that bot.py passes pitch, steer, yaw, roll 1-to-1 without accidental sign negation.
@@ -145,6 +169,168 @@ class TestPhysicsAndControls(unittest.TestCase):
         bot.prev_action = np.array([1.0, 0.8, 0.0, 0.0, 0.0, 0.0, 0.0, 0.9], dtype=np.float32)
         ctrl_turn = bot.get_output(packet)
         self.assertTrue(ctrl_turn.handbrake, msg="Handbrake must be True when act[7] > 0.0 and car is on ground!")
+
+    def test_bot_no_forced_speedflip(self):
+        """Guarantees bot.py does NOT force speed-flips when policy does not request jump (act[5] <= 0)."""
+        bot = SenseiRLBot("TestBot", 0, 0)
+        bot.prev_action = np.array([1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0], dtype=np.float32)
+        bot.ticks_since_last_action = 0
+
+        class Struct:
+            def __init__(self, **kwargs):
+                for k, v in kwargs.items():
+                    setattr(self, k, v)
+
+        car = Struct(
+            team=0, boost=50.0, has_wheel_contact=True, jumped=False, double_jumped=False,
+            physics=Struct(
+                location=Struct(x=0.0, y=-2000.0, z=17.0),
+                velocity=Struct(x=0.0, y=800.0, z=0.0),
+                rotation=Struct(pitch=0.0, yaw=np.pi / 2, roll=0.0),
+                angular_velocity=Struct(x=0.0, y=0.0, z=0.0)
+            )
+        )
+        ball = Struct(physics=Struct(location=Struct(x=0.0, y=1000.0, z=93.0), velocity=Struct(x=0.0, y=0.0, z=0.0), angular_velocity=Struct(x=0.0, y=0.0, z=0.0)))
+        packet = Struct(num_cars=1, game_cars=[car], game_ball=ball, game_info=Struct(is_match_ended=False, is_round_active=True))
+
+        ctrl = bot.get_output(packet)
+        self.assertFalse(ctrl.jump, "bot.py must NOT force jump when act[5] <= 0.0, even when sprinting downfield toward ball!")
+
+    def test_bot_no_pitch_inversion_on_airborne_flip(self):
+        """Guarantees bot.py does NOT invert pitch on airborne flips when moving forward."""
+        bot = SenseiRLBot("TestBot", 0, 0)
+        # act[2] = -0.8 (Pitch Up / Backflip request), act[5] = 1.0 (Jump)
+        bot.prev_action = np.array([1.0, 0.0, -0.8, 0.0, 0.0, 1.0, 0.0, 0.0], dtype=np.float32)
+        bot.ticks_since_last_action = 2  # Substep 2 (airborne flip execution window)
+
+        class Struct:
+            def __init__(self, **kwargs):
+                for k, v in kwargs.items():
+                    setattr(self, k, v)
+
+        car = Struct(
+            team=0, boost=30.0, has_wheel_contact=False, jumped=True, double_jumped=False,
+            physics=Struct(
+                location=Struct(x=0.0, y=0.0, z=100.0),
+                velocity=Struct(x=0.0, y=500.0, z=0.0),  # Forward speed > 100
+                rotation=Struct(pitch=0.0, yaw=np.pi / 2, roll=0.0),
+                angular_velocity=Struct(x=0.0, y=0.0, z=0.0)
+            )
+        )
+        ball = Struct(physics=Struct(location=Struct(x=0.0, y=1000.0, z=93.0), velocity=Struct(x=0.0, y=0.0, z=0.0), angular_velocity=Struct(x=0.0, y=0.0, z=0.0)))
+        packet = Struct(num_cars=1, game_cars=[car], game_ball=ball, game_info=Struct(is_match_ended=False, is_round_active=True))
+
+        ctrl = bot.get_output(packet)
+        self.assertTrue(ctrl.jump)
+        # In RLBot: controller.pitch = +0.8 (scaled) means pitch-up / backflip
+        # It must NOT be inverted to negative (front-flip)
+        self.assertGreater(ctrl.pitch, 0.5, f"bot.py must NOT invert backflip pitch to negative! (got {ctrl.pitch})")
+
+    def test_bot_no_ball_behind_powerslide_hijack(self):
+        """Guarantees bot.py does NOT hijack steering or handbrake when the ball is behind the car."""
+        bot = SenseiRLBot("TestBot", 0, 0)
+        # Policy requests straight forward drive: steer=0, handbrake=0, throttle=1.0
+        bot.prev_action = np.array([1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0], dtype=np.float32)
+        bot.ticks_since_last_action = 0
+
+        class Struct:
+            def __init__(self, **kwargs):
+                for k, v in kwargs.items():
+                    setattr(self, k, v)
+
+        # Car facing +Y, location y=500, moving forward at +300 y
+        car = Struct(
+            team=0, boost=30.0, has_wheel_contact=True, jumped=False, double_jumped=False,
+            physics=Struct(
+                location=Struct(x=0.0, y=500.0, z=17.0),
+                velocity=Struct(x=0.0, y=300.0, z=0.0),
+                rotation=Struct(pitch=0.0, yaw=np.pi / 2, roll=0.0),
+                angular_velocity=Struct(x=0.0, y=0.0, z=0.0)
+            )
+        )
+        # Ball behind car at y=0 (local_x = -500)
+        ball = Struct(physics=Struct(location=Struct(x=0.0, y=0.0, z=93.0), velocity=Struct(x=0.0, y=0.0, z=0.0), angular_velocity=Struct(x=0.0, y=0.0, z=0.0)))
+        packet = Struct(num_cars=1, game_cars=[car], game_ball=ball, game_info=Struct(is_match_ended=False, is_round_active=True))
+
+        ctrl = bot.get_output(packet)
+        self.assertEqual(ctrl.steer, 0.0, "Steer must NOT be hijacked to force 180 turn!")
+        self.assertFalse(ctrl.handbrake, "Handbrake must NOT be hijacked when ball is behind car!")
+        self.assertEqual(ctrl.throttle, 1.0, "Throttle must NOT be overridden when ball is behind car!")
+
+    def test_boost_suppressed_on_reverse_throttle(self):
+        """Guarantees bot.py suppresses boost whenever reverse throttle (act[0] < -0.05) is commanded."""
+        bot = SenseiRLBot("TestBot", 0, 0)
+        # Policy requests reverse throttle + boost
+        bot.prev_action = np.array([-0.7, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0], dtype=np.float32)
+        bot.ticks_since_last_action = 0
+
+        class Struct:
+            def __init__(self, **kwargs):
+                for k, v in kwargs.items():
+                    setattr(self, k, v)
+
+        car = Struct(
+            team=0, boost=50.0, has_wheel_contact=True, jumped=False, double_jumped=False,
+            physics=Struct(
+                location=Struct(x=0.0, y=0.0, z=17.0),
+                velocity=Struct(x=0.0, y=0.0, z=0.0),
+                rotation=Struct(pitch=0.0, yaw=np.pi / 2, roll=0.0),
+                angular_velocity=Struct(x=0.0, y=0.0, z=0.0)
+            )
+        )
+        ball = Struct(physics=Struct(location=Struct(x=0.0, y=500.0, z=93.0), velocity=Struct(x=0.0, y=0.0, z=0.0), angular_velocity=Struct(x=0.0, y=0.0, z=0.0)))
+        packet = Struct(num_cars=1, game_cars=[car], game_ball=ball, game_info=Struct(is_match_ended=False, is_round_active=True))
+
+        ctrl = bot.get_output(packet)
+        self.assertFalse(ctrl.boost, "Boost must be False when commanding reverse throttle to prevent standstill cancel!")
+
+    def test_mock_arena_get_predicted_ball_pos(self):
+        """Guarantees MockArena implements get_predicted_ball_pos and observation builder uses it."""
+        bot = SenseiRLBot("TestBot", 0, 0)
+
+        class Struct:
+            def __init__(self, **kwargs):
+                for k, v in kwargs.items():
+                    setattr(self, k, v)
+
+        # Mock RLBot prediction struct (60 slices @ 60Hz)
+        slices = [Struct(physics=Struct(location=Struct(x=float(i * 10), y=float(i * 20), z=200.0))) for i in range(60)]
+        pred_struct = Struct(num_slices=60, slices=slices)
+
+        car = Struct(
+            team=0, boost=30.0, has_wheel_contact=True, jumped=False, double_jumped=False,
+            physics=Struct(
+                location=Struct(x=0.0, y=0.0, z=17.0),
+                velocity=Struct(x=0.0, y=0.0, z=0.0),
+                rotation=Struct(pitch=0.0, yaw=np.pi / 2, roll=0.0),
+                angular_velocity=Struct(x=0.0, y=0.0, z=0.0)
+            )
+        )
+        ball = Struct(physics=Struct(location=Struct(x=0.0, y=500.0, z=93.0), velocity=Struct(x=0.0, y=0.0, z=0.0), angular_velocity=Struct(x=0.0, y=0.0, z=0.0)))
+        packet = Struct(num_cars=1, game_cars=[car], game_ball=ball, game_info=Struct(is_match_ended=False, is_round_active=True))
+
+        bot.get_ball_prediction_struct = lambda: pred_struct
+        bot.ticks_since_last_action = 8
+        bot.get_output(packet)
+
+        # In MockArena, slice 60 (0.5s) maps to RLBot slice 30 (x=300, y=600, z=200)
+        self.assertIsNotNone(bot.latest_obs)
+        # obs[31] = (fpx * inv) / ARENA_EXTENT_X -> 300 / 4096 ~= 0.0732
+        self.assertAlmostEqual(bot.latest_obs[31], 300.0 / 4096.0, places=3)
+        self.assertAlmostEqual(bot.latest_obs[32], 600.0 / 5120.0, places=3)
+        self.assertAlmostEqual(bot.latest_obs[33], 200.0 / 2044.0, places=3)
+
+    def test_rear_quarter_scramble_state_setter(self):
+        """Guarantees TurnaroundRecoverySetter spawns rear_quarter_scramble without error."""
+        from env.state_setters import TurnaroundRecoverySetter
+        setter = TurnaroundRecoverySetter()
+        arena = RocketSimArena(num_players=2, game_mode="1v1")
+        # Run 20 resets to ensure rear_quarter_scramble is triggered and executes cleanly
+        for _ in range(20):
+            setter.reset(arena._rsim_arena, 2)
+            arena._sync_from_rsim()
+            self.assertGreater(len(arena.cars), 0)
+            self.assertIsNotNone(arena.ball)
 
     def test_bilateral_symmetry_masks(self):
         """
