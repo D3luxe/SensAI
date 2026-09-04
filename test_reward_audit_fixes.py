@@ -395,6 +395,90 @@ class TestRewardAuditFixes(unittest.TestCase):
         self.assertLessEqual(r, 0.025, f"Wall-crawling when ball is infield must be heavily dampened, got {r}")
 
 
+    def test_powerslide_reward_low_speed_yaw_rate(self):
+        """Test that PowerslideReward activates at low speed (120 uu/s) when rapid yaw pivoting occurs with handbrake."""
+        rew = PowerslideReward(weight=0.30)
+        car = CarState(
+            id=0, team=0,
+            pos=np.array([0.0, 0.0, 17.0], dtype=np.float32),
+            vel=np.array([120.0, 0.0, 0.0], dtype=np.float32),
+            ang_vel=np.array([0.0, 0.0, 2.5], dtype=np.float32),  # Rapid yaw pivot
+            rot=np.array([0.0, 0.0, 0.0], dtype=np.float32),      # Facing +X
+            on_ground=True
+        )
+        # Ball is 90 degrees to the left at (0, 500) -> fwd_alignment is ~0.0
+        self.arena.ball.pos = np.array([0.0, 500.0, 93.0], dtype=np.float32)
+        self.arena.cars = [car]
+        rew.reset(self.arena)
+
+        action = np.zeros(8, dtype=np.float32)
+        action[0] = 1.0   # throttle
+        action[1] = -1.0  # steer left
+        action[7] = 1.0   # handbrake active
+
+        r = rew.get_reward(car, self.arena, action, False, None)
+        self.assertGreater(r, 0.05, f"PowerslideReward should reward low-speed yaw cuts with handbrake, got {r}")
+
+    def test_wrong_way_throttle_exempt_when_steering(self):
+        """Test that forward throttle while facing away from the ball is NOT penalized if the bot is actively steering to turn."""
+        rew = PlayerToBallVelocityReward(weight=0.6)
+        car = CarState(
+            id=0, team=0,
+            pos=np.array([0.0, 0.0, 17.0], dtype=np.float32),
+            rot=np.array([0.0, 0.0, 0.0], dtype=np.float32),  # Facing +X
+            vel=np.array([50.0, 0.0, 0.0], dtype=np.float32),
+            on_ground=True
+        )
+        # Ball is behind the car at (-500, 0) -> fwd_alignment = -1.0
+        self.arena.ball.pos = np.array([-500.0, 0.0, 93.0], dtype=np.float32)
+        self.arena.cars = [car]
+        rew.reset(self.arena)
+        rew._prev_dist[car.id] = 500.0
+
+        # Scenario A: driving straight away (steer = 0.0) -> penalized
+        act_straight = np.zeros(8, dtype=np.float32)
+        act_straight[0] = 1.0
+        act_straight[1] = 0.0
+        r_straight = rew.get_reward(car, self.arena, act_straight, False, None)
+
+        # Scenario B: turning hard to rotate back to ball (steer = 1.0) -> exempt from wrong-way penalty
+        rew.reset(self.arena)
+        rew._prev_dist[car.id] = 500.0
+        act_turn = np.zeros(8, dtype=np.float32)
+        act_turn[0] = 1.0
+        act_turn[1] = 1.0
+        r_turn = rew.get_reward(car, self.arena, act_turn, False, None)
+
+        self.assertGreater(r_turn, r_straight, "Actively steering to complete a turn must not incur the wrong-way throttle penalty")
+
+    def test_forward_backflip_traversal_restricted(self):
+        """Test that backflips are not rewarded for open-field traversal when car is already driving forward."""
+        rew = JumpBridgeReward(weight=0.5)
+        car = CarState(
+            id=0, team=0,
+            pos=np.array([0.0, -1000.0, 17.0], dtype=np.float32),
+            rot=np.array([0.0, math.pi / 2, 0.0], dtype=np.float32),  # Facing +Y
+            vel=np.array([0.0, 800.0, 0.0], dtype=np.float32),        # Moving forward downfield
+            on_ground=False,
+            has_flip=False,
+            just_dodged=True
+        )
+        # Ball downfield at (0, 2000) -> open field (dist > 650)
+        self.arena.ball.pos = np.array([0.0, 2000.0, 93.0], dtype=np.float32)
+        self.arena.cars = [car]
+        rew.reset(self.arena)
+        rew._prev_has_flip[car.id] = True  # Just flipped
+
+        # Pitch back (backflip input) while driving forward
+        act_backflip = np.zeros(8, dtype=np.float32)
+        act_backflip[2] = -1.0  # Backflip pitch
+
+        r = rew.get_reward(car, self.arena, act_backflip, False, None)
+        # The flip traversal bonus should be 0 because car_fwd_speed > 250 and pitch < -0.3
+        self.assertEqual(r, 0.0, f"Backflipping while traveling forward at speed in open field should not be rewarded, got {r}")
+
+
 if __name__ == "__main__":
     unittest.main()
+
 

@@ -219,7 +219,9 @@ class PlayerToBallVelocityReward(BaseReward):
 
         if was_strike and not in_strike and car.ball_touches == prev_t and fwd_alignment < -0.15:
             # Car was in the strike zone and flew past the ball without touching it!
-            overshoot_penalty = -0.30
+            # Heavy penalty (-0.40), escalated if overshooting at supersonic speeds
+            car_spd = float(np.linalg.norm(car.vel))
+            overshoot_penalty = -0.40 if car_spd < 1800.0 else -0.60
 
         # Ceiling Exploit Prevention:
         # If car is riding the ceiling and the ball is below it, eliminate distance closure rewards
@@ -288,8 +290,9 @@ class PlayerToBallVelocityReward(BaseReward):
                 wrong_side_push_penalty = -0.30 * max(0.0, car_vy_defend / 1500.0) * max(0.0, fwd_alignment)
 
             # If closing dangerously fast (> 1000 uu/s) on a slower ball (< 700 uu/s), reward braking to pace arrival
-            if car_speed > 1000.0 and ball_speed < 700.0 and action[0] < -0.05:
-                brake_incentive = 0.25 * min(1.0, -action[0])
+            # When scrambling defensively towards own half, braking before arriving at ball prevents blowing past it
+            if car_speed > 900.0 and (ball_speed < 700.0 or is_wrong_side) and action[0] < -0.05:
+                brake_incentive = 0.30 * min(1.0, -action[0])
 
         # 4. Projected Velocity Toward Ball (Airborne Climbing vs Ground Traversal)
         vel_toward_ball = 0.0
@@ -315,10 +318,11 @@ class PlayerToBallVelocityReward(BaseReward):
                     vel_toward_ball *= 0.15
 
         # 5. Wrong-Way Ground Rush Penalty (Incentivizes coasting/braking/turning when facing away)
-        # Exempt when rotating back on defense toward defending net
+        # Exempt when rotating back on defense toward defending net, OR when actively steering into a turn/cut!
         wrong_way_throttle_penalty = 0.0
         is_retreating_to_defend = bool(car_vy_defend > 100.0)
-        if car.on_ground and fwd_alignment < -0.3 and float(action[0]) > 0.4 and not is_retreating_to_defend:
+        is_actively_steering = bool(abs(float(action[1])) >= 0.30)
+        if car.on_ground and fwd_alignment < -0.3 and float(action[0]) > 0.4 and not is_retreating_to_defend and not is_actively_steering:
             wrong_way_throttle_penalty = -0.15 * float(action[0]) * abs(fwd_alignment)
 
         total_reward = self.weight * (
@@ -513,9 +517,19 @@ class JumpBridgeReward(BaseReward):
         is_ball_in_defensive_half = bool(dist_ball_to_defend < ARENA_EXTENT_Y)
         is_wrong_side = bool(is_ball_in_defensive_half and (dist_car_to_defend > dist_ball_to_defend + 100.0))
 
-        # Tactical vector (toward defensive goal when retreating, toward ball when attacking/contesting)
+        # Tactical vector (toward shadow intercept position when retreating, toward ball when attacking/contesting)
+        # Instead of retreating blindly to the goal-line (which leads to overshooting and panicking),
+        # retreat to a shadow-defense position between the ball and net (ball.pos[1] +/- 700 uu).
         if is_wrong_side:
-            retreat_vec = np.array([0.0 - car.pos[0], defend_goal_y - car.pos[1], 0.0], dtype=np.float32)
+            shadow_offset = -700.0 if car.team == 0 else 700.0
+            shadow_target_y = float(arena.ball.pos[1] + shadow_offset)
+            # Bound within defending goal line and pitch bounds:
+            if car.team == 0:
+                shadow_target_y = max(-ARENA_EXTENT_Y + 200.0, min(0.0, shadow_target_y))
+            else:
+                shadow_target_y = min(ARENA_EXTENT_Y - 200.0, max(0.0, shadow_target_y))
+
+            retreat_vec = np.array([float(arena.ball.pos[0]) * 0.5 - car.pos[0], shadow_target_y - car.pos[1], 0.0], dtype=np.float32)
             tactical_dir = retreat_vec / max(1e-4, float(np.linalg.norm(retreat_vec)))
         else:
             tactical_dir = unit_to_ball
@@ -595,13 +609,17 @@ class JumpBridgeReward(BaseReward):
             dodge_align = 0.0
 
         car_speed_horiz = float(np.linalg.norm(car.vel[:2]))
+        car_fwd_speed = float(np.dot(car.vel[:2], fwd_vec[:2]))
         if not car.on_ground and prev_flip and not car.has_flip:
             # Traversal flips downfield require forward or backward movement (speed > 350 uu/s)
             # to prevent spamming flips in place from a stop or slow turn.
             # Close strike-zone dodges (dist <= 650 uu) allow stationary challenge 50/50 jumps.
             is_open_field = bool(dist > 650.0)
             has_traversal_speed = bool(car_speed_horiz > 350.0)
-            if stick_deflection >= 0.30 and dodge_align > 0.25:
+            # Backflip traversal restriction: do NOT reward backflips for travel when already driving forward (car_fwd_speed > 250)
+            # (prevents panic backflipping when rushing back or overshooting). Backflips for traversal are only for half-flips from reverse.
+            is_forward_backflip = bool(is_open_field and pitch_input < -0.3 and car_fwd_speed > 250.0)
+            if stick_deflection >= 0.30 and dodge_align > 0.25 and not is_forward_backflip:
                 if (not is_open_field) or has_traversal_speed:
                     reward += self.weight * dodge_align * (0.4 + 0.3 * stick_deflection)
             elif ball_z > 350.0 and forward_alignment > 0.30:
@@ -681,7 +699,7 @@ class BoostReward(BaseReward):
             # Supersonic boost waste penalty: burning boost when already at max speed (>= 2150 uu/s)
             speed = float(np.linalg.norm(car.vel))
             if speed >= 2150.0 and action[6] > 0.0:
-                loss_rew -= 0.20
+                loss_rew -= 0.35 if car.on_ground else 0.20
 
             # Ceiling and vertical climb boost waste penalty: burning boost along ceiling or climbing vertically away from a lower ball
             is_climbing_above_ball = bool(car.vel[2] > 100.0 and car.pos[2] > arena.ball.pos[2] + 200.0)
@@ -801,14 +819,21 @@ class PowerslideReward(BaseReward):
         prev_align = self._prev_alignment.get(car.id, fwd_alignment)
         self._prev_alignment[car.id] = fwd_alignment
 
-        # Active on ground during sharp off-axis cuts (fwd_alignment < 0.40, steer > 0.40)
+        # Active on ground during sharp off-axis cuts (fwd_alignment < 0.60, steer > 0.25, handbrake active)
+        # Enables low-speed cut turns and U-turns (speed > 50.0 uu/s) when pivoting rapidly toward target
         speed = float(np.linalg.norm(car.vel))
         steer_mag = abs(float(action[1]))
-        if car.on_ground and fwd_alignment < 0.40 and steer_mag > 0.40 and speed > 300.0 and float(action[7]) > 0.0:
+        yaw_rate = abs(float(car.ang_vel[2])) if hasattr(car, "ang_vel") else 0.0
+        handbrake_active = float(action[7]) > 0.0
+
+        if car.on_ground and fwd_alignment < 0.60 and steer_mag > 0.25 and speed > 50.0 and handbrake_active:
             alignment_rate = max(0.0, fwd_alignment - prev_align)
             handbrake_intensity = max(0.0, float(action[7]))
-            turn_bonus = alignment_rate * 4.0 * (0.5 + 0.5 * steer_mag) * handbrake_intensity
-            return self.weight * turn_bonus
+            # Rapid pivoting (high yaw velocity) or positive heading alignment progression:
+            if yaw_rate > 1.2 or alignment_rate > 0.02:
+                pivot_efficiency = min(1.0, max(alignment_rate * 5.0, yaw_rate / 3.5))
+                turn_bonus = pivot_efficiency * (0.6 + 0.4 * steer_mag) * handbrake_intensity
+                return self.weight * turn_bonus
 
         return 0.0
 
