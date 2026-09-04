@@ -1095,7 +1095,29 @@ def create_ui():
 
         # Training Controls
         def on_start(resume_latest: bool = True):
-            ckpt = "checkpoints/latest_model.pt" if (resume_latest and os.path.exists("checkpoints/latest_model.pt")) else None
+            ckpt = None
+            if resume_latest:
+                # Find the highest iteration checkpoint available
+                candidates = []
+                if os.path.exists("checkpoints/latest_model.pt"):
+                    candidates.append("checkpoints/latest_model.pt")
+                candidates.extend(glob.glob("checkpoints/checkpoint_iter_*.pt"))
+                candidates.extend(glob.glob("checkpoints/manual_checkpoint_step_*.pt"))
+                
+                best_ckpt = None
+                best_iter = -1
+                for c_path in candidates:
+                    try:
+                        data = torch.load(c_path, map_location="cpu", weights_only=False)
+                        if isinstance(data, dict):
+                            it = int(data.get("iteration", 0))
+                            if it > best_iter:
+                                best_iter = it
+                                best_ckpt = c_path
+                    except Exception:
+                        pass
+                ckpt = best_ckpt if best_ckpt else ("checkpoints/latest_model.pt" if os.path.exists("checkpoints/latest_model.pt") else None)
+
             success, msg = mgr.start_training(checkpoint_path=ckpt)
             time.sleep(0.3)
             return sync_ui_state(f"{'✅' if success else '❌'} {msg}")

@@ -72,9 +72,12 @@ class TestRocketLeagueEnvironment(unittest.TestCase):
         self.assertEqual(value.shape, (8, 1))
 
     def test_mini_ppo_training_run(self):
-        trainer = PPOTrainer(config_path="config/default_config.yaml")
-        # Run 2 training iterations
-        trainer.train(max_iterations=2)
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmpdir:
+            trainer = PPOTrainer(config_path="config/default_config.yaml")
+            trainer.save_dir = tmpdir
+            # Run 2 training iterations
+            trainer.train(max_iterations=2)
 
         # Check that metrics were generated
         self.assertTrue(os.path.exists("logs/metrics.json"))
