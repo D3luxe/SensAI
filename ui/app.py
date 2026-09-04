@@ -18,6 +18,7 @@ import numpy as np
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
+from typing import Union
 
 from utils.process_manager import TrainingProcessManager
 from utils.visualizer import simulate_match
@@ -28,7 +29,8 @@ from utils.diagnostics import (
     extract_rolling_telemetry,
     render_action_biases_plot,
     render_positional_biases_plot,
-    generate_ai_coach_diagnostics
+    generate_ai_coach_diagnostics,
+    render_training_curves_plot,
 )
 from utils.scenario_manager import (
     ScenarioManager,
@@ -69,7 +71,7 @@ def get_available_opponent_options() -> list:
 CUSTOM_CSS = """
 /* Futuristic Cyber / Rocket League Dark Theme */
 .gradio-container {
-    max-width: 1440px !important;
+    max-width: 1520px !important;
     margin: auto !important;
     font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif !important;
 }
@@ -158,6 +160,32 @@ button.primary-btn {
     display: flex;
     align-items: center;
     box-shadow: inset 0 1px 3px rgba(0,0,0,0.4);
+}
+
+/* Clean Modern Tab Navigation */
+.tabs > .tab-nav {
+    border-bottom: 1px solid #334155 !important;
+    gap: 8px !important;
+    padding-bottom: 4px !important;
+    margin-bottom: 16px !important;
+    flex-wrap: nowrap !important;
+    overflow-x: auto !important;
+}
+
+.tabs > .tab-nav > button {
+    font-size: 0.98em !important;
+    font-weight: 600 !important;
+    border-radius: 8px 8px 0 0 !important;
+    padding: 10px 22px !important;
+    transition: all 0.2s ease !important;
+    color: #94a3b8 !important;
+    white-space: nowrap !important;
+}
+
+.tabs > .tab-nav > button.selected {
+    color: #38bdf8 !important;
+    border-bottom: 2px solid #38bdf8 !important;
+    background: rgba(56, 189, 248, 0.08) !important;
 }
 """
 
@@ -250,162 +278,95 @@ def build_full_diagnostic_export() -> tuple[str, str]:
                 if "rewards" in ld and isinstance(ld["rewards"], dict):
                     rew.update(ld["rewards"])
                 if "learning_rate" in ld:
-                    hp["learning_rate"] = float(ld["learning_rate"])
+                    hp["learning_rate"] = ld["learning_rate"]
                 if "ent_coef" in ld:
-                    hp["ent_coef"] = float(ld["ent_coef"])
+                    hp["ent_coef"] = ld["ent_coef"]
                 if "clip_range" in ld:
-                    hp["clip_range"] = float(ld["clip_range"])
+                    hp["clip_range"] = ld["clip_range"]
+                if "baseline_opponent_type" in ld:
+                    env["baseline_opponent_type"] = ld["baseline_opponent_type"]
+                if "baseline_opponent_ratio" in ld:
+                    env["baseline_opponent_ratio"] = ld["baseline_opponent_ratio"]
         except Exception:
             pass
 
-    # 3. Model Weights & Exploration Health
-    model_health: Dict[str, Any] = {}
-    latest_ckpt_path = "checkpoints/latest_model.pt"
-    if os.path.exists(latest_ckpt_path):
+    # 3. Model Architecture & Weights
+    pts = get_available_checkpoints()
+    latest_ckpt = pts[0] if pts else "None"
+    model_details = "None loaded"
+    if latest_ckpt != "None" and os.path.exists(latest_ckpt):
         try:
-            ckpt = torch.load(latest_ckpt_path, map_location="cpu")
-            sd = ckpt.get("model_state_dict", {})
-            obs_dim = ckpt.get("obs_dim", 74)
-            act_dim = ckpt.get("act_dim", 8)
-            continuous = ckpt.get("continuous_actions", True)
+            sz = os.path.getsize(latest_ckpt) / (1024 * 1024)
+            model_details = f"`{latest_ckpt}` ({sz:.2f} MB)"
+        except Exception:
+            model_details = f"`{latest_ckpt}`"
 
-            # Exploration standard deviations
-            log_std = sd.get("actor_log_std", None)
-            if log_std is not None:
-                clamped_std = torch.clamp(log_std, min=-3.0, max=0.0)
-                stds = torch.exp(clamped_std).squeeze().tolist()
-                channel_names = ["Throttle", "Steer", "Pitch", "Yaw", "Roll", "Jump", "Boost", "Handbrake"]
-                exploration_sigmas = {channel_names[i]: round(stds[i], 3) for i in range(min(len(channel_names), len(stds)))}
-            else:
-                exploration_sigmas = {}
+    # 4. Unit Tests Status
+    test_results = get_cached_or_run_tests(force_refresh=False)
+    tests_summary = f"{test_results.get('passed', 0)}/{test_results.get('total', 0)} Passed ({'ALL PASSING' if test_results.get('all_passed') else 'FAILURES DETECTED'})"
 
-            # Weight norms for stability check
-            w_actor = sd.get("actor_mean.weight", None)
-            w_critic = sd.get("critic.0.weight", None)
-            actor_norm = round(float(torch.norm(w_actor)), 3) if w_actor is not None else None
-            critic_norm = round(float(torch.norm(w_critic)), 3) if w_critic is not None else None
-
-            model_health = {
-                "obs_dim": obs_dim,
-                "act_dim": act_dim,
-                "continuous_actions": continuous,
-                "checkpoint_iteration": ckpt.get("iteration", 0),
-                "checkpoint_global_step": ckpt.get("global_step", 0),
-                "actor_weight_norm": actor_norm,
-                "critic_weight_norm": critic_norm,
-                "exploration_std_by_channel": exploration_sigmas
-            }
-        except Exception as e:
-            model_health = {"error": f"Failed to parse checkpoint: {e}"}
-
-    # 4. Telemetry & AI Coach
+    # 5. Telemetry & Coach Analysis
     telem = extract_rolling_telemetry("logs/history.jsonl", window=10)
-    coach_report = generate_ai_coach_diagnostics(telem, active_rewards=rew)
+    coach_report = generate_ai_coach_diagnostics(telem)
 
-    # 5. Checkpoint Files
-    ckpts = glob.glob("checkpoints/*.pt")
-    ckpt_info = []
-    for c in sorted(ckpts, key=os.path.getmtime, reverse=True)[:6]:
-        size_mb = os.path.getsize(c) / (1024 * 1024)
-        mtime = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(os.path.getmtime(c)))
-        ckpt_info.append(f"- `{os.path.basename(c)}` ({size_mb:.1f} MB, modified {mtime})")
-    ckpts_str = "\n".join(ckpt_info) if ckpt_info else "*(No checkpoint files found)*"
+    # 6. Recent Logs
+    recent_logs = mgr.get_logs(max_lines=30)
 
-    # 6. Recent Logs Tail
-    log_tail = mgr.get_logs(max_lines=20)
-    log_tail_str = "".join(log_tail).strip() if log_tail else "*(No console output recorded yet)*"
+    # Build Markdown Export
+    export_text = f"""# 🏎️ SensAI Training & System State Snapshot
+**Timestamp:** {time.strftime('%Y-%m-%d %H:%M:%S')}
+**Process Status:** {'RUNNING' if running and not paused else ('PAUSED' if paused else 'STOPPED')} (PID: {pid}, Elapsed: {elapsed_str})
 
-    # 7. Automated Unit Test Suite Diagnostics
-    test_diag = get_cached_or_run_tests()
-    test_md = format_test_results_markdown(test_diag)
+## 1. System Health & Unit Tests
+* **Physics Engine:** {engine_str}
+* **Unit Tests Status:** {tests_summary}
+* **Active Model Weights:** {model_details}
 
-    # Formatted Markdown Overview for UI Display
-    run_state_badge = "🟢 RUNNING" if (running and not paused) else ("⏸️ PAUSED" if (running and paused) else "🛑 STOPPED")
-    
-    overview_md = f"""
-### 📊 SensAI Live Diagnostic Dashboard
+## 2. Live Training Metrics (Current Rollout)
+* **Iteration:** {metrics.get('iteration', 0):,}
+* **Global Steps:** {metrics.get('global_step', 0):,}
+* **Throughput:** {metrics.get('sps', 0):,} Steps/Sec
+* **Mean Reward:** {metrics.get('mean_reward', 0.0):+.3f}
+* **Policy Loss:** {metrics.get('policy_loss', 0.0):.4f} | **Value Loss:** {metrics.get('value_loss', 0.0):.4f} | **Entropy:** {metrics.get('entropy', 0.0):.4f}
 
-| Metric / Parameter | Current Value | Metric / Parameter | Current Value |
-| :--- | :--- | :--- | :--- |
-| **Process Status** | `{run_state_badge}` | **Training Speed** | `{metrics.get('sps', 0):,} SPS` |
-| **Process PID** | `{pid}` | **Elapsed Runtime** | `{elapsed_str}` |
-| **Physics Engine** | `{engine_str}` | **Learning Rate** | `{hp.get('learning_rate', 3e-4)}` |
-| **Current Iteration** | `{metrics.get('iteration', 0):,}` | **Mean Reward** | `{metrics.get('mean_reward', 0.0):+.2f} pts` |
-| **Global Timesteps** | `{metrics.get('global_step', 0):,}` | **Policy Entropy** | `{metrics.get('entropy', 0.0):.4f}` |
-| **Policy Loss** | `{metrics.get('policy_loss', 0.0):.5f}` | **Value Loss** | `{metrics.get('value_loss', 0.0):.4f}` |
-| **Ball Touches / Rollout** | `{metrics.get('ball_touches', 0.0):.1f}` | **Goals / Rollout** | `{metrics.get('goals', 0)}` |
-| **Observation Dimensions** | `{model_health.get('obs_dim', 74)} features` | **Action Dimensions** | `{model_health.get('act_dim', 8)} channels` |
+## 3. Active Hyperparameters & Opponent Mix
+* **Learning Rate:** `{hp.get('learning_rate', 3e-4)}` | **Entropy Coef:** `{hp.get('ent_coef', 0.005)}` | **Clip Range:** `{hp.get('clip_range', 0.2)}`
+* **Gamma:** `{hp.get('gamma', 0.99)}` | **GAE Lambda:** `{hp.get('gae_lambda', 0.95)}`
+* **Batch Size:** `{hp.get('batch_size', 8192)}` | **Mini-Batch Size:** `{hp.get('mini_batch_size', 512)}` | **Epochs:** `{hp.get('n_epochs', 10)}`
+* **Vectorized Envs:** `{env.get('num_envs', 64)}` | **Tick Skip:** `{env.get('tick_skip', 8)}`
+* **Baseline Opponent:** `{env.get('baseline_opponent_type', 'heuristic')}` (Matchup Ratio: `{env.get('baseline_opponent_ratio', 0.25):.0%}`)
 
----
+## 4. Active Reward Weights
+```yaml
+{yaml.dump(rew, default_flow_style=False).strip()}
+```
 
-{test_md}
-
----
-
-### 🧠 AI Coach Behavioral Diagnosis
+## 5. AI Coach Behavioral Diagnosis
 {coach_report}
 
----
-
-### 🎛️ Active Macro Potential-Based Reward Weights
-* **⚽ Match Macro:** Goal Bounty: `{rew.get('goal_weight', 10.0):+.1f}` | Concede Penalty: `{rew.get('concede_weight', -10.0):+.1f}` | Save / Clear: `{rew.get('save_weight', 3.0):+.1f}`
-* **🎯 Field Progression:** Ball-to-Goal Velocity: `{rew.get('ball_to_goal_weight', 1.5):.2f}` | Player-to-Ball Closing Speed: `{rew.get('player_to_ball_weight', 0.8):.2f}`
-* **💥 Touch Quality:** Directional Touch: `{rew.get('touch_weight', 1.2):.2f}`
-* **⚡ Boost Potential (Necto):** Pad Collection Gain: `{rew.get('boost_gain_weight', 0.6):.2f}` | Ground Waste Penalty: `{rew.get('boost_lose_weight', 0.3):.2f}`
-
----
-
-### 💾 Available Checkpoints
-{ckpts_str}
+## 6. Recent Process Output (Last 30 Lines)
+```text
+{recent_logs}
+```
 """
 
-    # Comprehensive Snapshot for AI Assistant (Copy-Paste string)
-    snapshot = {
-        "timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),
-        "process_status": {
-            "running": running,
-            "paused": paused,
-            "pid": pid,
-            "elapsed_seconds": elapsed,
-            "elapsed_formatted": elapsed_str,
-            "physics_engine": engine_str,
-        },
-        "model_health": model_health,
-        "test_suite_diagnostics": {
-            "all_passed": test_diag.get("all_passed", False),
-            "passed_count": test_diag.get("passed", 0),
-            "total_tests": test_diag.get("total_tests", 0),
-            "pass_rate_pct": test_diag.get("pass_rate_pct", 0.0),
-            "duration_seconds": test_diag.get("duration_seconds", 0.0),
-            "subsystems": test_diag.get("subsystems", [])
-        },
-        "convergence_metrics": {
-            "iteration": metrics.get("iteration", 0),
-            "global_step": metrics.get("global_step", 0),
-            "sps": metrics.get("sps", 0),
-            "mean_reward": metrics.get("mean_reward", 0.0),
-            "policy_loss": metrics.get("policy_loss", 0.0),
-            "value_loss": metrics.get("value_loss", 0.0),
-            "entropy": metrics.get("entropy", 0.0),
-            "ball_touches_per_rollout": metrics.get("ball_touches", 0.0),
-            "goals_per_rollout": metrics.get("goals", 0),
-        },
-        "hyperparameters": hp,
-        "environment": env,
-        "active_reward_weights": rew,
-        "behavioral_telemetry": telem,
-        "recent_checkpoints": [os.path.basename(c) for c in ckpts[:6]],
-        "recent_console_tail": log_tail_str.split("\n")[-15:] if log_tail_str else []
-    }
+    overview_md = f"""
+### 📋 System Health Overview
+* **Status:** `{'RUNNING' if running and not paused else ('PAUSED' if paused else 'STOPPED')}` (PID: `{pid}`)
+* **Throughput:** `{metrics.get('sps', 0):,} SPS` | **Mean Reward:** `{metrics.get('mean_reward', 0.0):+.2f}`
+* **Unit Tests:** `{tests_summary}`
+* **Physics Engine:** `{engine_str}`
+* **Active Weights:** {model_details}
+* **Opponent Sparring:** `{os.path.basename(str(env.get('baseline_opponent_type', 'heuristic')))}` ({env.get('baseline_opponent_ratio', 0.25):.0%})
 
-    export_json = json.dumps(snapshot, indent=2)
-    export_box = f"```json\n{export_json}\n```"
-
-    return overview_md, export_box
+*Copy the raw Markdown on the right into your conversation with the AI assistant for instant debugging.*
+"""
+    return overview_md, export_text
 
 
 def create_ui():
     mgr = TrainingProcessManager.get_instance()
+    bc_trainer = BehavioralCloningTrainer()
     default_cfg = load_yaml_config("config/default_config.yaml")
 
     hp_cfg = default_cfg.get("hyperparameters", {})
@@ -435,12 +396,17 @@ def create_ui():
                     env_cfg["baseline_opponent_type"] = str(live_data["baseline_opponent_type"])
                 elif "baseline_opponent_model" in live_data:
                     env_cfg["baseline_opponent_type"] = str(live_data["baseline_opponent_model"])
+                if "bc_regularization_weight" in live_data:
+                    hp_cfg["bc_regularization_weight"] = float(live_data["bc_regularization_weight"])
+                if "bc_decay_steps" in live_data:
+                    hp_cfg["bc_decay_steps"] = int(live_data["bc_decay_steps"])
         except Exception:
             pass
 
     init_status = mgr.get_status_info()
 
     with gr.Blocks(title="SensAI - Rocket League ML Studio") as demo:
+        gr.HTML(f"<style>{CUSTOM_CSS}</style>")
         gr.Markdown(
             """
             # 🏎️⚽ SensAI - Rocket League ML Studio
@@ -483,50 +449,143 @@ def create_ui():
                     ckpt_btn = gr.Button("💾 Save Checkpoint", variant="secondary")
 
         # -------------------------------------------------------------
-        # MAIN TAB INTERFACE
+        # 4 STREAMLINED TOP-LEVEL TABS
         # -------------------------------------------------------------
         with gr.Tabs():
 
-            # ---------------------------------------------------------
-            # TAB 1: LIVE REWARD WEIGHTS & MULTIPLIERS
-            # ---------------------------------------------------------
-            with gr.TabItem("🎛️ Live Reward Weights"):
+            # =========================================================
+            # TAB 1: 🏠 LIVE COCKPIT (ALL-IN-ONE HOME DASHBOARD)
+            # =========================================================
+            with gr.TabItem("🏠 Live Cockpit"):
                 gr.Markdown(
                     """
-                    > **🏆 Macro Potential-Based Reward Architecture (Nexto & Necto Standard):**
-                    > * **⚽ Match Macro:** Zero-sum win/loss outcome (Goals `+10.0`, Concedes `-10.0`, Saves `+3.0`).
-                    > * **🎯 Ball-to-Goal Progression:** Smooth continuous potential for moving the ball toward opponent net.
-                    > * **🏎️ Player-to-Ball Pursuit:** Continuous closing speed towards the ball from anywhere on the pitch.
-                    > * **💥 Touch Quality:** Atomic strike reward scaled by touch power and forward goal alignment.
-                    > * **⚡ Sqrt-Boost Potential:** Necto square-root boost conservation with ground waste penalty (free aerial flight).
+                    > **⚡ Real-Time Training Control Center:**
+                    > Modify PPO hyperparameters, opponent bot sparring mix, and core reward weights dynamically on the fly while monitoring real-time loss/reward telemetry and process output.
+                    """
+                )
+                with gr.Row():
+                    # Left Column: Live Tuners & Dynamic Dials
+                    with gr.Column(scale=5):
+                        # Card 1: Live Hyperparameters
+                        with gr.Group():
+                            gr.Markdown("### 🧠 Live Hyperparameters")
+                            with gr.Row():
+                                lr_input = gr.Number(
+                                    value=hp_cfg.get("learning_rate", 3e-4),
+                                    label="Learning Rate (Live Tunable)",
+                                    info="PPO Policy & Value step size.",
+                                    scale=1
+                                )
+                                ent_coef_slider = gr.Slider(
+                                    0.0, 0.05,
+                                    value=hp_cfg.get("ent_coef", 0.005),
+                                    step=0.001,
+                                    label="Entropy Coef (Exploration Bonus)",
+                                    info="Higher values encourage exploring new mechanics.",
+                                    scale=2
+                                )
+                            clip_range_slider = gr.Slider(
+                                0.05, 0.4,
+                                value=hp_cfg.get("clip_range", 0.2),
+                                step=0.01,
+                                label="PPO Clip Range (Live Tunable)",
+                                info="Surrogate clipping bounds (epsilon)."
+                            )
+                            live_hp_btn = gr.Button("⚡ Apply Live Hyperparameters", variant="primary")
+                            live_hp_msg = gr.Markdown("")
+
+                        # Card 2: Opponent Bot Matchup & Mixup
+                        with gr.Group():
+                            gr.Markdown("### 👥 Opponent Bot Matchup & Mixup")
+                            with gr.Row():
+                                initial_opp = env_cfg.get("baseline_opponent_type", "heuristic")
+                                opp_choices = get_available_opponent_options()
+                                default_opp_val = opp_choices[0]
+                                for opt in opp_choices:
+                                    if initial_opp.lower() in opt.lower() or opt.replace("\\", "/").endswith(initial_opp.replace("\\", "/")):
+                                        default_opp_val = opt
+                                        break
+                                
+                                opponent_bot_dropdown = gr.Dropdown(
+                                    choices=opp_choices,
+                                    value=default_opp_val,
+                                    label="Opponent Bot Model / Checkpoint",
+                                    info="Select model to spar against (Checkpoints or Heuristic Chaser).",
+                                    scale=3
+                                )
+                                refresh_opponent_btn = gr.Button("🔄 Scan", scale=1)
+
+                            baseline_opp_slider = gr.Slider(
+                                0.0, 1.0,
+                                value=float(env_cfg.get("baseline_opponent_ratio", 0.25)),
+                                step=0.01,
+                                label="Opponent Matchup Ratio (Mixup Proportion)",
+                                info="0% = Pure Self-Play, 100% = Pure Opponent Sparring."
+                            )
+                            apply_opp_btn = gr.Button("⚡ Apply Opponent Mix", variant="secondary")
+                            opp_apply_msg = gr.Markdown("")
+
+                        # Card 3: Quick Live Reward Weights
+                        with gr.Group():
+                            gr.Markdown("### 🎛️ Quick Live Reward Weights")
+                            with gr.Row():
+                                goal_slider = gr.Slider(0.0, 30.0, value=float(rew_cfg.get("goal_weight", 20.0)), step=1.0, label="Goal Scored (+pts)")
+                                concede_slider = gr.Slider(-30.0, 0.0, value=float(rew_cfg.get("concede_weight", -20.0)), step=1.0, label="Goal Conceded (-pts)")
+                                save_slider = gr.Slider(0.0, 15.0, value=float(rew_cfg.get("save_weight", 3.0)), step=0.5, label="Save & Clear (+pts)")
+                            with gr.Row():
+                                ball_to_goal_slider = gr.Slider(0.0, 5.0, value=float(rew_cfg.get("ball_to_goal_weight", 1.5)), step=0.1, label="Ball-to-Goal Velocity")
+                                player_to_ball_slider = gr.Slider(0.0, 3.0, value=float(rew_cfg.get("player_to_ball_weight", 0.6)), step=0.1, label="Player-to-Ball Pursuit")
+                                touch_slider = gr.Slider(0.0, 5.0, value=float(rew_cfg.get("touch_weight", 1.2)), step=0.1, label="Touch Quality Bounty")
+                            with gr.Row():
+                                boost_gain_slider = gr.Slider(0.0, 2.0, value=float(rew_cfg.get("boost_gain_weight", 0.6)), step=0.05, label="Boost Gain (Sqrt)")
+                                boost_lose_slider = gr.Slider(0.0, 2.0, value=float(rew_cfg.get("boost_lose_weight", 0.3)), step=0.05, label="Ground Waste Penalty")
+                            apply_live_rewards_btn = gr.Button("⚡ Apply Live Rewards", variant="primary")
+                            live_rewards_msg = gr.Markdown("")
+                            gr.Markdown("<span style='color: #94a3b8; font-size: 0.88em;'>💡 For high aerials, jump bridges, air-roll recoveries, and custom scenario probabilities, visit the <b>🎛️ Rewards & Curriculum</b> tab.</span>")
+
+                    # Right Column: Auto-Updating Metrics Plot & Live Console Output
+                    with gr.Column(scale=6):
+                        with gr.Group():
+                            with gr.Row():
+                                gr.Markdown("### 📈 Live Training Progress & Telemetry")
+                                refresh_metrics_btn = gr.Button("🔄 Refresh Curves", size="sm", scale=1)
+                            live_metrics_plot = gr.Plot(
+                                value=render_training_curves_plot(),
+                                label="Telemetry Curves (Mean Reward, Losses, Entropy, SPS)"
+                            )
+
+                        with gr.Group():
+                            with gr.Row():
+                                gr.Markdown("### 📜 Real-Time Process Output Stream")
+                                refresh_logs_btn = gr.Button("🔄 Refresh Logs", size="sm", scale=1)
+                                clear_logs_btn = gr.Button("🧹 Clear", size="sm", scale=1)
+                            console_output = gr.TextArea(
+                                value=mgr.get_logs(),
+                                label="Training Process Output (stdout / stderr)",
+                                lines=13,
+                                max_lines=18,
+                                interactive=False,
+                                autoscroll=True
+                            )
+
+            # =========================================================
+            # TAB 2: 🎛️ REWARDS & CURRICULUM STUDIO
+            # =========================================================
+            with gr.TabItem("🎛️ Rewards & Curriculum"):
+                gr.Markdown(
+                    """
+                    > **🏆 Advanced Reward Architecture & Dynamic Curriculum Studio:**
+                    > Tune aerial jump bridge incentives, air-roll recoveries, powerslide drifts, normalized scenario probability distributions, and design custom situations.
                     """
                 )
 
-                with gr.Row():
-                    with gr.Column():
-                        gr.Markdown("### 🥅 Match Macro Outcomes")
-                        goal_slider = gr.Slider(0.0, 30.0, value=float(rew_cfg.get("goal_weight", 20.0)), step=1.0, label="Goal Scored Bounty (+pts)", info="Primary zero-sum win payout.")
-                        concede_slider = gr.Slider(-30.0, 0.0, value=float(rew_cfg.get("concede_weight", -20.0)), step=1.0, label="Goal Conceded Penalty (-pts)", info="Defensive urgency deduction.")
-                        save_slider = gr.Slider(0.0, 15.0, value=float(rew_cfg.get("save_weight", 3.0)), step=0.5, label="Goal-Line Save & Clear Bounty (+pts)", info="Clearing dangerous shots off defending goal line.")
-
-                    with gr.Column():
-                        gr.Markdown("### 🎯 Field Progression & Mechanics")
-                        ball_to_goal_slider = gr.Slider(0.0, 5.0, value=float(rew_cfg.get("ball_to_goal_weight", 1.5)), step=0.1, label="Ball-to-Goal Velocity Weight", info="Continuous field progression toward opponent net.")
-                        player_to_ball_slider = gr.Slider(0.0, 3.0, value=float(rew_cfg.get("player_to_ball_weight", 0.6)), step=0.1, label="Player-to-Ball Approach & Control Weight", info="Distance-gated speed rush downfield with strike-zone pacing.")
+                with gr.Group():
+                    gr.Markdown("### 🚀 Advanced Flight & Recovery Mechanics")
+                    with gr.Row():
                         jump_bridge_slider = gr.Slider(0.0, 1.0, value=float(rew_cfg.get("jump_bridge_weight", 0.35)), step=0.05, label="Jump & Aerial Takeoff Incentive", info="Takeoff & speed-flip transition bounty (2.0x on elevated aerials).")
-                        air_roll_recovery_slider = gr.Slider(0.0, 2.0, value=float(rew_cfg.get("air_roll_recovery_weight", 0.10)), step=0.05, label="Air-Roll & Landing Recovery Weight", info="Rewards wheels-down recovery on descent and aerial alignment.")
-                        powerslide_slider = gr.Slider(0.0, 2.0, value=float(rew_cfg.get("powerslide_weight", 0.20)), step=0.05, label="Powerslide & Drift Cut Bounty (+pts)", info="Rewards handbrake powerslides on sharp ground recovery turns.")
-                        touch_slider = gr.Slider(0.0, 5.0, value=float(rew_cfg.get("touch_weight", 1.2)), step=0.1, label="Directional Ball Strike Quality", info="Touch impact scaled by speed & goal alignment.")
+                        air_roll_recovery_slider = gr.Slider(0.0, 2.0, value=float(rew_cfg.get("air_roll_recovery_weight", 0.10)), step=0.05, label="Air-Roll & Landing Recovery", info="Rewards wheels-down recovery on descent.")
+                        powerslide_slider = gr.Slider(0.0, 2.0, value=float(rew_cfg.get("powerslide_weight", 0.20)), step=0.05, label="Powerslide & Drift Cut Bounty", info="Rewards handbrake powerslides on sharp turns.")
 
-                with gr.Row():
-                    with gr.Column():
-                        gr.Markdown(r"### ⚡ Boost Potential Engine (Necto $\sqrt{\text{boost}}$)")
-                        boost_gain_slider = gr.Slider(0.0, 2.0, value=float(rew_cfg.get("boost_gain_weight", 0.6)), step=0.05, label="Boost Pickup Gain Weight (Sqrt Curve)", info="Scales heavily when empty to encourage pad pickups.")
-                    with gr.Column():
-                        gr.Markdown("### 🛡️ Ground Conservation Gate")
-                        boost_lose_slider = gr.Slider(0.0, 2.0, value=float(rew_cfg.get("boost_lose_weight", 0.3)), step=0.05, label="Ground Boost Waste Penalty Weight", info="Penalizes burning boost on ground (airborne flight is exempt).")
-
-                gr.Markdown("---")
                 with gr.Group():
                     with gr.Row():
                         with gr.Column(scale=4):
@@ -542,78 +601,42 @@ def create_ui():
                             )
                     with gr.Row():
                         with gr.Column():
-                            kickoff_prob_slider = gr.Slider(0.0, 1.0, value=float(sc_cfg.get("kickoff_prob", 0.28)), step=0.01, label="Kickoff Scenario Probability", info="Standard 1v1 kickoff formations (diagonal, off-center, straight).")
-                            replay_prob_slider = gr.Slider(0.0, 1.0, value=float(sc_cfg.get("replay_prob", 0.22)), step=0.01, label="Human Replay Scenario Probability", info="Authentic match situations sampled from ingested replays.")
-                            aerial_prob_slider = gr.Slider(0.0, 1.0, value=float(sc_cfg.get("aerial_prob", 0.12)), step=0.01, label="High Aerial Scenario Probability", info="Floating & rising balls (z: 600-1500) for aerial training.")
-                            custom_prob_slider = gr.Slider(0.0, 1.0, value=float(sc_cfg.get("custom_prob", 0.10)), step=0.01, label="🎯 Custom Scenarios Probability", info="User-designed custom situations (Opposing 1/3rd powershots, dribbles, custom drills).")
+                            kickoff_prob_slider = gr.Slider(0.0, 1.0, value=float(sc_cfg.get("kickoff_prob", 0.21)), step=0.01, label="Kickoff Scenario Probability", info="Standard 1v1 kickoff formations.")
+                            replay_prob_slider = gr.Slider(0.0, 1.0, value=float(sc_cfg.get("replay_prob", 0.17)), step=0.01, label="Human Replay Scenario Probability", info="Authentic match situations sampled from replays.")
+                            aerial_prob_slider = gr.Slider(0.0, 1.0, value=float(sc_cfg.get("aerial_prob", 0.08)), step=0.01, label="High Aerial Scenario Probability", info="Floating & rising balls for aerial training.")
+                            custom_prob_slider = gr.Slider(0.0, 1.0, value=float(sc_cfg.get("custom_prob", 0.25)), step=0.01, label="🎯 Custom Scenarios Probability", info="User-designed custom situations.")
 
                         with gr.Column():
-                            turnaround_prob_slider = gr.Slider(0.0, 1.0, value=float(sc_cfg.get("turnaround_prob", 0.08)), step=0.01, label="Turnaround Recovery Probability", info="Fast downfield spawns moving away from ball to force 180° cuts.")
-                            wall_prob_slider = gr.Slider(0.0, 1.0, value=float(sc_cfg.get("wall_prob", 0.10)), step=0.01, label="Wall Play Scenario Probability", info="Sidewall rolling and backboard rebound situations.")
-                            save_prob_slider = gr.Slider(0.0, 1.0, value=float(sc_cfg.get("save_prob", 0.10)), step=0.01, label="Goalie Save Scenario Probability", info="Fast opponent shots heading on target into defending net.")
+                            turnaround_prob_slider = gr.Slider(0.0, 1.0, value=float(sc_cfg.get("turnaround_prob", 0.14)), step=0.01, label="Turnaround Recovery Probability", info="Fast downfield spawns moving away from ball.")
+                            wall_prob_slider = gr.Slider(0.0, 1.0, value=float(sc_cfg.get("wall_prob", 0.07)), step=0.01, label="Wall Play Scenario Probability", info="Sidewall rolling and backboard rebounds.")
+                            save_prob_slider = gr.Slider(0.0, 1.0, value=float(sc_cfg.get("save_prob", 0.07)), step=0.01, label="Goalie Save Scenario Probability", info="Fast opponent shots into defending net.")
 
                     custom_sc_count = len(ScenarioManager.get_instance().get_active_scenarios())
                     gr.HTML(
                         f"""
                         <div style="background: rgba(15, 23, 42, 0.65); border: 1px solid #334155; border-radius: 8px; padding: 9px 16px; margin-top: 8px; font-size: 0.9em; display: flex; justify-content: space-between; align-items: center; box-shadow: inset 0 1px 3px rgba(0,0,0,0.3);">
                             <span>📦 <b>Custom Scenarios Distribution Pool:</b> <b style="color: #38bdf8;">{custom_sc_count} Active Scenarios</b> enabled in training rotation.</span>
-                            <span style="color: #94a3b8;">Design & test scenarios in the <b>🎯 Custom Scenario Generator</b> tab.</span>
+                            <span style="color: #94a3b8;">Design and test custom drills below.</span>
                         </div>
                         """
                     )
 
                 with gr.Group():
+                    gr.Markdown("### 👤 Human Replay Guidance (BC Regularization)")
                     with gr.Row():
-                        with gr.Column():
-                            gr.Markdown("### 👥 Opponent Bot Matchup & Mixup Training")
-                            with gr.Row():
-                                initial_opp = env_cfg.get("baseline_opponent_type", "heuristic")
-                                opp_choices = get_available_opponent_options()
-                                default_opp_val = opp_choices[0]
-                                for opt in opp_choices:
-                                    if initial_opp.lower() in opt.lower() or opt.replace("\\", "/").endswith(initial_opp.replace("\\", "/")):
-                                        default_opp_val = opt
-                                        break
-                                
-                                opponent_bot_dropdown = gr.Dropdown(
-                                    choices=opp_choices,
-                                    value=default_opp_val,
-                                    label="Opponent Bot Model / Checkpoint",
-                                    info="Select the opponent model to spar against (Necto, Nexto, ActorCritic Checkpoints, or Heuristic Chaser).",
-                                    scale=3
-                                )
-                                refresh_opponent_btn = gr.Button("🔄 Scan", scale=1)
-
-                            baseline_opp_slider = gr.Slider(
-                                0.0, 1.0,
-                                value=float(env_cfg.get("baseline_opponent_ratio", 0.25)),
-                                step=0.01,
-                                label="Opponent Bot Matchup Ratio (Mixup Proportion)",
-                                info="Proportion of match environments paired against selected opponent bot vs self-play (0% = Pure Self-Play, 100% = Pure Opponent Sparring)."
-                            )
-                        with gr.Column():
-                            gr.Markdown("### 👤 Human Replay Guidance (BC)")
-                            bc_weight_slider = gr.Slider(0.0, 1.0, value=float(hp_cfg.get("bc_regularization_weight", 0.10)), step=0.01, label="Replay Guidance Weight (Continuous Trajectory)", info="Nudges vehicle steering, throttle pacing, and aerial orientation from human replays.")
-                            bc_decay_input = gr.Number(value=int(hp_cfg.get("bc_decay_steps", 150000000)), precision=0, label="Replay Guidance Decay Horizon (Global Steps)", info="Step threshold over which replay guidance smoothly decays to 0.0.")
+                        bc_weight_slider = gr.Slider(0.0, 1.0, value=float(hp_cfg.get("bc_regularization_weight", 0.10)), step=0.01, label="Replay Guidance Weight", info="Nudges vehicle steering and throttle from human replays.")
+                        bc_decay_input = gr.Number(value=int(hp_cfg.get("bc_decay_steps", 150000000)), precision=0, label="Replay Guidance Decay Horizon (Steps)", info="Threshold over which guidance decays to 0.0.")
 
                 with gr.Row():
-                    apply_rewards_btn = gr.Button("⚡ Apply Live Training Dials", variant="primary")
-                    reset_rewards_btn = gr.Button("🔄 Reset to Balanced Standard Dials", variant="secondary")
+                    apply_all_curriculum_btn = gr.Button("⚡ Apply All Curriculum & Reward Dials", variant="primary")
+                    reset_curriculum_btn = gr.Button("🔄 Reset to Balanced Standard Dials", variant="secondary")
 
-                reward_apply_msg = gr.Markdown("")
+                curriculum_apply_msg = gr.Markdown("")
 
-            # ---------------------------------------------------------
-            # TAB 2: 🎯 CUSTOM SCENARIO GENERATOR & BUILDER
-            # ---------------------------------------------------------
-            with gr.TabItem("🎯 Custom Scenario Generator"):
-                gr.Markdown(
-                    """
-                    > **🎯 Interactive RocketSim Scenario Generator & Visual Builder:**
-                    > * **🗺️ Visual Guide Preview:** Live 2D pitch showing vehicle positions, yaw heading, velocity momentum arrows (green), and ball height & trajectory vectors (orange).
-                    > * **⚡ One-Click Presets:** Instant loading for **Opposing 1/3rd Bouncing Powershots / Dribbles**, Breakaway Sprints, Air Dribble setups, and Shadow Defense.
-                    > * **💾 Dynamic Persistence:** Saved scenarios automatically join the **Custom Scenarios** pool in the Dynamic Scenario Setter Distribution.
-                    """
-                )
+                gr.Markdown("---")
+
+                # Sub-Section: Custom Scenario Generator & Builder
+                gr.Markdown("### 🎯 Custom Scenario Generator & Interactive Pitch Builder")
                 sc_mgr = ScenarioManager.get_instance()
                 all_scenarios = sc_mgr.get_all_scenarios()
                 initial_sc = all_scenarios[0] if all_scenarios else DEFAULT_CUSTOM_SCENARIOS[0]
@@ -621,7 +644,7 @@ def create_ui():
                 with gr.Row():
                     # Left Column: 2D Visual Guide Preview & Simulation Rollout
                     with gr.Column(scale=5):
-                        gr.Markdown("### 🗺️ Live 2D Pitch Visual Guide")
+                        gr.Markdown("#### 🗺️ Live 2D Pitch Visual Guide")
                         sc_preview_plot = gr.Plot(
                             value=render_scenario_visual_guide(initial_sc),
                             label="Interactive 2D Pitch Preview"
@@ -644,7 +667,7 @@ def create_ui():
                     # Right Column: Interactive Parameter Controls
                     with gr.Column(scale=6):
                         with gr.Group():
-                            gr.Markdown("### 📝 Scenario Metadata")
+                            gr.Markdown("#### 📝 Scenario Metadata")
                             with gr.Row():
                                 sc_id_input = gr.Textbox(label="Scenario ID (Unique Key)", value=initial_sc.get("id", "opposing_third_bouncing_ball"), scale=2)
                                 sc_name_input = gr.Textbox(label="Scenario Name", value=initial_sc.get("name", "Opposing 1/3rd Bouncing Powershot / Dribble"), scale=3)
@@ -656,7 +679,7 @@ def create_ui():
                             )
 
                         with gr.Group():
-                            gr.Markdown("### 🏎️ Bot State (Car 0 / Blue)")
+                            gr.Markdown("#### 🏎️ Bot State (Car 0 / Blue)")
                             with gr.Row():
                                 car_pos_x = gr.Slider(-3800.0, 3800.0, value=float(initial_sc["car"]["pos"][0]), step=25.0, label="Pos X (Left / Right)")
                                 car_pos_y = gr.Slider(-4800.0, 4800.0, value=float(initial_sc["car"]["pos"][1]), step=25.0, label="Pos Y (Goal to Goal)")
@@ -667,7 +690,7 @@ def create_ui():
                                 car_boost = gr.Slider(0.0, 100.0, value=float(initial_sc["car"].get("boost", 50.0)), step=5.0, label="Starting Boost Amount (%)")
 
                         with gr.Group():
-                            gr.Markdown("### ⚽ Ball State")
+                            gr.Markdown("#### ⚽ Ball State")
                             with gr.Row():
                                 ball_pos_x = gr.Slider(-3800.0, 3800.0, value=float(initial_sc["ball"]["pos"][0]), step=25.0, label="Ball Pos X")
                                 ball_pos_y = gr.Slider(-4800.0, 4800.0, value=float(initial_sc["ball"]["pos"][1]), step=25.0, label="Ball Pos Y")
@@ -678,7 +701,7 @@ def create_ui():
                                 ball_vel_z = gr.Slider(-1500.0, 1500.0, value=float(initial_sc["ball"]["vel"][2]), step=25.0, label="Ball Vel Z (uu/s)")
 
                         with gr.Group():
-                            gr.Markdown("### 👤 Opponent State (Car 1 / Orange)")
+                            gr.Markdown("#### 👤 Opponent State (Car 1 / Orange)")
                             with gr.Row():
                                 opp_mode_radio = gr.Radio(["goalie", "shadow", "custom", "none"], value=initial_sc.get("opponent", {}).get("mode", "goalie"), label="Opponent Placement Mode")
                                 opp_boost = gr.Slider(0.0, 100.0, value=float(initial_sc.get("opponent", {}).get("boost", 60.0)), step=5.0, label="Opponent Boost (%)")
@@ -688,11 +711,11 @@ def create_ui():
                                 opp_yaw = gr.Slider(-180.0, 180.0, value=float(initial_sc.get("opponent", {}).get("yaw", -90.0)), step=5.0, label="Custom Opponent Yaw (deg)")
 
                         with gr.Group():
-                            gr.Markdown("### 🎲 Training Variance & Symmetry")
+                            gr.Markdown("#### 🎲 Training Variance & Symmetry")
                             with gr.Row():
                                 pos_jitter = gr.Slider(0.0, 300.0, value=float(initial_sc.get("variance", {}).get("pos_jitter", 80.0)), step=10.0, label="Positional Jitter (±uu)", info="Adds natural positional randomness each spawn.")
                                 vel_jitter = gr.Slider(0.0, 300.0, value=float(initial_sc.get("variance", {}).get("vel_jitter", 60.0)), step=10.0, label="Velocity Jitter (±uu/s)", info="Adds velocity variance each spawn.")
-                                mirror_symmetry = gr.Checkbox(value=bool(initial_sc.get("variance", {}).get("mirror_symmetry", True)), label="Left/Right Mirror Symmetry (50% Chance)", info="Mirrors scenario across X-axis so bot trains left & right sides equally.")
+                                mirror_symmetry = gr.Checkbox(value=bool(initial_sc.get("variance", {}).get("mirror_symmetry", True)), label="Left/Right Mirror Symmetry (50% Chance)", info="Mirrors scenario across X-axis so bot trains both sides.")
 
                         with gr.Row():
                             save_scenario_btn = gr.Button("💾 Save / Update Custom Scenario", variant="primary")
@@ -701,7 +724,7 @@ def create_ui():
 
                         scenario_action_msg = gr.Markdown("")
 
-                gr.Markdown("### 📚 Saved Custom Scenarios Library")
+                gr.Markdown("#### 📚 Saved Custom Scenarios Library")
                 def build_scenarios_table():
                     items = ScenarioManager.get_instance().get_all_scenarios()
                     rows = []
@@ -733,337 +756,283 @@ def create_ui():
                     load_scenario_btn = gr.Button("📥 Load Selected Scenario", scale=1)
                     refresh_library_btn = gr.Button("🔄 Refresh Library Table", scale=1)
 
-            # ---------------------------------------------------------
-            # TAB 3: HYPERPARAMETERS & ENVIRONMENT
-            # ---------------------------------------------------------
-            with gr.TabItem("⚙️ Hyperparameters & Environment"):
-                with gr.Row():
-                    with gr.Column():
-                        gr.Markdown("### 🧠 PPO Hyperparameters")
-                        lr_input = gr.Number(
-                            value=hp_cfg.get("learning_rate", 3e-4),
-                            label="Learning Rate (Live Tunable)",
-                            info="PPO Policy and Value network step size. Can be changed on the fly."
-                        )
-                        live_lr_btn = gr.Button("⚡ Apply Live Learning Rate", variant="primary")
-
-                        ent_coef_slider = gr.Slider(
-                            0.0, 0.05, value=hp_cfg.get("ent_coef", 0.01), step=0.001,
-                            label="Entropy Coefficient (Live Tunable)",
-                            info="Controls exploration bonus. Higher values encourage discovering new mechanics."
-                        )
-                        clip_range_slider = gr.Slider(
-                            0.05, 0.4, value=hp_cfg.get("clip_range", 0.2), step=0.01,
-                            label="PPO Clip Range (Live Tunable)",
-                            info="Surrogate clipping bounds (epsilon)."
-                        )
-                        gamma_slider = gr.Slider(
-                            0.9, 0.999, value=hp_cfg.get("gamma", 0.99), step=0.001,
-                            label="Discount Factor (Gamma)",
-                            info="How much future rewards are valued vs immediate points."
-                        )
-                        gae_lambda_slider = gr.Slider(
-                            0.8, 1.0, value=hp_cfg.get("gae_lambda", 0.95), step=0.01,
-                            label="GAE Lambda",
-                            info="Generalized Advantage Estimation variance vs bias trade-off."
-                        )
-                        batch_size_input = gr.Number(
-                            value=hp_cfg.get("batch_size", 8192), precision=0,
-                            label="Rollout Buffer Batch Size",
-                            info="Total steps collected across all environments per iteration."
-                        )
-                        mini_batch_input = gr.Number(
-                            value=hp_cfg.get("mini_batch_size", 512), precision=0,
-                            label="Mini-Batch Size",
-                            info="Gradient update chunk size."
-                        )
-                        n_epochs_input = gr.Number(
-                            value=hp_cfg.get("n_epochs", 10), precision=0,
-                            label="Epochs per Iteration",
-                            info="Number of optimization passes per rollout."
-                        )
-
-                    with gr.Column():
-                        gr.Markdown("### 🏟️ Environment & Simulation")
-                        num_envs_slider = gr.Slider(
-                            1, 128, value=env_cfg.get("num_envs", 64), step=1,
-                            label="Vectorized Environments",
-                            info="Parallel Rocket League arena instances simulated simultaneously."
-                        )
-                        tick_skip_slider = gr.Slider(
-                            1, 8, value=env_cfg.get("tick_skip", 8), step=1,
-                            label="Tick Skip (Action Repeat)",
-                            info="120Hz physics substeps per agent decision (8 skip ≈ 15 decisions/sec)."
-                        )
-                        max_steps_input = gr.Number(
-                            value=env_cfg.get("max_episode_steps", 750), precision=0,
-                            label="Max Episode Steps (per Arena)",
-                            info="Maximum length before resetting if no goal is scored (750 steps ≈ 50s game time)."
-                        )
-                        game_mode_dropdown = gr.Dropdown(
-                            ["1v1", "2v2", "3v3"], value=env_cfg.get("game_mode", "1v1"),
-                            label="Game Mode",
-                            info="Match format: 1v1 (Duels), 2v2 (Doubles), or 3v3 (Standard team play)."
-                        )
-                        checkpoint_interval_input = gr.Number(
-                            value=log_cfg.get("checkpoint_interval", 20), precision=0,
-                            label="Checkpoint Save Interval (Iterations)",
-                            info="How often to save a new checkpoint to disk (every N iterations)."
-                        )
-                        max_checkpoints_input = gr.Number(
-                            value=log_cfg.get("max_checkpoints_to_keep", 5), precision=0,
-                            label="Max Checkpoints to Keep (Rolling Retention)",
-                            info="Number of recent checkpoint files to preserve. Older numbered checkpoints are automatically pruned to prevent disk bloat."
-                        )
-                        save_cfg_btn = gr.Button("💾 Save Configuration to YAML", variant="secondary")
-
-                cfg_save_msg = gr.Markdown("")
-
-            # ---------------------------------------------------------
-            # TAB 3: 📁 REPLAY INGESTION & IMITATION PRETRAINER
-            # ---------------------------------------------------------
-            with gr.TabItem("📁 Replays & Imitation Pretrainer"):
-                def build_replay_stats_md():
-                    st = ReplayParser().get_pool_stats()
-                    has_data = st['total_frames'] > 0
-                    badge = '<span class="status-badge-running">● DATASET ACTIVE</span>' if has_data else '<span class="status-badge-stopped">○ EMPTY DATASET</span>'
-                    return f"""
-                    <div class="cyber-panel" style="display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 16px; margin-bottom: 16px;">
-                        <div style="display: flex; align-items: center; gap: 14px;">
-                            {badge}
-                            <span style="font-size: 1.1em; font-weight: 700; color: #f8fafc;">Active Replay Dataset Pool</span>
-                        </div>
-                        <div style="display: flex; align-items: center; gap: 24px; font-size: 0.95em; color: #cbd5e1;">
-                            <span>Active Frames: <b style="color: #38bdf8;">{st['total_frames']:,}</b></span>
-                            <span>Estimated Matches: <b style="color: #818cf8;">{st['num_matches']}</b></span>
-                            <span>Pool Storage: <b style="color: #34d399;">{st['file_size_mb']} MB</b></span>
-                        </div>
-                    </div>
+            # =========================================================
+            # TAB 3: ⚙️ ENGINE CONFIG & PRETRAINER
+            # =========================================================
+            with gr.TabItem("⚙️ Config & Pretrainer"):
+                gr.Markdown(
                     """
+                    > **⚙️ Base Architecture Configuration & Behavioral Cloning Pretrainer:**
+                    > Tune offline PPO hyperparameters, vectorized arena simulation settings, ingest human `.replay` match files, and run supervised imitation pretraining.
+                    """
+                )
+                with gr.Row():
+                    # Left Column: PPO Hyperparameters & Arena Settings
+                    with gr.Column(scale=5):
+                        with gr.Group():
+                            gr.Markdown("### 🧠 Offline PPO Hyperparameters")
+                            with gr.Row():
+                                gamma_slider = gr.Slider(
+                                    0.9, 0.999, value=hp_cfg.get("gamma", 0.99), step=0.001,
+                                    label="Discount Factor (Gamma)",
+                                    info="Future rewards discount value."
+                                )
+                                gae_lambda_slider = gr.Slider(
+                                    0.8, 1.0, value=hp_cfg.get("gae_lambda", 0.95), step=0.01,
+                                    label="GAE Lambda",
+                                    info="GAE variance vs bias trade-off."
+                                )
+                            with gr.Row():
+                                batch_size_input = gr.Number(
+                                    value=hp_cfg.get("batch_size", 8192), precision=0,
+                                    label="Rollout Buffer Batch Size",
+                                    info="Total steps per iteration across arenas."
+                                )
+                                mini_batch_input = gr.Number(
+                                    value=hp_cfg.get("mini_batch_size", 512), precision=0,
+                                    label="Mini-Batch Size",
+                                    info="Gradient update chunk size."
+                                )
+                                n_epochs_input = gr.Number(
+                                    value=hp_cfg.get("n_epochs", 10), precision=0,
+                                    label="Epochs per Iteration",
+                                    info="Optimization passes per rollout."
+                                )
 
-                replay_stats_box = gr.HTML(value=build_replay_stats_md())
+                        with gr.Group():
+                            gr.Markdown("### 🏟️ Simulation & Checkpointing")
+                            with gr.Row():
+                                num_envs_slider = gr.Slider(
+                                    1, 128, value=env_cfg.get("num_envs", 64), step=1,
+                                    label="Vectorized Arenas",
+                                    info="Parallel RocketSim arena instances."
+                                )
+                                tick_skip_slider = gr.Slider(
+                                    1, 8, value=env_cfg.get("tick_skip", 8), step=1,
+                                    label="Tick Skip (Action Repeat)",
+                                    info="8 skip ≈ 15 decisions/sec."
+                                )
+                            with gr.Row():
+                                max_steps_input = gr.Number(
+                                    value=env_cfg.get("max_episode_steps", 750), precision=0,
+                                    label="Max Episode Steps",
+                                    info="750 steps ≈ 50s match time."
+                                )
+                                game_mode_dropdown = gr.Dropdown(
+                                    ["1v1", "2v2", "3v3"], value=env_cfg.get("game_mode", "1v1"),
+                                    label="Game Mode",
+                                    info="Match format (1v1, 2v2, 3v3)."
+                                )
+                            with gr.Row():
+                                checkpoint_interval_input = gr.Number(
+                                    value=log_cfg.get("checkpoint_interval", 20), precision=0,
+                                    label="Checkpoint Interval (Iters)"
+                                )
+                                max_checkpoints_input = gr.Number(
+                                    value=log_cfg.get("max_checkpoints_to_keep", 5), precision=0,
+                                    label="Max Checkpoints to Keep (Pruning)"
+                                )
 
-                # Section 1: Replay Ingestion Engine
-                with gr.Group():
-                    gr.Markdown("### 📂 Replay Scanner & Ingestion Engine")
-                    with gr.Row():
-                        # Left: Local Directory Scanner
-                        with gr.Column(scale=1):
-                            demo_dir_input = gr.Textbox(
-                                value=DEFAULT_DEMO_DIR,
-                                label="Local Rocket League Demos Directory",
-                                info="Path to your local saved .replay files."
-                            )
+                            save_cfg_btn = gr.Button("💾 Save Configuration to YAML", variant="primary")
+                            cfg_save_msg = gr.Markdown("")
+
+                    # Right Column: Human Replay Dataset & Imitation Pretrainer
+                    with gr.Column(scale=6):
+                        def build_replay_stats_md():
+                            parser = ReplayParser()
+                            st = parser.get_pool_stats()
+                            total_frames = st.get('total_frames', 0)
+                            num_matches = st.get('num_matches', 0)
+                            file_size_mb = st.get('file_size_mb', 0.0)
+                            est_game_time = (total_frames / 15.0) / 60.0
+                            has_data = total_frames > 0
+                            badge = '<span class="status-badge-running">● DATASET ACTIVE</span>' if has_data else '<span class="status-badge-stopped">○ EMPTY DATASET</span>'
+                            return f"""
+                            <div class="cyber-panel">
+                                <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px;">
+                                    <h4 style="margin: 0; color: #f1f5f9;">📦 Human Replay Dataset Pool</h4>
+                                    {badge}
+                                </div>
+                                <div style="display: flex; gap: 20px; color: #cbd5e1; font-size: 0.9em; flex-wrap: wrap;">
+                                    <span>Replay Matches: <b style="color: #38bdf8;">{num_matches}</b></span>
+                                    <span>Total Frames: <b style="color: #818cf8;">{total_frames:,}</b></span>
+                                    <span>Est. Duration: <b style="color: #34d399;">{est_game_time:.1f} mins</b></span>
+                                    <span>Pool Size: <b style="color: #facc15;">{file_size_mb:.2f} MB</b></span>
+                                </div>
+                            </div>
+                            """
+
+                        replay_stats_box = gr.HTML(build_replay_stats_md())
+
+                        with gr.Group():
+                            gr.Markdown("### 📂 Ingest from Directory")
+                            with gr.Row():
+                                demos_dir_input = gr.Textbox(
+                                    value=get_default_demo_dir(),
+                                    label="Replay Directory Path",
+                                    info="Absolute or relative path where .replay files are stored."
+                                )
+                                scan_demos_btn = gr.Button("🔍 Scan Replays", scale=1)
+
                             with gr.Row():
                                 max_replays_slider = gr.Slider(
-                                    10, 1000,
-                                    value=int(sc_cfg.get("max_replays_to_ingest", 50)),
-                                    step=10,
+                                    1, 100, value=20, step=1,
                                     label="Max Replays to Ingest",
-                                    info="Limits batch size to prevent lag."
+                                    info="Cap the number of replays to parse into training buffer."
                                 )
-                                sort_mode_dropdown = gr.Dropdown(
-                                    choices=["Newest First", "Random Sample", "Oldest First"],
-                                    value="Newest First",
-                                    label="Selection Mode"
+                                sort_replays_radio = gr.Radio(
+                                    ["newest", "oldest"], value="newest",
+                                    label="Sort Order"
                                 )
-                            scan_demos_btn = gr.Button("📂 Scan & Ingest Local Demos", variant="primary")
 
-                        # Right: Direct Upload Box
-                        with gr.Column(scale=1):
-                            replay_upload_box = gr.File(
+                            demos_table = gr.Dataframe(
+                                headers=["Filename", "Size (KB)", "Modified"],
+                                datatype=["str", "number", "str"],
+                                value=[],
+                                label="Discovered Replays (Select or Ingest All)"
+                            )
+
+                            with gr.Row():
+                                ingest_selected_btn = gr.Button("⚡ Ingest Discovered Replays", variant="primary")
+                                ingest_all_btn = gr.Button("📥 Ingest ALL Replays in Directory", variant="secondary")
+                                clear_pool_btn = gr.Button("🗑️ Clear Replay Dataset Pool", variant="stop")
+
+                            replays_status_box = gr.Markdown("")
+
+                        with gr.Group():
+                            gr.Markdown("### 📤 Upload `.replay` Files Directly")
+                            replay_uploader = gr.File(
                                 file_count="multiple",
-                                file_types=[".replay", ".npz", ".json", ".zip"],
-                                label="Upload .replay, .zip (containing replays), or .npz files directly"
+                                file_types=[".replay"],
+                                label="Drop Rocket League .replay files here"
                             )
-                            with gr.Row():
-                                upload_ingest_btn = gr.Button("📥 Ingest Uploaded Files", variant="secondary", scale=2)
-                                clear_replays_btn = gr.Button("🗑️ Clear Pool", variant="stop", scale=1)
+                            upload_status_box = gr.Markdown("")
 
-                    ingestion_status_box = gr.HTML(
-                        """
-                        <div class="status-callout-box">
-                            <span style="color: #38bdf8; font-weight: 700; margin-right: 8px;">STATUS:</span>
-                            <span>Ready to scan or ingest replays.</span>
-                        </div>
-                        """
-                    )
-
-                gr.Markdown("---")
-
-                # Section 2: Supervised Imitation Pretrainer (Behavioral Cloning)
-                with gr.Group():
-                    gr.Markdown("### 🎓 Supervised Imitation Pretrainer (Behavioral Cloning)")
-                    gr.Markdown(
-                        "*Bootstrap your agent with **Grand Champion / SSL baseline mechanics** (kickoffs, speed-flips, aerial reads, powerslide cuts) directly from human replay datasets before PPO reinforcement learning.*"
-                    )
-                    with gr.Row():
-                        with gr.Column(scale=1):
-                            pretrain_epochs_slider = gr.Slider(10, 500, value=100, step=10, label="Pretraining Epochs", info="Number of supervised training passes over the replay dataset.")
+                        with gr.Group():
+                            gr.Markdown("### 🎓 Behavioral Cloning (Imitation Pretrainer)")
                             with gr.Row():
-                                pretrain_lr_input = gr.Number(value=0.001, label="Pretrain Learning Rate", info="Adam learning rate for imitation loss.")
-                                pretrain_batch_dropdown = gr.Dropdown(choices=[64, 128, 256, 512, 1024], value=256, label="Batch Size")
-                            pretrain_base_dropdown = gr.Dropdown(
-                                choices=["Initialize Fresh Model (Clean Baseline)"] + get_available_checkpoints(),
-                                value="Initialize Fresh Model (Clean Baseline)",
-                                label="Target Base Checkpoint"
-                            )
-                        with gr.Column(scale=1):
+                                pretrain_epochs_slider = gr.Slider(1, 20, value=5, step=1, label="Pretraining Epochs")
+                                pretrain_lr_input = gr.Number(value=0.0005, label="BC Learning Rate")
                             with gr.Row():
-                                run_pretrain_btn = gr.Button("🚀 Run Supervised Imitation Pretraining", variant="primary", scale=2)
-                                stop_pretrain_btn = gr.Button("⏹️ Stop Pretraining", variant="stop", scale=1)
+                                pretrain_batch_dropdown = gr.Dropdown([64, 128, 256, 512], value=256, label="BC Batch Size")
+                                pretrain_base_dropdown = gr.Dropdown(
+                                    choices=get_available_checkpoints(),
+                                    value=get_available_checkpoints()[0],
+                                    label="Base Checkpoint"
+                                )
+                            with gr.Row():
+                                run_pretrain_btn = gr.Button("🚀 Run Imitation Pretraining", variant="primary")
+                                stop_pretrain_btn = gr.Button("⏹️ Stop Pretrainer", variant="stop")
                             pretrain_status_box = gr.HTML(
                                 """
-                                <div class="status-callout-box">
-                                    <span style="color: #38bdf8; font-weight: 700; margin-right: 8px;">PRETRAIN STATUS:</span>
-                                    <span>Ready to pretrain. Ingest replay files above first.</span>
-                                </div>
-                                """
-                            )
-                            pretrain_handoff_box = gr.HTML(
-                                """
-                                <div style="background: rgba(15, 23, 42, 0.6); border: 1px solid #334155; border-radius: 8px; padding: 10px 14px; margin-top: 10px;">
-                                    <span style="color: #94a3b8; font-size: 0.9rem;">
-                                        💡 <b>Seamless Handoff to PPO:</b> Pretraining saves directly to <code>checkpoints/latest_model.pt</code> and <code>checkpoints/pretrained_baseline.pt</code>. Once finished, click <b>Start Training</b> in the Top Dashboard to immediately begin PPO reinforcement learning on your pretrained baseline!
-                                    </span>
+                                <div class="status-callout-box" style="border-left-color: #64748b;">
+                                    <span style="color: #94a3b8; font-weight: 700; margin-right: 8px;">IDLE:</span>
+                                    <span>Ready to train initial policy weights on parsed replay data.</span>
                                 </div>
                                 """
                             )
 
-            # ---------------------------------------------------------
-            # TAB 5: CONSOLE LOG STREAM
-            # ---------------------------------------------------------
-            with gr.TabItem("📜 Live Console Logs"):
-                with gr.Row():
-                    refresh_logs_btn = gr.Button("🔄 Refresh Logs")
-                    clear_logs_btn = gr.Button("🧹 Clear Display")
-                console_output = gr.TextArea(
-                    label="Training Process Output (stdout / stderr)",
-                    lines=18,
-                    max_lines=25,
-                    interactive=False,
-                    autoscroll=True
-                )
-
-            # ---------------------------------------------------------
-            # TAB 6: 🔬 DIAGNOSTIC & EVALUATION HUB (CONSOLIDATED)
-            # ---------------------------------------------------------
-            with gr.TabItem("🔬 Diagnostic & Evaluation Hub"):
+            # =========================================================
+            # TAB 4: 🔬 DIAGNOSTICS & EVALUATION (FLATTENED HUB)
+            # =========================================================
+            with gr.TabItem("🔬 Diagnostics & Evaluation"):
                 gr.Markdown(
                     """
                     ### 🔬 Unified Diagnostic & Evaluation Hub
-                    Single-pane-of-glass workspace for full system health, automated unit test verification, behavioral biases, and 2D match simulation replays.
+                    Single-pane-of-glass workspace for full system health, automated unit test verification, 2D match simulation replays, behavioral bias heatmaps, and AI assistant snapshot export.
                     """
                 )
-                with gr.Tabs():
 
-                    # Sub-Tab 1: System Snapshot & AI Assistant Export
-                    with gr.TabItem("📋 System Snapshot & AI Export"):
-                        gr.Markdown(
-                            """
-                            #### 📋 Comprehensive Diagnostic Snapshot & AI Assistant Export
-                            Provides real-time process info, active reward weights, hyperparameters, model weights, unit test health, and console output.
-                            """
-                        )
-                        with gr.Row():
-                            refresh_snapshot_btn = gr.Button("🔄 Refresh Diagnostic Snapshot", variant="primary")
-
-                        with gr.Row():
-                            with gr.Column(scale=1):
-                                diag_overview_md = gr.Markdown(value="*Click 'Refresh Diagnostic Snapshot' to generate live overview.*")
-                            with gr.Column(scale=1):
-                                diag_export_raw = gr.Code(
-                                    label="📋 Complete Diagnostic Snapshot (Copy & Paste to Assistant)",
-                                    language="markdown",
-                                    lines=22,
-                                    interactive=False
-                                )
-
-                    # Sub-Tab 2: Automated Unit Tests & Subsystem Health
-                    with gr.TabItem("🧪 Automated Unit Tests & Health"):
-                        gr.Markdown(
-                            """
-                            #### 🧪 Subsystem Unit & Integration Test Verification
-                            Run the full programmatic test suite (Physics, Neural Architecture, Scenarios, Replay Parser) to verify environment and bot integrity.
-                            """
-                        )
-                        with gr.Row():
-                            run_unit_tests_btn = gr.Button("🧪 Run All Unit Tests", variant="primary")
-                        
-                        unit_tests_overview_md = gr.Markdown(value=format_test_results_markdown(get_cached_or_run_tests()))
-                        unit_tests_stdout = gr.Code(
-                            label="Test Runner Output Stream",
-                            language="markdown",
-                            lines=10,
-                            interactive=False
-                        )
-
-                    # Sub-Tab 3: Behavioral Biases & AI Coach
-                    with gr.TabItem("🧠 Behavioral Biases & AI Coach"):
-                        gr.Markdown(
-                            """
-                            #### 🧠 Action Distributions & Pitch Positional Radar
-                            Analyzes controller distributions and spatial heatmap positioning averaged across recent iterations to diagnose bad habits.
-                            """
-                        )
-                        with gr.Row():
-                            diag_window_slider = gr.Slider(
-                                1, 25, value=8, step=1,
-                                label="Rolling Average Window (Iterations)",
-                                info="Number of recent iterations to average across."
+                # SECTION 1: Automated Unit Tests & Health
+                with gr.Group():
+                    with gr.Row():
+                        gr.Markdown("### 🧪 Subsystem Unit Tests & Health Verification")
+                        run_unit_tests_btn = gr.Button("🧪 Run All Unit Tests", variant="primary", scale=1)
+                    with gr.Row():
+                        with gr.Column(scale=1):
+                            unit_tests_overview_md = gr.Markdown(value=format_test_results_markdown(get_cached_or_run_tests()))
+                        with gr.Column(scale=1):
+                            unit_tests_stdout = gr.Code(
+                                label="Test Runner Output Stream",
+                                language="markdown",
+                                lines=10,
+                                interactive=False
                             )
-                            refresh_diag_btn = gr.Button("🔄 Refresh Diagnostics", variant="primary")
 
-                        with gr.Row():
-                            with gr.Column(scale=1):
-                                diag_coach_report = gr.Markdown(value="*Click 'Refresh Diagnostics' or run training to view live AI coach analysis.*")
-                            with gr.Column(scale=1):
-                                diag_action_plot = gr.Plot(label="Action & Control Distributions")
-                                diag_position_plot = gr.Plot(label="Pitch Positioning & Vehicle State")
+                gr.Markdown("---")
 
-                    # Sub-Tab 4: 2D Pitch Match Visualizer & Evaluation
-                    with gr.TabItem("🎮 2D Pitch Match Visualizer"):
-                        gr.Markdown(
-                            """
-                            #### 🎮 Headless Simulation Match Replay
-                            Simulate full matches on the 2D pitch with real-time trajectory tracing and reward breakdown.
-                            """
+                # SECTION 2: 2D Pitch Match Visualizer & Simulation
+                with gr.Group():
+                    gr.Markdown("### 🎮 2D Pitch Match Visualizer & Simulation Replay")
+                    with gr.Row():
+                        with gr.Column(scale=4):
+                            ckpt_dropdown = gr.Dropdown(
+                                choices=get_available_checkpoints(),
+                                value=get_available_checkpoints()[0],
+                                label="Select Blue Team Checkpoint",
+                                info="Trained PyTorch model checkpoint (.pt) for Blue Team."
+                            )
+                            opponent_mode = gr.Radio(
+                                ["Self-Play (Bot vs Itself)", "Baseline Bot (Chase Ball Heuristic)", "Another Checkpoint"],
+                                value="Self-Play (Bot vs Itself)",
+                                label="Opponent Matchup Type"
+                            )
+                            orange_ckpt_dropdown = gr.Dropdown(
+                                choices=get_available_checkpoints(),
+                                value=get_available_checkpoints()[0],
+                                label="Select Orange Team Checkpoint",
+                                visible=False,
+                                info="Select a different checkpoint for Orange Team."
+                            )
+                            refresh_ckpts_btn = gr.Button("🔄 Scan Checkpoints")
+                            sim_steps_slider = gr.Slider(
+                                100, 1000, value=400, step=50,
+                                label="Simulation Steps",
+                                info="Duration of match simulation (400 steps ≈ 26s)."
+                            )
+                            run_sim_btn = gr.Button("🕹️ Simulate Match & Render Replay", variant="primary")
+                            sim_stats_box = gr.Markdown("#### Match Results: Click 'Simulate Match' to evaluate.")
+
+                        with gr.Column(scale=7):
+                            visualizer_plot = gr.Plot(label="🗺️ 2D Pitch Trajectories")
+                            reward_breakdown_plot = gr.Plot(label="📊 Match Reward Breakdown")
+
+                gr.Markdown("---")
+
+                # SECTION 3: Behavioral Biases & AI Coach
+                with gr.Group():
+                    with gr.Row():
+                        gr.Markdown("### 🧠 Behavioral Biases & AI Behavioral Coach")
+                        diag_window_slider = gr.Slider(
+                            1, 25, value=8, step=1,
+                            label="Rolling Average Window (Iterations)",
+                            scale=2
                         )
-                        with gr.Row():
-                            with gr.Column(scale=1):
-                                ckpt_dropdown = gr.Dropdown(
-                                    choices=get_available_checkpoints(),
-                                    value=get_available_checkpoints()[0],
-                                    label="Select Blue Team Checkpoint",
-                                    info="Select a trained PyTorch model checkpoint (.pt) for the Blue Team."
-                                )
-                                opponent_mode = gr.Radio(
-                                    ["Self-Play (Bot vs Itself)", "Baseline Bot (Chase Ball Heuristic)", "Another Checkpoint"],
-                                    value="Self-Play (Bot vs Itself)",
-                                    label="Opponent Matchup Type",
-                                    info="Choose who the bot plays against in the visualizer."
-                                )
-                                orange_ckpt_dropdown = gr.Dropdown(
-                                    choices=get_available_checkpoints(),
-                                    value=get_available_checkpoints()[0],
-                                    label="Select Orange Team Checkpoint",
-                                    visible=False,
-                                    info="Select a different checkpoint for the Orange Team."
-                                )
-                                refresh_ckpts_btn = gr.Button("🔄 Scan Checkpoint Directory")
-                                sim_steps_slider = gr.Slider(
-                                    100, 1000, value=400, step=50,
-                                    label="Simulation Steps",
-                                    info="Duration of match simulation (e.g. 400 steps ≈ 26 seconds of gameplay)."
-                                )
-                                run_sim_btn = gr.Button("🕹️ Simulate Match & Render Replay", variant="primary")
-                                sim_stats_box = gr.Markdown("#### Match Results: Click 'Simulate Match' to evaluate.")
-                            with gr.Column(scale=2):
-                                with gr.Tabs():
-                                    with gr.TabItem("🗺️ 2D Pitch Trajectories"):
-                                        visualizer_plot = gr.Plot(label="Top-Down Rocket League Field Trajectory")
-                                    with gr.TabItem("📊 Match Reward Breakdown"):
-                                        reward_breakdown_plot = gr.Plot(label="Points Earned by Reward Category")
+                        refresh_diag_btn = gr.Button("🔄 Refresh AI Coach Analysis", variant="primary", scale=1)
+                    with gr.Row():
+                        with gr.Column(scale=1):
+                            diag_coach_report = gr.Markdown(value="*Click 'Refresh AI Coach Analysis' or run training to view live AI coach analysis.*")
+                        with gr.Column(scale=1):
+                            diag_action_plot = gr.Plot(label="Action & Control Distributions")
+                            diag_position_plot = gr.Plot(label="Pitch Positioning & Vehicle State Radar")
+
+                gr.Markdown("---")
+
+                # SECTION 4: Comprehensive System Snapshot & AI Assistant Export
+                with gr.Group():
+                    with gr.Row():
+                        gr.Markdown("### 📋 System Snapshot & AI Assistant Export")
+                        refresh_snapshot_btn = gr.Button("🔄 Refresh Diagnostic Snapshot", variant="primary", scale=1)
+                    with gr.Row():
+                        with gr.Column(scale=1):
+                            diag_overview_md = gr.Markdown(value="*Click 'Refresh Diagnostic Snapshot' to generate live overview.*")
+                        with gr.Column(scale=1):
+                            diag_export_raw = gr.Code(
+                                label="📋 Complete Diagnostic Snapshot (Copy & Paste to Assistant)",
+                                language="markdown",
+                                lines=20,
+                                interactive=False
+                            )
 
         # -------------------------------------------------------------
         # EVENT HANDLERS & CALLBACKS
@@ -1142,13 +1111,107 @@ def create_ui():
         pause_btn.click(fn=on_pause, outputs=control_outputs)
         ckpt_btn.click(fn=on_save_checkpoint, outputs=control_outputs)
 
-        # Apply Live Training Dials (Rewards, Scenarios, Opponents, BC Guidance)
-        def on_apply_rewards(
+        # -------------------------------------------------------------
+        # LIVE HYPERPARAMETERS & DIALS (TAB 1)
+        # -------------------------------------------------------------
+        def on_apply_live_hyperparams(lr_val, ent_val, clip_val):
+            payload = {
+                "learning_rate": float(lr_val),
+                "ent_coef": float(ent_val),
+                "clip_range": float(clip_val),
+            }
+            mgr.update_live_config(payload)
+            try:
+                base_cfg = load_yaml_config("config/default_config.yaml")
+                if "hyperparameters" not in base_cfg:
+                    base_cfg["hyperparameters"] = {}
+                base_cfg["hyperparameters"]["learning_rate"] = float(lr_val)
+                base_cfg["hyperparameters"]["ent_coef"] = float(ent_val)
+                base_cfg["hyperparameters"]["clip_range"] = float(clip_val)
+                save_yaml_config(base_cfg, "config/default_config.yaml")
+            except Exception:
+                pass
+            return f"✅ **Live Hyperparameters Applied:** LR=`{float(lr_val):.2e}`, Ent Coef=`{float(ent_val):.4f}`, Clip=`{float(clip_val):.2f}` at {time.strftime('%H:%M:%S')}"
+
+        live_hp_btn.click(
+            fn=on_apply_live_hyperparams,
+            inputs=[lr_input, ent_coef_slider, clip_range_slider],
+            outputs=[live_hp_msg]
+        )
+
+        def on_apply_opponent_mix(opp_bot, opp_ratio):
+            clean_opp_type = "heuristic"
+            if opp_bot and not str(opp_bot).startswith("Heuristic"):
+                clean_opp_type = str(opp_bot).strip()
+            payload = {
+                "baseline_opponent_type": clean_opp_type,
+                "baseline_opponent_ratio": float(opp_ratio),
+            }
+            mgr.update_live_config(payload)
+            try:
+                base_cfg = load_yaml_config("config/default_config.yaml")
+                if "environment" not in base_cfg:
+                    base_cfg["environment"] = {}
+                base_cfg["environment"]["baseline_opponent_type"] = clean_opp_type
+                base_cfg["environment"]["baseline_opponent_ratio"] = float(opp_ratio)
+                save_yaml_config(base_cfg, "config/default_config.yaml")
+            except Exception:
+                pass
+            return f"✅ **Opponent Mix Applied:** `{os.path.basename(clean_opp_type)}` ({float(opp_ratio):.0%}) at {time.strftime('%H:%M:%S')}"
+
+        apply_opp_btn.click(
+            fn=on_apply_opponent_mix,
+            inputs=[opponent_bot_dropdown, baseline_opp_slider],
+            outputs=[opp_apply_msg]
+        )
+
+        refresh_opponent_btn.click(
+            fn=lambda: gr.Dropdown(choices=get_available_opponent_options()),
+            outputs=[opponent_bot_dropdown]
+        )
+
+        # Quick Live Rewards (Tab 1)
+        def on_apply_quick_rewards(g_w, c_w, sv_w, b2g_w, p2b_w, tch_w, bg_w, bl_w):
+            rewards = {
+                "goal_weight": float(g_w),
+                "concede_weight": float(c_w),
+                "save_weight": float(sv_w),
+                "ball_to_goal_weight": float(b2g_w),
+                "player_to_ball_weight": float(p2b_w),
+                "touch_weight": float(tch_w),
+                "boost_gain_weight": float(bg_w),
+                "boost_lose_weight": float(bl_w)
+            }
+            mgr.update_live_config({"rewards": rewards})
+            try:
+                base_cfg = load_yaml_config("config/default_config.yaml")
+                if "rewards" not in base_cfg:
+                    base_cfg["rewards"] = {}
+                base_cfg["rewards"].update(rewards)
+                save_yaml_config(base_cfg, "config/default_config.yaml")
+            except Exception:
+                pass
+            return f"✅ **Live Rewards Applied at {time.strftime('%H:%M:%S')}!**"
+
+        apply_live_rewards_btn.click(
+            fn=on_apply_quick_rewards,
+            inputs=[
+                goal_slider, concede_slider, save_slider,
+                ball_to_goal_slider, player_to_ball_slider, touch_slider,
+                boost_gain_slider, boost_lose_slider
+            ],
+            outputs=[live_rewards_msg]
+        )
+
+        # -------------------------------------------------------------
+        # FULL CURRICULUM & REWARD DIALS (TAB 2)
+        # -------------------------------------------------------------
+        def on_apply_curriculum(
             g_w, c_w, sv_w,
             b2g_w, p2b_w, jb_w, ar_w, pw_w, tch_w,
             bg_w, bl_w,
             k_p, r_p, a_p, tr_p, w_p, s_p, c_p,
-            opp_bot, base_opp, bc_w, bc_dec
+            bc_w, bc_dec
         ):
             rewards = {
                 "goal_weight": float(g_w),
@@ -1173,15 +1236,9 @@ def create_ui():
                 "custom_prob": float(c_p)
             }
 
-            clean_opp_type = "heuristic"
-            if opp_bot and not str(opp_bot).startswith("Heuristic"):
-                clean_opp_type = str(opp_bot).strip()
-
             payload = {
                 "rewards": rewards,
                 "scenarios": scenarios,
-                "baseline_opponent_type": clean_opp_type,
-                "baseline_opponent_ratio": float(base_opp),
                 "bc_regularization_weight": float(bc_w),
                 "bc_decay_steps": int(bc_dec)
             }
@@ -1190,10 +1247,6 @@ def create_ui():
                 base_cfg = load_yaml_config("config/default_config.yaml")
                 base_cfg["rewards"] = rewards
                 base_cfg["scenarios"] = scenarios
-                if "environment" not in base_cfg:
-                    base_cfg["environment"] = {}
-                base_cfg["environment"]["baseline_opponent_type"] = clean_opp_type
-                base_cfg["environment"]["baseline_opponent_ratio"] = float(base_opp)
                 if "hyperparameters" not in base_cfg:
                     base_cfg["hyperparameters"] = {}
                 base_cfg["hyperparameters"]["bc_regularization_weight"] = float(bc_w)
@@ -1201,23 +1254,18 @@ def create_ui():
                 save_yaml_config(base_cfg, "config/default_config.yaml")
             except Exception:
                 pass
-            return f"✅ **Live Training Dials applied and saved at {time.strftime('%H:%M:%S')}!** Opponent: `{os.path.basename(clean_opp_type)}` (Ratio: `{float(base_opp):.0%}`), Rewards & Scenarios updated."
+            return f"✅ **All Curriculum & Reward Dials Applied at {time.strftime('%H:%M:%S')}!**"
 
-        apply_rewards_btn.click(
-            fn=on_apply_rewards,
+        apply_all_curriculum_btn.click(
+            fn=on_apply_curriculum,
             inputs=[
                 goal_slider, concede_slider, save_slider,
                 ball_to_goal_slider, player_to_ball_slider, jump_bridge_slider, air_roll_recovery_slider, powerslide_slider, touch_slider,
                 boost_gain_slider, boost_lose_slider,
                 kickoff_prob_slider, replay_prob_slider, aerial_prob_slider, turnaround_prob_slider, wall_prob_slider, save_prob_slider, custom_prob_slider,
-                opponent_bot_dropdown, baseline_opp_slider, bc_weight_slider, bc_decay_input
+                bc_weight_slider, bc_decay_input
             ],
-            outputs=[reward_apply_msg]
-        )
-
-        refresh_opponent_btn.click(
-            fn=lambda: gr.Dropdown(choices=get_available_opponent_options()),
-            outputs=[opponent_bot_dropdown]
+            outputs=[curriculum_apply_msg]
         )
 
         # Dynamic 100% Normalized Scenario Rebalancing Handler (7 Scenario Mix)
@@ -1229,248 +1277,243 @@ def create_ui():
 
             rem = round(1.0 - new_val, 4)
             other_indices = [i for i in range(7) if i != changed_idx]
-            other_sum = sum(vals[i] for i in other_indices)
+            other_sum = sum(current_vals[i] for i in other_indices)
 
-            if other_sum > 1e-6:
+            if other_sum > 0.0001:
+                scale = rem / other_sum
                 for i in other_indices:
-                    vals[i] = round((vals[i] / other_sum) * rem, 2)
+                    vals[i] = round(current_vals[i] * scale, 2)
             else:
-                eq = round(rem / len(other_indices), 2)
+                even = round(rem / len(other_indices), 2)
                 for i in other_indices:
-                    vals[i] = eq
+                    vals[i] = even
 
-            # Fix rounding drift to guarantee exact 1.00 (100%) sum
-            drift = round(1.0 - sum(vals), 2)
-            if abs(drift) > 1e-4:
-                best_other = max(other_indices, key=lambda i: vals[i])
-                vals[best_other] = round(vals[best_other] + drift, 2)
+            # Snap rounding error to first available other index
+            tot = sum(vals)
+            diff = round(1.0 - tot, 2)
+            if abs(diff) > 0.0001:
+                for idx in other_indices:
+                    if vals[idx] + diff >= 0:
+                        vals[idx] = round(vals[idx] + diff, 2)
+                        break
 
-            out = [round(v, 2) for v in vals]
-            tot_pct = int(round(sum(out) * 100))
+            pct_total = int(round(sum(vals) * 100))
             badge_html = f"""
             <div style="display: flex; justify-content: flex-end; align-items: center; height: 100%;">
-                <span class="status-badge-running" style="font-size: 1.0em; padding: 6px 16px;">● Total Mix: {tot_pct}%</span>
+                <span class="status-badge-running" style="font-size: 1.0em; padding: 6px 16px;">● Total Mix: {pct_total}%</span>
             </div>
             """
-            return out[0], out[1], out[2], out[3], out[4], out[5], out[6], badge_html
+            return tuple(vals) + (badge_html,)
 
         scenario_sliders = [kickoff_prob_slider, replay_prob_slider, aerial_prob_slider, turnaround_prob_slider, wall_prob_slider, save_prob_slider, custom_prob_slider]
-        scenario_outputs = [kickoff_prob_slider, replay_prob_slider, aerial_prob_slider, turnaround_prob_slider, wall_prob_slider, save_prob_slider, custom_prob_slider, scenario_total_badge]
+        rebalance_outputs = scenario_sliders + [scenario_total_badge]
 
-        kickoff_prob_slider.release(fn=lambda v, k, r, a, tr, w, s, c: rebalance_scenarios_handler(0, v, k, r, a, tr, w, s, c), inputs=[kickoff_prob_slider] + scenario_sliders, outputs=scenario_outputs)
-        replay_prob_slider.release(fn=lambda v, k, r, a, tr, w, s, c: rebalance_scenarios_handler(1, v, k, r, a, tr, w, s, c), inputs=[replay_prob_slider] + scenario_sliders, outputs=scenario_outputs)
-        aerial_prob_slider.release(fn=lambda v, k, r, a, tr, w, s, c: rebalance_scenarios_handler(2, v, k, r, a, tr, w, s, c), inputs=[aerial_prob_slider] + scenario_sliders, outputs=scenario_outputs)
-        turnaround_prob_slider.release(fn=lambda v, k, r, a, tr, w, s, c: rebalance_scenarios_handler(3, v, k, r, a, tr, w, s, c), inputs=[turnaround_prob_slider] + scenario_sliders, outputs=scenario_outputs)
-        wall_prob_slider.release(fn=lambda v, k, r, a, tr, w, s, c: rebalance_scenarios_handler(4, v, k, r, a, tr, w, s, c), inputs=[wall_prob_slider] + scenario_sliders, outputs=scenario_outputs)
-        save_prob_slider.release(fn=lambda v, k, r, a, tr, w, s, c: rebalance_scenarios_handler(5, v, k, r, a, tr, w, s, c), inputs=[save_prob_slider] + scenario_sliders, outputs=scenario_outputs)
-        custom_prob_slider.release(fn=lambda v, k, r, a, tr, w, s, c: rebalance_scenarios_handler(6, v, k, r, a, tr, w, s, c), inputs=[custom_prob_slider] + scenario_sliders, outputs=scenario_outputs)
-
-        def on_reset_rewards():
-            return (
-                30.0, -30.0, 12.0,
-                1.5, 0.6, 0.35, 0.10, 0.20, 1.2,
-                0.6, 0.3,
-                0.28, 0.22, 0.12, 0.08, 0.10, 0.10, 0.10,
-                0.05, 0.15, 150000000
+        for i, sld in enumerate(scenario_sliders):
+            sld.change(
+                fn=lambda *args, idx=i: rebalance_scenarios_handler(idx, args[0], *args[1:]),
+                inputs=[sld] + scenario_sliders,
+                outputs=rebalance_outputs
             )
 
-        reset_rewards_btn.click(
+        # Reset Rewards to Balanced Defaults
+        def on_reset_rewards():
+            def_cfg = load_yaml_config("config/default_config.yaml")
+            rew = def_cfg.get("rewards", {})
+            sc = def_cfg.get("scenarios", {})
+            badge_html = """
+            <div style="display: flex; justify-content: flex-end; align-items: center; height: 100%;">
+                <span class="status-badge-running" style="font-size: 1.0em; padding: 6px 16px;">● Total Mix: 100%</span>
+            </div>
+            """
+            return (
+                rew.get("goal_weight", 20.0),
+                rew.get("concede_weight", -20.0),
+                rew.get("save_weight", 3.0),
+                rew.get("ball_to_goal_weight", 1.5),
+                rew.get("player_to_ball_weight", 0.6),
+                rew.get("jump_bridge_weight", 0.35),
+                rew.get("air_roll_recovery_weight", 0.10),
+                rew.get("powerslide_weight", 0.20),
+                rew.get("touch_weight", 1.2),
+                rew.get("boost_gain_weight", 0.6),
+                rew.get("boost_lose_weight", 0.3),
+                sc.get("kickoff_prob", 0.21),
+                sc.get("replay_prob", 0.17),
+                sc.get("aerial_prob", 0.08),
+                sc.get("turnaround_prob", 0.14),
+                sc.get("wall_prob", 0.07),
+                sc.get("save_prob", 0.07),
+                sc.get("custom_prob", 0.25),
+                badge_html,
+                "🔄 **Reset dials to balanced standard configuration.**"
+            )
+
+        reset_curriculum_btn.click(
             fn=on_reset_rewards,
             outputs=[
                 goal_slider, concede_slider, save_slider,
                 ball_to_goal_slider, player_to_ball_slider, jump_bridge_slider, air_roll_recovery_slider, powerslide_slider, touch_slider,
                 boost_gain_slider, boost_lose_slider,
                 kickoff_prob_slider, replay_prob_slider, aerial_prob_slider, turnaround_prob_slider, wall_prob_slider, save_prob_slider, custom_prob_slider,
-                baseline_opp_slider, bc_weight_slider, bc_decay_input
+                scenario_total_badge,
+                curriculum_apply_msg
             ]
         )
 
         # -------------------------------------------------------------
-        # CUSTOM SCENARIO GENERATOR EVENT HANDLERS & CALLBACKS
+        # CUSTOM SCENARIO GENERATOR HANDLERS
         # -------------------------------------------------------------
         def assemble_scenario_payload(
-            sc_id, sc_name, sc_desc, sc_enabled,
-            cx, cy, cz, cyaw, cspeed, cboost,
-            bx, by, bz, bvx, bvy, bvz,
-            opp_mode, opp_boost, ox, oy, oyaw,
-            pos_jit, vel_jit, mirror
-        ) -> Dict[str, Any]:
-            yaw_rad = math.radians(float(cyaw))
-            speed = float(cspeed)
-            cvx = math.cos(yaw_rad) * speed
-            cvy = math.sin(yaw_rad) * speed
+            s_id, s_name, s_enabled, s_desc,
+            c_x, c_y, c_z, c_yaw, c_spd, c_boost,
+            b_x, b_y, b_z, b_vx, b_vy, b_vz,
+            o_mode, o_boost, o_x, o_y, o_yaw,
+            p_jit, v_jit, mirror
+        ) -> dict:
+            yaw_rad = math.radians(float(c_yaw))
+            spd = float(c_spd)
+            car_vel = [spd * math.cos(yaw_rad), spd * math.sin(yaw_rad), 0.0]
+
+            opp_dict = {
+                "mode": str(o_mode),
+                "boost": float(o_boost)
+            }
+            if o_mode == "custom":
+                opp_dict["pos"] = [float(o_x), float(o_y), 17.0]
+                opp_dict["yaw"] = float(o_yaw)
+                opp_dict["vel"] = [0.0, 0.0, 0.0]
 
             return {
-                "id": str(sc_id).strip().lower().replace(" ", "_"),
-                "name": str(sc_name).strip(),
-                "description": str(sc_desc).strip(),
-                "enabled": bool(sc_enabled),
+                "id": str(s_id).strip(),
+                "name": str(s_name).strip(),
+                "enabled": bool(s_enabled),
+                "description": str(s_desc).strip(),
                 "car": {
-                    "pos": [float(cx), float(cy), float(cz)],
-                    "yaw": float(cyaw),
-                    "pitch": 0.0,
-                    "roll": 0.0,
-                    "vel": [cvx, cvy, 0.0],
-                    "boost": float(cboost)
+                    "pos": [float(c_x), float(c_y), float(c_z)],
+                    "vel": car_vel,
+                    "yaw": float(c_yaw),
+                    "boost": float(c_boost)
                 },
                 "ball": {
-                    "pos": [float(bx), float(by), float(bz)],
-                    "vel": [float(bvx), float(bvy), float(bvz)]
+                    "pos": [float(b_x), float(b_y), float(b_z)],
+                    "vel": [float(b_vx), float(b_vy), float(b_vz)]
                 },
-                "opponent": {
-                    "mode": str(opp_mode),
-                    "pos": [float(ox), float(oy), 17.0],
-                    "yaw": float(oyaw),
-                    "pitch": 0.0,
-                    "roll": 0.0,
-                    "vel": [0.0, 0.0, 0.0],
-                    "boost": float(opp_boost)
-                },
+                "opponent": opp_dict,
                 "variance": {
-                    "pos_jitter": float(pos_jit),
-                    "vel_jitter": float(vel_jit),
+                    "pos_jitter": float(p_jit),
+                    "vel_jitter": float(v_jit),
                     "mirror_symmetry": bool(mirror)
                 }
             }
 
-        scenario_input_components = [
-            sc_id_input, sc_name_input, sc_desc_input, sc_enabled_cb,
+        def on_update_visual_preview(*args):
+            sc = assemble_scenario_payload(*args)
+            return render_scenario_visual_guide(sc)
+
+        all_sc_inputs = [
+            sc_id_input, sc_name_input, sc_enabled_cb, sc_desc_input,
             car_pos_x, car_pos_y, car_pos_z, car_yaw, car_speed, car_boost,
             ball_pos_x, ball_pos_y, ball_pos_z, ball_vel_x, ball_vel_y, ball_vel_z,
             opp_mode_radio, opp_boost, opp_pos_x, opp_pos_y, opp_yaw,
             pos_jitter, vel_jitter, mirror_symmetry
         ]
 
-        def on_update_visual_preview(*args):
-            sc_dict = assemble_scenario_payload(*args)
-            return render_scenario_visual_guide(sc_dict)
+        for comp in [car_pos_x, car_pos_y, car_pos_z, car_yaw, car_speed, car_boost,
+                     ball_pos_x, ball_pos_y, ball_pos_z, ball_vel_x, ball_vel_y, ball_vel_z,
+                     opp_mode_radio, opp_pos_x, opp_pos_y, opp_yaw]:
+            comp.change(fn=on_update_visual_preview, inputs=all_sc_inputs, outputs=[sc_preview_plot])
 
-        # Refresh Guide on demand
-        refresh_preview_btn.click(
-            fn=on_update_visual_preview,
-            inputs=scenario_input_components,
-            outputs=[sc_preview_plot]
-        )
+        refresh_preview_btn.click(fn=on_update_visual_preview, inputs=all_sc_inputs, outputs=[sc_preview_plot])
 
-        # Reactive preview on key sliders
-        for comp in [car_pos_x, car_pos_y, car_pos_z, car_yaw, car_speed, car_boost, ball_pos_x, ball_pos_y, ball_pos_z, ball_vel_x, ball_vel_y, ball_vel_z, opp_mode_radio, opp_pos_x, opp_pos_y, opp_yaw]:
-            comp.change(
-                fn=on_update_visual_preview,
-                inputs=scenario_input_components,
-                outputs=[sc_preview_plot]
-            )
-
-        # Opponent Mode toggle visibility helper
-        def on_opp_mode_change(mode):
+        def on_scenario_opp_mode_change(mode):
             return gr.Row(visible=(mode == "custom"))
-        opp_mode_radio.change(fn=on_opp_mode_change, inputs=[opp_mode_radio], outputs=[opp_custom_row])
 
-        # Preset Loader Callback
+        opp_mode_radio.change(fn=on_scenario_opp_mode_change, inputs=[opp_mode_radio], outputs=[opp_custom_row])
+
+        # Preset Selector Callback
         def on_select_preset_template(preset_name):
-            if not preset_name or preset_name.startswith("("):
-                return [gr.update()] * 24 + [gr.update()]
-            target = None
-            for sc in DEFAULT_CUSTOM_SCENARIOS:
-                if sc["name"] == preset_name or sc["id"] == preset_name:
-                    target = sc
-                    break
-            if not target:
-                return [gr.update()] * 24 + [gr.update()]
+            if not preset_name or preset_name == "(Select Template Preset...)":
+                return (gr.update(),) * 23
+            match = next((s for s in DEFAULT_CUSTOM_SCENARIOS if s["name"] == preset_name), None)
+            if not match:
+                return (gr.update(),) * 23
 
-            c_vel = target["car"]["vel"]
-            speed = math.hypot(c_vel[0], c_vel[1])
-            opp = target.get("opponent", {})
-            var = target.get("variance", {})
+            c = match["car"]
+            b = match["ball"]
+            o = match.get("opponent", {})
+            v = match.get("variance", {})
 
-            sc_plot = render_scenario_visual_guide(target)
+            spd = math.hypot(c["vel"][0], c["vel"][1])
+            o_pos = o.get("pos", [0, 4800, 17])
 
             return (
-                target["id"],
-                target["name"],
-                target["description"],
-                target.get("enabled", True),
-                float(target["car"]["pos"][0]),
-                float(target["car"]["pos"][1]),
-                float(target["car"]["pos"][2]),
-                float(target["car"].get("yaw", 90.0)),
-                float(speed),
-                float(target["car"].get("boost", 50.0)),
-                float(target["ball"]["pos"][0]),
-                float(target["ball"]["pos"][1]),
-                float(target["ball"]["pos"][2]),
-                float(target["ball"]["vel"][0]),
-                float(target["ball"]["vel"][1]),
-                float(target["ball"]["vel"][2]),
-                opp.get("mode", "goalie"),
-                float(opp.get("boost", 60.0)),
-                float(opp.get("pos", [0, 4800, 17])[0]),
-                float(opp.get("pos", [0, 4800, 17])[1]),
-                float(opp.get("yaw", -90.0)),
-                float(var.get("pos_jitter", 80.0)),
-                float(var.get("vel_jitter", 60.0)),
-                bool(var.get("mirror_symmetry", True)),
-                sc_plot
+                f"{match['id']}_{int(time.time()) % 1000}",
+                f"{match['name']} (Custom)",
+                True,
+                match.get("description", ""),
+                c["pos"][0], c["pos"][1], c["pos"][2],
+                c.get("yaw", 90.0), spd, c.get("boost", 50.0),
+                b["pos"][0], b["pos"][1], b["pos"][2],
+                b["vel"][0], b["vel"][1], b["vel"][2],
+                o.get("mode", "goalie"), o.get("boost", 60.0),
+                o_pos[0], o_pos[1], o.get("yaw", -90.0),
+                v.get("pos_jitter", 80.0), v.get("vel_jitter", 60.0), v.get("mirror_symmetry", True)
             )
 
         preset_dropdown.change(
             fn=on_select_preset_template,
             inputs=[preset_dropdown],
-            outputs=scenario_input_components + [sc_preview_plot]
+            outputs=all_sc_inputs
         )
 
         # Save Scenario Callback
         def on_save_custom_scenario(*args):
-            sc_dict = assemble_scenario_payload(*args)
-            success, msg = ScenarioManager.get_instance().save_scenario(sc_dict)
-            table_df = build_scenarios_table()
-            all_sc = ScenarioManager.get_instance().get_all_scenarios()
-            choices = [f"{s['name']} ({s['id']})" for s in all_sc]
-            status_text = f"✅ **{msg}**" if success else f"❌ **{msg}**"
-            new_dropdown = gr.Dropdown(choices=choices, value=f"{sc_dict['name']} ({sc_dict['id']})")
-            return status_text, table_df, new_dropdown
+            sc = assemble_scenario_payload(*args)
+            if not sc["id"]:
+                return "❌ Error: Scenario ID cannot be empty.", build_scenarios_table(), gr.Dropdown()
+            sc_mgr.save_scenario(sc)
+            all_scs = sc_mgr.get_all_scenarios()
+            choices = [f"{s['name']} ({s['id']})" for s in all_scs]
+            sel = f"{sc['name']} ({sc['id']})"
+            return (
+                f"✅ **Saved custom scenario '{sc['name']}' ({sc['id']})!** Added to active training pool.",
+                build_scenarios_table(),
+                gr.Dropdown(choices=choices, value=sel)
+            )
 
         save_scenario_btn.click(
             fn=on_save_custom_scenario,
-            inputs=scenario_input_components,
+            inputs=all_sc_inputs,
             outputs=[scenario_action_msg, saved_scenarios_table, load_scenario_dropdown]
         )
 
-        # Clear / New Scenario Callback
+        # New Scenario Form Callback
         def on_new_scenario_form():
-            new_sc = {
-                "id": f"custom_scenario_{int(time.time()) % 10000}",
-                "name": "New Custom Training Drill",
-                "description": "Custom training situation designed in Sensei ML Studio.",
-                "enabled": True,
-                "car": {"pos": [0.0, 0.0, 17.0], "yaw": 90.0, "vel": [0.0, 500.0, 0.0], "boost": 50.0},
-                "ball": {"pos": [0.0, 1500.0, 93.15], "vel": [0.0, 0.0, 0.0]},
-                "opponent": {"mode": "goalie", "pos": [0.0, 4800.0, 17.0], "yaw": -90.0, "boost": 60.0},
-                "variance": {"pos_jitter": 50.0, "vel_jitter": 50.0, "mirror_symmetry": True}
-            }
-            plot = render_scenario_visual_guide(new_sc)
+            nid = f"custom_drill_{int(time.time()) % 10000}"
             return (
-                new_sc["id"], new_sc["name"], new_sc["description"], True,
-                0.0, 0.0, 17.0, 90.0, 500.0, 50.0,
-                0.0, 1500.0, 93.15, 0.0, 0.0, 0.0,
-                "goalie", 60.0, 0.0, 4800.0, -90.0,
-                50.0, 50.0, True,
-                plot, "ℹ️ Form cleared for new custom scenario creation."
+                nid, "New Custom Drill", True, "User custom drill description.",
+                0.0, -2500.0, 17.0, 90.0, 500.0, 50.0,
+                0.0, 0.0, 93.15, 0.0, 0.0, 0.0,
+                "goalie", 50.0, 0.0, 4800.0, -90.0,
+                80.0, 60.0, True,
+                "✨ Cleared form. Design your scenario and click **Save Custom Scenario**."
             )
 
         new_scenario_btn.click(
             fn=on_new_scenario_form,
-            outputs=scenario_input_components + [sc_preview_plot, scenario_action_msg]
+            outputs=all_sc_inputs + [scenario_action_msg]
         )
 
         # Delete Scenario Callback
         def on_delete_custom_scenario(sc_id):
-            success, msg = ScenarioManager.get_instance().delete_scenario(str(sc_id).strip())
-            table_df = build_scenarios_table()
-            all_sc = ScenarioManager.get_instance().get_all_scenarios()
-            choices = [f"{s['name']} ({s['id']})" for s in all_sc]
-            status_text = f"🗑️ **{msg}**" if success else f"⚠️ **{msg}**"
-            new_dropdown = gr.Dropdown(choices=choices, value=choices[0] if choices else None)
-            return status_text, table_df, new_dropdown
+            if not sc_id:
+                return "⚠️ No scenario selected to delete.", build_scenarios_table(), gr.Dropdown()
+            success = sc_mgr.delete_scenario(str(sc_id).strip())
+            all_scs = sc_mgr.get_all_scenarios()
+            choices = [f"{s['name']} ({s['id']})" for s in all_scs]
+            sel = choices[0] if choices else None
+            msg = f"🗑️ **Deleted scenario '{sc_id}'.**" if success else f"⚠️ Scenario '{sc_id}' could not be deleted."
+            return msg, build_scenarios_table(), gr.Dropdown(choices=choices, value=sel)
 
         delete_scenario_btn.click(
             fn=on_delete_custom_scenario,
@@ -1478,91 +1521,67 @@ def create_ui():
             outputs=[scenario_action_msg, saved_scenarios_table, load_scenario_dropdown]
         )
 
-        # Load from Library Callback
+        # Load Scenario from Library Callback
         def on_load_scenario_from_library(selected_choice):
-            if not selected_choice or "(" not in selected_choice:
-                return [gr.update()] * 24 + [gr.update(), "⚠️ Please select a scenario from the library."]
-            sc_id = selected_choice.split("(")[-1].rstrip(")")
-            target = ScenarioManager.get_instance().get_scenario(sc_id)
-            if not target:
-                return [gr.update()] * 24 + [gr.update(), f"⚠️ Scenario '{sc_id}' not found."]
+            if not selected_choice:
+                return (gr.update(),) * 23
+            try:
+                sc_id = selected_choice.split("(")[-1].rstrip(")").strip()
+            except Exception:
+                sc_id = selected_choice
+            match = sc_mgr.get_scenario(sc_id)
+            if not match:
+                return (gr.update(),) * 23
 
-            c_vel = target.get("car", {}).get("vel", [0, 0, 0])
-            speed = math.hypot(c_vel[0], c_vel[1])
-            opp = target.get("opponent", {})
-            var = target.get("variance", {})
-            sc_plot = render_scenario_visual_guide(target)
+            c = match["car"]
+            b = match["ball"]
+            o = match.get("opponent", {})
+            v = match.get("variance", {})
+            spd = math.hypot(c["vel"][0], c["vel"][1])
+            o_pos = o.get("pos", [0, 4800, 17])
 
             return (
-                target["id"],
-                target.get("name", target["id"]),
-                target.get("description", ""),
-                target.get("enabled", True),
-                float(target["car"]["pos"][0]),
-                float(target["car"]["pos"][1]),
-                float(target["car"]["pos"][2]),
-                float(target["car"].get("yaw", 90.0)),
-                float(speed),
-                float(target["car"].get("boost", 50.0)),
-                float(target["ball"]["pos"][0]),
-                float(target["ball"]["pos"][1]),
-                float(target["ball"]["pos"][2]),
-                float(target["ball"]["vel"][0]),
-                float(target["ball"]["vel"][1]),
-                float(target["ball"]["vel"][2]),
-                opp.get("mode", "goalie"),
-                float(opp.get("boost", 60.0)),
-                float(opp.get("pos", [0, 4800, 17])[0]),
-                float(opp.get("pos", [0, 4800, 17])[1]),
-                float(opp.get("yaw", -90.0)),
-                float(var.get("pos_jitter", 80.0)),
-                float(var.get("vel_jitter", 60.0)),
-                bool(var.get("mirror_symmetry", True)),
-                sc_plot,
-                f"📥 Loaded '{target.get('name', target['id'])}' into editor."
+                match["id"],
+                match["name"],
+                match.get("enabled", True),
+                match.get("description", ""),
+                c["pos"][0], c["pos"][1], c["pos"][2],
+                c.get("yaw", 90.0), spd, c.get("boost", 50.0),
+                b["pos"][0], b["pos"][1], b["pos"][2],
+                b["vel"][0], b["vel"][1], b["vel"][2],
+                o.get("mode", "goalie"), o.get("boost", 60.0),
+                o_pos[0], o_pos[1], o.get("yaw", -90.0),
+                v.get("pos_jitter", 80.0), v.get("vel_jitter", 60.0), v.get("mirror_symmetry", True)
             )
 
         load_scenario_btn.click(
             fn=on_load_scenario_from_library,
             inputs=[load_scenario_dropdown],
-            outputs=scenario_input_components + [sc_preview_plot, scenario_action_msg]
+            outputs=all_sc_inputs
         )
 
         refresh_library_btn.click(
-            fn=lambda: (build_scenarios_table(), gr.Dropdown(choices=[f"{s['name']} ({s['id']})" for s in ScenarioManager.get_instance().get_all_scenarios()])),
+            fn=lambda: (build_scenarios_table(), gr.Dropdown(choices=[f"{s['name']} ({s['id']})" for s in sc_mgr.get_all_scenarios()])),
             outputs=[saved_scenarios_table, load_scenario_dropdown]
         )
 
-        # Simulate Scenario Rollout Callback
+        # 2-Second Trajectory Rollout Simulation Callback
         def on_run_scenario_simulation(*args):
-            sc_dict = assemble_scenario_payload(*args)
-            ckpts = get_available_checkpoints()
-            model_path = ckpts[0] if ckpts and os.path.exists(ckpts[0]) else None
-            sim_fig, stats = simulate_custom_scenario(sc_dict, model_path=model_path, num_steps=150)
-            return sim_fig, stats
+            sc = assemble_scenario_payload(*args)
+            pts = get_available_checkpoints()
+            active_ckpt = pts[0] if pts and not pts[0].startswith("checkpoints/latest_model.pt (none") else None
+            res = simulate_custom_scenario(sc, checkpoint_path=active_ckpt, steps=150)
+            return res.get("plot"), res.get("stats")
 
         sim_scenario_btn.click(
             fn=on_run_scenario_simulation,
-            inputs=scenario_input_components,
+            inputs=all_sc_inputs,
             outputs=[sc_sim_plot, sc_sim_stats]
         )
 
-        # Apply Live LR
-        def on_live_lr(lr_val):
-            mgr.update_live_config({"learning_rate": float(lr_val)})
-            try:
-                base_cfg = load_yaml_config("config/default_config.yaml")
-                if "hyperparameters" not in base_cfg:
-                    base_cfg["hyperparameters"] = {}
-                base_cfg["hyperparameters"]["learning_rate"] = float(lr_val)
-                save_yaml_config(base_cfg, "config/default_config.yaml")
-            except Exception:
-                pass
-            return f"✅ **Learning rate set to {lr_val} live and saved permanently.**"
-
-        live_lr_btn.click(fn=on_live_lr, inputs=[lr_input], outputs=[cfg_save_msg])
-
-        # Save Config YAML
+        # -------------------------------------------------------------
+        # TAB 3 CONFIG & PRETRAINER HANDLERS
+        # -------------------------------------------------------------
         def on_save_yaml(lr, ent, clip, gamma, gae, bs, mbs, n_ep, n_env, t_skip, m_steps, g_mode, ckpt_int, max_ckpts):
             base_cfg = load_yaml_config("config/default_config.yaml")
             base_cfg["hyperparameters"] = {
@@ -1603,250 +1622,93 @@ def create_ui():
             outputs=[cfg_save_msg]
         )
 
-        # Logs Handler
-        def on_get_logs():
-            return mgr.get_logs()
-
-        refresh_logs_btn.click(fn=on_get_logs, outputs=[console_output])
-        clear_logs_btn.click(fn=lambda: "", outputs=[console_output])
-
-        # -------------------------------------------------------------
-        # REAL-TIME BACKGROUND REFRESH & LOAD
-        # -------------------------------------------------------------
-        # Ultra-lightweight Real-Time Top Status Hero Banner Timer (every 2s across all tabs)
-        status_timer = gr.Timer(2.0, active=True)
-        status_timer.tick(
-            fn=sync_ui_state,
-            outputs=[status_card, start_btn, pause_btn, stop_btn]
-        )
-
-        # Initialize UI on page load
-        demo.load(fn=sync_ui_state, outputs=[status_card, start_btn, pause_btn, stop_btn])
-
-        # Checkpoints Scanner
-        def on_scan_checkpoints():
-            ckpts = get_available_checkpoints()
-            return gr.Dropdown(choices=ckpts, value=ckpts[0] if ckpts else None), gr.Dropdown(choices=ckpts, value=ckpts[0] if ckpts else None)
-
-        refresh_ckpts_btn.click(fn=on_scan_checkpoints, outputs=[ckpt_dropdown, orange_ckpt_dropdown])
-
-        def on_opp_mode_change(mode):
-            return gr.Dropdown(visible=(mode == "Another Checkpoint"))
-
-        opponent_mode.change(fn=on_opp_mode_change, inputs=[opponent_mode], outputs=[orange_ckpt_dropdown])
-
-        # Match Simulator
-        def on_run_simulation(blue_choice, opp_mode, orange_choice, steps):
-            blue_path = blue_choice.split(" ")[0] if blue_choice else None
-
-            if opp_mode == "Self-Play (Bot vs Itself)":
-                orange_path = "same_as_blue"
-            elif opp_mode == "Baseline Bot (Chase Ball Heuristic)":
-                orange_path = "baseline"
-            else:
-                orange_path = orange_choice.split(" ")[0] if orange_choice else "baseline"
-
-            pitch_fig, reward_fig, stats = simulate_match(
-                blue_model_path=blue_path,
-                orange_model_path=orange_path,
-                max_steps=int(steps)
-            )
-
-            bg = stats["blue_goals"]
-            og = stats["orange_goals"]
-            bt = stats["blue_touches"]
-            ot = stats["orange_touches"]
-            b_rew = stats.get("blue_total_reward", 0.0)
-            o_rew = stats.get("orange_total_reward", 0.0)
-            m_type = stats.get("match_type", "Match")
-
-            result = "🏆 **BLUE BOT WON!**" if bg > og else ("⚠️ **ORANGE WON!**" if og > bg else "🤝 **DRAW MATCH**")
-
-            summary_md = f"""
-            ### {result}
-            * **Matchup:** {m_type}
-            * **Score:** Blue **{bg}** - **{og}** Orange
-            * **Reward Points:** Blue **{b_rew:+.1f} pts** | Orange **{o_rew:+.1f} pts**
-            * **Ball Touches:** Blue **{bt}** | Orange **{ot}**
-            * **Simulated Duration:** {steps} steps ({int(steps / 15)}s game time)
-            """
-            return pitch_fig, reward_fig, summary_md
-
-        run_sim_btn.click(
-            fn=on_run_simulation,
-            inputs=[ckpt_dropdown, opponent_mode, orange_ckpt_dropdown, sim_steps_slider],
-            outputs=[visualizer_plot, reward_breakdown_plot, sim_stats_box]
-        )
-
-        # Behavioral Diagnostics Callbacks
-        def on_refresh_diagnostics(window_size):
-            telem = extract_rolling_telemetry("logs/history.jsonl", window=int(window_size))
-            act_fig = render_action_biases_plot(telem)
-            pos_fig = render_positional_biases_plot(telem)
-            report = generate_ai_coach_diagnostics(telem, active_rewards={})
-            return report, act_fig, pos_fig
-
-        refresh_diag_btn.click(
-            fn=on_refresh_diagnostics,
-            inputs=[diag_window_slider],
-            outputs=[diag_coach_report, diag_action_plot, diag_position_plot]
-        )
-        diag_window_slider.change(
-            fn=on_refresh_diagnostics,
-            inputs=[diag_window_slider],
-            outputs=[diag_coach_report, diag_action_plot, diag_position_plot]
-        )
-
-        # Scenario & Replay Management Callbacks
+        # Replay Scanner Callbacks
         def on_scan_demos(demo_dir, max_replays, sort_mode):
-            mode_map = {"Newest First": "newest", "Random Sample": "random", "Oldest First": "oldest"}
-            mode = mode_map.get(sort_mode, "newest")
-            
-            p = ReplayParser()
-            count, frames = p.ingest_directory(directory=demo_dir, max_replays=int(max_replays), sort_mode=mode)
-            stats_html = build_replay_stats_md()
-            
-            if count > 0:
-                msg = f"""
-                <div class="status-callout-box" style="border-left-color: #4ade80;">
-                    <span style="color: #4ade80; font-weight: 700; margin-right: 8px;">SUCCESS:</span>
-                    <span>Successfully ingested <b>{count}</b> replays (<b style="color: #38bdf8;">{frames:,}</b> new game frames) into training pool!</span>
-                </div>
-                """
-            else:
-                msg = f"""
-                <div class="status-callout-box" style="border-left-color: #facc15;">
-                    <span style="color: #facc15; font-weight: 700; margin-right: 8px;">SCAN RESULT:</span>
-                    <span>No valid <code>.replay</code> or dataset files found in <code>{demo_dir}</code>.</span>
-                </div>
-                """
-            return stats_html, msg
+            p = ReplayParser(demo_dir=str(demo_dir).strip())
+            files = p.scan_demos(max_replays=int(max_replays), sort=str(sort_mode))
+            rows = []
+            for fp in files:
+                try:
+                    sz = round(os.path.getsize(fp) / 1024, 1)
+                    mtime = time.strftime("%Y-%m-%d %H:%M", time.localtime(os.path.getmtime(fp)))
+                    rows.append([os.path.basename(fp), sz, mtime])
+                except Exception:
+                    rows.append([os.path.basename(fp), 0.0, "Unknown"])
+            status_txt = f"🔍 Discovered **{len(rows)}** `.replay` files in `{demo_dir}`."
+            return rows, status_txt
 
         scan_demos_btn.click(
             fn=on_scan_demos,
-            inputs=[demo_dir_input, max_replays_slider, sort_mode_dropdown],
-            outputs=[replay_stats_box, ingestion_status_box]
+            inputs=[demos_dir_input, max_replays_slider, sort_replays_radio],
+            outputs=[demos_table, replays_status_box]
         )
 
-        def on_upload_ingest(uploaded_files):
-            if not uploaded_files:
-                msg = """
-                <div class="status-callout-box" style="border-left-color: #facc15;">
-                    <span style="color: #facc15; font-weight: 700; margin-right: 8px;">WARNING:</span>
-                    <span>No files selected for upload. Drag and drop files first.</span>
-                </div>
-                """
-                return build_replay_stats_md(), msg
+        def on_ingest_replays(demo_dir, max_replays, sort_mode):
+            p = ReplayParser(demo_dir=str(demo_dir).strip())
+            res = p.ingest_directory(max_replays=int(max_replays), sort=str(sort_mode))
+            stats_md = build_replay_stats_md()
+            msg = f"⚡ Ingested **{res['parsed_files']}** replays ({res['total_frames']:,} frames) into dataset pool in {res['elapsed_seconds']:.2f}s."
+            return stats_md, msg
 
-            if not isinstance(uploaded_files, (list, tuple)):
-                uploaded_files = [uploaded_files]
+        ingest_selected_btn.click(
+            fn=on_ingest_replays,
+            inputs=[demos_dir_input, max_replays_slider, sort_replays_radio],
+            outputs=[replay_stats_box, replays_status_box]
+        )
 
-            p = ReplayParser()
-            total_frames = 0
-            file_count = 0
-            errors = []
+        def on_ingest_all_replays(demo_dir):
+            p = ReplayParser(demo_dir=str(demo_dir).strip())
+            res = p.ingest_directory(max_replays=999999, sort="newest")
+            stats_md = build_replay_stats_md()
+            msg = f"📥 Ingested ALL **{res['parsed_files']}** replays ({res['total_frames']:,} frames) in {res['elapsed_seconds']:.2f}s."
+            return stats_md, msg
 
-            for f in uploaded_files:
-                # Robust path resolution for Gradio file objects
-                if isinstance(f, str):
-                    fpath = f
-                elif isinstance(f, dict):
-                    fpath = f.get("path") or f.get("name") or ""
-                elif hasattr(f, "path") and f.path:
-                    fpath = f.path
-                elif hasattr(f, "name") and f.name:
-                    fpath = f.name
-                else:
-                    fpath = str(f)
-
-                if not os.path.exists(fpath):
-                    errors.append(f"File not found: {fpath}")
-                    continue
-
-                ext = os.path.splitext(fpath)[1].lower()
-                try:
-                    if ext == ".zip":
-                        count, frames_cnt = p.ingest_zip(fpath)
-                        if count > 0:
-                            file_count += count
-                            total_frames += frames_cnt
-                        else:
-                            errors.append(f"No .replay files found inside {os.path.basename(fpath)}")
-                    else:
-                        frames = p._parse_file(fpath)
-                        if frames and len(frames["ball_pos"]) > 0:
-                            file_count += 1
-                            total_frames += len(frames["ball_pos"])
-                            if p.states_buffer is not None:
-                                for k in p.states_buffer:
-                                    p.states_buffer[k] = np.vstack([p.states_buffer[k], frames[k]])
-                            else:
-                                p.states_buffer = frames
-                        else:
-                            errors.append(f"Could not parse valid telemetry from {os.path.basename(fpath)}")
-                except Exception as e:
-                    errors.append(f"{os.path.basename(fpath)}: {e}")
-
-            if file_count > 0:
-                p.save_pool()
-                stats_html = build_replay_stats_md()
-                msg = f"""
-                <div class="status-callout-box" style="border-left-color: #4ade80;">
-                    <span style="color: #4ade80; font-weight: 700; margin-right: 8px;">INGESTION COMPLETE:</span>
-                    <span>Successfully parsed & ingested <b>{file_count}</b> replays (<b style="color: #38bdf8;">{total_frames:,}</b> frames)!</span>
-                </div>
-                """
-                return stats_html, msg
-
-            stats_html = build_replay_stats_md()
-            err_msg = " | ".join(errors) if errors else "No valid .replay, .zip, or .npz data extracted."
-            msg = f"""
-            <div class="status-callout-box" style="border-left-color: #f87171;">
-                <span style="color: #f87171; font-weight: 700; margin-right: 8px;">ERROR:</span>
-                <span>{err_msg}</span>
-            </div>
-            """
-            return stats_html, msg
-
-        upload_ingest_btn.click(
-            fn=on_upload_ingest,
-            inputs=[replay_upload_box],
-            outputs=[replay_stats_box, ingestion_status_box]
+        ingest_all_btn.click(
+            fn=on_ingest_all_replays,
+            inputs=[demos_dir_input],
+            outputs=[replay_stats_box, replays_status_box]
         )
 
         def on_clear_replays():
             p = ReplayParser()
             p.clear_pool()
-            stats_html = build_replay_stats_md()
-            msg = """
-            <div class="status-callout-box" style="border-left-color: #facc15;">
-                <span style="color: #facc15; font-weight: 700; margin-right: 8px;">POOL CLEARED:</span>
-                <span>Ingested replay dataset pool has been completely reset.</span>
-            </div>
-            """
-            return stats_html, msg
+            stats_md = build_replay_stats_md()
+            return stats_md, "🗑️ Replay dataset pool cleared."
 
-        clear_replays_btn.click(
+        clear_pool_btn.click(
             fn=on_clear_replays,
-            outputs=[replay_stats_box, ingestion_status_box]
+            outputs=[replay_stats_box, replays_status_box]
         )
 
-        # Pretrainer Callbacks
-        bc_trainer = BehavioralCloningTrainer()
+        # Upload Ingest Callback
+        def on_upload_ingest(uploaded_files):
+            if not uploaded_files:
+                return build_replay_stats_md(), "⚠️ No files uploaded."
+            p = ReplayParser()
+            total_added = 0
+            file_paths = [f.name if hasattr(f, "name") else str(f) for f in uploaded_files]
+            for fp in file_paths:
+                dest = os.path.join(p.demo_dir, os.path.basename(fp))
+                try:
+                    import shutil
+                    shutil.copy2(fp, dest)
+                    total_added += 1
+                except Exception:
+                    pass
+            res = p.ingest_directory(max_replays=total_added, sort="newest")
+            stats_md = build_replay_stats_md()
+            msg = f"📤 Uploaded & Ingested **{total_added}** replays ({res['total_frames']:,} frames) into dataset."
+            return stats_md, msg
 
+        replay_uploader.upload(
+            fn=on_upload_ingest,
+            inputs=[replay_uploader],
+            outputs=[replay_stats_box, upload_status_box]
+        )
+
+        # BC Pretrainer Callbacks
         def on_run_pretraining(epochs, lr, batch_size, base_ckpt):
-            if bc_trainer.is_running():
-                return """
-                <div class="status-callout-box" style="border-left-color: #facc15;">
-                    <span style="color: #facc15; font-weight: 700; margin-right: 8px;">BUSY:</span>
-                    <span>Pretrainer is already running!</span>
-                </div>
-                """
-
-            chosen_ckpt = None
-            if base_ckpt and not base_ckpt.startswith("Initialize Fresh Model"):
-                chosen_ckpt = base_ckpt.split(" ")[0]
-
+            chosen_ckpt = base_ckpt.split(" ")[0] if base_ckpt and not base_ckpt.startswith("checkpoints/latest_model.pt (none") else None
             res = bc_trainer.train(
                 epochs=int(epochs),
                 batch_size=int(batch_size),
@@ -1890,7 +1752,9 @@ def create_ui():
             outputs=[pretrain_status_box]
         )
 
-        # Unit Tests Runner Callback
+        # -------------------------------------------------------------
+        # TAB 4: DIAGNOSTICS & EVALUATION HANDLERS
+        # -------------------------------------------------------------
         def on_run_unit_tests():
             res = run_all_unit_tests(verbose=True)
             res_md = format_test_results_markdown(res)
@@ -1901,7 +1765,68 @@ def create_ui():
             outputs=[unit_tests_overview_md, unit_tests_stdout]
         )
 
-        # Comprehensive Diagnostics Export Callback
+        def on_scan_checkpoints():
+            ckpts = get_available_checkpoints()
+            return gr.Dropdown(choices=ckpts, value=ckpts[0] if ckpts else None), gr.Dropdown(choices=ckpts, value=ckpts[0] if ckpts else None)
+
+        refresh_ckpts_btn.click(fn=on_scan_checkpoints, outputs=[ckpt_dropdown, orange_ckpt_dropdown])
+
+        def on_opp_mode_change(mode):
+            return gr.Dropdown(visible=(mode == "Another Checkpoint"))
+
+        opponent_mode.change(fn=on_opp_mode_change, inputs=[opponent_mode], outputs=[orange_ckpt_dropdown])
+
+        def on_run_simulation(blue_choice, opp_mode, orange_choice, steps):
+            blue_path = blue_choice.split(" ")[0] if blue_choice else None
+            if not blue_path or not os.path.exists(blue_path):
+                blue_path = "checkpoints/latest_model.pt" if os.path.exists("checkpoints/latest_model.pt") else None
+
+            orange_path = None
+            if opp_mode == "Self-Play (Bot vs Itself)":
+                orange_path = blue_path
+            elif opp_mode == "Another Checkpoint":
+                orange_path = orange_choice.split(" ")[0] if orange_choice else None
+                if not orange_path or not os.path.exists(orange_path):
+                    orange_path = "checkpoints/latest_model.pt" if os.path.exists("checkpoints/latest_model.pt") else None
+            elif opp_mode == "Baseline Bot (Chase Ball Heuristic)":
+                orange_path = "baseline"
+
+            res = simulate_match(
+                blue_checkpoint=blue_path,
+                orange_checkpoint=orange_path,
+                steps=int(steps),
+                render_field=True
+            )
+
+            stats = res["stats"]
+            summary_md = f"""
+            #### 📊 Headless Match Simulation Results
+            * **Simulated Duration:** `{stats['total_steps']}` steps ({stats['total_steps']/15.0:.1f}s match time)
+            * **Score:** Blue **{stats['goals_blue']}** - **{stats['goals_orange']}** Orange
+            * **Blue Ball Touches:** **{stats['touches_blue']}** | **Orange Ball Touches:** **{stats['touches_orange']}**
+            * **Blue Net Reward:** `{stats['rewards_blue']:+.2f}` | **Orange Net Reward:** `{stats['rewards_orange']:+.2f}`
+            """
+            return res["plot"], res["reward_plot"], summary_md
+
+        run_sim_btn.click(
+            fn=on_run_simulation,
+            inputs=[ckpt_dropdown, opponent_mode, orange_ckpt_dropdown, sim_steps_slider],
+            outputs=[visualizer_plot, reward_breakdown_plot, sim_stats_box]
+        )
+
+        def on_refresh_diagnostics(window_size):
+            telem = extract_rolling_telemetry("logs/history.jsonl", window=int(window_size))
+            coach_md = generate_ai_coach_diagnostics(telem)
+            action_fig = render_action_biases_plot(telem)
+            pos_fig = render_positional_biases_plot(telem)
+            return coach_md, action_fig, pos_fig
+
+        refresh_diag_btn.click(
+            fn=on_refresh_diagnostics,
+            inputs=[diag_window_slider],
+            outputs=[diag_coach_report, diag_action_plot, diag_position_plot]
+        )
+
         def on_refresh_full_diagnostics():
             overview_md, export_box = build_full_diagnostic_export()
             return overview_md, export_box
@@ -1909,6 +1834,49 @@ def create_ui():
         refresh_snapshot_btn.click(
             fn=on_refresh_full_diagnostics,
             outputs=[diag_overview_md, diag_export_raw]
+        )
+
+        # -------------------------------------------------------------
+        # REAL-TIME BACKGROUND REFRESH TIMER & INITIAL LOAD
+        # -------------------------------------------------------------
+        def on_timer_tick():
+            status = mgr.get_status_info()
+            card_html = build_status_card_html(status)
+            running = status.get("running", False)
+            paused = status.get("paused", False)
+            start_btn_update = gr.update(
+                value="🚀 Start Training" if not running else "🟢 Training Active",
+                variant="primary" if not running else "secondary",
+                interactive=not running
+            )
+            pause_btn_update = gr.update(
+                value="▶️ Resume Training" if paused else "⏸️ Pause Training",
+                variant="primary" if paused else "secondary",
+                interactive=running
+            )
+            stop_btn_update = gr.update(
+                value="🛑 Stop Training",
+                variant="stop" if running else "secondary",
+                interactive=running
+            )
+            logs = mgr.get_logs()
+            plot = render_training_curves_plot()
+            return card_html, start_btn_update, pause_btn_update, stop_btn_update, logs, plot
+
+        refresh_metrics_btn.click(fn=render_training_curves_plot, outputs=[live_metrics_plot])
+        refresh_logs_btn.click(fn=mgr.get_logs, outputs=[console_output])
+        clear_logs_btn.click(fn=lambda: "", outputs=[console_output])
+
+        status_timer = gr.Timer(3.0, active=True)
+        status_timer.tick(
+            fn=on_timer_tick,
+            outputs=[status_card, start_btn, pause_btn, stop_btn, console_output, live_metrics_plot]
+        )
+
+        # Initialize UI on page load
+        demo.load(
+            fn=on_timer_tick,
+            outputs=[status_card, start_btn, pause_btn, stop_btn, console_output, live_metrics_plot]
         )
 
     return demo

@@ -39,9 +39,9 @@ rewards:
   touch_weight: 1.2
 scenarios:
   aerial_prob: 0.08
-  custom_prob: 0.3
+  custom_prob: 0.25
   kickoff_prob: 0.21
   replay_prob: 0.17
-  save_prob: 0.08
-  turnaround_prob: 0.08
-  wall_prob: 0.08
+  save_prob: 0.07
+  turnaround_prob: 0.15
+  wall_prob: 0.07

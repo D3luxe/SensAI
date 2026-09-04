@@ -243,3 +243,117 @@ def generate_ai_coach_diagnostics(telemetry: Dict[str, Any], active_rewards: Dic
             report += f"* {t}\n"
 
     return report
+
+
+def render_training_curves_plot(history_file: str = "logs/history.jsonl", max_points: int = 100) -> plt.Figure:
+    """
+    Renders a 4-panel dark-themed live training progress chart:
+    1. Mean Reward Curve
+    2. Policy & Value Losses
+    3. Policy Entropy (Exploration)
+    4. Throughput (SPS) & Ball Touches
+    """
+    plt.close("all")
+    fig, axes = plt.subplots(2, 2, figsize=(11, 6.0), dpi=100)
+    fig.patch.set_facecolor("#1a202c")
+    for ax in axes.flat:
+        ax.set_facecolor("#2d3748")
+        ax.spines["top"].set_visible(False)
+        ax.spines["right"].set_visible(False)
+        ax.spines["left"].set_color("#4a5568")
+        ax.spines["bottom"].set_color("#4a5568")
+        ax.grid(True, linestyle=":", alpha=0.35, color="#718096")
+        ax.tick_params(colors="#cbd5e0", labelsize=8)
+
+    if not os.path.exists(history_file):
+        for ax in axes.flat:
+            ax.set_axis_off()
+        axes[0, 0].set_axis_on()
+        axes[0, 0].text(0.5, 0.5, "Waiting for Training Data...\n(Metrics will display once training is active)",
+                        color="#a0aec0", fontsize=11, ha="center", va="center")
+        plt.tight_layout()
+        return fig
+
+    records = []
+    try:
+        from collections import deque
+        with open(history_file, "r", encoding="utf-8") as f:
+            lines = deque(f, maxlen=max_points)
+            for line in lines:
+                if line.strip():
+                    try:
+                        records.append(json.loads(line.strip()))
+                    except Exception:
+                        pass
+    except Exception:
+        pass
+
+    if not records:
+        for ax in axes.flat:
+            ax.set_axis_off()
+        axes[0, 0].set_axis_on()
+        axes[0, 0].text(0.5, 0.5, "No Training Data Found", color="#a0aec0", fontsize=11, ha="center", va="center")
+        plt.tight_layout()
+        return fig
+
+    iters = [r.get("iteration", i + 1) for i, r in enumerate(records)]
+    rewards = [r.get("mean_reward", 0.0) for r in records]
+    p_losses = [r.get("policy_loss", 0.0) for r in records]
+    v_losses = [r.get("value_loss", 0.0) for r in records]
+    entropies = [r.get("entropy", 0.0) for r in records]
+    sps_vals = [r.get("sps", 0) for r in records]
+    touches = [r.get("ball_touches", 0.0) for r in records]
+
+    # Panel 1: Mean Reward
+    ax_rew = axes[0, 0]
+    ax_rew.plot(iters, rewards, color="#38bdf8", linewidth=1.8, label="Mean Reward")
+    if len(rewards) >= 5:
+        # 5-step rolling moving average
+        kernel = np.ones(5) / 5.0
+        smooth = np.convolve(rewards, kernel, mode="valid")
+        smooth_iters = iters[len(iters) - len(smooth):]
+        ax_rew.plot(smooth_iters, smooth, color="#0284c7", linewidth=2.5, linestyle="--", alpha=0.85, label="Trend (MA-5)")
+    ax_rew.set_title("Mean Reward per Rollout", color="white", fontsize=10, fontweight="bold", pad=6)
+    ax_rew.set_ylabel("Reward Points", color="#cbd5e0", fontsize=8)
+    ax_rew.legend(loc="upper left", facecolor="#1e293b", edgecolor="#475569", labelcolor="white", fontsize=7)
+
+    # Panel 2: Losses
+    ax_loss = axes[0, 1]
+    ax_loss.plot(iters, p_losses, color="#f87171", linewidth=1.5, label="Policy Loss")
+    ax_loss.set_title("Losses (Policy & Value)", color="white", fontsize=10, fontweight="bold", pad=6)
+    ax_loss.set_ylabel("Policy Loss", color="#f87171", fontsize=8)
+    ax_loss.tick_params(axis="y", labelcolor="#f87171")
+    
+    ax_vloss = ax_loss.twinx()
+    ax_vloss.plot(iters, v_losses, color="#facc15", linewidth=1.5, linestyle=":", label="Value Loss")
+    ax_vloss.set_ylabel("Value Loss", color="#facc15", fontsize=8)
+    ax_vloss.tick_params(axis="y", labelcolor="#facc15", labelsize=8)
+    ax_vloss.spines["top"].set_visible(False)
+    ax_vloss.spines["left"].set_visible(False)
+    ax_vloss.spines["right"].set_color("#4a5568")
+
+    # Panel 3: Policy Entropy
+    ax_ent = axes[1, 0]
+    ax_ent.plot(iters, entropies, color="#c084fc", linewidth=1.8, label="Policy Entropy")
+    ax_ent.set_title("Policy Entropy (Exploration)", color="white", fontsize=10, fontweight="bold", pad=6)
+    ax_ent.set_xlabel("Training Iteration", color="#cbd5e0", fontsize=8)
+    ax_ent.set_ylabel("Entropy", color="#cbd5e0", fontsize=8)
+
+    # Panel 4: SPS Throughput & Ball Touches
+    ax_sps = axes[1, 1]
+    ax_sps.plot(iters, sps_vals, color="#4ade80", linewidth=1.5, label="Throughput (SPS)")
+    ax_sps.set_title("Throughput (SPS) & Ball Touches", color="white", fontsize=10, fontweight="bold", pad=6)
+    ax_sps.set_xlabel("Training Iteration", color="#cbd5e0", fontsize=8)
+    ax_sps.set_ylabel("SPS (Steps/Sec)", color="#4ade80", fontsize=8)
+    ax_sps.tick_params(axis="y", labelcolor="#4ade80")
+
+    ax_tch = ax_sps.twinx()
+    ax_tch.plot(iters, touches, color="#60a5fa", linewidth=1.5, linestyle="--", label="Touches")
+    ax_tch.set_ylabel("Avg Touches", color="#60a5fa", fontsize=8)
+    ax_tch.tick_params(axis="y", labelcolor="#60a5fa", labelsize=8)
+    ax_tch.spines["top"].set_visible(False)
+    ax_tch.spines["left"].set_visible(False)
+    ax_tch.spines["right"].set_color("#4a5568")
+
+    plt.tight_layout()
+    return fig
