@@ -172,7 +172,7 @@ class SenseiRLBot(BaseAgent):
                     self.model.load_state_dict(model_state)
                 else:
                     self.model.load_state_dict(saved_state)
-                self.model.bin_thresh_logits.data = torch.tensor([-2.944, -1.0986, -0.4055], dtype=torch.float32, device=self.device)
+                self.model.bin_thresh_logits.data = torch.tensor([-0.8473, -1.0986, -0.4055], dtype=torch.float32, device=self.device)
                 self.model.debias_symmetric_actions()
                 self.model.eval()
                 self.loaded_ckpt_mtime = os.path.getmtime(ckpt_path) if os.path.exists(ckpt_path) else 0.0
@@ -433,6 +433,13 @@ class SenseiRLBot(BaseAgent):
             #  - Airborne Dodge: Press jump on ticks 0..2 to activate second jump / dodge.
             want_jump = bool(act[5] > 0.0)
             substep_tick = self.ticks_since_last_action  # 0 to 7 within the 15Hz step
+
+            # Low-Speed Turn Jump Suppression:
+            # When nearly stopped on the ground (speed < 250 uu/s) and steering hard (abs(act[1]) > 0.6),
+            # suppress accidental jump triggers so the bot turns smoothly on wheels instead of tumbling in place.
+            car_speed_2d = float(np.linalg.norm(car_state.vel[:2]))
+            if is_on_ground and car_speed_2d < 250.0 and abs(act[1]) > 0.6:
+                want_jump = False
 
             if is_on_ground:
                 controller.jump = bool(want_jump and substep_tick <= 3)

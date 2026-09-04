@@ -250,10 +250,18 @@ class PlayerToBallVelocityReward(BaseReward):
             if is_elevated_aerial or is_ball_infield or is_car_above_ball:
                 delta_dist *= 0.15
 
-        # If car is moving in reverse or executing a turnaround/half-flip towards target, do not damp distance delta
+        # If car is moving in reverse, executing a half-flip, or executing an active dodge/speedflip towards target,
+        # evaluate horizontal travel velocity alignment rather than car nose forward vector:
         car_fwd_vel = float(np.dot(car.vel[:2], car.get_forward_vector()[:2]))
+        car_horiz_speed = float(np.linalg.norm(car.vel[:2]))
+        travel_unit_h = car.vel[:2] / max(1e-4, car_horiz_speed)
+        travel_align_to_ball = float(np.dot(travel_unit_h, unit_to_ball[:2]))
+
+        # Front flips, diagonal speedflips, and dodges temporarily pitch the nose away while rocketing forward:
+        is_dodging_toward_ball = bool(car.just_dodged and car_horiz_speed > 250.0 and travel_align_to_ball > 0.2)
         is_reversing_to_target = (car_fwd_vel < -100.0 or delta_dist > 0.0) and float(np.dot(car.vel[:2], unit_to_ball[:2])) > 100.0
-        if fwd_alignment < 0.0 and delta_dist > 0.0 and not is_reversing_to_target:
+
+        if fwd_alignment < 0.0 and delta_dist > 0.0 and not (is_reversing_to_target or is_dodging_toward_ball):
             delta_dist = delta_dist * max(0.0, fwd_alignment + 1.0) * 0.2
 
         # 3. Strike-Zone Velocity Matching & Brake Incentives (< 450 uu)
@@ -301,7 +309,8 @@ class PlayerToBallVelocityReward(BaseReward):
             if not (is_wrong_side and car_vy_defend > 100.0):
                 speed_taper = min(1.0, max(0.0, (curr_dist - 180.0) / 320.0))
                 fwd_speed_to_ball = max(0.0, float(np.dot(car.vel, unit_to_ball)))
-                vel_toward_ball = (fwd_speed_to_ball / 2300.0) * 0.20 * max(0.0, fwd_alignment) * speed_taper
+                effective_alignment = travel_align_to_ball if is_dodging_toward_ball else fwd_alignment
+                vel_toward_ball = (fwd_speed_to_ball / 2300.0) * 0.20 * max(0.0, effective_alignment) * speed_taper
                 if is_on_wall and (is_ball_infield or is_car_above_ball or is_elevated_aerial):
                     vel_toward_ball *= 0.15
 
@@ -461,6 +470,7 @@ class JumpBridgeReward(BaseReward):
         self._prev_has_flip: Dict[int, bool] = {}
         self._prev_touches: Dict[int, int] = {}
         self._prev_vel: Dict[int, np.ndarray] = {}
+        self._prev_pos_z: Dict[int, float] = {}
         self._challenge_jump_active: Dict[int, bool] = {}
 
     def reset(self, initial_state: RocketSimArena):
@@ -468,6 +478,7 @@ class JumpBridgeReward(BaseReward):
         self._prev_has_flip = {car.id: car.has_flip for car in initial_state.cars}
         self._prev_touches = {car.id: car.ball_touches for car in initial_state.cars}
         self._prev_vel = {car.id: car.vel.copy() for car in initial_state.cars}
+        self._prev_pos_z = {car.id: float(car.pos[2]) for car in initial_state.cars}
         self._challenge_jump_active = {car.id: False for car in initial_state.cars}
 
     def get_reward(self, car: CarState, arena: RocketSimArena, action: np.ndarray, is_goal: bool, scoring_team: Optional[int]) -> float:
@@ -482,6 +493,9 @@ class JumpBridgeReward(BaseReward):
 
         prev_vel = self._prev_vel.get(car.id, car.vel)
         self._prev_vel[car.id] = car.vel.copy()
+
+        prev_pos_z = self._prev_pos_z.get(car.id, float(car.pos[2]))
+        self._prev_pos_z[car.id] = float(car.pos[2])
 
         car_to_ball = arena.ball.pos - car.pos
         dist = float(np.linalg.norm(car_to_ball))
@@ -580,10 +594,16 @@ class JumpBridgeReward(BaseReward):
         else:
             dodge_align = 0.0
 
+        car_speed_horiz = float(np.linalg.norm(car.vel[:2]))
         if not car.on_ground and prev_flip and not car.has_flip:
+            # Traversal flips downfield require forward or backward movement (speed > 350 uu/s)
+            # to prevent spamming flips in place from a stop or slow turn.
+            # Close strike-zone dodges (dist <= 650 uu) allow stationary challenge 50/50 jumps.
+            is_open_field = bool(dist > 650.0)
+            has_traversal_speed = bool(car_speed_horiz > 350.0)
             if stick_deflection >= 0.30 and dodge_align > 0.25:
-                # Directional dodge strictly aligned with tactical objective (including backward half-flip dodges)
-                reward += self.weight * dodge_align * (0.4 + 0.3 * stick_deflection)
+                if (not is_open_field) or has_traversal_speed:
+                    reward += self.weight * dodge_align * (0.4 + 0.3 * stick_deflection)
             elif ball_z > 350.0 and forward_alignment > 0.30:
                 # Double jump for high aerial balls
                 reward += self.weight * forward_alignment * 0.4
@@ -594,11 +614,18 @@ class JumpBridgeReward(BaseReward):
         tactical_speed_prev = float(np.dot(prev_vel[:2], tactical_dir[:2]))
         delta_tactical_speed = tactical_speed_curr - tactical_speed_prev
 
-        is_landing_or_dodge = bool((not prev_ground and car.on_ground) or car.just_dodged)
-        if is_landing_or_dodge and delta_tactical_speed > 60.0 and tactical_speed_curr > 500.0:
-            speed_factor = min(1.0, tactical_speed_curr / 2200.0)
-            impulse_factor = min(1.0, delta_tactical_speed / 400.0)
-            reward += self.weight * 0.8 * impulse_factor * speed_factor
+        # Explicit Wavedash Detection:
+        # A wavedash occurs when dodging while very low to the turf (prev_pos_z < 55 uu)
+        # and immediately contacting turf, slamming the flip impulse into ground acceleration (> 120 uu/s)
+        is_wavedash = bool(car.on_ground and prev_pos_z < 55.0 and car.just_dodged and delta_tactical_speed > 120.0)
+        if is_wavedash:
+            reward += self.weight * 1.5 * min(1.0, delta_tactical_speed / 400.0)
+        else:
+            is_landing_or_dodge = bool((not prev_ground and car.on_ground) or car.just_dodged)
+            if is_landing_or_dodge and delta_tactical_speed > 60.0 and tactical_speed_curr > 500.0:
+                speed_factor = min(1.0, tactical_speed_curr / 2200.0)
+                impulse_factor = min(1.0, delta_tactical_speed / 400.0)
+                reward += self.weight * 0.8 * impulse_factor * speed_factor
 
         return float(reward)
 
@@ -810,6 +837,7 @@ class AirRollRecoveryReward(BaseReward):
         self._airborne_recovery_total: Dict[int, float] = {}
         self._wall_landed: Dict[int, bool] = {}
         self._halfflip_cancel_executed: Dict[int, bool] = {}
+        self._halfflip_cancel_total: Dict[int, float] = {}
 
     def reset(self, initial_state: RocketSimArena):
         self._prev_up_z = {car.id: float(car.get_up_vector()[2]) for car in initial_state.cars}
@@ -819,6 +847,7 @@ class AirRollRecoveryReward(BaseReward):
         self._airborne_recovery_total = {car.id: 0.0 for car in initial_state.cars}
         self._wall_landed = {car.id: False for car in initial_state.cars}
         self._halfflip_cancel_executed = {car.id: False for car in initial_state.cars}
+        self._halfflip_cancel_total = {car.id: 0.0 for car in initial_state.cars}
 
     def get_reward(self, car: CarState, arena: RocketSimArena, action: np.ndarray, is_goal: bool, scoring_team: Optional[int]) -> float:
         if car.on_ground:
@@ -829,6 +858,7 @@ class AirRollRecoveryReward(BaseReward):
             self._airborne_recovery_total[car.id] = 0.0
             self._wall_landed[car.id] = False
             self._halfflip_cancel_executed[car.id] = False
+            self._halfflip_cancel_total[car.id] = 0.0
             return 0.0
 
         air_ticks = self._airborne_ticks.get(car.id, 0) + 1
@@ -901,20 +931,23 @@ class AirRollRecoveryReward(BaseReward):
                 total_reward += yaw_rec
                 self._airborne_recovery_total[car.id] = self._airborne_recovery_total.get(car.id, 0.0) + yaw_rec
 
-            # 1c. Active Half-Flip Flip-Cancel & Air-Roll (Freezing flip rotation & rolling wheels down)
-            # When inverted following a backward dodge or during backward retreat:
-            # Actively reward holding forward pitch (pitch_input > 0.3) to cancel the flip rotation,
-            # and actively reward air roll (abs(roll_input) > 0.25) to right the vehicle.
-            if air_ticks <= 18 and up_z < 0.35 and speed_horiz > 300.0:
+            # 1c. Dedicated Half-Flip Flip-Cancel & Air-Roll Bonus Budget
+            # Has its own independent budget (0.60) so passive delta_up cannot starve the active cancel!
+            cancel_spent = self._halfflip_cancel_total.get(car.id, 0.0)
+            cancel_budget = max(0.0, 0.60 - cancel_spent)
+            if air_ticks <= 18 and up_z < 0.40 and speed_horiz > 250.0:
+                step_cancel_reward = 0.0
                 if pitch_input > 0.3:
-                    cancel_bonus = min(rec_budget, (pitch_input * 0.40) * urgency)
-                    total_reward += cancel_bonus
-                    rec_budget = max(0.0, rec_budget - cancel_bonus)
+                    c_rew = min(cancel_budget, (pitch_input * 0.30) * urgency)
+                    step_cancel_reward += c_rew
+                    cancel_budget = max(0.0, cancel_budget - c_rew)
                     self._halfflip_cancel_executed[car.id] = True
                 if abs(roll_input) > 0.25:
-                    roll_bonus = min(rec_budget, (abs(roll_input) * 0.40) * urgency)
-                    total_reward += roll_bonus
-                    rec_budget = max(0.0, rec_budget - roll_bonus)
+                    r_rew = min(cancel_budget, (abs(roll_input) * 0.30) * urgency)
+                    step_cancel_reward += r_rew
+                    cancel_budget = max(0.0, cancel_budget - r_rew)
+                total_reward += step_cancel_reward
+                self._halfflip_cancel_total[car.id] = cancel_spent + step_cancel_reward
 
             # Reset disorientation once upright attitude is fully restored
             if up_z > 0.85 and curr_heading > 0.85:
@@ -927,14 +960,14 @@ class AirRollRecoveryReward(BaseReward):
                     if speed_horiz > 300.0 and curr_heading > 0.30:
                         total_reward += (curr_heading * 0.5)
                         # 180° Turnaround Half-Flip Completion Bonus:
-                        if self._halfflip_cancel_executed.get(car.id, False) and curr_heading > 0.60 and speed_horiz > 600.0:
-                            total_reward += 0.80
-                    elif speed_horiz > 300.0 and curr_heading < -0.50:
-                        if float(action[0]) < -0.1 or float(action[7]) > 0.0:
-                            total_reward += (abs(curr_heading) * 0.5)
+                        # Massive +1.50 completion bonus when bot executes a flip-cancel turnaround
+                        # and lands cleanly facing forward in the direction of flight!
+                        if self._halfflip_cancel_executed.get(car.id, False) and curr_heading > 0.60 and speed_horiz > 400.0:
+                            total_reward += 1.50
                 # Consume disorientation so touchdown reward only fires once per landing
                 self._was_disoriented[car.id] = False
                 self._halfflip_cancel_executed[car.id] = False
+                self._halfflip_cancel_total[car.id] = 0.0
 
                 # Upside down landing crash penalty (forgiven during active flip-cancels & quick half-flip air-rolls)
                 if up_z < 0.0 and not is_active_halfflip_cancel:
