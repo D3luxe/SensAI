@@ -444,7 +444,22 @@ class SenseiRLBot(BaseAgent):
             if is_on_ground:
                 controller.jump = bool(want_jump and substep_tick <= 3)
             else:
-                controller.jump = bool(want_jump and has_flip and substep_tick <= 2)
+                # Airborne Dodge / Second Jump:
+                # RocketSim and Rocket League physics require jump release while airborne before second jump.
+                # When jumping off the ground, wheels leave turf on ticks 1-2.
+                # Pressing jump on ticks 2..5 guarantees the wheel-lift check passes and executes the dodge.
+                controller.jump = bool(want_jump and has_flip and 2 <= substep_tick <= 5)
+
+                # Dodge Deadzone Compensation:
+                # Rocket League and RocketSim require analog stick deflection >= 0.50 to execute a directional flip/dodge.
+                # When an airborne dodge is triggered, scale directional stick deflection past the deadzone threshold
+                # so continuous policy outputs execute genuine forward, backward, or diagonal dodges instead of empty double jumps.
+                if controller.jump:
+                    stick_mag = math.hypot(controller.pitch, controller.yaw)
+                    if stick_mag > 0.08:
+                        scale = max(1.0, 0.90 / stick_mag)
+                        controller.pitch = float(np.clip(controller.pitch * scale, -1.0, 1.0))
+                        controller.yaw = float(np.clip(controller.yaw * scale, -1.0, 1.0))
 
             # Ground stabilization:
             # When driving on the ground without jumping, keep pitch, yaw, and roll neutral

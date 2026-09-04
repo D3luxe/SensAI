@@ -459,10 +459,17 @@ class RocketSimArena:
                         yaw_val = -float(act[3]) if want_jump else 0.0
                         roll_val = -float(act[4]) if want_jump else 0.0
                     else:
-                        jump_val = bool(want_jump and not has_flip and tick <= 2)
+                        jump_val = bool(want_jump and not has_flip and 2 <= tick <= 5)
                         pitch_val = -float(act[2])
                         yaw_val = -float(act[3])
                         roll_val = -float(act[4])
+                        # Dodge deadzone scaling when dodge is triggered
+                        if jump_val:
+                            stick_mag = math.hypot(pitch_val, yaw_val)
+                            if stick_mag > 0.08:
+                                scale = max(1.0, 0.90 / stick_mag)
+                                pitch_val = float(np.clip(pitch_val * scale, -1.0, 1.0))
+                                yaw_val = float(np.clip(yaw_val * scale, -1.0, 1.0))
 
                     hnd_val = bool(act[7] > 0.0 and is_on_gnd)
                     r_car.set_controls(rsim.CarControls(
