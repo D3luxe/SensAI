@@ -74,8 +74,14 @@ class TestRocketLeagueEnvironment(unittest.TestCase):
     def test_mini_ppo_training_run(self):
         import tempfile
         with tempfile.TemporaryDirectory() as tmpdir:
-            trainer = PPOTrainer(config_path="config/default_config.yaml")
-            trainer.save_dir = tmpdir
+            import yaml
+            with open("config/default_config.yaml", "r") as f:
+                cfg = yaml.safe_load(f)
+            cfg["logging"]["save_dir"] = tmpdir
+            cfg_path = os.path.join(tmpdir, "test_config.yaml")
+            with open(cfg_path, "w") as f:
+                yaml.dump(cfg, f)
+            trainer = PPOTrainer(config_path=cfg_path)
             # Run 2 training iterations
             trainer.train(max_iterations=2)
 

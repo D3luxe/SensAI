@@ -212,10 +212,15 @@ class BehavioralCloningTrainer:
                             boost = 1.0
                         if (abs(ball.pos[0]) < 50.0 and abs(ball.pos[1]) < 50.0) and 0.4 < local_ball_x < 1.1:
                             jump = 1.0
-                            pitch = 1.0  # Full front-flip speed dodge (+1.0) into the ball
+                            pitch = 1.0  # Full front-flip speed dodge (+1.0) into kickoff ball
                         elif ball.pos[2] > 250.0 and local_ball_x > 0.2:
                             jump = 1.0  # Aerial liftoff jump
                             pitch = -1.0  # Full nose-up climb (-1.0) into aerial ball
+                        elif ball.pos[2] < 150.0 and local_ball_x > 0.5 and abs(local_ball_y) < 0.25 and float(np.linalg.norm(car.vel)) > 600.0:
+                            # Open-field speed-flip traversal toward loose ball
+                            jump = 1.0
+                            pitch = 1.0
+                            yaw = float(np.clip(local_ball_y * 2.0, -0.4, 0.4))
                     else:
                         pitch = float(np.clip(-local_ball_z * 3.0, -1.0, 1.0))
                         yaw = steer

@@ -131,9 +131,9 @@ class InverseDynamicsSolver:
             steer_act = 0.0
             handbrake_act = -1.0
 
-            # Pitch (in RocketSim/RLGym: -1.0 is nose up / backflip, +1.0 is nose down / frontflip / flip-cancel)
+            # Pitch (in SensAI action space: -1.0 is nose up / climb, +1.0 is nose down / frontflip / flip-cancel)
             pitch_rate = float(measured_omega[0])
-            pitch_act = float(np.clip(pitch_rate / PITCH_TORQUE, -1.0, 1.0))
+            pitch_act = float(np.clip(-pitch_rate / PITCH_TORQUE, -1.0, 1.0))
 
             # Flip-Cancel Detection:
             # If the car is inverted (up vector z < 0.2) and pitch rate is near-zero while having backward/downward flight momentum,
@@ -155,18 +155,21 @@ class InverseDynamicsSolver:
         if on_ground_t and not on_ground_next and vel_next[2] > 200.0:
             jump_act = 1.0
         elif not on_ground_t and not on_ground_next:
-            # Airborne dodge / double jump impulse (sudden non-gravitational velocity spike > 400 uu/s)
+            # Airborne dodge / double jump impulse (sudden non-gravitational velocity spike > 300 uu/s)
             delta_v_mag = float(np.linalg.norm(vel_next - vel_t))
-            if delta_v_mag > 400.0:
+            if delta_v_mag > 300.0:
                 jump_act = 1.0
-                if a_fwd > 500.0:
+                # Forward / Backward Pitch component (front-flip or backflip)
+                if a_fwd > 300.0:
                     pitch_act = 1.0   # Front-flip dodge (nose down +1)
-                elif a_fwd < -500.0:
+                elif a_fwd < -300.0:
                     pitch_act = -1.0  # Backflip dodge (nose up -1)
-                elif a_right > 500.0:
+
+                # Lateral / Diagonal Yaw & Roll component (independent from pitch to capture speed-flips!)
+                if a_right > 300.0:
                     yaw_act = 1.0     # Right side dodge
                     roll_act = 1.0
-                elif a_right < -500.0:
+                elif a_right < -300.0:
                     yaw_act = -1.0    # Left side dodge
                     roll_act = -1.0
 

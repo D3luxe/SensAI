@@ -423,20 +423,16 @@ class TouchBallReward(BaseReward):
                 rel_speed = float(np.linalg.norm(car.vel - arena.ball.vel))
                 is_gentle_ground_push = bool(car.on_ground and ball_z < 130.0 and rel_speed < 150.0)
 
+                # Power and directional strike bonus:
+                # Rewards solid impact velocity transferred into the ball toward the opponent net
                 power_bonus = 0.0
-                if goal_alignment > 0.4 and not is_gentle_ground_push:
-                    power_bonus = min(1.2, max(ball_speed, rel_speed) / 1800.0)
+                if goal_alignment > 0.2 and not is_gentle_ground_push:
+                    power_bonus = min(1.5, max(ball_speed, rel_speed) / 1500.0)
 
-                if is_gentle_ground_push:
-                    control_bonus = 0.0
-                    base_touch = 0.25
-                else:
-                    control_bonus = max(0.0, 1.0 - (rel_speed / 600.0)) * 0.8
-                    clear_bonus = 0.5 if is_defensive_clear else 0.0
-                    base_touch = 0.8 + clear_bonus
+                clear_bonus = 0.5 if is_defensive_clear else 0.0
+                base_touch = 0.25 if is_gentle_ground_push else (0.8 + clear_bonus)
 
-                tactical_bonus = max(power_bonus, control_bonus)
-                return (self.weight * (base_touch + tactical_bonus) * direction_multiplier * height_multiplier) + airborne_bonus + kickoff_bounty
+                return (self.weight * (base_touch + power_bonus) * direction_multiplier * height_multiplier) + airborne_bonus + kickoff_bounty
 
             # --- CASE 2: Ball hit directed backward toward defending half / goal ---
             else:
@@ -536,6 +532,14 @@ class JumpBridgeReward(BaseReward):
 
         reward = 0.0
 
+        fwd_vec = car.get_forward_vector()
+        right_vec = car.get_right_vector()
+        car_speed_horiz = float(np.linalg.norm(car.vel[:2]))
+        car_fwd_speed = float(np.dot(car.vel[:2], fwd_vec[:2]))
+        pitch_input = float(action[2])
+        yaw_input = float(action[3])
+        stick_deflection = max(abs(pitch_input), abs(yaw_input))
+
         # ── 1. Takeoff Transition (Ground -> Air) ─────────────────────────────
         if prev_ground and not car.on_ground and car.vel[2] > 80.0:
             is_on_wall_zone = bool(abs(car.pos[0]) > 3400.0 or abs(car.pos[1]) > 4400.0)
@@ -543,10 +547,11 @@ class JumpBridgeReward(BaseReward):
             car_boost = float(car.boost)
 
             # 1a. Close-Quarters Strike Liftoff & 50/50 Challenge (dist <= 500 uu, closing toward ball)
+            # Requires neutral or forward pitch (pitch_input >= -0.10) so jumping does not reward backflip braking!
             opponents = [c for c in arena.cars if c.team != car.team and not c.demoed]
             opp_dist_to_ball = min([float(np.linalg.norm(c.pos - arena.ball.pos)) for c in opponents], default=9999.0)
             is_contested_5050 = bool(dist <= 450.0 and opp_dist_to_ball <= 650.0 and ball_z < 220.0 and car.pos[2] < 150.0)
-            is_strike_liftoff = bool(dist <= 500.0 and ball_z < 250.0 and car.pos[2] < 150.0 and forward_alignment > 0.20 and takeoff_closing_vel > 150.0)
+            is_strike_liftoff = bool(dist <= 500.0 and ball_z < 250.0 and car.pos[2] < 150.0 and forward_alignment > 0.20 and takeoff_closing_vel > 150.0 and pitch_input >= -0.10)
 
             if is_contested_5050 or is_strike_liftoff:
                 self._challenge_jump_active[car.id] = True
@@ -574,8 +579,12 @@ class JumpBridgeReward(BaseReward):
                     # Hopeless floor takeoff under high ball with low/no boost
                     reward += -0.15
 
-            # 1d. Open-field ground traversal (dist > 650 uu, ball grounded)
-            # Liftoff alone gets 0.0 (prevents open-field bunny hopping)
+            # 1d. Open-field ground traversal & downfield sprint (dist > 700 uu, ball grounded)
+            # Rewards initiating a forward jump when running downfield with forward stick deflection (speed-flip or front-flip prep)
+            elif not is_aerial_ball and not is_on_wall_zone and dist > 700.0 and forward_alignment > 0.50:
+                is_forward_flip_prep = bool(pitch_input > 0.15 or (pitch_input > 0.10 and abs(yaw_input) > 0.15))
+                if is_forward_flip_prep and car_fwd_speed > 500.0:
+                    reward += self.weight * 0.40 * forward_alignment
 
         # ── 2. Airborne 50/50 Challenge Completion Bonus ──────────────────────
         if not car.on_ground and self._challenge_jump_active.get(car.id, False):
@@ -587,18 +596,14 @@ class JumpBridgeReward(BaseReward):
             self._challenge_jump_active[car.id] = False
 
         # ── 3. Airborne Dodge / Flip & Traversal Impulse ──────────────────────
-        pitch_input = float(action[2])
-        yaw_input = float(action[3])
-        stick_deflection = max(abs(pitch_input), abs(yaw_input))
+        is_executing_dodge = bool(not car.on_ground and prev_flip and not car.has_flip)
 
         # Joystick-Only Dodge Impulse Reconstruction:
         # In Rocket League, flip/dodge direction is governed solely by joystick pitch (action[2]) and yaw (action[3]).
         # Throttle/brake and air roll have NO influence on dodge impulse direction.
-        fwd_vec = car.get_forward_vector()
-        right_vec = car.get_right_vector()
         dodge_dir_local = np.array([
-            1.0 if pitch_input > 0.3 else (-1.0 if pitch_input < -0.3 else 0.0),
-            1.0 if yaw_input > 0.3 else (-1.0 if yaw_input < -0.3 else 0.0),
+            1.0 if pitch_input > 0.25 else (-1.0 if pitch_input < -0.25 else 0.0),
+            1.0 if yaw_input > 0.25 else (-1.0 if yaw_input < -0.25 else 0.0),
             0.0
         ], dtype=np.float32)
         dodge_norm = float(np.linalg.norm(dodge_dir_local))
@@ -608,20 +613,37 @@ class JumpBridgeReward(BaseReward):
         else:
             dodge_align = 0.0
 
-        car_speed_horiz = float(np.linalg.norm(car.vel[:2]))
-        car_fwd_speed = float(np.dot(car.vel[:2], fwd_vec[:2]))
-        if not car.on_ground and prev_flip and not car.has_flip:
-            # Traversal flips downfield require forward or backward movement (speed > 350 uu/s)
-            # to prevent spamming flips in place from a stop or slow turn.
-            # Close strike-zone dodges (dist <= 650 uu) allow stationary challenge 50/50 jumps.
+        # Strict Backflip Penalization:
+        # Backflips while moving forward or facing the ball destroy forward momentum and tumble.
+        # Only half-flips from genuine reverse (car_fwd_speed < -150.0) are valid backflips.
+        if is_executing_dodge and pitch_input < -0.20:
+            if car_fwd_speed > 100.0 or forward_alignment > 0.15:
+                reward -= self.weight * 0.80  # Strict penalty against forward backflips
+            elif is_wrong_side and car_fwd_speed > 100.0:
+                reward -= self.weight * 0.60  # Penalize backflips when retreating while driving forward
+
+        if is_executing_dodge:
             is_open_field = bool(dist > 650.0)
             has_traversal_speed = bool(car_speed_horiz > 350.0)
-            # Backflip traversal restriction: do NOT reward backflips for travel when already driving forward (car_fwd_speed > 250)
-            # (prevents panic backflipping when rushing back or overshooting). Backflips for traversal are only for half-flips from reverse.
-            is_forward_backflip = bool(is_open_field and pitch_input < -0.3 and car_fwd_speed > 250.0)
-            if stick_deflection >= 0.30 and dodge_align > 0.25 and not is_forward_backflip:
+            is_forward_backflip = bool(pitch_input < -0.20 and (car_fwd_speed > 100.0 or forward_alignment > 0.15))
+
+            if stick_deflection >= 0.25 and dodge_align > 0.20 and not is_forward_backflip:
                 if (not is_open_field) or has_traversal_speed:
-                    reward += self.weight * dodge_align * (0.4 + 0.3 * stick_deflection)
+                    reward += self.weight * dodge_align * (0.5 + 0.3 * stick_deflection)
+
+                    # Dedicated Forward & Diagonal Traversal Flip Incentive:
+                    # Forward flip (pitch > 0.25) or diagonal speed-flip (pitch > 0.15, |yaw| > 0.15)
+                    is_forward_flip = bool(pitch_input > 0.25)
+                    is_diagonal_flip = bool(pitch_input > 0.15 and abs(yaw_input) > 0.15)
+                    if (is_forward_flip or is_diagonal_flip) and forward_alignment > 0.30:
+                        speed_progression = min(1.0, max(0.2, car_fwd_speed / 1800.0))
+                        diag_bonus = 0.50 if is_diagonal_flip else 0.25
+                        reward += self.weight * (0.8 * speed_progression + diag_bonus) * forward_alignment
+
+                    # Kickoff Speed-Flip / Dodge Bounty:
+                    is_kickoff = bool(abs(arena.ball.pos[0]) < 50.0 and abs(arena.ball.pos[1]) < 50.0 and arena.ball.pos[2] < 120.0 and float(np.linalg.norm(arena.ball.vel)) < 100.0)
+                    if is_kickoff and dist > 800.0 and (is_forward_flip or is_diagonal_flip):
+                        reward += self.weight * 1.50
             elif ball_z > 350.0 and forward_alignment > 0.30:
                 # Double jump for high aerial balls
                 reward += self.weight * forward_alignment * 0.4

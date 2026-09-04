@@ -260,9 +260,47 @@ class TurnaroundRecoverySetter(BaseStateSetter):
     def reset(self, rsim_arena: Any, num_players: int) -> None:
         target_team = random.choice([0, 1])
         sign = 1.0 if target_team == 0 else -1.0
-        mode = random.choice(["turnaround_sprint", "wrong_side_dribble", "reverse_halfflip", "midflip_inverted"])
+        mode = random.choice(["turnaround_sprint", "wrong_side_dribble", "reverse_halfflip", "midflip_inverted", "downfield_speedflip_sprint"])
 
-        if mode == "wrong_side_dribble":
+        if mode == "downfield_speedflip_sprint":
+            # Scenario E: Downfield breakaway / speed-flip sprint
+            # Ball rolling fast downfield toward opponent goal, car chasing from behind.
+            # Directly trains forward dodges, diagonal speed-flips, and forward traversal acceleration.
+            bx = random.uniform(-1000, 1000)
+            by = sign * random.uniform(1000, 2500)
+            bz = 93.15
+
+            bs = rsim_arena.ball.get_state()
+            bs.pos = rsim.Vec(bx, by, bz)
+            bs.vel = rsim.Vec(random.uniform(-100, 100), sign * random.uniform(600, 1300), 0)
+            bs.ang_vel = rsim.Vec(0, 0, 0)
+            rsim_arena.ball.set_state(bs)
+
+            for i, car in enumerate(rsim_arena.get_cars()):
+                cs = car.get_state()
+                cs.boost = random.uniform(20.0, 50.0)
+                team = i % 2
+
+                if team == target_team:
+                    # Car placed 2000-3500 uu behind ball facing directly toward attacking net
+                    cx = bx + random.uniform(-200, 200)
+                    cy = by - sign * random.uniform(2000, 3200)
+                    cs.pos = rsim.Vec(cx, cy, 17.0)
+                    yaw = sign * math.pi / 2 + random.uniform(-0.15, 0.15)
+                    cs.rot_mat = rsim.Angle(pitch=0.0, yaw=yaw, roll=0.0).as_rot_mat()
+                    speed = random.uniform(500, 900)
+                    cs.vel = rsim.Vec(math.cos(yaw) * speed, math.sin(yaw) * speed, 0)
+                else:
+                    # Opponent scrambling back on defense
+                    cs.pos = rsim.Vec(random.uniform(-800, 800), by + sign * random.uniform(1000, 1800), 17.0)
+                    yaw = -sign * math.pi / 2
+                    cs.rot_mat = rsim.Angle(pitch=0.0, yaw=yaw, roll=0.0).as_rot_mat()
+                    cs.vel = rsim.Vec(0, -sign * 700, 0)
+
+                cs.ang_vel = rsim.Vec(0, 0, 0)
+                car.set_state(cs)
+
+        elif mode == "wrong_side_dribble":
             # Scenario A: Bot is directly behind the ball facing its own goal
             # Forces policy to brake / peel off rather than accelerating into own net
             bx = random.uniform(-1000, 1000)

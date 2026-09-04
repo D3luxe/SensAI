@@ -474,8 +474,42 @@ class TestRewardAuditFixes(unittest.TestCase):
         act_backflip[2] = -1.0  # Backflip pitch
 
         r = rew.get_reward(car, self.arena, act_backflip, False, None)
-        # The flip traversal bonus should be 0 because car_fwd_speed > 250 and pitch < -0.3
-        self.assertEqual(r, 0.0, f"Backflipping while traveling forward at speed in open field should not be rewarded, got {r}")
+        # The flip traversal bonus should be penalized (<= 0.0) because car_fwd_speed > 250 and pitch < -0.3
+        self.assertLessEqual(r, 0.0, f"Backflipping while traveling forward at speed in open field should be penalized (<= 0.0), got {r}")
+
+    def test_forward_and_diagonal_dodge_traversal_rewarded(self):
+        """Test that forward flips and diagonal speed-flips are actively rewarded during open field traversal."""
+        from env.rewards import JumpBridgeReward
+        from env.physics_engine import CarState
+
+        rew = JumpBridgeReward(weight=0.5)
+        car = CarState(
+            id=0, team=0,
+            pos=np.array([0.0, 0.0, 50.0], dtype=np.float32),
+            vel=np.array([0.0, 1000.0, 0.0], dtype=np.float32),
+            rot=np.array([0.0, math.pi / 2, 0.0], dtype=np.float32),
+            rot_mat=np.array([[0, 1, 0], [-1, 0, 0], [0, 0, 1]], dtype=np.float32),
+            on_ground=False,
+            has_flip=False
+        )
+        self.arena.ball.pos = np.array([0.0, 2500.0, 93.0], dtype=np.float32)
+        self.arena.cars = [car]
+        rew.reset(self.arena)
+        rew._prev_has_flip[car.id] = True  # Just dodged
+
+        # 1. Forward flip (+1.0 pitch)
+        act_fwd = np.zeros(8, dtype=np.float32)
+        act_fwd[2] = 1.0
+        r_fwd = rew.get_reward(car, self.arena, act_fwd, False, None)
+        self.assertGreater(r_fwd, 0.3, f"Forward dodge downfield should receive strong traversal reward, got {r_fwd}")
+
+        # 2. Diagonal speed-flip (+0.8 pitch, +0.8 yaw)
+        rew._prev_has_flip[car.id] = True  # Re-prime dodge trigger
+        act_diag = np.zeros(8, dtype=np.float32)
+        act_diag[2] = 0.8
+        act_diag[3] = 0.8
+        r_diag = rew.get_reward(car, self.arena, act_diag, False, None)
+        self.assertGreater(r_diag, 0.4, f"Diagonal speed-flip should receive speed-flip coordination bonus, got {r_diag}")
 
 
 if __name__ == "__main__":
