@@ -245,13 +245,14 @@ def generate_ai_coach_diagnostics(telemetry: Dict[str, Any], active_rewards: Dic
     return report
 
 
-def render_training_curves_plot(history_file: str = "logs/history.jsonl", max_points: int = 100) -> plt.Figure:
+def render_training_curves_plot(history_file: str = "logs/history.jsonl", max_points: int = 100, mode: str = "recent") -> plt.Figure:
     """
     Renders a 4-panel dark-themed live training progress chart:
     1. Mean Reward Curve
     2. Policy & Value Losses
     3. Policy Entropy (Exploration)
     4. Throughput (SPS) & Ball Touches
+    Uses O(1) seek-from-tail for recent iterations (<1ms) or byte-stepped downsampling for full run history.
     """
     plt.close("all")
     fig, axes = plt.subplots(2, 2, figsize=(11, 6.0), dpi=100)
@@ -276,15 +277,39 @@ def render_training_curves_plot(history_file: str = "logs/history.jsonl", max_po
 
     records = []
     try:
-        from collections import deque
-        with open(history_file, "r", encoding="utf-8") as f:
-            lines = deque(f, maxlen=max_points)
-            for line in lines:
-                if line.strip():
-                    try:
-                        records.append(json.loads(line.strip()))
-                    except Exception:
-                        pass
+        file_size = os.path.getsize(history_file)
+        if file_size > 0:
+            if mode == "full" and file_size > max_points * 1500:
+                # Byte-stepped seek downsampling across massive files (O(1) memory, ~5ms)
+                step = file_size / max_points
+                with open(history_file, "rb") as f:
+                    for i in range(max_points):
+                        f.seek(int(i * step))
+                        if i > 0:
+                            f.readline()  # Skip partial line
+                        line = f.readline().decode("utf-8", errors="ignore").strip()
+                        if line:
+                            try:
+                                records.append(json.loads(line))
+                            except Exception:
+                                pass
+            else:
+                # Seek from tail for recent window (O(1) time & memory, <1ms regardless of file size)
+                buf_size = min(file_size, max(8192, max_points * 2500))
+                with open(history_file, "rb") as f:
+                    f.seek(file_size - buf_size)
+                    raw = f.read().decode("utf-8", errors="ignore")
+                    lines = raw.splitlines()
+                    if file_size > buf_size and lines:
+                        lines.pop(0)  # Discard partial initial line
+                    lines = lines[-max_points:]
+                    for l in lines:
+                        l = l.strip()
+                        if l:
+                            try:
+                                records.append(json.loads(l))
+                            except Exception:
+                                pass
     except Exception:
         pass
 
@@ -303,6 +328,7 @@ def render_training_curves_plot(history_file: str = "logs/history.jsonl", max_po
     entropies = [r.get("entropy", 0.0) for r in records]
     sps_vals = [r.get("sps", 0) for r in records]
     touches = [r.get("ball_touches", 0.0) for r in records]
+    title_suffix = " (Full Run)" if mode == "full" else f" (Recent {len(iters)} Iters)"
 
     # Panel 1: Mean Reward
     ax_rew = axes[0, 0]
@@ -313,7 +339,7 @@ def render_training_curves_plot(history_file: str = "logs/history.jsonl", max_po
         smooth = np.convolve(rewards, kernel, mode="valid")
         smooth_iters = iters[len(iters) - len(smooth):]
         ax_rew.plot(smooth_iters, smooth, color="#0284c7", linewidth=2.5, linestyle="--", alpha=0.85, label="Trend (MA-5)")
-    ax_rew.set_title("Mean Reward per Rollout", color="white", fontsize=10, fontweight="bold", pad=6)
+    ax_rew.set_title(f"Mean Reward{title_suffix}", color="white", fontsize=10, fontweight="bold", pad=6)
     ax_rew.set_ylabel("Reward Points", color="#cbd5e0", fontsize=8)
     ax_rew.legend(loc="upper left", facecolor="#1e293b", edgecolor="#475569", labelcolor="white", fontsize=7)
 

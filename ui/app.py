@@ -548,9 +548,15 @@ def create_ui():
                         with gr.Group():
                             with gr.Row():
                                 gr.Markdown("### 📈 Live Training Progress & Telemetry")
-                                refresh_metrics_btn = gr.Button("🔄 Refresh Curves", size="sm", scale=1)
+                                metrics_window_radio = gr.Radio(
+                                    ["Recent 100", "Full Run"],
+                                    value="Recent 100",
+                                    label="Telemetry Window",
+                                    scale=2
+                                )
+                                refresh_metrics_btn = gr.Button("🔄 Refresh", size="sm", scale=1)
                             live_metrics_plot = gr.Plot(
-                                value=render_training_curves_plot(),
+                                value=render_training_curves_plot(mode="recent"),
                                 label="Telemetry Curves (Mean Reward, Losses, Entropy, SPS)"
                             )
 
@@ -1839,7 +1845,12 @@ def create_ui():
         # -------------------------------------------------------------
         # REAL-TIME BACKGROUND REFRESH TIMER & INITIAL LOAD
         # -------------------------------------------------------------
-        def on_timer_tick():
+        _last_history_mtime = [0.0]
+        _last_history_size = [0]
+        _last_log_str = [""]
+        _last_view_mode = ["Recent 100"]
+
+        def on_timer_tick(view_mode: str = "Recent 100"):
             status = mgr.get_status_info()
             card_html = build_status_card_html(status)
             running = status.get("running", False)
@@ -1859,23 +1870,54 @@ def create_ui():
                 variant="stop" if running else "secondary",
                 interactive=running
             )
-            logs = mgr.get_logs()
-            plot = render_training_curves_plot()
-            return card_html, start_btn_update, pause_btn_update, stop_btn_update, logs, plot
 
-        refresh_metrics_btn.click(fn=render_training_curves_plot, outputs=[live_metrics_plot])
+            # Smart Log Update: zero network overhead if logs haven't changed
+            logs = mgr.get_logs()
+            if logs == _last_log_str[0]:
+                logs_update = gr.update()
+            else:
+                _last_log_str[0] = logs
+                logs_update = logs
+
+            # Smart Plot Update: zero CPU / zero memory overhead if history hasn't been appended to
+            history_file = "logs/history.jsonl"
+            curr_mtime = os.path.getmtime(history_file) if os.path.exists(history_file) else 0.0
+            curr_size = os.path.getsize(history_file) if os.path.exists(history_file) else 0
+            mode_param = "full" if "full" in str(view_mode).lower() else "recent"
+
+            if (curr_mtime == _last_history_mtime[0] and
+                curr_size == _last_history_size[0] and
+                view_mode == _last_view_mode[0]):
+                plot_update = gr.update()
+            else:
+                _last_history_mtime[0] = curr_mtime
+                _last_history_size[0] = curr_size
+                _last_view_mode[0] = view_mode
+                plot_update = render_training_curves_plot(history_file=history_file, mode=mode_param)
+
+            return card_html, start_btn_update, pause_btn_update, stop_btn_update, logs_update, plot_update
+
+        def on_change_view_mode(mode_val):
+            mode_param = "full" if "full" in str(mode_val).lower() else "recent"
+            _last_view_mode[0] = mode_val
+            return render_training_curves_plot(mode=mode_param)
+
+        metrics_window_radio.change(fn=on_change_view_mode, inputs=[metrics_window_radio], outputs=[live_metrics_plot])
+        refresh_metrics_btn.click(fn=on_change_view_mode, inputs=[metrics_window_radio], outputs=[live_metrics_plot])
         refresh_logs_btn.click(fn=mgr.get_logs, outputs=[console_output])
         clear_logs_btn.click(fn=lambda: "", outputs=[console_output])
 
         status_timer = gr.Timer(3.0, active=True)
         status_timer.tick(
             fn=on_timer_tick,
+            inputs=[metrics_window_radio],
             outputs=[status_card, start_btn, pause_btn, stop_btn, console_output, live_metrics_plot]
         )
 
         # Initialize UI on page load
         demo.load(
             fn=on_timer_tick,
+            inputs=[metrics_window_radio],
             outputs=[status_card, start_btn, pause_btn, stop_btn, console_output, live_metrics_plot]
         )
 
