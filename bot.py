@@ -427,21 +427,28 @@ class SenseiRLBot(BaseAgent):
             controller.yaw = -float(np.clip(act[3], -1.0, 1.0))
             controller.roll = -float(np.clip(act[4], -1.0, 1.0))
 
+            # Dodge cooldown countdown
+            if self.dodge_cooldown > 0:
+                self.dodge_cooldown -= 1
+
+            fwd_speed = float(np.dot(car_state.vel, car_state.get_forward_vector()))
+            car_speed_total = float(np.linalg.norm(car_state.vel))
+            is_supersonic = bool(car_state.is_supersonic if hasattr(car_state, "is_supersonic") else car_speed_total >= 2200.0)
+
             # ── RLGym / RLBot Jump & Dodge Substep Timing Sequencer ────────────
             # Controls jump button release/press timing across the 8 physics substeps:
             #  - Ground Liftoff: Hold jump for ticks 0..3, release ticks 4..7 to prime airborne dodge.
-            #  - Airborne Dodge: Press jump on ticks 0..2 to activate second jump / dodge.
+            #  - Airborne Dodge: Press jump on ticks 2..5 to activate second jump / dodge.
             want_jump = bool(act[5] > 0.0)
             substep_tick = self.ticks_since_last_action  # 0 to 7 within the 15Hz step
 
-            # Low-Speed Turn Jump Suppression:
-            # When nearly stopped on the ground (speed < 250 uu/s) and steering hard (abs(act[1]) > 0.6),
-            # suppress accidental jump triggers so the bot turns smoothly on wheels instead of tumbling in place.
-            car_speed_2d = float(np.linalg.norm(car_state.vel[:2]))
-            if is_on_ground and car_speed_2d < 250.0 and abs(act[1]) > 0.6:
-                want_jump = False
-
+            # Ground Jump Gating:
+            # 1. Flip Cooldown: Require recovery ticks on wheels after a dodge before jumping again.
+            # 2. Hard Turning: When steering hard on turf (abs(act[1]) > 0.35), steer on wheels instead of tumbling.
+            # 3. Supersonic: When already at supersonic speed on the ground, do not dodge for speed.
             if is_on_ground:
+                if self.dodge_cooldown > 0 or abs(act[1]) > 0.35 or is_supersonic:
+                    want_jump = False
                 controller.jump = bool(want_jump and substep_tick <= 3)
             else:
                 # Airborne Dodge / Second Jump:
@@ -450,16 +457,37 @@ class SenseiRLBot(BaseAgent):
                 # Pressing jump on ticks 2..5 guarantees the wheel-lift check passes and executes the dodge.
                 controller.jump = bool(want_jump and has_flip and 2 <= substep_tick <= 5)
 
-                # Dodge Deadzone Compensation:
-                # Rocket League and RocketSim require analog stick deflection >= 0.50 to execute a directional flip/dodge.
-                # When an airborne dodge is triggered, scale directional stick deflection past the deadzone threshold
-                # so continuous policy outputs execute genuine forward, backward, or diagonal dodges instead of empty double jumps.
                 if controller.jump:
+                    self.dodge_cooldown = 18  # ~1.2 second recovery after dodge
+
+                    # Directional Flip Sanitation:
+                    # In Rocket League:
+                    #  - controller.pitch = -1.0 is nose-DOWN / FRONT-FLIP
+                    #  - controller.pitch = +1.0 is nose-UP / BACKFLIP
+                    # When moving forward downfield or into the ball (fwd_speed > 100 uu/s):
+                    # Any dodge MUST be forward or diagonal. Invert accidental backward stick to front-flip!
+                    if fwd_speed > 100.0:
+                        if controller.pitch > 0.0:
+                            controller.pitch = -controller.pitch
+                        if abs(controller.pitch) < 0.2 and abs(controller.yaw) < 0.2:
+                            controller.pitch = -1.0
+
+                    # Dodge Deadzone Compensation:
+                    # Rocket League and RocketSim require analog stick deflection >= 0.50 to execute a directional flip/dodge.
+                    # When an airborne dodge is triggered, scale directional stick deflection past the deadzone threshold
+                    # so continuous policy outputs execute genuine forward, backward, or diagonal dodges instead of empty double jumps.
                     stick_mag = math.hypot(controller.pitch, controller.yaw)
                     if stick_mag > 0.08:
                         scale = max(1.0, 0.90 / stick_mag)
                         controller.pitch = float(np.clip(controller.pitch * scale, -1.0, 1.0))
                         controller.yaw = float(np.clip(controller.yaw * scale, -1.0, 1.0))
+
+                # Half-Flip Recovery: If doing a reverse backflip, cancel and roll when inverted
+                elif not is_on_ground and not has_flip and fwd_speed < -100.0:
+                    up_vec = car_state.get_up_vector()
+                    if up_vec[2] < 0.0:  # Upside down during backflip
+                        controller.pitch = -1.0  # Flip cancel forward!
+                        controller.roll = 1.0   # Air-roll to land on wheels!
 
             # Ground stabilization:
             # When driving on the ground without jumping, keep pitch, yaw, and roll neutral
@@ -472,9 +500,6 @@ class SenseiRLBot(BaseAgent):
             # Boost Economy & Momentum Safety Gate:
             # 1. Suppress boost when the vehicle's 3D momentum strongly opposes its nose direction (fwd_speed < -150 uu/s).
             # 2. Suppress boost on the ground when already at supersonic speed (is_supersonic), preventing boost waste.
-            fwd_speed = float(np.dot(car_state.vel, car_state.get_forward_vector()))
-            car_speed_total = float(np.linalg.norm(car_state.vel))
-            is_supersonic = bool(car_state.is_supersonic if hasattr(car_state, "is_supersonic") else car_speed_total >= 2200.0)
             controller.boost = bool(act[6] > 0.0 and fwd_speed > -150.0 and not (is_supersonic and is_on_ground))
             controller.handbrake = bool(act[7] > 0.0 and is_on_ground)
 
