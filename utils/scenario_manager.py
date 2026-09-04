@@ -591,12 +591,18 @@ def simulate_custom_scenario(
     scenario_data: Dict[str, Any],
     model_path: Optional[str] = None,
     num_steps: int = 150,
-    device: str = "cpu"
+    device: str = "cpu",
+    **kwargs
 ) -> Tuple[plt.Figure, Dict[str, Any]]:
     """
     Rolls out a 2-second simulation from the custom scenario in RocketSim,
     rendering trajectory trails and returning summary diagnostics.
     """
+    if "checkpoint_path" in kwargs and kwargs["checkpoint_path"] is not None:
+        model_path = kwargs["checkpoint_path"]
+    if "steps" in kwargs and kwargs["steps"] is not None:
+        num_steps = int(kwargs["steps"])
+
     from env.physics_engine import RocketSimArena
     from env.observations import DefaultObservationBuilder
     from env.actions import ContinuousActionParser
@@ -671,9 +677,6 @@ def simulate_custom_scenario(
     opp_x, opp_y = [], []
     touches = 0
 
-    obs_builder = DefaultObservationBuilder(symmetric=True)
-    action_parser = ContinuousActionParser()
-
     for step in range(num_steps):
         blue_x.append(float(arena.cars[0].pos[0]))
         blue_y.append(float(arena.cars[0].pos[1]))
@@ -684,22 +687,17 @@ def simulate_custom_scenario(
             opp_y.append(float(arena.cars[1].pos[1]))
 
         # Actions
-        obs_blue = obs_builder.build_obs(arena.cars[0], arena, 0)
-        act_blue = bot.act(obs_blue)
-        act_blue_parsed = action_parser.parse_actions(np.array([act_blue]))[0]
-
+        act_blue = bot.get_action(arena.cars[0], arena)
         if len(arena.cars) > 1:
-            obs_opp = obs_builder.build_obs(arena.cars[1], arena, 1)
-            act_opp = opp_bot.act(obs_opp)
-            act_opp_parsed = action_parser.parse_actions(np.array([act_opp]))[0]
-            actions = [act_blue_parsed, act_opp_parsed]
+            act_opp = opp_bot.get_action(arena.cars[1], arena)
+            actions = [act_blue, act_opp]
         else:
-            actions = [act_blue_parsed]
+            actions = [act_blue]
 
-        _, _, done, _ = arena.step(actions)
+        goal, scoring_team = arena.step(actions, dt=1.0 / 15.0)
         if arena.cars[0].ball_touches > touches:
             touches = arena.cars[0].ball_touches
-        if done:
+        if goal:
             break
 
     # Render Simulation Trajectory Plot

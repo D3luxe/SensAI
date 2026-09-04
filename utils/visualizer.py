@@ -200,7 +200,8 @@ def simulate_match(
     blue_model_path: Optional[str] = None,
     orange_model_path: Optional[str] = "same_as_blue",
     max_steps: int = 400,
-    device: str = "cpu"
+    device: str = "cpu",
+    **kwargs
 ) -> Tuple[plt.Figure, plt.Figure, Dict[str, Any]]:
     """
     Simulates a match between Blue and Orange agents and produces:
@@ -208,6 +209,13 @@ def simulate_match(
     2. Detailed Reward Breakdown Bar Chart.
     3. Match statistics dict.
     """
+    if "blue_checkpoint" in kwargs and kwargs["blue_checkpoint"] is not None:
+        blue_model_path = kwargs["blue_checkpoint"]
+    if "orange_checkpoint" in kwargs and kwargs["orange_checkpoint"] is not None:
+        orange_model_path = kwargs["orange_checkpoint"]
+    if "steps" in kwargs and kwargs["steps"] is not None:
+        max_steps = int(kwargs["steps"])
+
     arena = RocketSimArena(num_players=2, game_mode="1v1")
     # For full match replay visualization, always start from a standard competitive kickoff
     arena.reset(random_kickoff=False)
@@ -316,11 +324,18 @@ def simulate_match(
     stats = {
         "blue_goals": blue_goals,
         "orange_goals": orange_goals,
+        "goals_blue": blue_goals,
+        "goals_orange": orange_goals,
         "blue_touches": blue_touches,
         "orange_touches": orange_touches,
+        "touches_blue": blue_touches,
+        "touches_orange": orange_touches,
         "blue_total_reward": round(sum(blue_rewards.values()), 1),
         "orange_total_reward": round(sum(orange_rewards.values()), 1),
+        "rewards_blue": round(sum(blue_rewards.values()), 1),
+        "rewards_orange": round(sum(orange_rewards.values()), 1),
         "simulation_steps": max_steps,
+        "total_steps": max_steps,
         "match_type": match_type,
         "blue_breakdown": blue_rewards,
         "orange_breakdown": orange_rewards

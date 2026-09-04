@@ -329,11 +329,11 @@ def build_full_diagnostic_export() -> tuple[str, str]:
 
     # 4. Unit Tests Status
     test_results = get_cached_or_run_tests(force_refresh=False)
-    tests_summary = f"{test_results.get('passed', 0)}/{test_results.get('total', 0)} Passed ({'ALL PASSING' if test_results.get('all_passed') else 'FAILURES DETECTED'})"
+    tests_summary = f"{test_results.get('passed', 0)}/{test_results.get('total_tests', test_results.get('total', 0))} Passed ({'ALL PASSING' if test_results.get('all_passed') else 'FAILURES DETECTED'})"
 
     # 5. Telemetry & Coach Analysis
     telem = extract_rolling_telemetry("logs/history.jsonl", window=10)
-    coach_report = generate_ai_coach_diagnostics(telem)
+    coach_report = generate_ai_coach_diagnostics(telem, active_rewards=rew)
 
     # 6. Recent Logs
     recent_logs = mgr.get_logs(max_lines=30)
@@ -1603,8 +1603,12 @@ def create_ui():
             sc = assemble_scenario_payload(*args)
             pts = get_available_checkpoints()
             active_ckpt = pts[0] if pts and not pts[0].startswith("checkpoints/latest_model.pt (none") else None
-            res = simulate_custom_scenario(sc, checkpoint_path=active_ckpt, steps=150)
-            return res.get("plot"), res.get("stats")
+            res = simulate_custom_scenario(sc, model_path=active_ckpt, num_steps=150)
+            if isinstance(res, dict):
+                return res.get("plot"), res.get("stats")
+            elif isinstance(res, (tuple, list)):
+                return res[0], res[1]
+            return None, {}
 
         sim_scenario_btn.click(
             fn=on_run_scenario_simulation,
@@ -1814,32 +1818,45 @@ def create_ui():
             if not blue_path or not os.path.exists(blue_path):
                 blue_path = "checkpoints/latest_model.pt" if os.path.exists("checkpoints/latest_model.pt") else None
 
-            orange_path = None
+            orange_path = "same_as_blue"
             if opp_mode == "Self-Play (Bot vs Itself)":
-                orange_path = blue_path
+                orange_path = "same_as_blue"
             elif opp_mode == "Another Checkpoint":
                 orange_path = orange_choice.split(" ")[0] if orange_choice else None
                 if not orange_path or not os.path.exists(orange_path):
-                    orange_path = "checkpoints/latest_model.pt" if os.path.exists("checkpoints/latest_model.pt") else None
+                    orange_path = "checkpoints/latest_model.pt" if os.path.exists("checkpoints/latest_model.pt") else "baseline"
             elif opp_mode == "Baseline Bot (Chase Ball Heuristic)":
                 orange_path = "baseline"
 
             res = simulate_match(
-                blue_checkpoint=blue_path,
-                orange_checkpoint=orange_path,
-                steps=int(steps),
-                render_field=True
+                blue_model_path=blue_path,
+                orange_model_path=orange_path,
+                max_steps=int(steps)
             )
 
-            stats = res["stats"]
+            if isinstance(res, dict):
+                p_fig = res.get("plot")
+                r_fig = res.get("reward_plot")
+                stats = res.get("stats", {})
+            else:
+                p_fig, r_fig, stats = res
+
+            total_s = stats.get("simulation_steps", stats.get("total_steps", int(steps)))
+            b_goals = stats.get("blue_goals", stats.get("goals_blue", 0))
+            o_goals = stats.get("orange_goals", stats.get("goals_orange", 0))
+            b_touches = stats.get("blue_touches", stats.get("touches_blue", 0))
+            o_touches = stats.get("orange_touches", stats.get("touches_orange", 0))
+            b_rew = stats.get("blue_total_reward", stats.get("rewards_blue", 0.0))
+            o_rew = stats.get("orange_total_reward", stats.get("rewards_orange", 0.0))
+
             summary_md = f"""
             #### 📊 Headless Match Simulation Results
-            * **Simulated Duration:** `{stats['total_steps']}` steps ({stats['total_steps']/15.0:.1f}s match time)
-            * **Score:** Blue **{stats['goals_blue']}** - **{stats['goals_orange']}** Orange
-            * **Blue Ball Touches:** **{stats['touches_blue']}** | **Orange Ball Touches:** **{stats['touches_orange']}**
-            * **Blue Net Reward:** `{stats['rewards_blue']:+.2f}` | **Orange Net Reward:** `{stats['rewards_orange']:+.2f}`
+            * **Simulated Duration:** `{total_s}` steps ({total_s/15.0:.1f}s match time)
+            * **Score:** Blue **{b_goals}** - **{o_goals}** Orange
+            * **Blue Ball Touches:** **{b_touches}** | **Orange Ball Touches:** **{o_touches}**
+            * **Blue Net Reward:** `{b_rew:+.2f}` | **Orange Net Reward:** `{o_rew:+.2f}`
             """
-            return res["plot"], res["reward_plot"], summary_md
+            return p_fig, r_fig, summary_md
 
         run_sim_btn.click(
             fn=on_run_simulation,
@@ -1849,7 +1866,9 @@ def create_ui():
 
         def on_refresh_diagnostics(window_size):
             telem = extract_rolling_telemetry("logs/history.jsonl", window=int(window_size))
-            coach_md = generate_ai_coach_diagnostics(telem)
+            live_cfg = mgr.get_live_config()
+            active_rewards = live_cfg.get("rewards", {})
+            coach_md = generate_ai_coach_diagnostics(telem, active_rewards=active_rewards)
             action_fig = render_action_biases_plot(telem)
             pos_fig = render_positional_biases_plot(telem)
             return coach_md, action_fig, pos_fig
