@@ -11,6 +11,7 @@ checkpoints/checkpoint_iter_*.pt
 checkpoints/manual_checkpoint_*.pt
 checkpoints/*Copy*
 checkpoints/bak/
+checkpoints/latest_model_before_alignment_*.pt
 *.bak
 *.pid
 .system_generated/

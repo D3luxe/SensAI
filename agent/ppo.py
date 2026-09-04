@@ -570,8 +570,11 @@ class PPOTrainer:
 
                     loss = pg_loss - self.ent_coef * entropy_loss + v_loss * self.vf_coef
 
-                    # Decaying Behavioral Cloning (BC) Regularization (Fast Actor-Only Forward Pass)
-                    current_bc_weight = float(self.bc_regularization_weight * max(0.0, 1.0 - (self.global_step / max(1, self.bc_decay_steps))))
+                    # Behavioral Cloning (BC) Regularization with persistent floor anchor
+                    # Prevents catastrophic forgetting of core mechanical dodges and kickoffs during extended RL self-play
+                    min_bc_floor = 0.05 * self.bc_regularization_weight
+                    decay_factor = max(0.0, 1.0 - (self.global_step / max(1, self.bc_decay_steps)))
+                    current_bc_weight = float(max(min_bc_floor, self.bc_regularization_weight * decay_factor))
                     if current_bc_weight > 1e-4:
                         self._ensure_bc_dataset()
                         if self.bc_obs_tensor is not None and len(self.bc_obs_tensor) > 0:

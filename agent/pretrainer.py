@@ -208,19 +208,49 @@ class BehavioralCloningTrainer:
                         jump = 1.0  # Wall-dodge jump recovery back down to pitch floor
                         roll = float(np.clip(-local_ball_y * 2.0, -1.0, 1.0))
                     elif car.on_ground:
-                        if abs(local_ball_y) < 0.2 and local_ball_x > 0.3 and car.boost > 5.0:
+                        if abs(local_ball_y) < 0.25 and local_ball_x > 0.3 and car.boost > 5.0:
                             boost = 1.0
-                        if (abs(ball.pos[0]) < 50.0 and abs(ball.pos[1]) < 50.0) and 0.4 < local_ball_x < 1.1:
+
+                        fwd_vec = car.get_forward_vector()
+                        fwd_speed = float(np.dot(car.vel, fwd_vec))
+                        dist_to_ball = float(np.linalg.norm(ball.pos - car.pos))
+
+                        # 1. Reverse Half-Flip: Facing away from ball while actively reversing backwards
+                        if local_ball_x < -0.3 and fwd_speed < -150.0:
                             jump = 1.0
-                            pitch = 1.0  # Full front-flip speed dodge (+1.0) into kickoff ball
-                        elif ball.pos[2] > 250.0 and local_ball_x > 0.2:
-                            jump = 1.0  # Aerial liftoff jump
-                            pitch = -1.0  # Full nose-up climb (-1.0) into aerial ball
-                        elif ball.pos[2] < 150.0 and local_ball_x > 0.5 and abs(local_ball_y) < 0.25 and float(np.linalg.norm(car.vel)) > 600.0:
-                            # Open-field speed-flip traversal toward loose ball
+                            pitch = -1.0  # Nose-up backflip for half-flip turnaround
+
+                        # 2. Kickoff Speed Rush Dodge:
+                        elif (abs(ball.pos[0]) < 100.0 and abs(ball.pos[1]) < 100.0) and 0.3 < local_ball_x < 1.2:
                             jump = 1.0
-                            pitch = 1.0
-                            yaw = float(np.clip(local_ball_y * 2.0, -0.4, 0.4))
+                            if abs(local_ball_y) > 0.10:
+                                flip_dir = float(np.sign(local_ball_y))
+                                pitch = 0.85
+                                yaw = flip_dir * 0.85
+                                roll = flip_dir * 0.85
+                            else:
+                                pitch = 1.0  # Full front-flip speed dodge into kickoff ball
+
+                        # 3. Open-Field Traversal Speed-Flip / Front-Flip:
+                        elif local_ball_x > 0.3 and dist_to_ball > 500.0 and fwd_speed > 350.0:
+                            jump = 1.0
+                            if abs(local_ball_y) > 0.12:
+                                flip_dir = float(np.sign(local_ball_y))
+                                pitch = 0.85
+                                yaw = flip_dir * 0.85
+                                roll = flip_dir * 0.85
+                            else:
+                                pitch = 1.0  # Straight front-flip for downfield speed
+
+                        # 4. Close-Quarters Strike Dodge (Challenging / 50-50 / Shot on Ball):
+                        elif local_ball_x > 0.4 and dist_to_ball < 450.0 and ball.pos[2] < 180.0:
+                            jump = 1.0
+                            pitch = 0.80  # Power front-flip punch through the ball
+
+                        # 5. Aerial Liftoff Jump (Elevated ball requiring aerial climb):
+                        elif ball.pos[2] > 280.0 and dist_to_ball < 1500.0 and local_ball_x > 0.2:
+                            jump = 1.0
+                            pitch = -0.20  # Gentle nose-up pitch tilt for aerial climb (NEVER a -1.0 backflip dodge!)
                     else:
                         pitch = float(np.clip(-local_ball_z * 3.0, -1.0, 1.0))
                         yaw = steer
@@ -273,7 +303,168 @@ class BehavioralCloningTrainer:
                                 obs_list.append(obs_w * OBS_MIRROR_MASK_NP)
                                 act_list.append(act_w * ACT_MIRROR_MASK_NP)
 
-        # ── Inject Synthetic Half-Flip Demonstration Trajectories ──
+        # ── Inject Synthetic Front-Flip Demonstration Trajectories ──
+        for heading_sign in [1.0, -1.0]:  # Facing North (+Y) or South (-Y)
+            init_yaw = math.pi / 2 if heading_sign > 0 else -math.pi / 2
+            for x_pos in [-1500.0, -500.0, 0.0, 500.0, 1500.0]:
+                for y_start in [-2000.0, -500.0, 500.0, 2000.0]:
+                    for ball_dist in [1200.0, 2400.0, 3500.0]:
+                        ball_ff = BallState(
+                            pos=np.array([x_pos, y_start + heading_sign * ball_dist, 93.15], dtype=np.float32),
+                            vel=np.array([0.0, heading_sign * 500.0, 0.0], dtype=np.float32)
+                        )
+
+                        # Stage 1: Forward liftoff jump (car sprinting forward toward ball)
+                        car_f1 = CarState(
+                            id=0, team=0,
+                            pos=np.array([x_pos, y_start, 22.0], dtype=np.float32),
+                            vel=np.array([0.0, heading_sign * 1100.0, 190.0], dtype=np.float32),
+                            rot=np.array([0.05, init_yaw, 0.0], dtype=np.float32),
+                            rot_mat=rotation_to_rot_mat(0.05, init_yaw, 0.0),
+                            boost=40.0,
+                            on_ground=False
+                        )
+                        act_f1 = np.array([1.0, 0.0, 0.2, 0.0, 0.0, 1.0, 1.0, -1.0], dtype=np.float32)
+
+                        # Stage 2: Front-Flip Dodge Impulse (pitch = +1.0 forward dodge, jump = 1.0)
+                        car_f2 = CarState(
+                            id=0, team=0,
+                            pos=np.array([x_pos, y_start + heading_sign * 80.0, 58.0], dtype=np.float32),
+                            vel=np.array([0.0, heading_sign * 1600.0, 40.0], dtype=np.float32),
+                            rot=np.array([0.35, init_yaw, 0.0], dtype=np.float32),
+                            rot_mat=rotation_to_rot_mat(0.35, init_yaw, 0.0),
+                            boost=35.0,
+                            on_ground=False
+                        )
+                        act_f2 = np.array([1.0, 0.0, 1.0, 0.0, 0.0, 1.0, 1.0, -1.0], dtype=np.float32)
+
+                        # Stage 3: Front-Flip In-Flight Rotation
+                        car_f3 = CarState(
+                            id=0, team=0,
+                            pos=np.array([x_pos, y_start + heading_sign * 220.0, 55.0], dtype=np.float32),
+                            vel=np.array([0.0, heading_sign * 1950.0, -30.0], dtype=np.float32),
+                            rot=np.array([0.75, init_yaw, 0.0], dtype=np.float32),
+                            rot_mat=rotation_to_rot_mat(0.75, init_yaw, 0.0),
+                            boost=30.0,
+                            on_ground=False
+                        )
+                        act_f3 = np.array([1.0, 0.0, 0.8, 0.0, 0.0, -1.0, 1.0, -1.0], dtype=np.float32)
+
+                        # Stage 4: 4-Wheel Supersonic Touchdown
+                        car_f4 = CarState(
+                            id=0, team=0,
+                            pos=np.array([x_pos, y_start + heading_sign * 420.0, 17.0], dtype=np.float32),
+                            vel=np.array([0.0, heading_sign * 2200.0, 0.0], dtype=np.float32),
+                            rot=np.array([0.0, init_yaw, 0.0], dtype=np.float32),
+                            rot_mat=rotation_to_rot_mat(0.0, init_yaw, 0.0),
+                            boost=25.0,
+                            on_ground=True
+                        )
+                        act_f4 = np.array([1.0, 0.0, 0.0, 0.0, 0.0, -1.0, -1.0, -1.0], dtype=np.float32)
+
+                        for cs, act in [(car_f1, act_f1), (car_f2, act_f2), (car_f3, act_f3), (car_f4, act_f4)]:
+                            obs_val = self.obs_builder.build_obs(cs, MockArenaForObs(ball_ff, [cs]))
+                            obs_list.append(obs_val)
+                            act_list.append(act)
+                            obs_list.append(obs_val * OBS_MIRROR_MASK_NP)
+                            act_list.append(act * ACT_MIRROR_MASK_NP)
+
+        # ── Inject Synthetic Diagonal Speed-Flip Demonstration Trajectories ──
+        for heading_sign in [1.0, -1.0]:
+            init_yaw = math.pi / 2 if heading_sign > 0 else -math.pi / 2
+            for flip_side in [-1.0, 1.0]:  # Left vs Right diagonal speed-flip
+                for x_pos in [-1200.0, 0.0, 1200.0]:
+                    for y_start in [-1800.0, 0.0, 1800.0]:
+                        ball_sf = BallState(
+                            pos=np.array([x_pos + flip_side * 200.0, y_start + heading_sign * 2500.0, 93.15], dtype=np.float32),
+                            vel=np.array([0.0, heading_sign * 600.0, 0.0], dtype=np.float32)
+                        )
+
+                        # Stage 1: Angled takeoff jump
+                        car_sf1 = CarState(
+                            id=0, team=0,
+                            pos=np.array([x_pos, y_start, 22.0], dtype=np.float32),
+                            vel=np.array([flip_side * 150.0, heading_sign * 1200.0, 190.0], dtype=np.float32),
+                            rot=np.array([0.05, init_yaw + flip_side * 0.1, 0.0], dtype=np.float32),
+                            rot_mat=rotation_to_rot_mat(0.05, init_yaw + flip_side * 0.1, 0.0),
+                            boost=50.0,
+                            on_ground=False
+                        )
+                        act_sf1 = np.array([1.0, float(flip_side * 0.2), 0.2, float(flip_side * 0.2), 0.0, 1.0, 1.0, -1.0], dtype=np.float32)
+
+                        # Stage 2: Diagonal Speed-Flip Dodge (pitch = +0.85, yaw = +/-0.85, roll = +/-0.85)
+                        car_sf2 = CarState(
+                            id=0, team=0,
+                            pos=np.array([x_pos + flip_side * 40.0, y_start + heading_sign * 90.0, 58.0], dtype=np.float32),
+                            vel=np.array([flip_side * 300.0, heading_sign * 1700.0, 45.0], dtype=np.float32),
+                            rot=np.array([0.3, init_yaw, float(flip_side * 0.4)], dtype=np.float32),
+                            rot_mat=rotation_to_rot_mat(0.3, init_yaw, float(flip_side * 0.4)),
+                            boost=45.0,
+                            on_ground=False
+                        )
+                        act_sf2 = np.array([1.0, 0.0, 0.85, float(flip_side * 0.85), float(flip_side * 0.85), 1.0, 1.0, -1.0], dtype=np.float32)
+
+                        # Stage 3: Flip Cancel + Counter Air-Roll
+                        car_sf3 = CarState(
+                            id=0, team=0,
+                            pos=np.array([x_pos + flip_side * 80.0, y_start + heading_sign * 240.0, 50.0], dtype=np.float32),
+                            vel=np.array([flip_side * 200.0, heading_sign * 2100.0, -25.0], dtype=np.float32),
+                            rot=np.array([0.1, init_yaw, float(-flip_side * 0.3)], dtype=np.float32),
+                            rot_mat=rotation_to_rot_mat(0.1, init_yaw, float(-flip_side * 0.3)),
+                            boost=35.0,
+                            on_ground=False
+                        )
+                        act_sf3 = np.array([1.0, 0.0, -0.6, float(-flip_side * 0.6), float(-flip_side * 0.6), -1.0, 1.0, -1.0], dtype=np.float32)
+
+                        for cs, act in [(car_sf1, act_sf1), (car_sf2, act_sf2), (car_sf3, act_sf3)]:
+                            obs_val = self.obs_builder.build_obs(cs, MockArenaForObs(ball_sf, [cs]))
+                            obs_list.append(obs_val)
+                            act_list.append(act)
+                            obs_list.append(obs_val * OBS_MIRROR_MASK_NP)
+                            act_list.append(act * ACT_MIRROR_MASK_NP)
+
+        # ── Inject Synthetic Close-Quarters Strike Dodges (50/50 Hits into Ball) ──
+        for heading_sign in [1.0, -1.0]:
+            init_yaw = math.pi / 2 if heading_sign > 0 else -math.pi / 2
+            for x_pos in [-1000.0, 0.0, 1000.0]:
+                for y_start in [-2200.0, 0.0, 2200.0]:
+                    for strike_dist in [150.0, 250.0, 380.0]:
+                        ball_st = BallState(
+                            pos=np.array([x_pos, y_start + heading_sign * strike_dist, 93.15], dtype=np.float32),
+                            vel=np.array([0.0, heading_sign * 200.0, 0.0], dtype=np.float32)
+                        )
+
+                        # Car approaching ball in strike zone: MUST JUMP & FRONT-FLIP INTO BALL (NEVER BRAKE / BACKFLIP!)
+                        car_st1 = CarState(
+                            id=0, team=0,
+                            pos=np.array([x_pos, y_start, 22.0], dtype=np.float32),
+                            vel=np.array([0.0, heading_sign * 1400.0, 180.0], dtype=np.float32),
+                            rot=np.array([0.1, init_yaw, 0.0], dtype=np.float32),
+                            rot_mat=rotation_to_rot_mat(0.1, init_yaw, 0.0),
+                            boost=30.0,
+                            on_ground=False
+                        )
+                        act_st1 = np.array([1.0, 0.0, 0.5, 0.0, 0.0, 1.0, 1.0, -1.0], dtype=np.float32)
+
+                        car_st2 = CarState(
+                            id=0, team=0,
+                            pos=np.array([x_pos, y_start + heading_sign * 50.0, 50.0], dtype=np.float32),
+                            vel=np.array([0.0, heading_sign * 1850.0, 40.0], dtype=np.float32),
+                            rot=np.array([0.4, init_yaw, 0.0], dtype=np.float32),
+                            rot_mat=rotation_to_rot_mat(0.4, init_yaw, 0.0),
+                            boost=25.0,
+                            on_ground=False
+                        )
+                        act_st2 = np.array([1.0, 0.0, 1.0, 0.0, 0.0, 1.0, 1.0, -1.0], dtype=np.float32)
+
+                        for cs, act in [(car_st1, act_st1), (car_st2, act_st2)]:
+                            obs_val = self.obs_builder.build_obs(cs, MockArenaForObs(ball_st, [cs]))
+                            obs_list.append(obs_val)
+                            act_list.append(act)
+                            obs_list.append(obs_val * OBS_MIRROR_MASK_NP)
+                            act_list.append(act * ACT_MIRROR_MASK_NP)
+
+        # ── Inject Synthetic Half-Flip Demonstration Trajectories (From Genuine Reverse Only) ──
         for heading_sign in [1.0, -1.0]:  # Facing North (+Y) or South (-Y)
             init_yaw = math.pi / 2 if heading_sign > 0 else -math.pi / 2
             target_sign = -heading_sign    # Half-flip target is behind the car
