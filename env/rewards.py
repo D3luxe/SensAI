@@ -270,6 +270,7 @@ class PlayerToBallVelocityReward(BaseReward):
         vel_matching_bonus = 0.0
         brake_incentive = 0.0
         wrong_side_push_penalty = 0.0
+        dribble_boost_penalty = 0.0
 
         if curr_dist < 450.0 and fwd_alignment > 0.2:
             car_speed = float(np.linalg.norm(car.vel))
@@ -285,14 +286,21 @@ class PlayerToBallVelocityReward(BaseReward):
             if not (is_wrong_side and car_vy_defend > 100.0):
                 if not is_ground_pushing and ball_speed > 250.0 and car_speed > 200.0:
                     vel_matching_bonus = 0.30 * max(0.0, 1.0 - (rel_speed / 700.0))
+
+                # High-Speed Overshoot Braking:
+                # When closing fast on a much slower ball in the strike zone, reward braking to pace/control
+                if car_speed > 900.0 and ball_speed < 700.0 and float(action[0]) < -0.05:
+                    brake_incentive = 0.30 * min(1.0, -float(action[0]))
             else:
                 # Car is pushing ball toward own net: apply wrong-side push penalty
                 wrong_side_push_penalty = -0.30 * max(0.0, car_vy_defend / 1500.0) * max(0.0, fwd_alignment)
 
-            # If closing dangerously fast (> 1000 uu/s) on a slower ball (< 700 uu/s), reward braking to pace arrival
-            # When scrambling defensively towards own half, braking before arriving at ball prevents blowing past it
-            if car_speed > 900.0 and (ball_speed < 700.0 or is_wrong_side) and action[0] < -0.05:
-                brake_incentive = 0.30 * min(1.0, -action[0])
+            # Dribble Proximity Pacing & Anti-Overshoot:
+            # If car is within 350 uu of a low ball and outpacing it (car_speed > ball_speed + 150),
+            # penalize boosting to blow past the ball!
+            if curr_dist < 350.0 and ball_z < 160.0 and car.on_ground:
+                if car_speed > ball_speed + 150.0 and float(action[6]) > 0.0:
+                    dribble_boost_penalty = -0.30 * float(action[6])
 
         # 4. Projected Velocity Toward Ball (Airborne Climbing vs Ground Traversal)
         vel_toward_ball = 0.0
@@ -317,17 +325,20 @@ class PlayerToBallVelocityReward(BaseReward):
                 if is_on_wall and (is_ball_infield or is_car_above_ball or is_elevated_aerial):
                     vel_toward_ball *= 0.15
 
-        # 5. Wrong-Way Ground Rush Penalty (Incentivizes coasting/braking/turning when facing away)
-        # Exempt when rotating back on defense toward defending net, OR when actively steering into a turn/cut!
-        wrong_way_throttle_penalty = 0.0
-        is_retreating_to_defend = bool(car_vy_defend > 100.0)
-        is_actively_steering = bool(abs(float(action[1])) >= 0.30)
-        if car.on_ground and fwd_alignment < -0.3 and float(action[0]) > 0.4 and not is_retreating_to_defend and not is_actively_steering:
-            wrong_way_throttle_penalty = -0.15 * float(action[0]) * abs(fwd_alignment)
+        # 5. Turnaround Incentive vs Straight-Reverse Penalty
+        # When ball is behind the car (fwd_alignment < -0.25):
+        # Penalize creeping backwards in reverse without steering (action[0] < -0.1 and |steer| < 0.3).
+        # Reward active powerslide / turning turnaround (steering hard or handbrake).
+        turnaround_reward = 0.0
+        if car.on_ground and fwd_alignment < -0.25:
+            if float(action[0]) < -0.10 and abs(float(action[1])) < 0.30:
+                turnaround_reward = -0.20 * abs(fwd_alignment)
+            elif abs(float(action[1])) > 0.35 or float(action[7]) > 0.0:
+                turnaround_reward = +0.20 * max(abs(float(action[1])), 0.5)
 
         total_reward = self.weight * (
-            delta_dist + vel_toward_ball + vel_matching_bonus + brake_incentive +
-            overshoot_penalty + ceiling_penalty + wrong_side_push_penalty + wrong_way_throttle_penalty
+            delta_dist + vel_toward_ball + vel_matching_bonus + brake_incentive + dribble_boost_penalty +
+            overshoot_penalty + ceiling_penalty + wrong_side_push_penalty + turnaround_reward
         )
         return float(total_reward)
 
@@ -579,12 +590,11 @@ class JumpBridgeReward(BaseReward):
                     # Hopeless floor takeoff under high ball with low/no boost
                     reward += -0.15
 
-            # 1d. Open-field ground traversal & downfield sprint (dist > 700 uu, ball grounded)
-            # Rewards initiating a forward jump when running downfield with forward stick deflection (speed-flip or front-flip prep)
-            elif not is_aerial_ball and not is_on_wall_zone and dist > 700.0 and forward_alignment > 0.50:
-                is_forward_flip_prep = bool(pitch_input > 0.15 or (pitch_input > 0.10 and abs(yaw_input) > 0.15))
-                if is_forward_flip_prep and car_fwd_speed > 500.0:
-                    reward += self.weight * 0.40 * forward_alignment
+            # 1d. Open-field ground traversal & downfield sprint (dist > 650 uu, ball grounded)
+            # Rewards initiating forward traversal liftoff when sprinting downfield (neutral or forward pitch)
+            elif not is_aerial_ball and not is_on_wall_zone and dist > 650.0 and forward_alignment > 0.40:
+                if car_fwd_speed > 400.0 and pitch_input >= -0.10:
+                    reward += self.weight * 0.35 * forward_alignment
 
         # ── 2. Airborne 50/50 Challenge Completion Bonus ──────────────────────
         if not car.on_ground and self._challenge_jump_active.get(car.id, False):

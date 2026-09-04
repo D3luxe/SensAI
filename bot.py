@@ -435,12 +435,31 @@ class SenseiRLBot(BaseAgent):
             car_speed_total = float(np.linalg.norm(car_state.vel))
             is_supersonic = bool(car_state.is_supersonic if hasattr(car_state, "is_supersonic") else car_speed_total >= 2200.0)
 
+            # Spatial context relative to ball
+            delta_to_ball = ball_state.pos - car_state.pos
+            dist_to_ball = float(np.linalg.norm(delta_to_ball))
+            fwd_vec = car_state.get_forward_vector()
+            right_vec = car_state.get_right_vector()
+            unit_ball = delta_to_ball / max(1.0, dist_to_ball)
+            fwd_align = float(np.dot(fwd_vec, unit_ball))
+            local_x = float(np.dot(delta_to_ball, fwd_vec))
+            local_y = float(np.dot(delta_to_ball, right_vec))
+            ball_spd = float(np.linalg.norm(ball_state.vel))
+
             # ── RLGym / RLBot Jump & Dodge Substep Timing Sequencer ────────────
             # Controls jump button release/press timing across the 8 physics substeps:
             #  - Ground Liftoff: Hold jump for ticks 0..3, release ticks 4..7 to prime airborne dodge.
             #  - Airborne Dodge: Press jump on ticks 2..5 to activate second jump / dodge.
             want_jump = bool(act[5] > 0.0)
             substep_tick = self.ticks_since_last_action  # 0 to 7 within the 15Hz step
+
+            # Downfield Traversal Speed-Flip Trigger:
+            # When sprinting downfield on open turf toward the ball (dist > 750 uu, speed > 650 uu/s, aligned),
+            # if the policy requests forward drive (act[0] > 0.50) and car is not yet supersonic,
+            # initiate a forward speed-flip if cooldown has elapsed.
+            if is_on_ground and self.dodge_cooldown == 0:
+                if dist_to_ball > 750.0 and fwd_speed > 650.0 and car_speed_total < 1950.0 and abs(act[1]) < 0.25 and fwd_align > 0.65 and act[0] > 0.50:
+                    want_jump = True
 
             # Ground Jump Gating:
             # 1. Flip Cooldown: Require recovery ticks on wheels after a dodge before jumping again.
@@ -458,7 +477,7 @@ class SenseiRLBot(BaseAgent):
                 controller.jump = bool(want_jump and has_flip and 2 <= substep_tick <= 5)
 
                 if controller.jump:
-                    self.dodge_cooldown = 18  # ~1.2 second recovery after dodge
+                    self.dodge_cooldown = 20  # ~1.3 second recovery after dodge
 
                     # Directional Flip Sanitation:
                     # In Rocket League:
@@ -502,6 +521,23 @@ class SenseiRLBot(BaseAgent):
             # 2. Suppress boost on the ground when already at supersonic speed (is_supersonic), preventing boost waste.
             controller.boost = bool(act[6] > 0.0 and fwd_speed > -150.0 and not (is_supersonic and is_on_ground))
             controller.handbrake = bool(act[7] > 0.0 and is_on_ground)
+
+            # Dribble Pacing & Anti-Overshoot:
+            # When alongside the ball (dist < 350 uu, ball on ground), if the car is outrunning the ball,
+            # cut boost and pace throttle to match ball speed so the car can turn/cut the ball toward net!
+            if dist_to_ball < 350.0 and ball_state.pos[2] < 160.0 and is_on_ground:
+                if fwd_speed > ball_spd + 80.0:
+                    controller.boost = False
+                    controller.throttle = float(np.clip(ball_spd / max(1.0, fwd_speed), 0.25, 0.85))
+
+            # Ball-Behind Turnaround Recovery:
+            # If the ball is behind the car (local_x < -60 uu) while moving forward (fwd_speed > 80 uu/s),
+            # powerslide turnaround rapidly toward the ball instead of straight-line reversing into a freeze!
+            if is_on_ground and local_x < -60.0 and fwd_speed > 80.0:
+                turn_dir = float(np.sign(local_y)) if abs(local_y) > 20.0 else 1.0
+                controller.steer = turn_dir
+                controller.handbrake = True
+                controller.throttle = 0.50
 
             self.tick_count += 1
             ball_pos = ball_state.pos
