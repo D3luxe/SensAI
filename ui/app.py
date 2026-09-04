@@ -187,6 +187,32 @@ button.primary-btn {
     border-bottom: 2px solid #38bdf8 !important;
     background: rgba(56, 189, 248, 0.08) !important;
 }
+
+/* Sleek, un-cluttered slider & input labels (eliminate giant opaque blue button badges) */
+.gradio-container .block label,
+.gradio-container .block label span,
+.gradio-container .block-label,
+.gradio-container span.block-label,
+.gradio-container [data-testid="block-label"],
+.gradio-container span[data-testid="block-info"],
+.gradio-container .label-wrap span,
+.gradio-container .gradio-slider label,
+.gradio-container .gradio-slider .head span {
+    background: transparent !important;
+    background-color: transparent !important;
+    color: #93c5fd !important;
+    font-size: 0.88em !important;
+    font-weight: 600 !important;
+    padding: 0 !important;
+    margin-bottom: 2px !important;
+    white-space: nowrap !important;
+    border: none !important;
+    box-shadow: none !important;
+}
+
+.gradio-slider {
+    padding: 4px 6px !important;
+}
 """
 
 
@@ -472,7 +498,7 @@ def create_ui():
                             with gr.Row():
                                 lr_input = gr.Number(
                                     value=hp_cfg.get("learning_rate", 3e-4),
-                                    label="Learning Rate (Live Tunable)",
+                                    label="Learning Rate",
                                     info="PPO Policy & Value step size.",
                                     scale=1
                                 )
@@ -480,15 +506,15 @@ def create_ui():
                                     0.0, 0.05,
                                     value=hp_cfg.get("ent_coef", 0.005),
                                     step=0.001,
-                                    label="Entropy Coef (Exploration Bonus)",
-                                    info="Higher values encourage exploring new mechanics.",
+                                    label="Entropy Coef",
+                                    info="Exploration bonus.",
                                     scale=2
                                 )
                             clip_range_slider = gr.Slider(
                                 0.05, 0.4,
                                 value=hp_cfg.get("clip_range", 0.2),
                                 step=0.01,
-                                label="PPO Clip Range (Live Tunable)",
+                                label="PPO Clip Range",
                                 info="Surrogate clipping bounds (epsilon)."
                             )
                             live_hp_btn = gr.Button("⚡ Apply Live Hyperparameters", variant="primary")
@@ -509,8 +535,8 @@ def create_ui():
                                 opponent_bot_dropdown = gr.Dropdown(
                                     choices=opp_choices,
                                     value=default_opp_val,
-                                    label="Opponent Bot Model / Checkpoint",
-                                    info="Select model to spar against (Checkpoints or Heuristic Chaser).",
+                                    label="Opponent Bot Model",
+                                    info="Select sparring model (Checkpoints or Heuristic Chaser).",
                                     scale=3
                                 )
                                 refresh_opponent_btn = gr.Button("🔄 Scan", scale=1)
@@ -519,7 +545,7 @@ def create_ui():
                                 0.0, 1.0,
                                 value=float(env_cfg.get("baseline_opponent_ratio", 0.25)),
                                 step=0.01,
-                                label="Opponent Matchup Ratio (Mixup Proportion)",
+                                label="Opponent Matchup Ratio",
                                 info="0% = Pure Self-Play, 100% = Pure Opponent Sparring."
                             )
                             apply_opp_btn = gr.Button("⚡ Apply Opponent Mix", variant="secondary")
@@ -529,16 +555,17 @@ def create_ui():
                         with gr.Group():
                             gr.Markdown("### 🎛️ Quick Live Reward Weights")
                             with gr.Row():
-                                goal_slider = gr.Slider(0.0, 30.0, value=float(rew_cfg.get("goal_weight", 20.0)), step=1.0, label="Goal Scored (+pts)")
-                                concede_slider = gr.Slider(-30.0, 0.0, value=float(rew_cfg.get("concede_weight", -20.0)), step=1.0, label="Goal Conceded (-pts)")
-                                save_slider = gr.Slider(0.0, 15.0, value=float(rew_cfg.get("save_weight", 3.0)), step=0.5, label="Save & Clear (+pts)")
+                                goal_slider = gr.Slider(0.0, 30.0, value=float(rew_cfg.get("goal_weight", 20.0)), step=1.0, label="Goal (+pts)")
+                                concede_slider = gr.Slider(-30.0, 0.0, value=float(rew_cfg.get("concede_weight", -20.0)), step=1.0, label="Concede (-pts)")
                             with gr.Row():
-                                ball_to_goal_slider = gr.Slider(0.0, 5.0, value=float(rew_cfg.get("ball_to_goal_weight", 1.5)), step=0.1, label="Ball-to-Goal Velocity")
-                                player_to_ball_slider = gr.Slider(0.0, 3.0, value=float(rew_cfg.get("player_to_ball_weight", 0.6)), step=0.1, label="Player-to-Ball Pursuit")
-                                touch_slider = gr.Slider(0.0, 5.0, value=float(rew_cfg.get("touch_weight", 1.2)), step=0.1, label="Touch Quality Bounty")
+                                save_slider = gr.Slider(0.0, 15.0, value=float(rew_cfg.get("save_weight", 3.0)), step=0.5, label="Save (+pts)")
+                                touch_slider = gr.Slider(0.0, 5.0, value=float(rew_cfg.get("touch_weight", 1.2)), step=0.1, label="Touch Quality")
+                            with gr.Row():
+                                ball_to_goal_slider = gr.Slider(0.0, 5.0, value=float(rew_cfg.get("ball_to_goal_weight", 1.5)), step=0.1, label="Ball to Goal")
+                                player_to_ball_slider = gr.Slider(0.0, 3.0, value=float(rew_cfg.get("player_to_ball_weight", 0.6)), step=0.1, label="Ball Pursuit")
                             with gr.Row():
                                 boost_gain_slider = gr.Slider(0.0, 2.0, value=float(rew_cfg.get("boost_gain_weight", 0.6)), step=0.05, label="Boost Gain (Sqrt)")
-                                boost_lose_slider = gr.Slider(0.0, 2.0, value=float(rew_cfg.get("boost_lose_weight", 0.3)), step=0.05, label="Ground Waste Penalty")
+                                boost_lose_slider = gr.Slider(0.0, 2.0, value=float(rew_cfg.get("boost_lose_weight", 0.3)), step=0.05, label="Boost Waste")
                             apply_live_rewards_btn = gr.Button("⚡ Apply Live Rewards", variant="primary")
                             live_rewards_msg = gr.Markdown("")
                             gr.Markdown("<span style='color: #94a3b8; font-size: 0.88em;'>💡 For high aerials, jump bridges, air-roll recoveries, and custom scenario probabilities, visit the <b>🎛️ Rewards & Curriculum</b> tab.</span>")
