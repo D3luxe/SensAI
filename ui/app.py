@@ -2045,7 +2045,13 @@ def create_ui():
 
         def on_refresh_diagnostics(window_size):
             telem = extract_rolling_telemetry("logs/history.jsonl", window=int(window_size))
-            live_cfg = mgr.get_live_config()
+            live_cfg = mgr.get_live_config() if hasattr(mgr, "get_live_config") else {}
+            if not live_cfg and os.path.exists("config/live_config.json"):
+                try:
+                    with open("config/live_config.json", "r") as f:
+                        live_cfg = json.load(f)
+                except Exception:
+                    live_cfg = {}
             active_rewards = live_cfg.get("rewards", {})
             coach_md = generate_ai_coach_diagnostics(telem, active_rewards=active_rewards)
             action_fig = render_action_biases_plot(telem)

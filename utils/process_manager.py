@@ -150,6 +150,15 @@ class TrainingProcessManager:
         self.log_buffer.append(f"[{time.strftime('%H:%M:%S')}] Requested manual checkpoint save.")
         return True, "Checkpoint save requested."
 
+    def get_live_config(self) -> Dict[str, Any]:
+        if os.path.exists(self.live_config_file):
+            try:
+                with open(self.live_config_file, "r") as f:
+                    return json.load(f)
+            except Exception:
+                return {}
+        return {}
+
     def update_live_config(self, updates: Dict[str, Any]):
         live = {}
         if os.path.exists(self.live_config_file):
