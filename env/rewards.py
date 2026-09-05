@@ -366,32 +366,91 @@ class PlayerToBallVelocityReward(BaseReward):
                 if is_on_wall and (is_ball_infield or is_car_above_ball or is_elevated_aerial):
                     vel_toward_ball *= 0.15
 
-        # 5. Turnaround Incentive & Close-Proximity Rear Quarter Resolution
+        # 5. Turnaround Incentive, Lateral Flank Pocket, and Overshoot Resolution
         turnaround_reward = 0.0
         if car.on_ground:
-            local_x = float(np.dot(car_to_ball[:2], car.get_forward_vector()[:2]))
-            local_y = float(np.dot(car_to_ball[:2], car.get_right_vector()[:2]))
+            fwd_vec = car.get_forward_vector()
+            right_vec = car.get_right_vector()
+            local_x = float(np.dot(car_to_ball[:2], fwd_vec[:2]))
+            local_y = float(np.dot(car_to_ball[:2], right_vec[:2]))
+            car_fwd_speed = float(np.dot(car.vel[:2], fwd_vec[:2]))
+            ball_fwd_speed = float(np.dot(arena.ball.vel[:2], fwd_vec[:2]))
+            rel_fwd_speed = car_fwd_speed - ball_fwd_speed
 
-            # Close-Proximity Blindspot / Overshoot (ball at rear bumper or quarter panel < 300 uu):
-            if curr_dist < 300.0 and local_x < 0.0:
-                # 1. Active Tap-Braking: Rapid deceleration to let ball roll back in front of bumper
-                if float(action[0]) < -0.05:
-                    turnaround_reward = +0.30 * min(1.0, -float(action[0]))
-                # 2. Coasting / Throttle Release: Cutting gas and boost to let forward momentum taper
-                elif float(action[0]) <= 0.10 and float(action[6]) <= 0.0:
-                    turnaround_reward = +0.15
-                # 3. Active steering or powersliding to swing around the ball:
-                elif (abs(float(action[1])) > 0.25) or float(action[7]) > 0.0:
-                    turnaround_reward = +0.25 * max(abs(float(action[1])), 0.6)
-                # 4. Driving away: Penalize continuing to gas or boost forward away from the ball
-                elif float(action[0]) > 0.30 or float(action[6]) > 0.0:
-                    turnaround_reward = -0.25
+            throttle = float(action[0])
+            steer = float(action[1])
+            boost = float(action[6])
+            handbrake = float(action[7])
+
+            # A. Lateral Flank / Pocket Control (ball rolling alongside car: doors / fenders):
+            is_lateral_pocket = bool(
+                curr_dist < 320.0 and
+                abs(local_x) < 140.0 and
+                50.0 < abs(local_y) < 240.0 and
+                ball_z < 200.0
+            )
+
+            if is_lateral_pocket:
+                # 1. Hook Cut / Lateral Pop: Steering directly into the ball
+                steer_into_ball = bool(steer * local_y > 0.15)
+                if steer_into_ball:
+                    cut_bonus = 0.30 * min(1.0, abs(steer))
+                    if handbrake > 0.0:
+                        cut_bonus += 0.10  # Sharp powerslide cut
+                    turnaround_reward += cut_bonus
+
+                # 2. Downfield Speed Matching / Escort in Pocket:
+                # Both moving downfield: reward matching the ball's pace so the bot can carry it on its hip
+                if car_fwd_speed > 150.0 and ball_fwd_speed > 150.0:
+                    pacing_bonus = 0.25 * max(0.0, 1.0 - min(1.0, abs(rel_fwd_speed) / 400.0))
+                    turnaround_reward += pacing_bonus
+
+                # 3. Letting Ball Roll Ahead to Absorb 50/50 or Transition to Catch:
+                # If car is slightly ahead and outpacing ball, reward coasting or tap-braking
+                if local_x < 50.0 and rel_fwd_speed > 80.0:
+                    if throttle < -0.05:
+                        turnaround_reward += 0.25 * min(1.0, -throttle)
+                    elif throttle <= 0.10 and boost <= 0.0:
+                        turnaround_reward += 0.20
+
+                # 4. Penalize driving away from pocket:
+                if (throttle > 0.35 or boost > 0.0) and rel_fwd_speed > 250.0 and not steer_into_ball:
+                    turnaround_reward -= 0.25
+
+            # B. Close-Proximity Overshoot & Rear Bumper Resolution (ball behind center of mass and not in pocket):
+            elif curr_dist < 300.0 and local_x < 0.0:
+                # Speed-Differential Aware Overshoot Resolution:
+                # 1. Car outrunning trailing ball downfield (rel_fwd_speed > 0):
+                if rel_fwd_speed > 0.0:
+                    if throttle < -0.05:
+                        brake_scale = 0.35 if rel_fwd_speed > 150.0 else 0.30
+                        turnaround_reward = +brake_scale * min(1.0, -throttle)
+                    elif throttle <= 0.10 and boost <= 0.0:
+                        coast_scale = 0.20 if rel_fwd_speed <= 150.0 else 0.15
+                        turnaround_reward = +coast_scale
+                    elif throttle > 0.30 or boost > 0.0:
+                        turnaround_reward = -0.25
+                # 2. Ball is already rolling faster and overtaking car (rel_fwd_speed <= 0):
+                else:
+                    # Ball is catching up naturally; reward gentle coasting / throttle feathering
+                    if 0.0 <= throttle <= 0.35 and boost <= 0.0:
+                        turnaround_reward = +0.25
+                    elif -0.25 <= throttle < -0.05:
+                        turnaround_reward = +0.10
+                    elif throttle < -0.25:
+                        # Heavy reverse braking when ball is already overtaking risks reversing into ball
+                        turnaround_reward = 0.0
+
+                # Active steering or powersliding to swing around the ball:
+                if (abs(steer) > 0.25) or handbrake > 0.0:
+                    turnaround_reward += +0.25 * max(abs(steer), 0.6)
+
             elif fwd_alignment < -0.25:
                 # Downfield ball-behind: penalize straight reverse creeping, reward powerslides / hard cuts
-                if float(action[0]) < -0.10 and abs(float(action[1])) < 0.30:
+                if throttle < -0.10 and abs(steer) < 0.30:
                     turnaround_reward = -0.20 * abs(fwd_alignment)
-                elif abs(float(action[1])) > 0.35 or float(action[7]) > 0.0:
-                    turnaround_reward = +0.20 * max(abs(float(action[1])), 0.5)
+                elif abs(steer) > 0.35 or handbrake > 0.0:
+                    turnaround_reward = +0.20 * max(abs(steer), 0.5)
 
         total_reward = self.weight * (
             delta_dist + vel_toward_ball + vel_matching_bonus + brake_incentive + dribble_boost_penalty +

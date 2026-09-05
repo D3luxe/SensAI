@@ -602,6 +602,80 @@ class TestRewardAuditFixes(unittest.TestCase):
         self.assertGreater(r_brake, r_coast, f"Active tap-braking should be rewarded more than passive coasting, got brake={r_brake} vs coast={r_coast}")
         self.assertLess(r_drive_away, 0.0, f"Driving away from ball on overshoot should be penalized, got {r_drive_away}")
 
+    def test_lateral_pocket_pacing_and_cut_in(self):
+        """Test that driving alongside the ball downfield awards pocket pacing, hook cuts, and letting ball roll ahead."""
+        rew = PlayerToBallVelocityReward(weight=1.0)
+        # Car at (0, 0, 17), facing +Y downfield, moving at 800 uu/s
+        car = CarState(
+            id=0, team=0,
+            pos=np.array([0.0, 0.0, 17.0], dtype=np.float32),
+            vel=np.array([0.0, 800.0, 0.0], dtype=np.float32),
+            rot=np.array([0.0, math.pi / 2, 0.0], dtype=np.float32),  # Facing +Y
+            on_ground=True
+        )
+        # Ball is on the right hip: local_x = 0, local_y = +100 (in pocket), rolling at 800 uu/s downfield
+        # In world space: right vector is +X when facing +Y, so pos = (100, 0, 93)
+        self.arena.ball.pos = np.array([100.0, 0.0, 93.0], dtype=np.float32)
+        self.arena.ball.vel = np.array([0.0, 800.0, 0.0], dtype=np.float32)
+        self.arena.cars = [car]
+        rew.reset(self.arena)
+
+        # 1. Pacing alongside downfield: throttle matching speed (e.g. throttle = 0.5)
+        act_pace = np.zeros(8, dtype=np.float32)
+        act_pace[0] = 0.5
+        r_pace = rew.get_reward(car, self.arena, act_pace, False, None)
+        self.assertGreater(r_pace, 0.20, f"Pacing alongside ball downfield in pocket should receive positive pacing reward, got {r_pace}")
+
+        # 2. Hook cut: steering right into the ball (steer = +1.0) with powerslide
+        act_cut = np.zeros(8, dtype=np.float32)
+        act_cut[0] = 0.5
+        act_cut[1] = 1.0  # Steer right into ball
+        act_cut[7] = 1.0  # Powerslide
+        r_cut = rew.get_reward(car, self.arena, act_cut, False, None)
+        self.assertGreater(r_cut, r_pace, f"Executing a hook cut into the ball should yield higher reward than pacing, got {r_cut} vs {r_pace}")
+
+        # 3. Letting ball roll ahead: car slightly ahead (pos_y = 40) outrunning ball (car vel = 950, ball vel = 800)
+        car_ahead = CarState(
+            id=0, team=0,
+            pos=np.array([0.0, 40.0, 17.0], dtype=np.float32),
+            vel=np.array([0.0, 950.0, 0.0], dtype=np.float32),
+            rot=np.array([0.0, math.pi / 2, 0.0], dtype=np.float32),
+            on_ground=True
+        )
+        act_let_roll = np.zeros(8, dtype=np.float32)
+        act_let_roll[0] = 0.0  # Coast to let ball slip forward into 50/50 block
+        r_let_roll = rew.get_reward(car_ahead, self.arena, act_let_roll, False, None)
+        self.assertGreater(r_let_roll, 0.15, f"Coasting to let ball roll ahead from pocket should be rewarded, got {r_let_roll}")
+
+    def test_speed_differential_overshoot_resolution(self):
+        """Test that overshoot rewards dynamically adapt when ball is already overtaking the car."""
+        rew = PlayerToBallVelocityReward(weight=1.0)
+        # Car at (0, 150, 17), facing +Y. Ball at (0, 0, 93) trailing behind.
+        # Case: Ball is rolling FASTER than car (ball_vel = 800, car_vel = 300 -> rel_fwd_speed = -500)
+        car = CarState(
+            id=0, team=0,
+            pos=np.array([0.0, 150.0, 17.0], dtype=np.float32),
+            vel=np.array([0.0, 300.0, 0.0], dtype=np.float32),
+            rot=np.array([0.0, math.pi / 2, 0.0], dtype=np.float32),
+            on_ground=True
+        )
+        self.arena.ball.pos = np.array([0.0, 0.0, 93.0], dtype=np.float32)
+        self.arena.ball.vel = np.array([0.0, 800.0, 0.0], dtype=np.float32)
+        self.arena.cars = [car]
+        rew.reset(self.arena)
+
+        # Coasting / feather throttle to receive the overtaking ball smoothly
+        act_coast = np.zeros(8, dtype=np.float32)
+        act_coast[0] = 0.1
+        r_coast = rew.get_reward(car, self.arena, act_coast, False, None)
+
+        # Hard reverse braking (-1.0) when ball is already overtaking rapidly
+        act_hard_reverse = np.zeros(8, dtype=np.float32)
+        act_hard_reverse[0] = -1.0
+        r_hard_reverse = rew.get_reward(car, self.arena, act_hard_reverse, False, None)
+
+        self.assertGreater(r_coast, r_hard_reverse, f"When ball is already overtaking from behind, coasting must be preferred over slamming reverse into it! (got coast={r_coast} vs rev={r_hard_reverse})")
+
 
 if __name__ == "__main__":
     unittest.main()
