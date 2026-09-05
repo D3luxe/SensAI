@@ -1,4 +1,6 @@
 environment:
+  baseline_opponent_ratio: 0.04
+  baseline_opponent_type: checkpoints/necto-model.pt
   game_mode: 1v1
   max_episode_steps: 3000
   num_envs: 64
@@ -6,7 +8,7 @@ environment:
 hyperparameters:
   batch_size: 8192
   bc_decay_steps: 500000000
-  bc_regularization_weight: 0.0
+  bc_regularization_weight: 0.02
   clip_range: 0.2
   ent_coef: 0.012
   gae_lambda: 0.95
@@ -30,7 +32,7 @@ ppo:
 rewards:
   air_roll_recovery_weight: 0.1
   ball_to_goal_weight: 1.5
-  boost_gain_weight: 0.7
+  boost_gain_weight: 1.1
   boost_lose_weight: 0.35
   concede_weight: -30.0
   goal_weight: 30.0
@@ -38,13 +40,12 @@ rewards:
   player_to_ball_weight: 0.6
   powerslide_weight: 0.2
   save_weight: 12.0
-  touch_weight: 1.2
+  touch_weight: 1.8
 scenarios:
   aerial_prob: 0.09
-  custom_prob: 0.14
-  dribble_flick_prob: 0.10
-  kickoff_prob: 0.18
-  replay_prob: 0.14
+  custom_prob: 0.15
+  kickoff_prob: 0.21
+  replay_prob: 0.2
   save_prob: 0.08
   turnaround_prob: 0.09
   wall_prob: 0.09

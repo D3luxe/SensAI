@@ -255,9 +255,12 @@ class PlayerToBallVelocityReward(BaseReward):
         is_on_ceiling = bool((car.pos[2] > 1750.0 and car.on_ground) or car.pos[2] > 1900.0)
         is_on_wall = bool((abs(car.pos[0]) > 3450.0 or abs(car.pos[1]) > 4450.0) and car.pos[2] > 200.0 and car.on_ground)
 
+        horiz_ball_dist = float(np.linalg.norm(arena.ball.pos[:2] - car.pos[:2]))
+        eff_dist = min(curr_dist, horiz_ball_dist) if (car.on_ground and ball_z < 650.0) else curr_dist
+
         # 1. Anti-Overshoot Penalty & Strike Zone Tracking
         overshoot_penalty = 0.0
-        in_strike = (raw_ball_dist < 400.0)
+        in_strike = (raw_ball_dist < 400.0) or (car.on_ground and horiz_ball_dist < 380.0 and ball_z < 650.0)
         was_strike = self._was_in_strike_zone.get(car.id, False)
         self._was_in_strike_zone[car.id] = in_strike
 
@@ -267,7 +270,7 @@ class PlayerToBallVelocityReward(BaseReward):
         )
         self._prev_car_touches = {c.id: c.ball_touches for c in arena.cars}
 
-        car_fwd_spd = float(np.dot(car.vel[:2], car.get_forward_vector()[:2]))
+        car_fwd_spd = float(np.dot(car.vel, car.get_forward_vector())) if not car.on_ground else float(np.dot(car.vel[:2], car.get_forward_vector()[:2]))
         if was_strike and not in_strike and car.ball_touches == prev_t and fwd_alignment < -0.15 and not opp_touched and car_fwd_spd > 150.0:
             # Car was in the strike zone and flew past the ball without touching it!
             # Heavy penalty (-0.40), escalated if overshooting at supersonic speeds
@@ -293,7 +296,7 @@ class PlayerToBallVelocityReward(BaseReward):
         # 2. Distance Delta with Strike Zone Pacing
         # Downfield (> 450 uu): 100% distance closure rewarded
         # Inside strike zone (< 450 uu): Paces approach so car doesn't blindly barrel past ball
-        strike_pacing = min(1.0, max(0.20, (curr_dist - 150.0) / 300.0))
+        strike_pacing = min(1.0, max(0.20, (eff_dist - 150.0) / 300.0))
         delta_dist = raw_delta_dist * strike_pacing
 
         # Wall-Crawling Dampening:
@@ -341,10 +344,18 @@ class PlayerToBallVelocityReward(BaseReward):
         wrong_side_push_penalty = 0.0
         dribble_boost_penalty = 0.0
 
-        if raw_ball_dist < 450.0 and fwd_alignment > 0.2:
+        in_strike_zone = (raw_ball_dist < 450.0) or (car.on_ground and horiz_ball_dist < 450.0 and ball_z < 650.0)
+        if in_strike_zone and fwd_alignment > 0.2:
             car_speed = float(np.linalg.norm(car.vel))
             ball_speed = float(np.linalg.norm(arena.ball.vel))
+            car_speed_2d = float(np.linalg.norm(car.vel[:2]))
+            ball_speed_2d = float(np.linalg.norm(arena.ball.vel[:2]))
             rel_speed = float(np.linalg.norm(car.vel - arena.ball.vel))
+            rel_speed_2d = float(np.linalg.norm(car.vel[:2] - arena.ball.vel[:2]))
+
+            effective_car_speed = car_speed_2d if (car.on_ground and ball_z < 650.0) else car_speed
+            effective_ball_speed = ball_speed_2d if (car.on_ground and ball_z < 650.0) else ball_speed
+            effective_rel_speed = rel_speed_2d if (car.on_ground and ball_z < 650.0) else rel_speed
             
             # Gated Velocity Matching:
             # Velocity matching should only reward pacing a moving ball (ball_speed > 250 and car_speed > 200),
@@ -353,41 +364,54 @@ class PlayerToBallVelocityReward(BaseReward):
             is_ground_pushing = bool(raw_ball_dist < 180.0 and ball_z < 130.0 and car.on_ground)
 
             if not (is_wrong_side and car_vy_defend > 100.0):
-                if not is_ground_pushing and ball_speed > 250.0 and car_speed > 200.0:
-                    vel_matching_bonus = 0.30 * max(0.0, 1.0 - (rel_speed / 700.0))
+                if not is_ground_pushing and effective_ball_speed > 250.0 and effective_car_speed > 200.0:
+                    vel_matching_bonus = 0.30 * max(0.0, 1.0 - (effective_rel_speed / 700.0))
 
                 # High-Speed Overshoot Braking:
-                # When closing fast on a much slower ball in the strike zone, reward braking to pace/control
-                if car_speed > 900.0 and ball_speed < 700.0 and float(action[0]) < -0.05:
-                    brake_incentive = 0.30 * min(1.0, -float(action[0]))
+                # When closing fast on a much slower ball in the strike zone, reward braking to pace/control.
+                # Evaluates horizontal velocity so vertical gravity speed on falling balls does not disable braking.
+                # Strictly gated on car.on_ground as mid-air reverse input does not brake airborne flight.
+                if car.on_ground and effective_car_speed > 850.0 and effective_ball_speed < 700.0 and float(action[0]) < -0.05:
+                    brake_incentive = 0.35 * min(1.0, -float(action[0]))
             else:
                 # Car is pushing ball toward own net: apply wrong-side push penalty
                 wrong_side_push_penalty = -0.30 * max(0.0, car_vy_defend / 1500.0) * max(0.0, fwd_alignment)
 
             # Dribble Proximity Pacing & Anti-Overshoot:
-            # If car is within 350 uu of a low ball and outpacing it (car_speed > ball_speed + 150),
+            # If car is within 350 uu of a low or bouncing ball and outpacing it (car_speed > ball_speed + 150),
             # penalize boosting to blow past the ball! (Exempt during roof carries so bot can accelerate carry)
-            if raw_ball_dist < 350.0 and ball_z < 160.0 and car.on_ground and not is_roof_carry:
-                if car_speed > ball_speed + 150.0 and float(action[6]) > 0.0:
+            is_close_approach = bool(raw_ball_dist < 350.0 or (horiz_ball_dist < 350.0 and ball_z < 650.0))
+            if is_close_approach and car.on_ground and not is_roof_carry:
+                if effective_car_speed > effective_ball_speed + 150.0 and float(action[6]) > 0.0:
                     dribble_boost_penalty = -0.30 * float(action[6])
 
         # 4. Projected Velocity Toward Ball (Airborne Climbing vs Ground Traversal)
         vel_toward_ball = 0.0
         if is_elevated_aerial:
             if not car.on_ground:
-                # Airborne flight: Directly reward 3D closing velocity toward high ball!
-                air_climb_speed = float(np.dot(car.vel, unit_to_ball))
-                if air_climb_speed > 0.0:
-                    vel_toward_ball = (air_climb_speed / 2300.0) * 0.40 * max(0.0, fwd_alignment)
-                elif air_climb_speed < -100.0 and curr_dist > 300.0:
+                # Airborne flight: Evaluate true 3D closing velocity toward high ball relative to ball motion
+                car_closing_proj = float(np.dot(car.vel, unit_to_ball))
+                rel_closing_proj = float(np.dot(car.vel - arena.ball.vel, unit_to_ball))
+                ball_proj = float(np.dot(arena.ball.vel, unit_to_ball))
+
+                # When ball is moving away along line of sight (ball_proj > 100), car must outpace it to close distance:
+                if ball_proj > 100.0:
+                    effective_air_speed = max(0.0, rel_closing_proj)
+                else:
+                    # Floating or incoming ball: reward flight momentum toward intercept, guided by relative closure
+                    effective_air_speed = max(0.0, car_closing_proj) if rel_closing_proj >= 0.0 else max(0.0, rel_closing_proj)
+
+                if effective_air_speed > 0.0:
+                    vel_toward_ball = (effective_air_speed / 2300.0) * 0.40 * max(0.0, fwd_alignment)
+                elif car_closing_proj < -100.0 and curr_dist > 300.0:
                     # Penalize actively flying away from elevated aerial ball in mid-air
-                    vel_toward_ball = (air_climb_speed / 2300.0) * 0.25
+                    vel_toward_ball = (car_closing_proj / 2300.0) * 0.25
             else:
                 vel_toward_ball = 0.0
         else:
             # Grounded or low ball: Gate downfield rush when pushing towards defending goal
             if not (is_wrong_side and car_vy_defend > 100.0):
-                speed_taper = min(1.0, max(0.0, (curr_dist - 180.0) / 320.0))
+                speed_taper = min(1.0, max(0.0, (eff_dist - 180.0) / 320.0))
                 fwd_speed_to_ball = max(0.0, float(np.dot(car.vel, unit_to_ball)))
                 effective_alignment = travel_align_to_ball if is_dodging_toward_ball else fwd_alignment
                 vel_toward_ball = (fwd_speed_to_ball / 2300.0) * 0.20 * max(0.0, effective_alignment) * speed_taper
@@ -446,8 +470,8 @@ class PlayerToBallVelocityReward(BaseReward):
                 if (throttle > 0.35 or boost > 0.0) and rel_fwd_speed > 250.0 and not steer_into_ball:
                     turnaround_reward -= 0.25
 
-            # B. Close-Proximity Overshoot & Rear Bumper Resolution (ball behind center of mass on turf, not in pocket or on roof):
-            elif not is_roof_carry and curr_dist < 300.0 and local_x < 0.0 and ball_z < 160.0:
+            # B. Close-Proximity Overshoot & Rear Bumper Resolution (ball behind center of mass on turf or bounce, not in pocket or on roof):
+            elif not is_roof_carry and (curr_dist < 300.0 or (horiz_ball_dist < 300.0 and ball_z < 650.0)) and local_x < 0.0 and ball_z < 650.0:
                 # Speed-Differential Aware Overshoot Resolution:
                 # 1. Car outrunning trailing ball downfield (rel_fwd_speed > 0):
                 if rel_fwd_speed > 0.0:
@@ -792,15 +816,21 @@ class JumpBridgeReward(BaseReward):
 
             # 1c. Aerial Floor Launch (Ball elevated in air)
             elif is_aerial_ball and car.pos[2] < 300.0 and forward_alignment > 0.15:
-                # Moderate ball (Z <= 450 uu): double-jump or pop reachable with minimal boost
-                if ball_z <= 450.0:
-                    reward += self.weight * forward_alignment * 2.0
-                # High aerial ball (Z > 450 uu): requires >= 30 boost to fly
-                elif car_boost >= 30.0:
-                    reward += self.weight * forward_alignment * 3.0
-                elif car_boost < 20.0:
-                    # Hopeless floor takeoff under high ball with low/no boost
-                    reward += -0.15
+                ball_retreat_vel = float(np.dot(arena.ball.vel, unit_to_ball))
+                # Do not reward jumping off the floor after a ball that is already screaming away downfield (> 1100 uu/s)
+                if ball_retreat_vel < 1100.0:
+                    # Moderate ball (Z <= 450 uu): double-jump or pop reachable with minimal boost
+                    if ball_z <= 450.0:
+                        reward += self.weight * forward_alignment * 2.0
+                    # High aerial ball (Z > 450 uu): requires >= 30 boost to fly
+                    elif car_boost >= 30.0:
+                        reward += self.weight * forward_alignment * 3.0
+                    elif car_boost < 20.0:
+                        # Hopeless floor takeoff under high ball with low/no boost
+                        reward += -0.15
+                elif car_boost >= 30.0 and forward_alignment > 0.4:
+                    # Chasing a fast-moving ball requires high commitment; damp takeoff bonus
+                    reward += self.weight * forward_alignment * 0.8
 
             # 1d. Open-field ground traversal & downfield sprint (dist > 650 uu, ball grounded)
             # Rewards initiating forward traversal liftoff when sprinting downfield (neutral or forward pitch)
@@ -1271,8 +1301,10 @@ class AirRollRecoveryReward(BaseReward):
         dist_to_ball = float(np.linalg.norm(car_to_ball))
         ball_z = float(arena.ball.pos[2])
 
-        # Aerial engagement check (protects inverted flight during air dribbles / flip resets)
-        is_aerial_engagement = bool(ball_z > 350.0 and dist_to_ball < 450.0)
+        # Aerial engagement check (protects steep climbing & inverted flight during aerials / air dribbles / flip resets)
+        unit_to_ball = car_to_ball / max(1e-4, dist_to_ball)
+        fwd_align_to_ball = float(np.dot(car.get_forward_vector(), unit_to_ball))
+        is_aerial_engagement = bool(ball_z > 350.0 and (dist_to_ball < 450.0 or (fwd_align_to_ball > 0.35 and dist_to_ball < 1500.0)))
 
         total_reward = 0.0
 
@@ -1388,9 +1420,12 @@ class AirRollRecoveryReward(BaseReward):
             if dist_to_ball > 1e-4:
                 unit_to_ball = car_to_ball / dist_to_ball
                 fwd_align = float(np.dot(car.get_forward_vector(), unit_to_ball))
-                closing_vel = float(np.dot(car.vel, unit_to_ball))
-                if fwd_align > 0.4 and closing_vel > 200.0:
-                    upright_bonus = max(0.0, up_z) * 0.2
+                car_approach_vel = float(np.dot(car.vel, unit_to_ball))
+                rel_closing_vel = float(np.dot(car.vel - arena.ball.vel, unit_to_ball))
+                # Must be flying toward ball and not hopelessly losing ground to a receding ball:
+                if fwd_align > 0.4 and car_approach_vel > 150.0 and rel_closing_vel > -150.0:
+                    # Upright bonus: reward upright orientation for shallow aerials, exempt steep climbs (fwd[2] > 0.5)
+                    upright_bonus = max(0.0, up_z) * 0.2 if car.get_forward_vector()[2] < 0.5 else 0.1
                     total_reward += (fwd_align * 0.3 + upright_bonus) * 0.5
 
         return self.weight * total_reward

@@ -757,6 +757,165 @@ class TestPhysicsAndControls(unittest.TestCase):
 
         self.assertGreater(rew_brake, rew_thr, "Braking when closing too fast on slow ball must yield higher reward than full throttle!")
 
+    def test_bouncing_and_falling_ball_pacing_and_braking(self):
+        """
+        Guarantees that PlayerToBallVelocityReward:
+        1. Correctly awards braking incentive when closing fast on a falling/bouncing ball (vz < -500 uu/s).
+        2. Penalizes full boost sprint directly underneath a bouncing ball.
+        3. Awards tap-braking and penalizes driving away when overshooting a bouncing ball.
+        4. Applies anti-overshoot penalty when zooming past a bouncing ball without touching.
+        """
+        from env.rewards import PlayerToBallVelocityReward
+        from env.physics_engine import CarState, BallState, BoostPad
+
+        class MockArena:
+            def __init__(self, ball, cars):
+                self.ball, self.cars = ball, cars
+                self.boost_pads = BoostPad.create_standard_pads()
+
+        # 1. Falling ball with vertical gravity velocity (-850 uu/s) at Z=400, horizontal speed 100 uu/s
+        ball_falling = BallState(pos=np.array([0, -2800, 400], dtype=np.float32),
+                                 vel=np.array([0, 100, -850], dtype=np.float32))
+        car = CarState(id=0, team=0, pos=np.array([0, -3000, 17], dtype=np.float32),
+                       vel=np.array([0, 1400, 0], dtype=np.float32),
+                       rot=np.array([0, math.pi / 2, 0], dtype=np.float32), on_ground=True)
+
+        p2b = PlayerToBallVelocityReward(weight=1.0)
+        p2b.reset(MockArena(ball_falling, [car]))
+
+        act_brake = np.array([-1.0, 0, 0, 0, 0, 0, 0, 0], dtype=np.float32)
+        rew_brake = p2b.get_reward(car, MockArena(ball_falling, [car]), act_brake, False, None)
+
+        act_thr = np.array([1.0, 0, 0, 0, 0, 0, 0, 0], dtype=np.float32)
+        rew_thr = p2b.get_reward(car, MockArena(ball_falling, [car]), act_thr, False, None)
+
+        self.assertGreater(rew_brake, rew_thr,
+                            f"Braking when closing fast on falling ball must exceed full throttle! brake={rew_brake} thr={rew_thr}")
+
+        # 2. Overshooting a bouncing ball (Z=320, trailing behind car at local_x < 0)
+        ball_bouncing_behind = BallState(pos=np.array([0, -3100, 320], dtype=np.float32),
+                                          vel=np.array([0, 50, -200], dtype=np.float32))
+        car_past = CarState(id=0, team=0, pos=np.array([0, -3000, 17], dtype=np.float32),
+                            vel=np.array([0, 300, 0], dtype=np.float32),
+                            rot=np.array([0, math.pi / 2, 0], dtype=np.float32), on_ground=True)
+
+        p2b_os = PlayerToBallVelocityReward(weight=1.0)
+        p2b_os.reset(MockArena(ball_bouncing_behind, [car_past]))
+
+        act_brake_os = np.array([-1.0, 0, 0, 0, 0, 0, 0, 0], dtype=np.float32)
+        rew_brake_os = p2b_os.get_reward(car_past, MockArena(ball_bouncing_behind, [car_past]), act_brake_os, False, None)
+
+        act_drive_away = np.array([1.0, 0, 0, 0, 0, 0, 0, 0], dtype=np.float32)
+        rew_drive_away = p2b_os.get_reward(car_past, MockArena(ball_bouncing_behind, [car_past]), act_drive_away, False, None)
+
+        self.assertGreater(rew_brake_os, 0.0, f"Tap braking when overshooting bouncing ball must be positive! got {rew_brake_os}")
+        self.assertLess(rew_drive_away, 0.0, f"Driving away from bouncing ball must be penalized! got {rew_drive_away}")
+
+        # 3. Anti-overshoot penalty when zooming past bouncing ball without touch
+        ball_bounce = BallState(pos=np.array([0, -2800, 450], dtype=np.float32), vel=np.array([0, 0, 0], dtype=np.float32))
+        car_approaching = CarState(id=0, team=0, pos=np.array([0, -3000, 17], dtype=np.float32),
+                                   vel=np.array([0, 1200, 0], dtype=np.float32),
+                                   rot=np.array([0, math.pi / 2, 0], dtype=np.float32), on_ground=True)
+        p2b_strike = PlayerToBallVelocityReward(weight=1.0)
+        p2b_strike.reset(MockArena(ball_bounce, [car_approaching]))
+
+        # Step 1: inside horizontal strike zone (horiz_dist = 200 < 380)
+        p2b_strike.get_reward(car_approaching, MockArena(ball_bounce, [car_approaching]), act_thr, False, None)
+        self.assertTrue(p2b_strike._was_in_strike_zone[0], "Car within 200 uu horiz of bounce must be marked in strike zone!")
+
+        # Step 2: car blew past the ball to Y = -2350 (450 uu past ball, no touch, moving forward, fwd_alignment < -0.15)
+        car_overshot = CarState(id=0, team=0, pos=np.array([0, -2350, 17], dtype=np.float32),
+                                vel=np.array([0, 1200, 0], dtype=np.float32),
+                                rot=np.array([0, math.pi / 2, 0], dtype=np.float32), on_ground=True)
+        car_overshot.ball_touches = car_approaching.ball_touches
+        rew_overshot = p2b_strike.get_reward(car_overshot, MockArena(ball_bounce, [car_overshot]), act_thr, False, None)
+        self.assertLess(rew_overshot, -0.20, f"Zooming past bouncing ball without touching must incur anti-overshoot penalty! got {rew_overshot}")
+
+    def test_aerial_momentum_and_attitude_rewards(self):
+        """
+        Guarantees that aerial momentum and attitude rewards:
+        1. Distinguish relative closure vs receding balls in aerials (no unearned reward for chasing faster receding balls).
+        2. Suppress mid-air braking incentive (cars cannot brake in mid-air).
+        3. Protect steep aerial climbs from false disorientation flags in AirRollRecoveryReward.
+        4. Apply anti-overshoot penalty when zooming past high aerial balls in 3D without touch.
+        """
+        from env.rewards import PlayerToBallVelocityReward, AirRollRecoveryReward
+        from env.physics_engine import CarState, BallState, BoostPad
+
+        class MockArena:
+            def __init__(self, ball, cars):
+                self.ball, self.cars = ball, cars
+                self.boost_pads = BoostPad.create_standard_pads()
+
+        # 1. Chasing a receding high ball vs incoming high ball
+        # Ball at Z=800, receding at [0, 1800, 0]
+        ball_receding = BallState(pos=np.array([0, 1000, 800], dtype=np.float32),
+                                  vel=np.array([0, 1800, 0], dtype=np.float32))
+        car_aerial = CarState(id=0, team=0, pos=np.array([0, 0, 400], dtype=np.float32),
+                              vel=np.array([0, 1200, 400], dtype=np.float32),
+                              rot=np.array([0, 0.4, 0], dtype=np.float32), on_ground=False)
+
+        p2b = PlayerToBallVelocityReward(weight=1.0)
+        p2b.reset(MockArena(ball_receding, [car_aerial]))
+
+        act_aerial = np.array([1.0, 0, 0, 0, 0, 0, 1.0, 0], dtype=np.float32)
+        rew_receding = p2b.get_reward(car_aerial, MockArena(ball_receding, [car_aerial]), act_aerial, False, None)
+
+        # Incoming high ball: Ball at Z=800 moving toward car at [0, -1000, -200]
+        ball_incoming = BallState(pos=np.array([0, 1000, 800], dtype=np.float32),
+                                  vel=np.array([0, -1000, -200], dtype=np.float32))
+        p2b_in = PlayerToBallVelocityReward(weight=1.0)
+        p2b_in.reset(MockArena(ball_incoming, [car_aerial]))
+        rew_incoming = p2b_in.get_reward(car_aerial, MockArena(ball_incoming, [car_aerial]), act_aerial, False, None)
+
+        self.assertGreater(rew_incoming, rew_receding,
+                           f"Incoming aerial ball intercept should yield higher reward than chasing a faster receding ball! in={rew_incoming} rec={rew_receding}")
+
+        # 2. Mid-air brake incentive must be 0 (cannot brake in mid-air)
+        ball_close = BallState(pos=np.array([0, 200, 600], dtype=np.float32),
+                               vel=np.array([0, 0, 0], dtype=np.float32))
+        car_air_brake = CarState(id=0, team=0, pos=np.array([0, 0, 600], dtype=np.float32),
+                                 vel=np.array([0, 1000, 0], dtype=np.float32),
+                                 rot=np.array([0, 0, 0], dtype=np.float32), on_ground=False)
+        p2b_mb = PlayerToBallVelocityReward(weight=1.0)
+        p2b_mb.reset(MockArena(ball_close, [car_air_brake]))
+        act_air_rev = np.array([-1.0, 0, 0, 0, 0, 0, 0, 0], dtype=np.float32)
+        act_air_neu = np.array([0.0, 0, 0, 0, 0, 0, 0, 0], dtype=np.float32)
+        r_rev = p2b_mb.get_reward(car_air_brake, MockArena(ball_close, [car_air_brake]), act_air_rev, False, None)
+        r_neu = p2b_mb.get_reward(car_air_brake, MockArena(ball_close, [car_air_brake]), act_air_neu, False, None)
+        self.assertEqual(r_rev, r_neu, f"Holding reverse in mid-air must not give brake incentive! rev={r_rev} neu={r_neu}")
+
+        # 3. Steep aerial climb must not trigger disorientation in AirRollRecoveryReward
+        # Pitch angle = 70 degrees up (up_z = cos(70 deg) approx 0.34)
+        rot_steep = np.array([0, 70.0 * np.pi / 180.0, 0], dtype=np.float32)
+        car_steep = CarState(id=0, team=0, pos=np.array([0, 0, 300], dtype=np.float32),
+                             vel=np.array([0, 500, 1200], dtype=np.float32),
+                             rot=rot_steep, on_ground=False)
+        ball_high = BallState(pos=np.array([0, 400, 1100], dtype=np.float32),
+                              vel=np.array([0, 0, 0], dtype=np.float32))
+        ar_rew = AirRollRecoveryReward(weight=1.0)
+        ar_rew.reset(MockArena(ball_high, [car_steep]))
+        r_steep = ar_rew.get_reward(car_steep, MockArena(ball_high, [car_steep]), act_aerial, False, None)
+        self.assertFalse(ar_rew._was_disoriented[0], "Steep climb aiming toward high aerial ball must NOT be marked disoriented!")
+
+        # 4. 3D Aerial Anti-Overshoot Penalty
+        car_aerial_approach = CarState(id=0, team=0, pos=np.array([0, -200, 600], dtype=np.float32),
+                                       vel=np.array([0, 1200, 200], dtype=np.float32),
+                                       rot=np.array([0, 0, 0], dtype=np.float32), on_ground=False)
+        ball_aerial_target = BallState(pos=np.array([0, 0, 600], dtype=np.float32), vel=np.array([0, 0, 0], dtype=np.float32))
+        p2b_aerial_os = PlayerToBallVelocityReward(weight=1.0)
+        p2b_aerial_os.reset(MockArena(ball_aerial_target, [car_aerial_approach]))
+        # Step 1: in strike zone (dist = 200 < 400)
+        p2b_aerial_os.get_reward(car_aerial_approach, MockArena(ball_aerial_target, [car_aerial_approach]), act_aerial, False, None)
+        self.assertTrue(p2b_aerial_os._was_in_strike_zone[0])
+        # Step 2: flew past ball to Y=450 without touch
+        car_aerial_past = CarState(id=0, team=0, pos=np.array([0, 450, 600], dtype=np.float32),
+                                   vel=np.array([0, 1200, 200], dtype=np.float32),
+                                   rot=np.array([0, 0, 0], dtype=np.float32), on_ground=False)
+        car_aerial_past.ball_touches = car_aerial_approach.ball_touches
+        r_aerial_os = p2b_aerial_os.get_reward(car_aerial_past, MockArena(ball_aerial_target, [car_aerial_past]), act_aerial, False, None)
+        self.assertLess(r_aerial_os, -0.20, f"Zooming past aerial ball without touching must trigger overshoot penalty! got {r_aerial_os}")
+
     def test_halfflip_inverse_dynamics_and_rewards(self):
         """
         Guarantees that:

@@ -919,6 +919,15 @@ def create_ui():
                             est_game_time = (total_frames / 15.0) / 60.0
                             has_data = total_frames > 0
                             badge = '<span class="status-badge-running">● DATASET ACTIVE</span>' if has_data else '<span class="status-badge-stopped">○ EMPTY DATASET</span>'
+                            warning_banner = f"""
+                            <div style="margin-top: 10px; padding: 8px 12px; background: rgba(245, 158, 11, 0.1); border: 1px solid rgba(245, 158, 11, 0.3); border-radius: 6px; font-size: 0.85em; color: #fbbf24;">
+                                ⚠️ <b>Dataset pool is empty (0 frames).</b> Replay state initialization will fall back to kickoffs and scenarios until genuine .replay, .npz, or .json files are ingested.
+                            </div>
+                            """ if not has_data else f"""
+                            <div style="margin-top: 10px; padding: 8px 12px; background: rgba(16, 185, 129, 0.1); border: 1px solid rgba(16, 185, 129, 0.3); border-radius: 6px; font-size: 0.85em; color: #34d399;">
+                                ✅ <b>Dataset pool active ({total_frames:,} genuine frames).</b> Replay scenarios will sample authentic positions from this pool.
+                            </div>
+                            """
                             return f"""
                             <div class="cyber-panel">
                                 <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px;">
@@ -931,6 +940,7 @@ def create_ui():
                                     <span>Est. Duration: <b style="color: #34d399;">{est_game_time:.1f} mins</b></span>
                                     <span>Pool Size: <b style="color: #facc15;">{file_size_mb:.2f} MB</b></span>
                                 </div>
+                                {warning_banner}
                             </div>
                             """
 
@@ -1854,7 +1864,15 @@ def create_ui():
             p = ReplayParser(demo_dir=str(demo_dir).strip())
             res = p.ingest_directory(max_replays=int(max_replays), sort=str(sort_mode))
             stats_md = build_replay_stats_md()
-            msg = f"⚡ Ingested **{res['parsed_files']}** replays ({res['total_frames']:,} frames) into dataset pool in {res['elapsed_seconds']:.2f}s."
+            if res['total_frames'] > 0:
+                msg = f"⚡ Ingested **{res['parsed_files']}** replays ({res['total_frames']:,} frames) into dataset pool in {res['elapsed_seconds']:.2f}s."
+            else:
+                rep = getattr(p, "last_ingest_report", {})
+                rej = rep.get("rejected_files", [])
+                if rej:
+                    msg = f"⚠️ Ingest scanned {rep.get('total_files', 0)} files in {res['elapsed_seconds']:.2f}s, but 0 frames were ingested. {len(rej)} file(s) could not be decoded (e.g. corrupt or incompatible .replay format)."
+                else:
+                    msg = f"⚠️ No valid replay files (.replay, .npz, .json) found in `{demo_dir}`."
             return stats_md, msg
 
         ingest_selected_btn.click(
@@ -1867,7 +1885,15 @@ def create_ui():
             p = ReplayParser(demo_dir=str(demo_dir).strip())
             res = p.ingest_directory(max_replays=999999, sort="newest")
             stats_md = build_replay_stats_md()
-            msg = f"📥 Ingested ALL **{res['parsed_files']}** replays ({res['total_frames']:,} frames) in {res['elapsed_seconds']:.2f}s."
+            if res['total_frames'] > 0:
+                msg = f"📥 Ingested ALL **{res['parsed_files']}** replays ({res['total_frames']:,} frames) in {res['elapsed_seconds']:.2f}s."
+            else:
+                rep = getattr(p, "last_ingest_report", {})
+                rej = rep.get("rejected_files", [])
+                if rej:
+                    msg = f"⚠️ Ingest scanned {rep.get('total_files', 0)} files in {res['elapsed_seconds']:.2f}s, but 0 frames were ingested. {len(rej)} file(s) failed decoding."
+                else:
+                    msg = f"⚠️ No valid replay files found in `{demo_dir}`."
             return stats_md, msg
 
         ingest_all_btn.click(
@@ -1913,7 +1939,18 @@ def create_ui():
                 res = p.ingest_directory(max_replays=total_added, sort="newest")
                 total_frames = res.get("total_frames", 0)
             stats_md = build_replay_stats_md()
-            msg = f"📤 Uploaded & Ingested **{total_added}** files ({total_frames:,} frames) into dataset."
+            if total_frames > 0:
+                msg = f"📤 Successfully Ingested **{total_added}** replay(s) (**{total_frames:,}** genuine frames) into dataset pool."
+            else:
+                rep = getattr(p, "last_ingest_report", {})
+                rej = rep.get("rejected_files", [])
+                if rej:
+                    rej_sample = ", ".join(rej[:3])
+                    if len(rej) > 3:
+                        rej_sample += f" (+{len(rej)-3} more)"
+                    msg = f"⚠️ Uploaded files processed, but **0 frames** could be extracted. {len(rej)} file(s) failed decoding ({rej_sample}). Check that the files are uncorrupted Rocket League replays."
+                else:
+                    msg = "⚠️ Uploaded files yielded 0 frames. Please upload valid Rocket League match replays (.replay, .npz, or .json) or archives (.zip)."
             return stats_md, msg
 
         replay_uploader.upload(
