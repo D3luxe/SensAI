@@ -18,6 +18,7 @@ ARENA_EXTENT_X = 4096.0
 ARENA_EXTENT_Y = 5120.0
 ARENA_HEIGHT_Z = 2044.0
 GOAL_HEIGHT = 642.775
+GOAL_HALF_WIDTH = 892.755
 
 
 def rotation_to_rot_mat(pitch: float, yaw: float, roll: float) -> np.ndarray:
@@ -683,20 +684,132 @@ class WallBounceReboundSetter(BaseStateSetter):
             car.set_state(cs)
 
 
+class DribbleFlickScenarioSetter(BaseStateSetter):
+    """
+    Dedicated Ground Dribble & Flick Scenario (Seer / Slater / Nexto Architecture).
+    Spawns the attacking car moving downfield at speed (700 - 1200 uu/s) with the ball
+    already settled on the roof / hood (Z ~ 140 - 152 uu, matched velocity).
+    Spawns a defending opponent in net (goalie) or shadowing downfield to force
+    the bot to execute a flick over or past the defender.
+    """
+    def reset(self, rsim_arena: Any, num_players: int) -> None:
+        arena_wrapper = None
+        if hasattr(rsim_arena, "_rsim_arena") and rsim_arena._rsim_arena is not None:
+            arena_wrapper = rsim_arena
+            rsim_arena = rsim_arena._rsim_arena
+
+        target_team = random.choice([0, 1])
+        sign = 1.0 if target_team == 0 else -1.0  # Team 0 attacks +Y, Team 1 attacks -Y
+
+        # Car spawns in midfield / attacking half, pointed downfield toward opponent goal
+        cx = random.uniform(-1000.0, 1000.0)
+        cy = -sign * random.uniform(500.0, 2000.0)
+        cz = 17.0
+        yaw = sign * math.pi / 2 + random.uniform(-0.15, 0.15)  # Pointed downfield
+
+        car_speed = random.uniform(700.0, 1200.0)
+        vx = math.cos(yaw) * car_speed
+        vy = math.sin(yaw) * car_speed
+        vz = 0.0
+
+        # Ball is resting on the roof (center of mass slightly forward or neutral: local_x in [-20, 25])
+        fwd = np.array([math.cos(yaw), math.sin(yaw), 0.0], dtype=np.float32)
+        right = np.array([-math.sin(yaw), math.cos(yaw), 0.0], dtype=np.float32)
+        local_x_offset = random.uniform(-20.0, 25.0)
+        local_y_offset = random.uniform(-15.0, 15.0)
+
+        bx = cx + local_x_offset * fwd[0] + local_y_offset * right[0]
+        by = cy + local_x_offset * fwd[1] + local_y_offset * right[1]
+        bz = random.uniform(142.0, 152.0)  # Perfectly settled on roof
+
+        # Ball velocity is matched with car velocity (smooth velcro carry)
+        bvx = vx + random.uniform(-20.0, 20.0)
+        bvy = vy + random.uniform(-20.0, 20.0)
+        bvz = random.uniform(-10.0, 15.0)
+
+        # Pure-Python arena fallback check
+        if not hasattr(rsim_arena.ball, "get_state"):
+            rsim_arena.ball.pos = np.array([bx, by, bz], dtype=np.float32)
+            rsim_arena.ball.vel = np.array([bvx, bvy, bvz], dtype=np.float32)
+            rsim_arena.ball.ang_vel = np.zeros(3, dtype=np.float32)
+            for i, car in enumerate(rsim_arena.cars):
+                car.boost = random.uniform(35.0, 80.0)
+                team = i % 2
+                if team == target_team:
+                    car.pos = np.array([cx, cy, cz], dtype=np.float32)
+                    car.rot = np.array([0.0, yaw, 0.0], dtype=np.float32)
+                    car.vel = np.array([vx, vy, vz], dtype=np.float32)
+                else:
+                    is_goalie = (random.random() < 0.60)
+                    if is_goalie:
+                        opp_y = sign * (ARENA_EXTENT_Y - random.uniform(200.0, 600.0))
+                        car.pos = np.array([random.uniform(-GOAL_HALF_WIDTH * 0.6, GOAL_HALF_WIDTH * 0.6), opp_y, 17.0], dtype=np.float32)
+                        opp_yaw = -sign * math.pi / 2
+                        car.rot = np.array([0.0, opp_yaw, 0.0], dtype=np.float32)
+                        car.vel = np.array([random.uniform(-200.0, 200.0), 0.0, 0.0], dtype=np.float32)
+                    else:
+                        opp_y = cy + sign * random.uniform(1000.0, 1600.0)
+                        car.pos = np.array([cx + random.uniform(-300.0, 300.0), opp_y, 17.0], dtype=np.float32)
+                        opp_yaw = sign * math.pi / 2
+                        car.rot = np.array([0.0, opp_yaw, 0.0], dtype=np.float32)
+                        car.vel = np.array([0.0, sign * random.uniform(500.0, 900.0), 0.0], dtype=np.float32)
+            return
+
+        bs = rsim_arena.ball.get_state()
+        bs.pos = rsim.Vec(bx, by, bz)
+        bs.vel = rsim.Vec(bvx, bvy, bvz)
+        bs.ang_vel = rsim.Vec(0, 0, 0)
+        rsim_arena.ball.set_state(bs)
+
+        cars = rsim_arena.get_cars()
+        for i, car in enumerate(cars):
+            cs = car.get_state()
+            cs.boost = random.uniform(35.0, 80.0)
+            team = i % 2
+
+            if team == target_team:
+                cs.pos = rsim.Vec(cx, cy, cz)
+                cs.rot_mat = rsim.Angle(pitch=0.0, yaw=yaw, roll=0.0).as_rot_mat()
+                cs.vel = rsim.Vec(vx, vy, vz)
+            else:
+                # Defending opponent: goalie in net (60%) or shadowing retreat downfield (40%)
+                is_goalie = (random.random() < 0.60)
+                if is_goalie:
+                    opp_y = sign * (ARENA_EXTENT_Y - random.uniform(200.0, 600.0))
+                    cs.pos = rsim.Vec(random.uniform(-GOAL_HALF_WIDTH * 0.6, GOAL_HALF_WIDTH * 0.6), opp_y, 17.0)
+                    opp_yaw = -sign * math.pi / 2
+                    cs.rot_mat = rsim.Angle(pitch=0.0, yaw=opp_yaw, roll=0.0).as_rot_mat()
+                    cs.vel = rsim.Vec(random.uniform(-200.0, 200.0), 0.0, 0.0)
+                else:
+                    # Shadow defense: retreating ahead of the dribbler
+                    opp_y = cy + sign * random.uniform(1000.0, 1600.0)
+                    cs.pos = rsim.Vec(cx + random.uniform(-300.0, 300.0), opp_y, 17.0)
+                    opp_yaw = sign * math.pi / 2
+                    cs.rot_mat = rsim.Angle(pitch=0.0, yaw=opp_yaw, roll=0.0).as_rot_mat()
+                    cs.vel = rsim.Vec(0.0, sign * random.uniform(500.0, 900.0), 0.0)
+
+            cs.ang_vel = rsim.Vec(0, 0, 0)
+            car.set_state(cs)
+
+        if arena_wrapper is not None:
+            arena_wrapper._sync_from_rsim()
+
+
 class WeightedScenarioSetter:
     """
     Composite Scenario Manager. Samples across kickoffs, replays, aerials, wall plays, saves, turnarounds,
-    wall rebounds, and user custom scenarios according to live user-configured probability weights.
+    wall rebounds, dribble flick setups, and user custom scenarios according to live user-configured probability weights.
     """
     def __init__(
         self,
-        kickoff_prob: float = 0.25,
-        replay_prob: float = 0.20,
-        aerial_prob: float = 0.11,
+        kickoff_prob: float = 0.22,
+        replay_prob: float = 0.15,
+        aerial_prob: float = 0.10,
         wall_prob: float = 0.09,
         save_prob: float = 0.09,
         turnaround_prob: float = 0.08,
         wall_rebound_prob: float = 0.08,
+        dribble_flick_prob: float = 0.09,
         custom_prob: float = 0.10,
         replay_parser: Optional[ReplayParser] = None
     ):
@@ -707,6 +820,7 @@ class WeightedScenarioSetter:
         self.save_prob = save_prob
         self.turnaround_prob = turnaround_prob
         self.wall_rebound_prob = wall_rebound_prob
+        self.dribble_flick_prob = dribble_flick_prob
         self.custom_prob = custom_prob
 
         self.kickoff_setter = KickoffSetter()
@@ -715,6 +829,7 @@ class WeightedScenarioSetter:
         self.goalie_setter = GoalieSaveSetter()
         self.turnaround_setter = TurnaroundRecoverySetter()
         self.wall_rebound_setter = WallBounceReboundSetter()
+        self.dribble_flick_setter = DribbleFlickScenarioSetter()
         self.replay_setter = ReplayStateSetter(parser=replay_parser)
         self.custom_setter = CustomScenarioSetter()
 
@@ -728,6 +843,7 @@ class WeightedScenarioSetter:
         if "save_prob" in sc: self.save_prob = float(sc["save_prob"])
         if "turnaround_prob" in sc: self.turnaround_prob = float(sc["turnaround_prob"])
         if "wall_rebound_prob" in sc: self.wall_rebound_prob = float(sc["wall_rebound_prob"])
+        if "dribble_flick_prob" in sc: self.dribble_flick_prob = float(sc["dribble_flick_prob"])
         if "custom_prob" in sc: self.custom_prob = float(sc["custom_prob"])
 
     def reset(self, rsim_arena: Any, num_players: int) -> str:
@@ -743,6 +859,7 @@ class WeightedScenarioSetter:
             self.save_prob,
             self.turnaround_prob,
             self.wall_rebound_prob,
+            self.dribble_flick_prob,
             self.custom_prob
         ]
         total = sum(weights)
@@ -791,7 +908,13 @@ class WeightedScenarioSetter:
             self.turnaround_setter.reset(rsim_arena, num_players)
             return "turnaround"
 
-        # 7. Custom Scenarios
+        # 7. Dribble & Flick
+        cumulative += self.dribble_flick_prob
+        if r <= cumulative:
+            self.dribble_flick_setter.reset(rsim_arena, num_players)
+            return "dribble_flick"
+
+        # 8. Custom Scenarios
         cumulative += self.custom_prob
         if r <= cumulative:
             if self.custom_setter.reset(rsim_arena, num_players):
@@ -799,7 +922,7 @@ class WeightedScenarioSetter:
             self.kickoff_setter.reset(rsim_arena, num_players)
             return "kickoff"
 
-        # 8. Goalie Save
+        # 9. Goalie Save
         self.goalie_setter.reset(rsim_arena, num_players)
         return "goalie_save"
 

@@ -187,6 +187,7 @@ class TestFlippingAndMechanics(unittest.TestCase):
         p2b.reset(self.arena)
 
         car = self.arena.cars[0]
+        car.team = 0
         # Car is mid-flip: airborne, flip already spent (has_flip=False), rocketing forward toward ball at +Y
         car.on_ground = False
         car.has_flip = False
@@ -196,6 +197,7 @@ class TestFlippingAndMechanics(unittest.TestCase):
         # Inverted orientation mid-flip: nose points backwards -Y (fwd = [0, -1, 0]), wheels up
         car.rot_mat = np.array([[0, -1, 0], [1, 0, 0], [0, 0, -1]], dtype=np.float32)
         self.arena.ball.pos = np.array([0.0, 2000.0, 93.0], dtype=np.float32)
+        self.arena.ball.vel = np.zeros(3, dtype=np.float32)
 
         p2b._prev_dist[car.id] = 2100.0 # Car is closing distance (2100 -> 2000 = +100 uu delta)
         act = np.array([1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0], dtype=np.float32)

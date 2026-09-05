@@ -1,10 +1,10 @@
 {
-  "updated_at": 1788576328.145357,
+  "updated_at": 1788579157.9998,
   "learning_rate": 0.0003,
-  "ent_coef": 0.008,
+  "ent_coef": 0.012,
   "clip_range": 0.2,
   "bc_regularization_weight": 0.1,
-  "bc_decay_steps": 150000000,
+  "bc_decay_steps": 500000000,
   "baseline_opponent_ratio": 0.1,
   "baseline_opponent_type": "checkpoints/necto-model.pt",
   "paused": false,
@@ -23,13 +23,14 @@
     "boost_lose_weight": 0.35
   },
   "scenarios": {
-    "kickoff_prob": 0.2,
-    "replay_prob": 0.15,
-    "aerial_prob": 0.15,
-    "turnaround_prob": 0.13,
-    "wall_prob": 0.07,
-    "wall_rebound_prob": 0.08,
-    "save_prob": 0.07,
-    "custom_prob": 0.15
+    "kickoff_prob": 0.18,
+    "replay_prob": 0.14,
+    "custom_prob": 0.14,
+    "aerial_prob": 0.09,
+    "wall_prob": 0.09,
+    "wall_rebound_prob": 0.09,
+    "turnaround_prob": 0.09,
+    "save_prob": 0.08,
+    "dribble_flick_prob": 0.10
   }
 }

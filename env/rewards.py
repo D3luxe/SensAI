@@ -307,6 +307,18 @@ class PlayerToBallVelocityReward(BaseReward):
         if fwd_alignment < 0.0 and delta_dist > 0.0 and not (is_reversing_to_target or is_dodging_toward_ball):
             delta_dist = delta_dist * max(0.0, fwd_alignment + 1.0) * 0.2
 
+        fwd_vec = car.get_forward_vector()
+        right_vec = car.get_right_vector()
+        local_x = float(np.dot(car_to_ball[:2], fwd_vec[:2]))
+        local_y = float(np.dot(car_to_ball[:2], right_vec[:2]))
+        is_roof_carry = bool(
+            car.on_ground and
+            curr_dist < 195.0 and
+            118.0 <= ball_z <= 225.0 and
+            abs(local_x) < 80.0 and
+            abs(local_y) < 60.0
+        )
+
         # 3. Strike-Zone Velocity Matching & Brake Incentives (< 450 uu)
         vel_matching_bonus = 0.0
         brake_incentive = 0.0
@@ -338,8 +350,8 @@ class PlayerToBallVelocityReward(BaseReward):
 
             # Dribble Proximity Pacing & Anti-Overshoot:
             # If car is within 350 uu of a low ball and outpacing it (car_speed > ball_speed + 150),
-            # penalize boosting to blow past the ball!
-            if raw_ball_dist < 350.0 and ball_z < 160.0 and car.on_ground:
+            # penalize boosting to blow past the ball! (Exempt during roof carries so bot can accelerate carry)
+            if raw_ball_dist < 350.0 and ball_z < 160.0 and car.on_ground and not is_roof_carry:
                 if car_speed > ball_speed + 150.0 and float(action[6]) > 0.0:
                     dribble_boost_penalty = -0.30 * float(action[6])
 
@@ -368,6 +380,7 @@ class PlayerToBallVelocityReward(BaseReward):
 
         # 5. Turnaround Incentive, Lateral Flank Pocket, and Overshoot Resolution
         turnaround_reward = 0.0
+        roof_carry_reward = 0.0
         if car.on_ground:
             fwd_vec = car.get_forward_vector()
             right_vec = car.get_right_vector()
@@ -452,9 +465,31 @@ class PlayerToBallVelocityReward(BaseReward):
                 elif abs(steer) > 0.35 or handbrake > 0.0:
                     turnaround_reward = +0.20 * max(abs(steer), 0.5)
 
+            # C. Roof Dribble Carry & Velcro Settling (Seer/Nexto Architecture):
+            if is_roof_carry:
+                target_goal_y = ARENA_EXTENT_Y if car.team == 0 else -ARENA_EXTENT_Y
+                target_goal_dir = np.array([0.0, 1.0 if car.team == 0 else -1.0, 0.0], dtype=np.float32)
+                car_to_goal_vel = float(np.dot(car.vel[:2], target_goal_dir[:2]))
+
+                # Anti-Circling Goal Projection (Seer/Nexto Guard):
+                # Only reward carrying the ball when advancing downfield toward the opponent net
+                if car_to_goal_vel > 50.0:
+                    goal_progress = min(1.0, max(0.2, car_to_goal_vel / 1400.0))
+                    center_score = max(0.0, 1.0 - (abs(local_x) / 80.0 * 0.5 + abs(local_y) / 60.0 * 0.5))
+
+                    # Velcro Settling Bonus: dampening vertical ball bounce on roof for stable flicks
+                    rel_vz = abs(float(arena.ball.vel[2] - car.vel[2]))
+                    velcro_bonus = 0.25 * max(0.0, 1.0 - (rel_vz / 120.0))
+
+                    # Velocity Synchronization
+                    rel_horiz_speed = float(np.linalg.norm(car.vel[:2] - arena.ball.vel[:2]))
+                    sync_bonus = 0.25 * max(0.0, 1.0 - (rel_horiz_speed / 250.0))
+
+                    roof_carry_reward = 0.40 * center_score * goal_progress + velcro_bonus + sync_bonus
+
         total_reward = self.weight * (
             delta_dist + vel_toward_ball + vel_matching_bonus + brake_incentive + dribble_boost_penalty +
-            overshoot_penalty + ceiling_penalty + wrong_side_push_penalty + turnaround_reward
+            overshoot_penalty + ceiling_penalty + wrong_side_push_penalty + turnaround_reward + roof_carry_reward
         )
         return float(total_reward)
 
@@ -602,6 +637,8 @@ class JumpBridgeReward(BaseReward):
         self._halfflip_in_progress: Dict[int, bool] = {}
         self._halfflip_cancel_executed: Dict[int, bool] = {}
         self._halfflip_roll_executed: Dict[int, bool] = {}
+        self._flick_window_active: Dict[int, bool] = {}
+        self._prev_ball_vel: Dict[int, np.ndarray] = {}
 
     def reset(self, initial_state: RocketSimArena):
         self._prev_on_ground = {car.id: car.on_ground for car in initial_state.cars}
@@ -613,6 +650,8 @@ class JumpBridgeReward(BaseReward):
         self._halfflip_in_progress = {car.id: False for car in initial_state.cars}
         self._halfflip_cancel_executed = {car.id: False for car in initial_state.cars}
         self._halfflip_roll_executed = {car.id: False for car in initial_state.cars}
+        self._flick_window_active = {car.id: False for car in initial_state.cars}
+        self._prev_ball_vel = {car.id: initial_state.ball.vel.copy() for car in initial_state.cars}
 
     def get_reward(self, car: CarState, arena: RocketSimArena, action: np.ndarray, is_goal: bool, scoring_team: Optional[int]) -> float:
         prev_ground = self._prev_on_ground.get(car.id, car.on_ground)
@@ -683,6 +722,8 @@ class JumpBridgeReward(BaseReward):
 
         fwd_vec = car.get_forward_vector()
         right_vec = car.get_right_vector()
+        local_x = float(np.dot(car_to_ball[:2], fwd_vec[:2]))
+        local_y = float(np.dot(car_to_ball[:2], right_vec[:2]))
         car_speed_horiz = float(np.linalg.norm(car.vel[:2]))
         car_fwd_speed = float(np.dot(car.vel[:2], fwd_vec[:2]))
         pitch_input = float(action[2])
@@ -695,15 +736,21 @@ class JumpBridgeReward(BaseReward):
             is_aerial_ball = bool(ball_z > 250.0)
             car_boost = float(car.boost)
 
-            # 1a. Close-Quarters Strike Liftoff & 50/50 Challenge (dist <= 500 uu)
-            # 50/50 Challenge: When an opponent is actively challenging, any body contact/block (including rear-absorption) is valid.
+            # 1a. Close-Quarters Strike Liftoff, 50/50 Challenge, and Flick Pop Setup:
             is_contested_5050 = bool(dist <= 450.0 and is_opponent_challenging and ball_z < 220.0 and car.pos[2] < 150.0)
-            # Strike Liftoff: When uncontested, liftoff requires forward alignment, closing velocity, and non-backward pitch.
+            is_flick_liftoff = bool(dist <= 260.0 and 115.0 <= ball_z <= 280.0 and car.pos[2] < 150.0 and abs(local_x) < 90.0 and abs(local_y) < 70.0)
             is_strike_liftoff = bool(dist <= 500.0 and ball_z < 250.0 and car.pos[2] < 150.0 and forward_alignment > 0.20 and takeoff_closing_vel > 150.0 and pitch_input >= -0.10)
 
-            if is_contested_5050 or is_strike_liftoff:
-                self._challenge_jump_active[car.id] = True
-                bonus_scale = 1.2 if is_contested_5050 else (0.8 + 0.4 * forward_alignment)
+            if is_contested_5050 or is_flick_liftoff or is_strike_liftoff:
+                if is_contested_5050:
+                    self._challenge_jump_active[car.id] = True
+                    bonus_scale = 1.2
+                elif is_flick_liftoff:
+                    self._flick_window_active[car.id] = True
+                    bonus_scale = 1.5
+                else:
+                    self._challenge_jump_active[car.id] = True
+                    bonus_scale = (0.8 + 0.4 * forward_alignment)
                 reward += self.weight * bonus_scale
 
             # 1b. Wall Takeoff / Air Dribble Pop / Wall Bang Setup
@@ -743,6 +790,7 @@ class JumpBridgeReward(BaseReward):
                 self._challenge_jump_active[car.id] = False
         elif car.on_ground:
             self._challenge_jump_active[car.id] = False
+            self._flick_window_active[car.id] = False
 
         # ── 3. Airborne Dodge / Flip & Traversal Impulse ──────────────────────
         is_executing_dodge = bool(not car.on_ground and prev_flip and not car.has_flip)
@@ -762,17 +810,21 @@ class JumpBridgeReward(BaseReward):
         else:
             dodge_align = 0.0
 
+        is_flick_active = bool(self._flick_window_active.get(car.id, False) or (dist < 260.0 and 115.0 <= ball_z <= 320.0 and abs(local_x) < 100.0 and abs(local_y) < 80.0))
+
         is_5050_backflip = bool(is_executing_dodge and pitch_input < -0.20 and dist <= 450.0 and is_opponent_challenging)
-        is_uncontested_dribble_backflip = bool(is_executing_dodge and pitch_input < -0.20 and dist <= 450.0 and not is_opponent_challenging and forward_alignment < -0.20)
-        is_forward_backflip = bool(is_executing_dodge and pitch_input < -0.20 and not is_5050_backflip and (car_fwd_speed > 100.0 or forward_alignment > 0.15))
+        is_uncontested_dribble_backflip = bool(is_executing_dodge and pitch_input < -0.20 and dist <= 450.0 and not is_opponent_challenging and not is_flick_active and forward_alignment < -0.20)
+        is_forward_backflip = bool(is_executing_dodge and pitch_input < -0.20 and not is_5050_backflip and not is_flick_active and (car_fwd_speed > 100.0 or forward_alignment > 0.15))
 
         # Strict Backflip Penalization & Half-Flip Initiation Tracking:
-        # 1. If opponent is challenging within 50/50 distance, backflipping to challenge/block is permitted.
+        # 1. If opponent is challenging within 50/50 distance or bot is in a flick setup, backflipping is permitted.
         # 2. Backflips while moving forward, facing the ball, or overshooting an uncontested dribble are strictly penalized.
         # 3. Only backward dodges when facing away from the target downfield (dist > 450 or retreating) represent valid Half-Flip attempts.
         if is_executing_dodge and pitch_input < -0.20:
             if is_5050_backflip:
                 self._challenge_jump_active[car.id] = True
+            elif is_flick_active:
+                pass  # Free backflip flick / scoop execution
             elif is_forward_backflip or is_uncontested_dribble_backflip:
                 reward -= self.weight * 0.80  # Strict penalty against forward backflips and uncontested dribble overshoot backflips
             elif forward_alignment < -0.20 and (dist > 450.0 or is_wrong_side):
@@ -816,6 +868,23 @@ class JumpBridgeReward(BaseReward):
             elif ball_z > 350.0 and forward_alignment > 0.30:
                 # Double jump for high aerial balls
                 reward += self.weight * forward_alignment * 0.4
+
+        # ── 3b. Flick Launch Impulse & Goal Acceleration Bonus (Seer/Nexto Architecture) ──
+        target_goal_y = ARENA_EXTENT_Y if car.team == 0 else -ARENA_EXTENT_Y
+        target_goal_dir = np.array([0.0, 1.0 if car.team == 0 else -1.0, 0.0], dtype=np.float32)
+
+        if (is_flick_active or dist < 260.0) and car.ball_touches > prev_touch and (is_executing_dodge or car.just_dodged):
+            prev_b_vel = self._prev_ball_vel.get(car.id, arena.ball.vel)
+            exit_speed_goal = float(np.dot(arena.ball.vel, target_goal_dir))
+            delta_v_goal = float(np.dot(arena.ball.vel - prev_b_vel, target_goal_dir))
+
+            if exit_speed_goal > 650.0 and delta_v_goal > 150.0:
+                # Genuine explosive flick on target net!
+                flick_power = min(3.0, (exit_speed_goal / 600.0) + (delta_v_goal / 500.0))
+                reward += self.weight * 1.5 * flick_power
+                self._flick_window_active[car.id] = False
+
+        self._prev_ball_vel[car.id] = arena.ball.vel.copy()
 
         # ── 4. Wavedash & Speed Impulse on Touchdown / Flip Acceleration ─────
         # Rewards speed increases (delta_v > 0) along tactical vector resulting from flips/wavedashes

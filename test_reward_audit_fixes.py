@@ -14,6 +14,7 @@ from env.rewards import (
     TouchBallReward, JumpBridgeReward, BoostReward, PowerslideReward,
     AirRollRecoveryReward, CombinedReward, RewardManager
 )
+from env.state_setters import DribbleFlickScenarioSetter, WeightedScenarioSetter
 
 
 class TestRewardAuditFixes(unittest.TestCase):
@@ -675,6 +676,224 @@ class TestRewardAuditFixes(unittest.TestCase):
         r_hard_reverse = rew.get_reward(car, self.arena, act_hard_reverse, False, None)
 
         self.assertGreater(r_coast, r_hard_reverse, f"When ball is already overtaking from behind, coasting must be preferred over slamming reverse into it! (got coast={r_coast} vs rev={r_hard_reverse})")
+
+    def test_roof_carry_goal_directed_reward(self):
+        """Test that carrying the ball on the roof towards the opponent goal is rewarded, while carrying towards own goal is not."""
+        rew = PlayerToBallVelocityReward(weight=1.0)
+        # 1. Carrying forward downfield towards opponent goal (+Y)
+        car_fwd = CarState(
+            id=0, team=0,
+            pos=np.array([0.0, 0.0, 17.0], dtype=np.float32),
+            vel=np.array([0.0, 900.0, 0.0], dtype=np.float32),
+            rot=np.array([0.0, math.pi / 2, 0.0], dtype=np.float32),
+            on_ground=True
+        )
+        self.arena.ball.pos = np.array([0.0, 15.0, 145.0], dtype=np.float32)
+        self.arena.ball.vel = np.array([0.0, 900.0, 0.0], dtype=np.float32)
+        self.arena.cars = [car_fwd]
+        rew.reset(self.arena)
+
+        act = np.zeros(8, dtype=np.float32)
+        act[0] = 0.5
+        r_fwd = rew.get_reward(car_fwd, self.arena, act, False, None)
+        self.assertGreater(r_fwd, 0.35, f"Roof carry towards opponent goal should receive high positive reward, got {r_fwd}")
+
+        # 2. Carrying backward towards own goal (-Y)
+        car_bwd = CarState(
+            id=0, team=0,
+            pos=np.array([0.0, 0.0, 17.0], dtype=np.float32),
+            vel=np.array([0.0, -900.0, 0.0], dtype=np.float32),
+            rot=np.array([0.0, -math.pi / 2, 0.0], dtype=np.float32),
+            on_ground=True
+        )
+        self.arena.ball.pos = np.array([0.0, -15.0, 145.0], dtype=np.float32)
+        self.arena.ball.vel = np.array([0.0, -900.0, 0.0], dtype=np.float32)
+        self.arena.cars = [car_bwd]
+        rew.reset(self.arena)
+
+        r_bwd = rew.get_reward(car_bwd, self.arena, act, False, None)
+        self.assertGreater(r_fwd, r_bwd, f"Advancing toward opponent goal must be rewarded much higher than own-goal retreat! (fwd={r_fwd} vs bwd={r_bwd})")
+
+    def test_roof_carry_settling_bonus(self):
+        """Test that a settled ball on the roof yields a higher settling bonus than a violently bouncing ball."""
+        rew = PlayerToBallVelocityReward(weight=1.0)
+        car = CarState(
+            id=0, team=0,
+            pos=np.array([0.0, 0.0, 17.0], dtype=np.float32),
+            vel=np.array([0.0, 900.0, 0.0], dtype=np.float32),
+            rot=np.array([0.0, math.pi / 2, 0.0], dtype=np.float32),
+            on_ground=True
+        )
+        self.arena.cars = [car]
+        rew.reset(self.arena)
+        act = np.zeros(8, dtype=np.float32)
+
+        # Case A: Settled ball (vz = 0)
+        self.arena.ball.pos = np.array([0.0, 10.0, 145.0], dtype=np.float32)
+        self.arena.ball.vel = np.array([0.0, 900.0, 0.0], dtype=np.float32)
+        r_settled = rew.get_reward(car, self.arena, act, False, None)
+
+        # Case B: Bouncing ball (vz = 300)
+        rew.reset(self.arena)
+        self.arena.ball.pos = np.array([0.0, 10.0, 145.0], dtype=np.float32)
+        self.arena.ball.vel = np.array([0.0, 900.0, 300.0], dtype=np.float32)
+        r_bouncing = rew.get_reward(car, self.arena, act, False, None)
+
+        self.assertGreater(r_settled, r_bouncing, f"Settled ball on roof must receive higher reward than bouncing ball (settled={r_settled} vs bouncing={r_bouncing})")
+
+    def test_roof_carry_boost_exemption(self):
+        """Test that feathering boost while carrying on roof is exempt from dribble boost penalty."""
+        rew = PlayerToBallVelocityReward(weight=1.0)
+        car = CarState(
+            id=0, team=0,
+            pos=np.array([0.0, 0.0, 17.0], dtype=np.float32),
+            vel=np.array([0.0, 900.0, 0.0], dtype=np.float32),
+            rot=np.array([0.0, math.pi / 2, 0.0], dtype=np.float32),
+            boost=50.0,
+            on_ground=True
+        )
+        self.arena.cars = [car]
+        rew.reset(self.arena)
+
+        # Ball on roof
+        self.arena.ball.pos = np.array([0.0, 10.0, 145.0], dtype=np.float32)
+        self.arena.ball.vel = np.array([0.0, 900.0, 0.0], dtype=np.float32)
+
+        act_boost = np.zeros(8, dtype=np.float32)
+        act_boost[6] = 1.0  # Boost input
+        r_roof = rew.get_reward(car, self.arena, act_boost, False, None)
+
+        # Ball rolling on ground in front of car (not roof carry, prone to dribble boost penalty)
+        rew.reset(self.arena)
+        self.arena.ball.pos = np.array([0.0, 150.0, 93.0], dtype=np.float32)
+        self.arena.ball.vel = np.array([0.0, 900.0, 0.0], dtype=np.float32)
+        r_ground = rew.get_reward(car, self.arena, act_boost, False, None)
+
+        self.assertGreater(r_roof, r_ground, f"Roof carry should exempt boost penalty, yielding higher reward than ground dribble boost (roof={r_roof} vs ground={r_ground})")
+
+    def test_flick_window_backflip_unpenalized(self):
+        """Test that backward flips during active flick window (e.g. Musty/backflip flick) are not penalized."""
+        rew = JumpBridgeReward(weight=0.35)
+        car = CarState(
+            id=0, team=0,
+            pos=np.array([0.0, 0.0, 80.0], dtype=np.float32),
+            vel=np.array([0.0, 800.0, 100.0], dtype=np.float32),
+            rot=np.array([0.0, math.pi / 2, 0.0], dtype=np.float32),
+            on_ground=False,
+            has_flip=False
+        )
+        # Ball in flick pocket above car
+        self.arena.ball.pos = np.array([0.0, 10.0, 170.0], dtype=np.float32)
+        self.arena.ball.vel = np.array([0.0, 800.0, 100.0], dtype=np.float32)
+        self.arena.cars = [car]
+        rew.reset(self.arena)
+
+        # Setup flick window active
+        rew._prev_on_ground[car.id] = False
+        rew._prev_has_flip[car.id] = True  # Consumed flip on this tick
+        rew._flick_window_active[car.id] = True
+        rew._prev_touches[car.id] = 0
+        rew._prev_vel[car.id] = car.vel.copy()
+
+        # Execute backflip dodge (pitch = -1.0)
+        act_backflip = np.zeros(8, dtype=np.float32)
+        act_backflip[2] = -1.0  # Pitch down
+        act_backflip[5] = 1.0   # Jump
+
+        r_flick_backflip = rew.get_reward(car, self.arena, act_backflip, False, None)
+
+        # Compare with uncontested dribble backflip without flick window
+        rew.reset(self.arena)
+        rew._prev_on_ground[car.id] = False
+        rew._prev_has_flip[car.id] = True
+        rew._flick_window_active[car.id] = False
+        self.arena.ball.pos = np.array([0.0, 500.0, 93.0], dtype=np.float32)  # Ball far away
+        r_uncontested_backflip = rew.get_reward(car, self.arena, act_backflip, False, None)
+
+        self.assertGreater(r_flick_backflip, r_uncontested_backflip, f"Flick backflip should NOT be penalized like an erroneous open field backflip! (got flick={r_flick_backflip} vs err={r_uncontested_backflip})")
+
+    def test_flick_launch_impulse_rewarded(self):
+        """Test that launching the ball with high impulse towards the target goal during a flick is heavily rewarded."""
+        rew = JumpBridgeReward(weight=0.35)
+        car = CarState(
+            id=0, team=0,
+            pos=np.array([0.0, 0.0, 80.0], dtype=np.float32),
+            vel=np.array([0.0, 900.0, 50.0], dtype=np.float32),
+            rot=np.array([0.0, math.pi / 2, 0.0], dtype=np.float32),
+            on_ground=False,
+            has_flip=False,
+            ball_touches=1
+        )
+        self.arena.cars = [car]
+        rew.reset(self.arena)
+        rew._prev_on_ground[car.id] = False
+        rew._prev_has_flip[car.id] = True
+        rew._flick_window_active[car.id] = True
+        rew._prev_touches[car.id] = 0
+        rew._prev_vel[car.id] = car.vel.copy()
+        rew._prev_ball_vel[car.id] = np.array([0.0, 800.0, 50.0], dtype=np.float32)
+
+        # 1. Ball launched at high speed downfield towards opponent goal
+        self.arena.ball.pos = np.array([0.0, 50.0, 160.0], dtype=np.float32)
+        self.arena.ball.vel = np.array([0.0, 1600.0, 350.0], dtype=np.float32)  # Explosive launch +Y
+
+        act = np.zeros(8, dtype=np.float32)
+        act[2] = 1.0  # Front flip
+        act[5] = 1.0
+        r_launch = rew.get_reward(car, self.arena, act, False, None)
+        self.assertGreater(r_launch, 0.8, f"Explosive flick launch toward opponent net must yield strong launch bonus, got {r_launch}")
+
+        # 2. Ball launched backwards toward own goal
+        rew.reset(self.arena)
+        rew._prev_on_ground[car.id] = False
+        rew._prev_has_flip[car.id] = True
+        rew._flick_window_active[car.id] = True
+        rew._prev_touches[car.id] = 0
+        rew._prev_vel[car.id] = car.vel.copy()
+        rew._prev_ball_vel[car.id] = np.array([0.0, -800.0, 50.0], dtype=np.float32)
+        self.arena.ball.vel = np.array([0.0, -1600.0, 350.0], dtype=np.float32)  # Launched -Y (own net)
+
+        r_own_net = rew.get_reward(car, self.arena, act, False, None)
+        self.assertGreater(r_launch, r_own_net, f"Flick launch toward opponent goal must be rewarded significantly higher than flick toward own net! (launch={r_launch} vs own_net={r_own_net})")
+
+    def test_dribble_flick_scenario_setter(self):
+        """Test that DribbleFlickScenarioSetter spawns settled ball on roof with matching speeds."""
+        setter = DribbleFlickScenarioSetter()
+        setter.reset(self.arena, num_players=2)
+
+        ball = self.arena.ball
+        # Identify the dribbler (the car directly under the ball)
+        dribbler = min(self.arena.cars, key=lambda c: float(np.linalg.norm(ball.pos[:2] - c.pos[:2])))
+
+        # Check car speed
+        car_speed = float(np.linalg.norm(dribbler.vel))
+        self.assertGreaterEqual(car_speed, 650.0, f"Car speed should be at least 650, got {car_speed}")
+        self.assertLessEqual(car_speed, 1250.0, f"Car speed should be at most 1250, got {car_speed}")
+
+        # Check ball is on roof
+        rel_pos = ball.pos - dribbler.pos
+        self.assertLess(float(np.linalg.norm(rel_pos[:2])), 80.0, f"Ball should be centered horizontally on car, got dist {np.linalg.norm(rel_pos[:2])}")
+        self.assertGreaterEqual(ball.pos[2], 120.0, f"Ball Z should be roof height, got {ball.pos[2]}")
+        self.assertLessEqual(ball.pos[2], 200.0, f"Ball Z should be roof height, got {ball.pos[2]}")
+
+        # Check velocity synchronization
+        rel_vel = ball.vel - dribbler.vel
+        self.assertLess(float(np.linalg.norm(rel_vel[:2])), 40.0, f"Ball and car horizontal velocities should match, got rel_vel {rel_vel}")
+
+        # Check WeightedScenarioSetter integration
+        weighted = WeightedScenarioSetter()
+        weighted.dribble_flick_prob = 1.0
+        weighted.kickoff_prob = 0.0
+        weighted.replay_prob = 0.0
+        weighted.aerial_prob = 0.0
+        weighted.wall_prob = 0.0
+        weighted.save_prob = 0.0
+        weighted.turnaround_prob = 0.0
+        weighted.wall_rebound_prob = 0.0
+        weighted.custom_prob = 0.0
+
+        chosen = weighted.reset(self.arena, num_players=2)
+        self.assertEqual(chosen, "dribble_flick", f"WeightedScenarioSetter should select dribble_flick, got {chosen}")
 
 
 if __name__ == "__main__":

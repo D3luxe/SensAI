@@ -116,12 +116,12 @@ class ActorCritic(nn.Module):
 
                 if hasattr(self, "actor_log_std") and self.actor_log_std is not None:
                     # Recover from underflow or parameter drift
-                    if torch.isnan(self.actor_log_std).any() or (self.actor_log_std.abs() < 1e-6).any() or (self.actor_log_std > -0.8).any():
-                        self.actor_log_std.data.fill_(-1.3)
+                    if torch.isnan(self.actor_log_std).any() or (self.actor_log_std.abs() < 1e-6).any() or (self.actor_log_std > -0.5).any():
+                        self.actor_log_std.data.fill_(-1.1)
                     else:
-                        self.actor_log_std.data.clamp_(min=-2.2, max=-1.0)
-                    # Guarantee healthy exploration on Pitch (index 2) to discover forward/diagonal dodges
-                    self.actor_log_std.data[0, 2] = max(-1.2, float(self.actor_log_std.data[0, 2]))
+                        self.actor_log_std.data.clamp_(min=-2.2, max=-0.7)
+                    # Guarantee healthy exploration on Pitch (index 2) to discover forward/diagonal/flick dodges
+                    self.actor_log_std.data[0, 2] = max(-1.0, float(self.actor_log_std.data[0, 2]))
 
                 # Desaturate actor_mean weights if they exceeded linear analog range
                 weight_norm = self.actor_mean.weight.data.norm(dim=1, keepdim=True)
@@ -185,7 +185,7 @@ class ActorCritic(nn.Module):
                 bin_logits = self.actor_binary(features)
 
             # Continuous Gaussian distribution (0..4: Throttle, Steer, Pitch, Yaw, Roll)
-            clamped_log_std = torch.clamp(self.actor_log_std, min=-2.5, max=-1.2)
+            clamped_log_std = torch.clamp(self.actor_log_std, min=-2.5, max=-0.7)
             action_log_std = clamped_log_std.expand_as(action_mean)
             action_std = torch.exp(action_log_std)
             dist_cont = Normal(action_mean, action_std)

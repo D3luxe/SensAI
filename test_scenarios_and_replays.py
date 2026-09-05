@@ -187,6 +187,8 @@ class TestScenariosAndReplays(unittest.TestCase):
             "replay_prob": 0.0,
             "wall_prob": 0.0,
             "turnaround_prob": 0.0,
+            "wall_rebound_prob": 0.0,
+            "dribble_flick_prob": 0.0,
             "save_prob": 0.0,
             "custom_prob": 0.0
         })
@@ -201,6 +203,8 @@ class TestScenariosAndReplays(unittest.TestCase):
             "replay_prob": 0.0,
             "wall_prob": 0.0,
             "turnaround_prob": 0.0,
+            "wall_rebound_prob": 0.0,
+            "dribble_flick_prob": 0.0,
             "save_prob": 0.0,
             "custom_prob": 1.0
         })
