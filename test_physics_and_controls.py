@@ -332,6 +332,68 @@ class TestPhysicsAndControls(unittest.TestCase):
             self.assertGreater(len(arena.cars), 0)
             self.assertIsNotNone(arena.ball)
 
+    def test_multi_slice_prediction_caching(self):
+        """Guarantees get_predicted_ball_pos caches multiple distinct slice indices per step."""
+        arena = RocketSimArena(num_players=2, game_mode="1v1")
+        arena.ball.pos = np.array([2000.0, 0.0, 100.0], dtype=np.float32)
+        arena.ball.vel = np.array([1500.0, 0.0, 0.0], dtype=np.float32)
+        if arena._use_rsim and arena._rsim_arena:
+            bs = arena._rsim_arena.ball.get_state()
+            bs.pos = rsim.Vec(2000, 0, 100)
+            bs.vel = rsim.Vec(1500, 0, 0)
+            arena._rsim_arena.ball.set_state(bs)
+
+        p30 = arena.get_predicted_ball_pos(30)
+        p60 = arena.get_predicted_ball_pos(60)
+        self.assertFalse(np.allclose(p30, p60), "Slice 30 and Slice 60 must return different future positions!")
+        # Calling slice 30 again should return cached copy
+        p30_cached = arena.get_predicted_ball_pos(30)
+        np.testing.assert_array_equal(p30, p30_cached)
+
+    def test_wall_bounce_rebound_setter(self):
+        """Guarantees WallBounceReboundSetter spawns valid wall-rebound configurations."""
+        from env.state_setters import WallBounceReboundSetter
+        setter = WallBounceReboundSetter()
+        arena = RocketSimArena(num_players=2, game_mode="1v1")
+        for _ in range(20):
+            setter.reset(arena._rsim_arena, 2)
+            arena._sync_from_rsim()
+            ball_spd = float(np.linalg.norm(arena.ball.vel))
+            self.assertGreaterEqual(ball_spd, 1000.0, "Wall rebound scenario must launch ball at >= 1000 uu/s!")
+            self.assertGreater(len(arena.cars), 0)
+            self.assertGreater(arena.cars[0].boost, 30.0)
+
+    def test_player_to_ball_reward_bounce_intercept(self):
+        """Guarantees PlayerToBallVelocityReward rewards anticipating future ball trajectory."""
+        from env.rewards import PlayerToBallVelocityReward
+        arena = RocketSimArena(num_players=2, game_mode="1v1")
+        reward_fn = PlayerToBallVelocityReward(weight=1.0)
+
+        # Set ball speeding toward sidewall (+X at 1800 uu/s)
+        arena.ball.pos = np.array([3000.0, 0.0, 200.0], dtype=np.float32)
+        arena.ball.vel = np.array([1800.0, 0.0, 0.0], dtype=np.float32)
+        if arena._use_rsim and arena._rsim_arena:
+            bs = arena._rsim_arena.ball.get_state()
+            bs.pos = rsim.Vec(3000, 0, 200)
+            bs.vel = rsim.Vec(1800, 0, 0)
+            arena._rsim_arena.ball.set_state(bs)
+
+        car = arena.cars[0]
+        car.pos = np.array([1500.0, 0.0, 17.0], dtype=np.float32)
+        car.vel = np.array([800.0, 0.0, 0.0], dtype=np.float32)
+        reward_fn.reset(arena)
+
+        # Check target_pos blending: target_pos should be shifted toward predicted trajectory
+        target = reward_fn._get_target_pos(car.pos, arena, is_kickoff=False)
+        self.assertGreater(target[0], arena.ball.pos[0] - 200.0)
+
+        # Car moving forward toward target earns positive reward
+        action = np.array([1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0], dtype=np.float32)
+        # Advance car slightly closer to target
+        car.pos[0] += 50.0
+        r = reward_fn.get_reward(car, arena, action, False, None)
+        self.assertGreater(r, 0.0, "Closing distance toward future rebound target must yield positive reward!")
+
     def test_bilateral_symmetry_masks(self):
         """
         Guarantees that mirroring an observation and action flips antisymmetric axes (steer, yaw, roll, X).

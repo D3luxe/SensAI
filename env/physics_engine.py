@@ -502,9 +502,13 @@ class RocketSimArena:
             return (self.scored_team is not None), self.scored_team
 
     def get_predicted_ball_pos(self, slice_idx: int = 60) -> np.ndarray:
-        """Returns cached 0.5s future ball position (calculated once per step per arena)."""
-        if getattr(self, "_cached_pred_step", -1) == self.step_count and getattr(self, "_cached_pred_slice", None) is not None:
-            return self._cached_pred_slice
+        """Returns cached future ball position for the given slice index (calculated once per step per arena)."""
+        if getattr(self, "_cached_pred_step", -1) != self.step_count:
+            self._cached_pred_slices = {}
+            self._cached_pred_step = self.step_count
+
+        if slice_idx in getattr(self, "_cached_pred_slices", {}):
+            return self._cached_pred_slices[slice_idx]
 
         pred_pos = None
         if self._use_rsim and self._rsim_arena is not None:
@@ -530,8 +534,9 @@ class RocketSimArena:
                 py = np.sign(py) * (5000.0 - (abs(py) - 5000.0) * 0.6)
             pred_pos = np.array([px, py, pz], dtype=np.float32)
 
-        self._cached_pred_step = self.step_count
-        self._cached_pred_slice = pred_pos
+        if not hasattr(self, "_cached_pred_slices"):
+            self._cached_pred_slices = {}
+        self._cached_pred_slices[slice_idx] = pred_pos
         return pred_pos
 
     def get_shot_threat(self, team: int) -> Tuple[bool, float, float]:

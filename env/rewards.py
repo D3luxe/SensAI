@@ -160,9 +160,39 @@ class PlayerToBallVelocityReward(BaseReward):
             return float(np.linalg.norm(ball_pos[:2] - car_pos[:2]))
         return float(np.linalg.norm(ball_pos - car_pos))
 
+    def _get_target_pos(self, car_pos: np.ndarray, arena: RocketSimArena, is_kickoff: bool) -> np.ndarray:
+        """
+        Computes the tactical target point for distance delta and alignment.
+        When the ball has significant velocity (> 300 uu/s) and has future trajectory,
+        blends the target toward predicted future position so reading wall bounces
+        and intercepting rebounds yields positive rewards instead of penalties.
+        Inside the close strike zone (< 400 uu) or when ball is slow, seamlessly
+        locks to the instantaneous ball position for accurate touches.
+        """
+        target_pos = arena.ball.pos
+        if is_kickoff:
+            return target_pos
+
+        ball_speed = float(np.linalg.norm(arena.ball.vel))
+        if ball_speed > 300.0 and hasattr(arena, "get_predicted_ball_pos"):
+            pred_pos = arena.get_predicted_ball_pos(60)
+            if pred_pos is not None:
+                raw_ball_dist = self._calc_dist(car_pos, arena.ball.pos)
+                proximity_factor = min(1.0, max(0.0, (raw_ball_dist - 250.0) / 350.0))
+                speed_factor = min(1.0, max(0.0, (ball_speed - 300.0) / 1200.0))
+                blend = 0.65 * proximity_factor * speed_factor
+                target_pos = (1.0 - blend) * arena.ball.pos + blend * pred_pos
+        return target_pos
+
     def reset(self, initial_state: RocketSimArena):
+        is_kickoff = bool(
+            abs(initial_state.ball.pos[0]) < 50.0 and
+            abs(initial_state.ball.pos[1]) < 50.0 and
+            initial_state.ball.pos[2] < 120.0 and
+            float(np.linalg.norm(initial_state.ball.vel)) < 100.0
+        )
         self._prev_dist = {
-            car.id: self._calc_dist(car.pos, initial_state.ball.pos)
+            car.id: self._calc_dist(car.pos, self._get_target_pos(car.pos, initial_state, is_kickoff))
             for car in initial_state.cars
         }
         self._prev_touches = {car.id: car.ball_touches for car in initial_state.cars}
@@ -172,15 +202,26 @@ class PlayerToBallVelocityReward(BaseReward):
         if is_goal:
             return 0.0
 
-        curr_dist = self._calc_dist(car.pos, arena.ball.pos)
+        # Kickoff sprint multiplier & anti-peel penalty (guarantees full-throttle rush on kickoff)
+        is_kickoff = bool(
+            abs(arena.ball.pos[0]) < 50.0 and
+            abs(arena.ball.pos[1]) < 50.0 and
+            arena.ball.pos[2] < 120.0 and
+            float(np.linalg.norm(arena.ball.vel)) < 100.0
+        )
+
+        target_pos = self._get_target_pos(car.pos, arena, is_kickoff)
+        curr_dist = self._calc_dist(car.pos, target_pos)
         prev_dist = self._prev_dist.get(car.id, curr_dist)
         self._prev_dist[car.id] = curr_dist
 
         prev_t = self._prev_touches.get(car.id, car.ball_touches)
         self._prev_touches[car.id] = car.ball_touches
 
-        # Unit alignment vector to ball (properly normalized in 3D)
-        car_to_ball = arena.ball.pos - car.pos
+        raw_ball_dist = self._calc_dist(car.pos, arena.ball.pos)
+
+        # Unit alignment vector to tactical target (properly normalized in 3D)
+        car_to_ball = target_pos - car.pos
         dist_3d = float(np.linalg.norm(car_to_ball))
         unit_to_ball = car_to_ball / max(1e-4, dist_3d)
         fwd_alignment = float(np.dot(car.get_forward_vector(), unit_to_ball))
@@ -192,8 +233,6 @@ class PlayerToBallVelocityReward(BaseReward):
         car_vy_defend = -car.vel[1] if car.team == 0 else car.vel[1]  # >0 when moving towards own goal
         is_wrong_side = bool(dist_car_to_defend > dist_ball_to_defend + 50.0)
 
-        # Kickoff sprint multiplier & anti-peel penalty (guarantees full-throttle rush on kickoff)
-        is_kickoff = bool(abs(arena.ball.pos[0]) < 50.0 and abs(arena.ball.pos[1]) < 50.0 and arena.ball.pos[2] < 120.0 and float(np.linalg.norm(arena.ball.vel)) < 100.0)
         if is_kickoff:
             delta_dist = (prev_dist - curr_dist) / 2000.0
             if fwd_alignment < -0.20 and float(action[0]) > 0.30:
@@ -213,7 +252,7 @@ class PlayerToBallVelocityReward(BaseReward):
 
         # 1. Anti-Overshoot Penalty & Strike Zone Tracking
         overshoot_penalty = 0.0
-        in_strike = (curr_dist < 400.0)
+        in_strike = (raw_ball_dist < 400.0)
         was_strike = self._was_in_strike_zone.get(car.id, False)
         self._was_in_strike_zone[car.id] = in_strike
 
@@ -274,7 +313,7 @@ class PlayerToBallVelocityReward(BaseReward):
         wrong_side_push_penalty = 0.0
         dribble_boost_penalty = 0.0
 
-        if curr_dist < 450.0 and fwd_alignment > 0.2:
+        if raw_ball_dist < 450.0 and fwd_alignment > 0.2:
             car_speed = float(np.linalg.norm(car.vel))
             ball_speed = float(np.linalg.norm(arena.ball.vel))
             rel_speed = float(np.linalg.norm(car.vel - arena.ball.vel))
@@ -283,7 +322,7 @@ class PlayerToBallVelocityReward(BaseReward):
             # Velocity matching should only reward pacing a moving ball (ball_speed > 250 and car_speed > 200),
             # preventing continuous reward farming when car is merely nose-pushing a grounded ball
             # or sitting stationary near a stopped ball.
-            is_ground_pushing = bool(curr_dist < 180.0 and ball_z < 130.0 and car.on_ground)
+            is_ground_pushing = bool(raw_ball_dist < 180.0 and ball_z < 130.0 and car.on_ground)
 
             if not (is_wrong_side and car_vy_defend > 100.0):
                 if not is_ground_pushing and ball_speed > 250.0 and car_speed > 200.0:
@@ -300,7 +339,7 @@ class PlayerToBallVelocityReward(BaseReward):
             # Dribble Proximity Pacing & Anti-Overshoot:
             # If car is within 350 uu of a low ball and outpacing it (car_speed > ball_speed + 150),
             # penalize boosting to blow past the ball!
-            if curr_dist < 350.0 and ball_z < 160.0 and car.on_ground:
+            if raw_ball_dist < 350.0 and ball_z < 160.0 and car.on_ground:
                 if car_speed > ball_speed + 150.0 and float(action[6]) > 0.0:
                     dribble_boost_penalty = -0.30 * float(action[6])
 

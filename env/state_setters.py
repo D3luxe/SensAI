@@ -607,19 +607,96 @@ class CustomScenarioSetter(BaseStateSetter):
         return True
 
 
+class WallBounceReboundSetter(BaseStateSetter):
+    """
+    Spawns hard clears, wall passes, and backboard bangs (1200 - 2000 uu/s)
+    speeding toward the sidewalls, corners, or backboard to rebound into the field.
+    The car is placed infield with speed and boost to practice bounce anticipation,
+    rebound timing, and interception.
+    """
+    def reset(self, rsim_arena: Any, num_players: int) -> None:
+        target_team = random.choice([0, 1])
+        sign = 1.0 if target_team == 0 else -1.0
+        bounce_type = random.choice(["sidewall", "backboard"])
+
+        side = random.choice([-1.0, 1.0])
+        if bounce_type == "sidewall":
+            # Ball starts infield and shoots toward the sidewall
+            start_x = side * random.uniform(500, 2000)
+            start_y = sign * random.uniform(-1000, 2000)
+            start_z = random.uniform(150, 600)
+
+            # High velocity aimed toward the side wall (x = side * 4096)
+            vx = side * random.uniform(1200, 1800)
+            vy = sign * random.uniform(200, 800)
+            vz = random.uniform(100, 400)
+
+            # Car positioned midfield / infield tracking toward the expected rebound zone
+            cx = side * random.uniform(400, 1500)
+            cy = start_y - sign * random.uniform(400, 1200)
+            cz = 17.0
+
+            yaw = math.atan2(sign * 1.0, side * 0.3)
+            car_speed = random.uniform(600, 1100)
+        else:
+            # Backboard bounce: Ball shoots toward opponent backboard (above goal)
+            start_x = random.uniform(-1500, 1500)
+            start_y = sign * random.uniform(1000, 2800)
+            start_z = random.uniform(200, 600)
+
+            vy = sign * random.uniform(1300, 1900)
+            vx = random.uniform(-400, 400)
+            vz = random.uniform(300, 700)
+
+            # Car trailing downfield ready to read the backboard rebound
+            cx = random.uniform(-800, 800)
+            cy = start_y - sign * random.uniform(1200, 2000)
+            cz = 17.0
+
+            yaw = sign * math.pi / 2
+            car_speed = random.uniform(700, 1200)
+
+        bs = rsim_arena.ball.get_state()
+        bs.pos = rsim.Vec(start_x, start_y, start_z)
+        bs.vel = rsim.Vec(vx, vy, vz)
+        bs.ang_vel = rsim.Vec(0, 0, 0)
+        rsim_arena.ball.set_state(bs)
+
+        cars = rsim_arena.get_cars()
+        for i, car in enumerate(cars):
+            cs = car.get_state()
+            cs.boost = random.uniform(40.0, 90.0)
+            team = i % 2
+
+            if team == target_team:
+                cs.pos = rsim.Vec(cx, cy, cz)
+                cs.rot_mat = rsim.Angle(pitch=0.0, yaw=yaw, roll=0.0).as_rot_mat()
+                cs.vel = rsim.Vec(math.cos(yaw) * car_speed, math.sin(yaw) * car_speed, 0.0)
+            else:
+                # Opponent in defensive posture
+                opp_y = sign * (ARENA_EXTENT_Y - random.uniform(400, 1200))
+                cs.pos = rsim.Vec(random.uniform(-600, 600), opp_y, 17.0)
+                cs.rot_mat = rsim.Angle(pitch=0.0, yaw=-sign * math.pi / 2, roll=0.0).as_rot_mat()
+                cs.vel = rsim.Vec(0.0, -sign * random.uniform(200, 600), 0.0)
+
+            cs.ang_vel = rsim.Vec(0, 0, 0)
+            car.set_state(cs)
+
+
 class WeightedScenarioSetter:
     """
     Composite Scenario Manager. Samples across kickoffs, replays, aerials, wall plays, saves, turnarounds,
-    and user custom scenarios according to live user-configured probability weights.
+    wall rebounds, and user custom scenarios according to live user-configured probability weights.
     """
     def __init__(
         self,
-        kickoff_prob: float = 0.28,
-        replay_prob: float = 0.22,
-        aerial_prob: float = 0.12,
-        wall_prob: float = 0.10,
-        save_prob: float = 0.10,
+        kickoff_prob: float = 0.25,
+        replay_prob: float = 0.20,
+        aerial_prob: float = 0.11,
+        wall_prob: float = 0.09,
+        save_prob: float = 0.09,
         turnaround_prob: float = 0.08,
+        wall_rebound_prob: float = 0.08,
         custom_prob: float = 0.10,
         replay_parser: Optional[ReplayParser] = None
     ):
@@ -629,6 +706,7 @@ class WeightedScenarioSetter:
         self.wall_prob = wall_prob
         self.save_prob = save_prob
         self.turnaround_prob = turnaround_prob
+        self.wall_rebound_prob = wall_rebound_prob
         self.custom_prob = custom_prob
 
         self.kickoff_setter = KickoffSetter()
@@ -636,6 +714,7 @@ class WeightedScenarioSetter:
         self.wall_setter = WallPlaySetter()
         self.goalie_setter = GoalieSaveSetter()
         self.turnaround_setter = TurnaroundRecoverySetter()
+        self.wall_rebound_setter = WallBounceReboundSetter()
         self.replay_setter = ReplayStateSetter(parser=replay_parser)
         self.custom_setter = CustomScenarioSetter()
 
@@ -648,6 +727,7 @@ class WeightedScenarioSetter:
         if "wall_prob" in sc: self.wall_prob = float(sc["wall_prob"])
         if "save_prob" in sc: self.save_prob = float(sc["save_prob"])
         if "turnaround_prob" in sc: self.turnaround_prob = float(sc["turnaround_prob"])
+        if "wall_rebound_prob" in sc: self.wall_rebound_prob = float(sc["wall_rebound_prob"])
         if "custom_prob" in sc: self.custom_prob = float(sc["custom_prob"])
 
     def reset(self, rsim_arena: Any, num_players: int) -> str:
@@ -662,6 +742,7 @@ class WeightedScenarioSetter:
             self.wall_prob,
             self.save_prob,
             self.turnaround_prob,
+            self.wall_rebound_prob,
             self.custom_prob
         ]
         total = sum(weights)
@@ -692,19 +773,25 @@ class WeightedScenarioSetter:
             self.aerial_setter.reset(rsim_arena, num_players)
             return "aerial"
 
-        # 4. Wall
+        # 4. Wall Play
         cumulative += self.wall_prob
         if r <= cumulative:
             self.wall_setter.reset(rsim_arena, num_players)
             return "wall_play"
 
-        # 5. Turnaround Recovery
+        # 5. Wall Rebound / Bounce Interception
+        cumulative += self.wall_rebound_prob
+        if r <= cumulative:
+            self.wall_rebound_setter.reset(rsim_arena, num_players)
+            return "wall_rebound"
+
+        # 6. Turnaround Recovery
         cumulative += self.turnaround_prob
         if r <= cumulative:
             self.turnaround_setter.reset(rsim_arena, num_players)
             return "turnaround"
 
-        # 6. Custom Scenarios
+        # 7. Custom Scenarios
         cumulative += self.custom_prob
         if r <= cumulative:
             if self.custom_setter.reset(rsim_arena, num_players):
@@ -712,7 +799,7 @@ class WeightedScenarioSetter:
             self.kickoff_setter.reset(rsim_arena, num_players)
             return "kickoff"
 
-        # 7. Goalie Save
+        # 8. Goalie Save
         self.goalie_setter.reset(rsim_arena, num_players)
         return "goalie_save"
 
