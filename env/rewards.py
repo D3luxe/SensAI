@@ -887,7 +887,7 @@ class JumpBridgeReward(BaseReward):
             is_forward_or_diagonal = bool((is_forward_flip or is_diagonal_flip) and forward_alignment > 0.30)
 
             if stick_deflection >= 0.25 and dodge_align > 0.20 and not is_bad_backflip:
-                if (not is_open_field) or has_traversal_speed or is_forward_or_diagonal:
+                if (not is_open_field) or has_traversal_speed:
                     reward += self.weight * dodge_align * (0.5 + 0.3 * stick_deflection)
 
                     if is_forward_or_diagonal:

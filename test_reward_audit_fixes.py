@@ -1209,17 +1209,17 @@ class TestRewardAuditFixes(unittest.TestCase):
         self.assertLessEqual(r, 0.01, f"Reverse creep must not yield unearned distance or turnaround reward, got {r}")
 
     def test_low_speed_forward_traversal_flip_rewarded(self):
-        """Test that forward flip from low speed in open field facing ball receives traversal progression reward."""
+        """Test that forward flip from low speed within approach range (dist <= 650) facing ball receives traversal progression reward."""
         rew = JumpBridgeReward(weight=0.35)
         car = CarState(
             id=0, team=0,
-            pos=np.array([0.0, -1000.0, 100.0], dtype=np.float32),
+            pos=np.array([0.0, -500.0, 100.0], dtype=np.float32),
             vel=np.array([0.0, 100.0, 0.0], dtype=np.float32),
             rot=np.array([0.0, math.pi / 2, 0.0], dtype=np.float32),
             on_ground=False,
             has_flip=False
         )
-        self.arena.ball.pos = np.array([0.0, 500.0, 93.0], dtype=np.float32)
+        self.arena.ball.pos = np.array([0.0, 0.0, 93.0], dtype=np.float32)
         self.arena.cars = [car]
         rew.reset(self.arena)
 
@@ -1230,7 +1230,7 @@ class TestRewardAuditFixes(unittest.TestCase):
         act[2] = 1.0
         r = rew.get_reward(car, self.arena, act, False, None)
 
-        self.assertGreater(r, 0.20, f"Low-speed forward traversal flip in open field should be rewarded, got {r}")
+        self.assertGreater(r, 0.20, f"Low-speed forward traversal flip within approach range should be rewarded, got {r}")
 
 
 if __name__ == "__main__":
