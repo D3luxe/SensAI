@@ -460,7 +460,7 @@ class PPOTrainer:
 
                 for info in infos:
                     rollout_touches_total += int(info.get("step_touches", 0))
-                    if info.get("is_goal", False) or info.get("step", 0) >= self.max_episode_steps:
+                    if info.get("done", False) or info.get("is_goal", False) or info.get("step", 0) >= self.max_episode_steps:
                         episode_rewards_list.extend(info.get("episode_rewards", []))
                         episode_touches_list.extend(info.get("episode_touches", []))
                         episode_goals_list.append(sum(info.get("episode_goals", [0, 0])))

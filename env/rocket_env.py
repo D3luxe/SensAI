@@ -14,6 +14,19 @@ from env.actions import ContinuousActionParser, DiscreteActionParser
 from env.baseline_agent import BaselineChaser, BaseOpponent, create_opponent_bot
 
 
+SCENARIO_TIMEOUTS: Dict[str, int] = {
+    "kickoff":       225,   # 15s  (backed by 75-step stagnation check)
+    "aerial":        120,   # 8s   (aerial contact window)
+    "goalie_save":    90,   # 6s   (reaction & save window)
+    "wall_play":     135,   # 9s   (wall climb & infield transition)
+    "wall_rebound":  120,   # 8s   (backboard read & rebound)
+    "turnaround":    180,   # 12s  (recovery & 180 cut)
+    "dribble_flick": 375,   # 25s  (extended carry & flick)
+    "replay":        450,   # 30s  (match state rollout)
+    "custom":        300,   # 20s
+}
+
+
 class RocketLeagueEnv:
     """
     Standard single-instance Gymnasium-compatible Rocket League match environment.
@@ -52,6 +65,9 @@ class RocketLeagueEnv:
         self.episode_rewards = [0.0] * self.num_players
         self.episode_touches = [0] * self.num_players
         self.episode_goals = [0] * 2
+        self.current_scenario = "kickoff"
+        self.scenario_timeout = self.max_episode_steps
+        self._save_defend_sign = 0.0
 
     def update_reward_weights(self, weights: Dict[str, float]):
         self.reward_manager.update_weights(weights)
@@ -66,6 +82,14 @@ class RocketLeagueEnv:
         self.episode_rewards = [0.0] * self.num_players
         self.episode_touches = [0] * self.num_players
         self.episode_goals = [0] * 2
+
+        self.current_scenario = self.arena.current_scenario
+        self.scenario_timeout = SCENARIO_TIMEOUTS.get(self.current_scenario, self.max_episode_steps)
+        if self.current_scenario == "goalie_save":
+            bvy = float(self.arena.ball.vel[1])
+            self._save_defend_sign = -1.0 if bvy < 0.0 else 1.0
+        else:
+            self._save_defend_sign = 0.0
 
         obs = []
         for car in self.arena.cars:
@@ -124,10 +148,52 @@ class RocketLeagueEnv:
         step_touches = max(0, sum(self.episode_touches) - prev_touches_sum)
 
         # RLGym Kickoff Stagnation Rule: If ball is untouched on kickoff after 75 steps (5.0s), terminate episode!
-        bx, by = self.arena.ball.pos[0], self.arena.ball.pos[1]
+        bx, by, bz = self.arena.ball.pos[0], self.arena.ball.pos[1], self.arena.ball.pos[2]
         bvx, bvy = self.arena.ball.vel[0], self.arena.ball.vel[1]
-        is_kickoff_stalled = (self.current_step > 75 and abs(bx) < 20.0 and abs(by) < 20.0 and (abs(bvx) + abs(bvy)) < 80.0)
-        done = (self.current_step >= self.max_episode_steps) or is_goal or is_kickoff_stalled
+        total_episode_touches = sum(self.episode_touches)
+
+        is_kickoff_stalled = (
+            self.current_scenario == "kickoff"
+            and self.current_step > 75
+            and abs(bx) < 20.0
+            and abs(by) < 20.0
+            and (abs(bvx) + abs(bvy)) < 80.0
+        )
+
+        # 1. Hard scenario timeout
+        is_scenario_timeout = (self.current_step >= self.scenario_timeout)
+
+        # 2. Aerial resolved: Whiffed aerial, ball dropped to floor (Z < 250) without a single touch
+        is_aerial_resolved = (
+            self.current_scenario == "aerial"
+            and self.current_step > 20
+            and total_episode_touches == 0
+            and bz < 250.0
+        )
+
+        # 3. Goalie save resolved: Ball moving away from defending net after shot flight window (> 30 steps)
+        is_save_resolved = False
+        if self.current_scenario == "goalie_save" and self.current_step > 30:
+            ball_moving_away = (bvy * self._save_defend_sign) < -300.0
+            is_save_resolved = ball_moving_away and (total_episode_touches > 0 or abs(by) < 3500.0)
+
+        # 4. Wall play / rebound resolved: Whiffed off wall onto infield turf without a touch
+        is_wall_resolved = (
+            self.current_scenario in ("wall_play", "wall_rebound")
+            and self.current_step > 30
+            and total_episode_touches == 0
+            and bz < 200.0
+            and abs(bx) < 2500.0
+        )
+
+        done = (
+            is_scenario_timeout
+            or is_goal
+            or is_kickoff_stalled
+            or is_aerial_resolved
+            or is_save_resolved
+            or is_wall_resolved
+        )
         dones = np.array([done] * self.num_players, dtype=bool)
 
         info = {
@@ -139,7 +205,9 @@ class RocketLeagueEnv:
             "episode_touches": list(self.episode_touches) if done else self.episode_touches,
             "episode_goals": list(self.episode_goals) if done else self.episode_goals,
             "reward_breakdown": info_rewards,
-            "is_baseline_env": self.is_baseline_env
+            "is_baseline_env": self.is_baseline_env,
+            "done": done,
+            "scenario": self.current_scenario,
         }
 
         # Auto-reset on goal/max steps/stalled kickoff

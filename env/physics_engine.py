@@ -255,6 +255,11 @@ class RocketSimArena:
         self._init_cars()
         from env.state_setters import WeightedScenarioSetter
         self.scenario_setter = WeightedScenarioSetter()
+        self._last_scenario = "kickoff"
+
+    @property
+    def current_scenario(self) -> str:
+        return getattr(self, "_last_scenario", "kickoff")
 
     def set_scenario_weights(self, config_dict: Dict[str, Any]):
         """Dynamically configures scenario probabilities (kickoffs, aerials, wall, saves, replays)."""
@@ -291,9 +296,10 @@ class RocketSimArena:
         if self._use_rsim and self._rsim_arena:
             # Execute modular State Setter (Kickoffs, Replays, Aerials, Wall Plays, Goalie Saves)
             if random_kickoff:
-                self.scenario_setter.reset(self._rsim_arena, self.num_players)
+                self._last_scenario = self.scenario_setter.reset(self._rsim_arena, self.num_players)
             else:
                 self.scenario_setter.kickoff_setter.reset(self._rsim_arena, self.num_players)
+                self._last_scenario = "kickoff"
 
             # Reset RocketSim boost pads to full active state
             if self._rsim_pads:
@@ -331,6 +337,7 @@ class RocketSimArena:
             return
 
         # Pure-Python Fallback Reset
+        self._last_scenario = "kickoff"
         for pad in self.boost_pads:
             pad.is_active = True
             pad.cooldown_timer = 0.0
