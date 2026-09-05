@@ -511,6 +511,97 @@ class TestRewardAuditFixes(unittest.TestCase):
         r_diag = rew.get_reward(car, self.arena, act_diag, False, None)
         self.assertGreater(r_diag, 0.4, f"Diagonal speed-flip should receive speed-flip coordination bonus, got {r_diag}")
 
+    def test_uncontested_dribble_overshoot_backflip_penalized(self):
+        """Test that backflipping when overshooting an uncontested dribble is penalized and receives no dodge reward."""
+        rew = JumpBridgeReward(weight=0.5)
+        # Car has overshot ball: car at Y=100, ball at Y=0, car facing +Y (ball behind it)
+        car = CarState(
+            id=0, team=0,
+            pos=np.array([0.0, 100.0, 30.0], dtype=np.float32),
+            vel=np.array([0.0, 50.0, 0.0], dtype=np.float32),
+            rot=np.array([0.0, math.pi / 2, 0.0], dtype=np.float32),  # Facing +Y, ball is at -Y
+            on_ground=False,
+            has_flip=False
+        )
+        self.arena.ball.pos = np.array([0.0, 0.0, 93.0], dtype=np.float32)
+        # Opponent is far away (uncontested)
+        opp = CarState(id=1, team=1, pos=np.array([0.0, 3000.0, 17.0], dtype=np.float32))
+        self.arena.cars = [car, opp]
+        rew.reset(self.arena)
+        rew._prev_has_flip[car.id] = True  # Executing dodge
+
+        # Backflip action: pitch = -1.0
+        act_backflip = np.zeros(8, dtype=np.float32)
+        act_backflip[2] = -1.0
+
+        r = rew.get_reward(car, self.arena, act_backflip, False, None)
+        self.assertLess(r, 0.0, f"Backflipping when overshooting uncontested dribble must be penalized (< 0.0), got {r}")
+        self.assertAlmostEqual(r, -0.80 * 0.5, places=3, msg=f"Expected strict -0.40 penalty, got {r}")
+        self.assertFalse(rew._halfflip_in_progress.get(car.id, False), "Uncontested dribble overshoot backflip must NOT be tracked as a valid half-flip")
+
+    def test_contested_5050_backflip_permitted(self):
+        """Test that backflipping or absorbing with rear bumper during a contested 50/50 is NOT penalized."""
+        rew = JumpBridgeReward(weight=0.5)
+        # Car at Y=100, ball at Y=0, car facing +Y (ball behind it or at rear), opponent at Y=-200 (within 50/50 range)
+        car = CarState(
+            id=0, team=0,
+            pos=np.array([0.0, 100.0, 30.0], dtype=np.float32),
+            vel=np.array([0.0, 50.0, 0.0], dtype=np.float32),
+            rot=np.array([0.0, math.pi / 2, 0.0], dtype=np.float32),
+            on_ground=False,
+            has_flip=False
+        )
+        self.arena.ball.pos = np.array([0.0, 0.0, 93.0], dtype=np.float32)
+        # Opponent challenging within 300 uu of the ball!
+        opp = CarState(id=1, team=1, pos=np.array([0.0, -250.0, 17.0], dtype=np.float32), vel=np.array([0.0, 1000.0, 0.0], dtype=np.float32))
+        self.arena.cars = [car, opp]
+        rew.reset(self.arena)
+        rew._prev_has_flip[car.id] = True
+
+        # Backflip action: pitch = -1.0
+        act_backflip = np.zeros(8, dtype=np.float32)
+        act_backflip[2] = -1.0
+
+        r = rew.get_reward(car, self.arena, act_backflip, False, None)
+        self.assertGreaterEqual(r, 0.0, f"50/50 backflip challenge must NOT be penalized, got {r}")
+        self.assertTrue(rew._challenge_jump_active.get(car.id, False), "50/50 backflip challenge should activate _challenge_jump_active")
+
+    def test_dribble_overshoot_braking_and_coasting_rewarded(self):
+        """Test that tap-braking and coasting/throttle release are both rewarded when overshooting a dribble."""
+        rew = PlayerToBallVelocityReward(weight=1.0)
+        # Car at Y=150, ball at Y=0 (local_x < 0, ball behind bumper, dist=150 < 300)
+        car = CarState(
+            id=0, team=0,
+            pos=np.array([0.0, 150.0, 17.0], dtype=np.float32),
+            vel=np.array([0.0, 200.0, 0.0], dtype=np.float32),
+            rot=np.array([0.0, math.pi / 2, 0.0], dtype=np.float32),  # Facing +Y
+            on_ground=True
+        )
+        self.arena.ball.pos = np.array([0.0, 0.0, 93.0], dtype=np.float32)
+        self.arena.ball.vel = np.array([0.0, 150.0, 0.0], dtype=np.float32)
+        self.arena.cars = [car]
+        rew.reset(self.arena)
+
+        # 1. Tap-braking: throttle = -1.0
+        act_brake = np.zeros(8, dtype=np.float32)
+        act_brake[0] = -1.0
+        r_brake = rew.get_reward(car, self.arena, act_brake, False, None)
+
+        # 2. Coasting / Throttle release: throttle = 0.0, boost = 0.0
+        act_coast = np.zeros(8, dtype=np.float32)
+        act_coast[0] = 0.0
+        r_coast = rew.get_reward(car, self.arena, act_coast, False, None)
+
+        # 3. Driving away: throttle = 1.0
+        act_drive_away = np.zeros(8, dtype=np.float32)
+        act_drive_away[0] = 1.0
+        r_drive_away = rew.get_reward(car, self.arena, act_drive_away, False, None)
+
+        self.assertGreater(r_brake, 0.0, f"Tap-braking on dribble overshoot should be positive, got {r_brake}")
+        self.assertGreater(r_coast, 0.0, f"Coasting/throttle release on dribble overshoot should be positive, got {r_coast}")
+        self.assertGreater(r_brake, r_coast, f"Active tap-braking should be rewarded more than passive coasting, got brake={r_brake} vs coast={r_coast}")
+        self.assertLess(r_drive_away, 0.0, f"Driving away from ball on overshoot should be penalized, got {r_drive_away}")
+
 
 if __name__ == "__main__":
     unittest.main()

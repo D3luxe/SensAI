@@ -372,15 +372,20 @@ class PlayerToBallVelocityReward(BaseReward):
             local_x = float(np.dot(car_to_ball[:2], car.get_forward_vector()[:2]))
             local_y = float(np.dot(car_to_ball[:2], car.get_right_vector()[:2]))
 
-            # Close-Proximity Blindspot (ball at rear bumper or quarter panel < 250 uu):
-            if curr_dist < 250.0 and local_x < 0.0:
-                # Active steering into the ball's lateral side or powersliding to swing around:
-                steer_into_ball = (float(action[1]) > 0.15) if local_y > 15.0 else ((float(action[1]) < -0.15) if local_y < -15.0 else (abs(float(action[1])) > 0.25))
-                if steer_into_ball or float(action[7]) > 0.0:
+            # Close-Proximity Blindspot / Overshoot (ball at rear bumper or quarter panel < 300 uu):
+            if curr_dist < 300.0 and local_x < 0.0:
+                # 1. Active Tap-Braking: Rapid deceleration to let ball roll back in front of bumper
+                if float(action[0]) < -0.05:
+                    turnaround_reward = +0.30 * min(1.0, -float(action[0]))
+                # 2. Coasting / Throttle Release: Cutting gas and boost to let forward momentum taper
+                elif float(action[0]) <= 0.10 and float(action[6]) <= 0.0:
+                    turnaround_reward = +0.15
+                # 3. Active steering or powersliding to swing around the ball:
+                elif (abs(float(action[1])) > 0.25) or float(action[7]) > 0.0:
                     turnaround_reward = +0.25 * max(abs(float(action[1])), 0.6)
-                elif abs(float(action[1])) < 0.15 and float(action[7]) <= 0.0:
-                    # Penalize zero-steer freeze in blindspot
-                    turnaround_reward = -0.20
+                # 4. Driving away: Penalize continuing to gas or boost forward away from the ball
+                elif float(action[0]) > 0.30 or float(action[6]) > 0.0:
+                    turnaround_reward = -0.25
             elif fwd_alignment < -0.25:
                 # Downfield ball-behind: penalize straight reverse creeping, reward powerslides / hard cuts
                 if float(action[0]) < -0.10 and abs(float(action[1])) < 0.30:
@@ -582,6 +587,22 @@ class JumpBridgeReward(BaseReward):
         is_ball_in_defensive_half = bool(dist_ball_to_defend < ARENA_EXTENT_Y)
         is_wrong_side = bool(is_ball_in_defensive_half and (dist_car_to_defend > dist_ball_to_defend + 100.0))
 
+        # Opponent challenge detection:
+        opponents = [c for c in arena.cars if c.team != car.team and not c.demoed]
+        is_opponent_challenging = False
+        opp_min_dist = 9999.0
+        for opp in opponents:
+            opp_to_ball = arena.ball.pos - opp.pos
+            opp_dist = float(np.linalg.norm(opp_to_ball))
+            if opp_dist < opp_min_dist:
+                opp_min_dist = opp_dist
+            if opp_dist <= 650.0:
+                is_opponent_challenging = True
+            elif opp_dist <= 900.0:
+                opp_closing = float(np.dot(opp.vel, opp_to_ball / max(1e-4, opp_dist)))
+                if opp_closing > 150.0:
+                    is_opponent_challenging = True
+
         # Tactical vector (toward shadow intercept position when retreating, toward ball when attacking/contesting)
         # Instead of retreating blindly to the goal-line (which leads to overshooting and panicking),
         # retreat to a shadow-defense position between the ball and net (ball.pos[1] +/- 700 uu).
@@ -615,11 +636,10 @@ class JumpBridgeReward(BaseReward):
             is_aerial_ball = bool(ball_z > 250.0)
             car_boost = float(car.boost)
 
-            # 1a. Close-Quarters Strike Liftoff & 50/50 Challenge (dist <= 500 uu, closing toward ball)
-            # Requires neutral or forward pitch (pitch_input >= -0.10) so jumping does not reward backflip braking!
-            opponents = [c for c in arena.cars if c.team != car.team and not c.demoed]
-            opp_dist_to_ball = min([float(np.linalg.norm(c.pos - arena.ball.pos)) for c in opponents], default=9999.0)
-            is_contested_5050 = bool(dist <= 450.0 and opp_dist_to_ball <= 650.0 and ball_z < 220.0 and car.pos[2] < 150.0)
+            # 1a. Close-Quarters Strike Liftoff & 50/50 Challenge (dist <= 500 uu)
+            # 50/50 Challenge: When an opponent is actively challenging, any body contact/block (including rear-absorption) is valid.
+            is_contested_5050 = bool(dist <= 450.0 and is_opponent_challenging and ball_z < 220.0 and car.pos[2] < 150.0)
+            # Strike Liftoff: When uncontested, liftoff requires forward alignment, closing velocity, and non-backward pitch.
             is_strike_liftoff = bool(dist <= 500.0 and ball_z < 250.0 and car.pos[2] < 150.0 and forward_alignment > 0.20 and takeoff_closing_vel > 150.0 and pitch_input >= -0.10)
 
             if is_contested_5050 or is_strike_liftoff:
@@ -683,14 +703,20 @@ class JumpBridgeReward(BaseReward):
         else:
             dodge_align = 0.0
 
+        is_5050_backflip = bool(is_executing_dodge and pitch_input < -0.20 and dist <= 450.0 and is_opponent_challenging)
+        is_uncontested_dribble_backflip = bool(is_executing_dodge and pitch_input < -0.20 and dist <= 450.0 and not is_opponent_challenging and forward_alignment < -0.20)
+        is_forward_backflip = bool(is_executing_dodge and pitch_input < -0.20 and not is_5050_backflip and (car_fwd_speed > 100.0 or forward_alignment > 0.15))
+
         # Strict Backflip Penalization & Half-Flip Initiation Tracking:
-        # Backflips while moving forward or facing the ball destroy forward momentum and tumble.
-        # Only backward dodges when facing away from the target (forward_alignment < -0.20)
-        # represent valid Half-Flip attempts.
+        # 1. If opponent is challenging within 50/50 distance, backflipping to challenge/block is permitted.
+        # 2. Backflips while moving forward, facing the ball, or overshooting an uncontested dribble are strictly penalized.
+        # 3. Only backward dodges when facing away from the target downfield (dist > 450 or retreating) represent valid Half-Flip attempts.
         if is_executing_dodge and pitch_input < -0.20:
-            if car_fwd_speed > 100.0 or forward_alignment > 0.15:
-                reward -= self.weight * 0.80  # Strict penalty against forward backflips
-            elif forward_alignment < -0.20:
+            if is_5050_backflip:
+                self._challenge_jump_active[car.id] = True
+            elif is_forward_backflip or is_uncontested_dribble_backflip:
+                reward -= self.weight * 0.80  # Strict penalty against forward backflips and uncontested dribble overshoot backflips
+            elif forward_alignment < -0.20 and (dist > 450.0 or is_wrong_side):
                 self._halfflip_in_progress[car.id] = True
                 self._halfflip_cancel_executed[car.id] = False
                 self._halfflip_roll_executed[car.id] = False
@@ -709,9 +735,9 @@ class JumpBridgeReward(BaseReward):
         if is_executing_dodge:
             is_open_field = bool(dist > 650.0)
             has_traversal_speed = bool(car_speed_horiz > 350.0)
-            is_forward_backflip = bool(pitch_input < -0.20 and (car_fwd_speed > 100.0 or forward_alignment > 0.15))
+            is_bad_backflip = bool(is_forward_backflip or is_uncontested_dribble_backflip)
 
-            if stick_deflection >= 0.25 and dodge_align > 0.20 and not is_forward_backflip:
+            if stick_deflection >= 0.25 and dodge_align > 0.20 and not is_bad_backflip:
                 if (not is_open_field) or has_traversal_speed:
                     reward += self.weight * dodge_align * (0.5 + 0.3 * stick_deflection)
 
