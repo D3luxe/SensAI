@@ -175,10 +175,34 @@ class TestFlippingAndMechanics(unittest.TestCase):
         self.assertGreaterEqual(rew, 1.0, "Low altitude flip slam into turf must award explicit wavedash bonus!")
 
     def test_model_jump_threshold_calibrated(self):
-        """Guarantees that ActorCritic deterministic jump threshold is set to p > 0.10 (-2.1972)."""
+        """Guarantees that ActorCritic deterministic jump threshold is set to p > 0.15 (-1.7346)."""
         model = ActorCritic(obs_dim=74, act_dim=8, continuous_actions=True)
-        self.assertAlmostEqual(model.bin_thresh_logits[0].item(), -2.1972, places=3,
-                               msg="Jump threshold logit must be calibrated to -2.1972 (p > 0.10)!")
+        self.assertAlmostEqual(model.bin_thresh_logits[0].item(), -1.7346, places=3,
+                               msg="Jump threshold logit must be calibrated to -1.7346 (p > 0.15)!")
+
+    def test_mid_flip_inverted_flight_velocity_reward_undampened(self):
+        """Guarantees that inverted flight during a front flip/speedflip receives 100% velocity reward without dampening."""
+        from env.rewards import PlayerToBallVelocityReward
+        p2b = PlayerToBallVelocityReward(weight=1.0)
+        p2b.reset(self.arena)
+
+        car = self.arena.cars[0]
+        # Car is mid-flip: airborne, flip already spent (has_flip=False), rocketing forward toward ball at +Y
+        car.on_ground = False
+        car.has_flip = False
+        car.just_dodged = False  # Critical: dodge tick has passed!
+        car.pos = np.array([0.0, 0.0, 80.0], dtype=np.float32)
+        car.vel = np.array([0.0, 1400.0, 50.0], dtype=np.float32)
+        # Inverted orientation mid-flip: nose points backwards -Y (fwd = [0, -1, 0]), wheels up
+        car.rot_mat = np.array([[0, -1, 0], [1, 0, 0], [0, 0, -1]], dtype=np.float32)
+        self.arena.ball.pos = np.array([0.0, 2000.0, 93.0], dtype=np.float32)
+
+        p2b._prev_dist[car.id] = 2100.0 # Car is closing distance (2100 -> 2000 = +100 uu delta)
+        act = np.array([1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0], dtype=np.float32)
+        rew = p2b.get_reward(car, self.arena, act, False, None)
+
+        # Delta dist = 100 / 2000 = 0.05. If dampened by 80%, rew would be ~0.01.
+        self.assertGreaterEqual(rew, 0.04, "Inverted mid-flip flight must NOT dampen forward distance closure rewards!")
 
     def test_bot_low_speed_steer_jump_suppression(self):
         """Guarantees that bot.py suppresses jump when turning hard at low speeds."""

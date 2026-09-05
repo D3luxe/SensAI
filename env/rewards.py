@@ -260,7 +260,9 @@ class PlayerToBallVelocityReward(BaseReward):
         travel_align_to_ball = float(np.dot(travel_unit_h, unit_to_ball[:2]))
 
         # Front flips, diagonal speedflips, and dodges temporarily pitch the nose away while rocketing forward:
-        is_dodging_toward_ball = bool(car.just_dodged and car_horiz_speed > 250.0 and travel_align_to_ball > 0.2)
+        # Protects the ENTIRE airborne flight of a dodge/flip (not just the initial tick):
+        is_in_flip_flight = bool(not car.on_ground and not car.has_flip and car_horiz_speed > 300.0 and travel_align_to_ball > 0.2)
+        is_dodging_toward_ball = bool((car.just_dodged or is_in_flip_flight) and car_horiz_speed > 250.0 and travel_align_to_ball > 0.2)
         is_reversing_to_target = bool(car_fwd_vel < -150.0 and float(np.dot(car.vel[:2], unit_to_ball[:2])) > 150.0 and curr_dist < 450.0)
 
         if fwd_alignment < 0.0 and delta_dist > 0.0 and not (is_reversing_to_target or is_dodging_toward_ball):
@@ -612,7 +614,7 @@ class JumpBridgeReward(BaseReward):
             elif not is_aerial_ball and not is_on_wall_zone and dist > 650.0 and forward_alignment > 0.40:
                 if car_fwd_speed > 400.0 and pitch_input >= -0.10:
                     is_kickoff = bool(abs(arena.ball.pos[0]) < 50.0 and abs(arena.ball.pos[1]) < 50.0 and arena.ball.pos[2] < 120.0)
-                    liftoff_mult = 1.20 if is_kickoff else 0.70
+                    liftoff_mult = 1.30 if is_kickoff else 0.80
                     reward += self.weight * liftoff_mult * forward_alignment
 
         # ── 2. Airborne 50/50 Challenge Completion Bonus ──────────────────────
