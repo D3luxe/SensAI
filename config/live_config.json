@@ -1,5 +1,5 @@
 {
-  "updated_at": 1788579157.9998,
+  "updated_at": 1788619056.809682,
   "learning_rate": 0.0003,
   "ent_coef": 0.012,
   "clip_range": 0.2,
@@ -31,6 +31,6 @@
     "wall_rebound_prob": 0.09,
     "turnaround_prob": 0.09,
     "save_prob": 0.08,
-    "dribble_flick_prob": 0.10
+    "dribble_flick_prob": 0.1
   }
 }

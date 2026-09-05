@@ -665,6 +665,7 @@ class PPOTrainer:
                 "value_loss": round(mean_v_loss, 5),
                 "entropy": round(mean_entropy, 4),
                 "ball_touches": round(mean_touches, 2),
+                "total_touches": rollout_touches_total,
                 "goals": total_goals,
                 "sps": sps,
                 "learning_rate": self.lr,
@@ -697,7 +698,7 @@ class PPOTrainer:
                 f"Policy Loss: {mean_pg_loss:.4f} | "
                 f"Value Loss: {mean_v_loss:.4f} | "
                 f"Entropy: {mean_entropy:.3f} | "
-                f"Touches: {mean_touches:.1f} | "
+                f"Touches: {rollout_touches_total} ({mean_touches:.1f}/ep) | "
                 f"Goals: {total_goals} | "
                 f"SPS: {sps}"
             )

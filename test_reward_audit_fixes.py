@@ -913,6 +913,7 @@ class TestRewardAuditFixes(unittest.TestCase):
         rew._prev_on_ground[car.id] = False
         rew._disoriented_this_flight[car.id] = True
         rew._halfflip_cancel_executed[car.id] = True
+        rew._takeoff_heading[car.id] = -1.0
 
         action = np.zeros(8, dtype=np.float32)
         r = rew.get_reward(car, self.arena, action, False, None)
@@ -1103,6 +1104,133 @@ class TestRewardAuditFixes(unittest.TestCase):
         act = np.zeros(8, dtype=np.float32)
         r = rew.get_reward(car, self.arena, act, False, None)
         self.assertGreater(r, 0.20, f"Wavedash ground impulse should be rewarded, got {r}")
+
+    def test_halfflip_residual_speed_not_penalized(self):
+        """Test that backward dodge facing away from ball with residual forward speed initiates half-flip without penalty."""
+        rew = JumpBridgeReward(weight=0.35)
+        car = CarState(
+            id=0, team=0,
+            pos=np.array([0.0, -1000.0, 100.0], dtype=np.float32),
+            vel=np.array([0.0, -150.0, 0.0], dtype=np.float32),
+            rot=np.array([0.0, -math.pi / 2, 0.0], dtype=np.float32),
+            on_ground=False,
+            has_flip=False
+        )
+        self.arena.ball.pos = np.array([0.0, 0.0, 93.0], dtype=np.float32)
+        self.arena.cars = [car]
+        rew.reset(self.arena)
+
+        rew._prev_has_flip[car.id] = True
+        rew._prev_on_ground[car.id] = False
+
+        act = np.zeros(8, dtype=np.float32)
+        act[2] = -1.0
+        r = rew.get_reward(car, self.arena, act, False, None)
+
+        self.assertTrue(rew._halfflip_in_progress.get(car.id, False), "Half-flip should be in progress")
+        self.assertGreaterEqual(r, 0.0, f"Half-flip initiation should not receive -0.80 penalty, got {r}")
+
+    def test_kickoff_charging_backflip_penalized(self):
+        """Test that charging forward into a challenge on kickoff and backflipping is strictly penalized."""
+        rew = JumpBridgeReward(weight=0.35)
+        car = CarState(
+            id=0, team=0,
+            pos=np.array([0.0, -400.0, 100.0], dtype=np.float32),
+            vel=np.array([0.0, 800.0, 0.0], dtype=np.float32),
+            rot=np.array([0.0, math.pi / 2, 0.0], dtype=np.float32),
+            on_ground=False,
+            has_flip=False
+        )
+        opp = CarState(
+            id=1, team=1,
+            pos=np.array([0.0, 400.0, 17.0], dtype=np.float32),
+            vel=np.array([0.0, -800.0, 0.0], dtype=np.float32),
+            on_ground=True
+        )
+        self.arena.ball.pos = np.array([0.0, 0.0, 93.0], dtype=np.float32)
+        self.arena.cars = [car, opp]
+        rew.reset(self.arena)
+
+        rew._prev_has_flip[car.id] = True
+        rew._prev_on_ground[car.id] = False
+
+        act = np.zeros(8, dtype=np.float32)
+        act[2] = -1.0
+        r = rew.get_reward(car, self.arena, act, False, None)
+
+        self.assertFalse(rew._challenge_jump_active.get(car.id, False), "Charging forward backflip must NOT activate 50/50 bonus")
+        self.assertLessEqual(r, -0.20, f"Charging forward backflip must receive penalty, got {r}")
+
+    def test_forward_flip_does_not_claim_halfflip_touchdown(self):
+        """Test that a forward flip landing on wheels does NOT receive the 180° half-flip touchdown bonus."""
+        rew = AirRollRecoveryReward(weight=0.10)
+        car = CarState(
+            id=0, team=0,
+            pos=np.array([0.0, 0.0, 17.0], dtype=np.float32),
+            vel=np.array([0.0, 600.0, 0.0], dtype=np.float32),
+            rot=np.array([0.0, math.pi / 2, 0.0], dtype=np.float32),
+            on_ground=True
+        )
+        self.arena.cars = [car]
+        rew.reset(self.arena)
+
+        rew._prev_on_ground[car.id] = False
+        rew._takeoff_heading[car.id] = 1.0
+        rew._halfflip_cancel_executed[car.id] = True
+        rew._disoriented_this_flight[car.id] = True
+
+        action = np.zeros(8, dtype=np.float32)
+        r = rew.get_reward(car, self.arena, action, False, None)
+
+        self.assertLess(r, 0.20, f"Forward flip landing must NOT receive half-flip completion bonus (+1.50), got {r}")
+
+    def test_ground_reverse_creeping_damped_without_artificial_bonus(self):
+        """Test that driving in reverse on the ground toward trailing ball has damped delta_dist and 0.0 turnaround bonus."""
+        rew = PlayerToBallVelocityReward(weight=0.60)
+        car = CarState(
+            id=0, team=0,
+            pos=np.array([0.0, 0.0, 17.0], dtype=np.float32),
+            vel=np.array([0.0, -200.0, 0.0], dtype=np.float32),
+            rot=np.array([0.0, math.pi / 2, 0.0], dtype=np.float32),
+            on_ground=True
+        )
+        self.arena.ball.pos = np.array([0.0, -250.0, 93.0], dtype=np.float32)
+        self.arena.ball.vel = np.zeros(3, dtype=np.float32)
+        self.arena.cars = [car]
+        rew.reset(self.arena)
+
+        rew._prev_dist[car.id] = 250.0
+        car.pos = np.array([0.0, -10.0, 17.0], dtype=np.float32)
+
+        action = np.zeros(8, dtype=np.float32)
+        action[0] = -0.15
+        r = rew.get_reward(car, self.arena, action, False, None)
+
+        self.assertLessEqual(r, 0.01, f"Reverse creep must not yield unearned distance or turnaround reward, got {r}")
+
+    def test_low_speed_forward_traversal_flip_rewarded(self):
+        """Test that forward flip from low speed in open field facing ball receives traversal progression reward."""
+        rew = JumpBridgeReward(weight=0.35)
+        car = CarState(
+            id=0, team=0,
+            pos=np.array([0.0, -1000.0, 100.0], dtype=np.float32),
+            vel=np.array([0.0, 100.0, 0.0], dtype=np.float32),
+            rot=np.array([0.0, math.pi / 2, 0.0], dtype=np.float32),
+            on_ground=False,
+            has_flip=False
+        )
+        self.arena.ball.pos = np.array([0.0, 500.0, 93.0], dtype=np.float32)
+        self.arena.cars = [car]
+        rew.reset(self.arena)
+
+        rew._prev_has_flip[car.id] = True
+        rew._prev_on_ground[car.id] = False
+
+        act = np.zeros(8, dtype=np.float32)
+        act[2] = 1.0
+        r = rew.get_reward(car, self.arena, act, False, None)
+
+        self.assertGreater(r, 0.20, f"Low-speed forward traversal flip in open field should be rewarded, got {r}")
 
 
 if __name__ == "__main__":

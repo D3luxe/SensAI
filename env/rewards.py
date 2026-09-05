@@ -317,11 +317,10 @@ class PlayerToBallVelocityReward(BaseReward):
 
         # Front flips, diagonal speedflips, and dodges temporarily pitch the nose away while rocketing forward:
         # Protects the ENTIRE airborne flight of a dodge/flip (not just the initial tick):
-        is_in_flip_flight = bool(not car.on_ground and not car.has_flip and car_horiz_speed > 300.0 and travel_align_to_ball > 0.2)
-        is_dodging_toward_ball = bool((car.just_dodged or is_in_flip_flight) and car_horiz_speed > 250.0 and travel_align_to_ball > 0.2)
-        is_reversing_to_target = bool(car_fwd_vel < -150.0 and float(np.dot(car.vel[:2], unit_to_ball[:2])) > 150.0 and curr_dist < 450.0)
+        is_in_flip_flight = bool(not car.on_ground and not car.has_flip and car_horiz_speed > 300.0 and travel_align_to_ball > 0.35)
+        is_dodging_toward_ball = bool((car.just_dodged or is_in_flip_flight) and car_horiz_speed > 250.0 and travel_align_to_ball > 0.35)
 
-        if fwd_alignment < 0.0 and delta_dist > 0.0 and not (is_reversing_to_target or is_dodging_toward_ball):
+        if fwd_alignment < 0.0 and delta_dist > 0.0 and not is_dodging_toward_ball:
             delta_dist = delta_dist * max(0.0, fwd_alignment + 1.0) * 0.2
 
         fwd_vec = car.get_forward_vector()
@@ -469,13 +468,14 @@ class PlayerToBallVelocityReward(BaseReward):
                         # Both stationary — no bonus
                         turnaround_reward = 0.0
                     elif car_fwd_speed > 100.0 or ball_fwd_speed > 100.0:
-                        # Ball is catching up naturally; reward gentle coasting / throttle feathering
-                        if 0.0 <= throttle <= 0.35 and boost <= 0.0:
-                            turnaround_reward = +0.25
-                        elif -0.25 <= throttle < -0.05:
-                            turnaround_reward = +0.10
-                        elif throttle < -0.25:
-                            # Heavy reverse braking when ball is already overtaking risks reversing into ball
+                        # Ball is catching up naturally downfield; reward gentle forward coasting / tap braking
+                        if car_fwd_speed > 50.0:
+                            if 0.0 <= throttle <= 0.35 and boost <= 0.0:
+                                turnaround_reward = +0.25
+                            elif -0.25 <= throttle < -0.05:
+                                turnaround_reward = +0.10
+                        else:
+                            # Reversing toward trailing ball receives 0.0 (no unearned input bonus, but no penalty to allow half-flip setup)
                             turnaround_reward = 0.0
 
                 # Active steering or powersliding to swing around the ball:
@@ -840,9 +840,13 @@ class JumpBridgeReward(BaseReward):
 
         is_flick_active = bool(self._flick_window_active.get(car.id, False) or (dist < 260.0 and 115.0 <= ball_z <= 320.0 and abs(local_x) < 100.0 and abs(local_y) < 80.0))
 
-        is_5050_backflip = bool(is_executing_dodge and pitch_input < -0.20 and dist <= 450.0 and is_opponent_challenging)
+        is_5050_backflip = bool(
+            is_executing_dodge and pitch_input < -0.20 and dist <= 450.0 and is_opponent_challenging
+            and car_fwd_speed < 200.0 and forward_alignment < 0.20
+        )
         is_uncontested_dribble_backflip = bool(is_executing_dodge and pitch_input < -0.20 and dist <= 450.0 and not is_opponent_challenging and not is_flick_active and forward_alignment < -0.20)
-        is_forward_backflip = bool(is_executing_dodge and pitch_input < -0.20 and not is_5050_backflip and not is_flick_active and (car_fwd_speed > 100.0 or forward_alignment > 0.15))
+        is_halfflip_candidate = bool(is_executing_dodge and pitch_input < -0.20 and forward_alignment < -0.20 and (dist > 450.0 or is_wrong_side))
+        is_forward_backflip = bool(is_executing_dodge and pitch_input < -0.20 and not is_5050_backflip and not is_flick_active and not is_halfflip_candidate and (car_fwd_speed > 100.0 or forward_alignment > 0.15))
 
         # Strict Backflip Penalization & Half-Flip Initiation Tracking:
         # 1. If opponent is challenging within 50/50 distance or bot is in a flick setup, backflipping is permitted.
@@ -853,12 +857,12 @@ class JumpBridgeReward(BaseReward):
                 self._challenge_jump_active[car.id] = True
             elif is_flick_active:
                 pass  # Free backflip flick / scoop execution
-            elif is_forward_backflip or is_uncontested_dribble_backflip:
-                reward -= self.weight * 0.80  # Strict penalty against forward backflips and uncontested dribble overshoot backflips
-            elif forward_alignment < -0.20 and (dist > 450.0 or is_wrong_side):
+            elif is_halfflip_candidate:
                 self._halfflip_in_progress[car.id] = True
                 self._halfflip_cancel_executed[car.id] = False
                 self._halfflip_roll_executed[car.id] = False
+            elif is_forward_backflip or is_uncontested_dribble_backflip:
+                reward -= self.weight * 0.80  # Strict penalty against forward backflips and uncontested dribble overshoot backflips
 
         # Active Half-Flip In-Flight Shaping (Flip Cancel & Air Roll):
         # Once an intended half-flip is initiated, reward pushing pitch forward to cancel
@@ -876,15 +880,17 @@ class JumpBridgeReward(BaseReward):
             has_traversal_speed = bool(car_speed_horiz > 350.0)
             is_bad_backflip = bool(is_forward_backflip or is_uncontested_dribble_backflip)
 
+            # Dedicated Forward & Diagonal Traversal Flip Incentive:
+            # Forward flip (pitch > 0.25) or diagonal speed-flip (pitch > 0.15, |yaw| > 0.15)
+            is_forward_flip = bool(pitch_input > 0.25)
+            is_diagonal_flip = bool(pitch_input > 0.15 and abs(yaw_input) > 0.15)
+            is_forward_or_diagonal = bool((is_forward_flip or is_diagonal_flip) and forward_alignment > 0.30)
+
             if stick_deflection >= 0.25 and dodge_align > 0.20 and not is_bad_backflip:
-                if (not is_open_field) or has_traversal_speed:
+                if (not is_open_field) or has_traversal_speed or is_forward_or_diagonal:
                     reward += self.weight * dodge_align * (0.5 + 0.3 * stick_deflection)
 
-                    # Dedicated Forward & Diagonal Traversal Flip Incentive:
-                    # Forward flip (pitch > 0.25) or diagonal speed-flip (pitch > 0.15, |yaw| > 0.15)
-                    is_forward_flip = bool(pitch_input > 0.25)
-                    is_diagonal_flip = bool(pitch_input > 0.15 and abs(yaw_input) > 0.15)
-                    if (is_forward_flip or is_diagonal_flip) and forward_alignment > 0.30:
+                    if is_forward_or_diagonal:
                         speed_progression = min(1.0, max(0.2, car_fwd_speed / 1800.0))
                         diag_bonus = 0.50 if is_diagonal_flip else 0.25
                         reward += self.weight * (0.8 * speed_progression + diag_bonus) * forward_alignment
@@ -1185,6 +1191,7 @@ class AirRollRecoveryReward(BaseReward):
         self._wall_landed: Dict[int, bool] = {}
         self._halfflip_cancel_executed: Dict[int, bool] = {}
         self._halfflip_cancel_total: Dict[int, float] = {}
+        self._takeoff_heading: Dict[int, float] = {}
 
     def reset(self, initial_state: RocketSimArena):
         self._prev_up_z = {car.id: float(car.get_up_vector()[2]) for car in initial_state.cars}
@@ -1197,6 +1204,7 @@ class AirRollRecoveryReward(BaseReward):
         self._wall_landed = {car.id: False for car in initial_state.cars}
         self._halfflip_cancel_executed = {car.id: False for car in initial_state.cars}
         self._halfflip_cancel_total = {car.id: 0.0 for car in initial_state.cars}
+        self._takeoff_heading = {car.id: 1.0 for car in initial_state.cars}
 
     def get_reward(self, car: CarState, arena: RocketSimArena, action: np.ndarray, is_goal: bool, scoring_team: Optional[int]) -> float:
         prev_ground = self._prev_on_ground.get(car.id, car.on_ground)
@@ -1229,7 +1237,16 @@ class AirRollRecoveryReward(BaseReward):
             self._wall_landed[car.id] = False
             self._halfflip_cancel_executed[car.id] = False
             self._halfflip_cancel_total[car.id] = 0.0
+            self._takeoff_heading[car.id] = 1.0
             return 0.0
+
+        if prev_ground and not car.on_ground:
+            if speed_horiz > 80.0 and fwd_norm > 1e-4:
+                self._takeoff_heading[car.id] = float(np.dot(fwd_h / fwd_norm, v_horiz / speed_horiz))
+            else:
+                car_to_b = arena.ball.pos[:2] - car.pos[:2]
+                d_b = float(np.linalg.norm(car_to_b))
+                self._takeoff_heading[car.id] = float(np.dot(fwd_h / max(1e-4, fwd_norm), car_to_b / d_b)) if d_b > 1e-4 else 1.0
 
         if not car.on_ground:
             air_ticks = self._airborne_ticks.get(car.id, 0) + 1
@@ -1320,7 +1337,7 @@ class AirRollRecoveryReward(BaseReward):
                     if speed_horiz > 300.0 and curr_heading > 0.30:
                         total_reward += (curr_heading * 0.5)
                         # 180° Turnaround Half-Flip Completion Bonus:
-                        if self._halfflip_cancel_executed.get(car.id, False) and curr_heading > 0.60 and speed_horiz > 400.0:
+                        if self._halfflip_cancel_executed.get(car.id, False) and curr_heading > 0.60 and speed_horiz > 400.0 and self._takeoff_heading.get(car.id, 1.0) < -0.20:
                             total_reward += 1.50
                 # Consume disorientation so touchdown reward only fires once per landing
                 self._was_disoriented[car.id] = False
@@ -1343,6 +1360,7 @@ class AirRollRecoveryReward(BaseReward):
             self._wall_landed[car.id] = False
             self._halfflip_cancel_executed[car.id] = False
             self._halfflip_cancel_total[car.id] = 0.0
+            self._takeoff_heading[car.id] = 1.0
 
         # ── 3. Wall Landing Recovery (Airborne near side or back wall) ────────
         # Single-shot landing impulse when approaching wall with wheels oriented toward wall
