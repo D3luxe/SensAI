@@ -477,9 +477,7 @@ class SenseiRLBot(BaseAgent):
                 # RocketSim and Rocket League physics require jump release while airborne before second jump.
                 # When jumping off the ground, wheels leave turf on ticks 1-2.
                 # Pressing jump on ticks 2..5 guarantees the wheel-lift check passes and executes the dodge.
-                stick_deflected = bool(math.hypot(act[2], act[3]) > 0.15)
-                should_dodge = bool((want_jump or stick_deflected) and has_flip)
-                controller.jump = bool(should_dodge and 2 <= substep_tick <= 5)
+                controller.jump = bool(want_jump and has_flip and 2 <= substep_tick <= 5)
 
                 if controller.jump:
                     self.dodge_cooldown = 20  # ~1.3 second recovery after dodge
