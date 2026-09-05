@@ -172,7 +172,7 @@ class SenseiRLBot(BaseAgent):
                     self.model.load_state_dict(model_state)
                 else:
                     self.model.load_state_dict(saved_state)
-                self.model.bin_thresh_logits.data = torch.tensor([-0.8473, -1.0986, -0.4055], dtype=torch.float32, device=self.device)
+                self.model.bin_thresh_logits.data = torch.tensor([-2.1972, -1.0986, -0.4055], dtype=torch.float32, device=self.device)
                 self.model.debias_symmetric_actions()
                 self.model.eval()
                 self.loaded_ckpt_mtime = os.path.getmtime(ckpt_path) if os.path.exists(ckpt_path) else 0.0
@@ -477,7 +477,9 @@ class SenseiRLBot(BaseAgent):
                 # RocketSim and Rocket League physics require jump release while airborne before second jump.
                 # When jumping off the ground, wheels leave turf on ticks 1-2.
                 # Pressing jump on ticks 2..5 guarantees the wheel-lift check passes and executes the dodge.
-                controller.jump = bool(want_jump and has_flip and 2 <= substep_tick <= 5)
+                stick_deflected = bool(math.hypot(act[2], act[3]) > 0.15)
+                should_dodge = bool((want_jump or stick_deflected) and has_flip)
+                controller.jump = bool(should_dodge and 2 <= substep_tick <= 5)
 
                 if controller.jump:
                     self.dodge_cooldown = 20  # ~1.3 second recovery after dodge
@@ -518,7 +520,7 @@ class SenseiRLBot(BaseAgent):
             is_kickoff = bool(abs(ball_pos[0]) < 50.0 and abs(ball_pos[1]) < 50.0 and float(np.linalg.norm(ball_state.vel)) < 100.0)
             
             # Event logging on jump/dodge trigger
-            if controller.jump and substep_tick == 0:
+            if controller.jump and (substep_tick == 0 or (not is_on_ground and substep_tick == 2)):
                 action_type = "LIFTOFF JUMP" if is_on_ground else "AIRBORNE FLIP"
                 log_debug(f"[TICK {self.tick_count}] *** {action_type} EXECUTED *** pit={controller.pitch:+.2f} yaw={controller.yaw:+.2f} rol={controller.roll:+.2f}")
 

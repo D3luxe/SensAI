@@ -32,7 +32,7 @@ rewards:
   boost_lose_weight: 0.35
   concede_weight: -30.0
   goal_weight: 30.0
-  jump_bridge_weight: 0.35
+  jump_bridge_weight: 1.0
   player_to_ball_weight: 0.6
   powerslide_weight: 0.2
   save_weight: 12.0

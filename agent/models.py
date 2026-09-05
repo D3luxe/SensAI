@@ -54,10 +54,10 @@ class ActorCritic(nn.Module):
         self.register_buffer("obs_mirror_mask", torch.tensor(OBS_MIRROR_MASK_NP, dtype=torch.float32), persistent=False)
         self.register_buffer("act_mirror_mask", torch.tensor(ACT_MIRROR_MASK_NP, dtype=torch.float32), persistent=False)
         # Calibrated deterministic activation thresholds for binary Bernoulli buttons:
-        # Index 0 (Jump): p > 0.30 (logit > -0.8473) - calibrated for deliberate takeoff/dodges without phantom low-speed turn hops
+        # Index 0 (Jump): p > 0.10 (logit > -2.1972) - calibrated for deliberate takeoff/dodges without phantom low-speed turn hops
         # Index 1 (Boost): p > 0.25 (logit > -1.0986)
         # Index 2 (Handbrake): p > 0.40 (logit > -0.4055)
-        self.register_buffer("bin_thresh_logits", torch.tensor([-0.8473, -1.0986, -0.4055], dtype=torch.float32), persistent=False)
+        self.register_buffer("bin_thresh_logits", torch.tensor([-2.1972, -1.0986, -0.4055], dtype=torch.float32), persistent=False)
 
         act_cls = get_activation_cls(activation)
 

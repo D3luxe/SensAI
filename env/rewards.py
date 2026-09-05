@@ -611,7 +611,9 @@ class JumpBridgeReward(BaseReward):
             # Rewards initiating forward traversal liftoff when sprinting downfield (neutral or forward pitch)
             elif not is_aerial_ball and not is_on_wall_zone and dist > 650.0 and forward_alignment > 0.40:
                 if car_fwd_speed > 400.0 and pitch_input >= -0.10:
-                    reward += self.weight * 0.35 * forward_alignment
+                    is_kickoff = bool(abs(arena.ball.pos[0]) < 50.0 and abs(arena.ball.pos[1]) < 50.0 and arena.ball.pos[2] < 120.0)
+                    liftoff_mult = 1.20 if is_kickoff else 0.70
+                    reward += self.weight * liftoff_mult * forward_alignment
 
         # ── 2. Airborne 50/50 Challenge Completion Bonus ──────────────────────
         if not car.on_ground and self._challenge_jump_active.get(car.id, False):

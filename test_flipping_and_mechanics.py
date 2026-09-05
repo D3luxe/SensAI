@@ -175,10 +175,10 @@ class TestFlippingAndMechanics(unittest.TestCase):
         self.assertGreaterEqual(rew, 1.0, "Low altitude flip slam into turf must award explicit wavedash bonus!")
 
     def test_model_jump_threshold_calibrated(self):
-        """Guarantees that ActorCritic deterministic jump threshold is set to p > 0.30 (-0.8473)."""
+        """Guarantees that ActorCritic deterministic jump threshold is set to p > 0.10 (-2.1972)."""
         model = ActorCritic(obs_dim=74, act_dim=8, continuous_actions=True)
-        self.assertAlmostEqual(model.bin_thresh_logits[0].item(), -0.8473, places=3,
-                               msg="Jump threshold logit must be calibrated to -0.8473 (p > 0.30)!")
+        self.assertAlmostEqual(model.bin_thresh_logits[0].item(), -2.1972, places=3,
+                               msg="Jump threshold logit must be calibrated to -2.1972 (p > 0.10)!")
 
     def test_bot_low_speed_steer_jump_suppression(self):
         """Guarantees that bot.py suppresses jump when turning hard at low speeds."""
