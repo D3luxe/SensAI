@@ -972,11 +972,11 @@ def create_ui():
                             replays_status_box = gr.Markdown("")
 
                         with gr.Group():
-                            gr.Markdown("### 📤 Upload `.replay` Files Directly")
+                            gr.Markdown("### 📤 Upload Dataset Files (.zip, .npz, .json)")
                             replay_uploader = gr.File(
                                 file_count="multiple",
-                                file_types=[".replay"],
-                                label="Drop Rocket League .replay files here"
+                                file_types=[".zip", ".npz", ".json", ".replay"],
+                                label="Drop .zip, .npz, or .json replay datasets here"
                             )
                             upload_status_box = gr.Markdown("")
 
@@ -1893,18 +1893,27 @@ def create_ui():
                 return build_replay_stats_md(), "⚠️ No files uploaded."
             p = ReplayParser()
             total_added = 0
+            total_frames = 0
             file_paths = [f.name if hasattr(f, "name") else str(f) for f in uploaded_files]
             for fp in file_paths:
-                dest = os.path.join(p.demo_dir, os.path.basename(fp))
-                try:
-                    import shutil
-                    shutil.copy2(fp, dest)
-                    total_added += 1
-                except Exception:
-                    pass
-            res = p.ingest_directory(max_replays=total_added, sort="newest")
+                ext = os.path.splitext(fp)[1].lower()
+                if ext == ".zip":
+                    parsed_count, frames_count = p.ingest_zip(fp)
+                    total_added += parsed_count
+                    total_frames += frames_count
+                else:
+                    dest = os.path.join(p.demo_dir, os.path.basename(fp))
+                    try:
+                        import shutil
+                        shutil.copy2(fp, dest)
+                        total_added += 1
+                    except Exception:
+                        pass
+            if total_frames == 0 and total_added > 0:
+                res = p.ingest_directory(max_replays=total_added, sort="newest")
+                total_frames = res.get("total_frames", 0)
             stats_md = build_replay_stats_md()
-            msg = f"📤 Uploaded & Ingested **{total_added}** replays ({res['total_frames']:,} frames) into dataset."
+            msg = f"📤 Uploaded & Ingested **{total_added}** files ({total_frames:,} frames) into dataset."
             return stats_md, msg
 
         replay_uploader.upload(

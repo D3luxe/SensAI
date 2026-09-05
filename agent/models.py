@@ -33,6 +33,11 @@ def get_activation_cls(activation: str):
 
 from env.observations import OBS_MIRROR_MASK_NP, ACT_MIRROR_MASK_NP
 
+try:
+    from env.observations import OBS_LEGACY_MIRROR_MASK_NP
+except ImportError:
+    OBS_LEGACY_MIRROR_MASK_NP = OBS_MIRROR_MASK_NP
+
 
 class ActorCritic(nn.Module):
     def __init__(
@@ -43,15 +48,19 @@ class ActorCritic(nn.Module):
         critic_hidden_dims: List[int] = [256, 256, 128],
         activation: str = "leaky_relu",
         continuous_actions: bool = True,
-        use_layer_norm: bool = True
+        use_layer_norm: bool = True,
+        legacy_mirror_mask: bool = False
     ):
         super().__init__()
         self.obs_dim = obs_dim
         self.act_dim = act_dim
         self.continuous_actions = continuous_actions
         self.use_layer_norm = use_layer_norm
+        self.legacy_mirror_mask = legacy_mirror_mask
 
-        self.register_buffer("obs_mirror_mask", torch.tensor(OBS_MIRROR_MASK_NP, dtype=torch.float32), persistent=False)
+        # Use legacy (pre-fix) mirror mask for evaluating old checkpoints, corrected mask for new training
+        mirror_mask_np = OBS_LEGACY_MIRROR_MASK_NP if legacy_mirror_mask else OBS_MIRROR_MASK_NP
+        self.register_buffer("obs_mirror_mask", torch.tensor(mirror_mask_np, dtype=torch.float32), persistent=False)
         self.register_buffer("act_mirror_mask", torch.tensor(ACT_MIRROR_MASK_NP, dtype=torch.float32), persistent=False)
         # Calibrated deterministic activation thresholds for binary Bernoulli buttons:
         # Index 0 (Jump): p > 0.15 (logit > -1.7346) - calibrated for deliberate takeoff/dodges without phantom low-speed turn hops

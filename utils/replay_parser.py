@@ -9,6 +9,7 @@ import os
 import glob
 import json
 import random
+import time
 import numpy as np
 from typing import List, Dict, Any, Optional, Tuple
 
@@ -34,8 +35,9 @@ class ReplayParser:
     """
     Parses Rocket League replay states and maintains a fast, memory-mapped replay buffer.
     """
-    def __init__(self, pool_path: str = DEFAULT_POOL_PATH):
+    def __init__(self, pool_path: str = DEFAULT_POOL_PATH, demo_dir: Optional[str] = None):
         self.pool_path = pool_path
+        self.demo_dir = demo_dir or DEFAULT_DEMO_DIR
         os.makedirs(os.path.dirname(self.pool_path), exist_ok=True)
         self.states_buffer: Optional[Dict[str, np.ndarray]] = None
         self.load_pool()
@@ -92,6 +94,25 @@ class ReplayParser:
             except Exception as e:
                 print(f"[ReplayParser] Warning: Could not remove {self.pool_path}: {e}")
         return True
+
+    def scan_demos(self, max_replays: int = 50, sort: str = "newest") -> List[str]:
+        """Scans demo_dir for replay/dataset files, returns sorted file paths."""
+        if not os.path.exists(self.demo_dir):
+            return []
+        files = (
+            glob.glob(os.path.join(self.demo_dir, "*.replay")) +
+            glob.glob(os.path.join(self.demo_dir, "*.npz")) +
+            glob.glob(os.path.join(self.demo_dir, "*.json"))
+        )
+        if sort == "newest":
+            files.sort(key=os.path.getmtime, reverse=True)
+        elif sort == "oldest":
+            files.sort(key=os.path.getmtime)
+        elif sort == "random":
+            random.shuffle(files)
+        if max_replays > 0 and len(files) > max_replays:
+            files = files[:max_replays]
+        return files
 
     def ingest_zip(self, zip_path: str) -> Tuple[int, int]:
         """
@@ -249,22 +270,29 @@ class ReplayParser:
 
     def ingest_directory(
         self,
-        directory: str = DEFAULT_DEMO_DIR,
+        directory: Optional[str] = None,
         max_replays: int = 50,
         sort_mode: str = "newest",
+        sort: Optional[str] = None,
         progress_cb: Optional[callable] = None
-    ) -> Tuple[int, int]:
+    ) -> Dict[str, Any]:
         """
         Scans a local directory for .replay / .npz / .json files, respects max_replays limit,
         extracts frames, and appends them to the replay pool.
         Returns: (num_replays_processed, num_frames_ingested)
         """
+        _t0 = time.time()
+        if directory is None:
+            directory = self.demo_dir
+        if sort is not None:
+            sort_mode = sort
+
         if not os.path.exists(directory):
-            return 0, 0
+            return {"parsed_files": 0, "total_frames": 0, "elapsed_seconds": 0.0}
 
         files = glob.glob(os.path.join(directory, "*.replay")) + glob.glob(os.path.join(directory, "*.npz")) + glob.glob(os.path.join(directory, "*.json"))
         if not files:
-            return 0, 0
+            return {"parsed_files": 0, "total_frames": 0, "elapsed_seconds": 0.0}
 
         # Sort files based on user preference
         if sort_mode == "newest":
@@ -306,7 +334,7 @@ class ReplayParser:
                 progress_cb(float(i + 1) / total_files, f"Ingested {i+1}/{total_files} replays...")
 
         if not extracted_b_pos:
-            return 0, 0
+            return {"parsed_files": 0, "total_frames": 0, "elapsed_seconds": 0.0}
 
         new_b_pos = np.vstack(extracted_b_pos)
         new_b_vel = np.vstack(extracted_b_vel)
@@ -338,7 +366,7 @@ class ReplayParser:
                 self.states_buffer[k] = self.states_buffer[k][-100000:]
 
         self.save_pool()
-        return processed_count, len(new_b_pos)
+        return {"parsed_files": processed_count, "total_frames": len(new_b_pos), "elapsed_seconds": round(time.time() - _t0, 2)}
 
     def _parse_file(self, file_path: str) -> Optional[Dict[str, np.ndarray]]:
         """Parses an individual replay file or pre-formatted numpy/json dataset."""
@@ -376,68 +404,21 @@ class ReplayParser:
     def _extract_replay_binary(self, file_path: str) -> Optional[Dict[str, np.ndarray]]:
         """
         Extracts valid in-game frame tuples from Rocket League demo files.
-        Uses boxcars/carball if installed, or fast header-guided telemetry generation.
+        Requires boxcars-py or carball for genuine extraction.
         """
         # Try third-party parsers if available in python environment
         try:
             import boxcars_py
             raw_json = boxcars_py.parse_replay(file_path)
             data = json.loads(raw_json)
-            # Extract trajectories
+            # TODO: Extract trajectories from parsed replay data
+            pass
+        except ImportError:
             pass
         except Exception:
             pass
 
-        # Fast resilient frame sampler: extract realistic high-level scenarios parameterized by file seed
-        file_stat = os.stat(file_path)
-        seed = int(file_stat.st_size + file_stat.st_mtime * 1000) % (2**31 - 1)
-        rng = np.random.RandomState(seed)
-
-        num_frames = min(200, max(50, int(file_stat.st_size // 4000)))
-        
-        # Generate authentic competitive match states
-        ball_pos = np.zeros((num_frames, 3), dtype=np.float32)
-        ball_pos[:, 0] = rng.uniform(-3000, 3000, size=num_frames)
-        ball_pos[:, 1] = rng.uniform(-4000, 4000, size=num_frames)
-        ball_pos[:, 2] = rng.uniform(100, 1500, size=num_frames)
-
-        ball_vel = np.zeros((num_frames, 3), dtype=np.float32)
-        ball_vel[:, :2] = rng.normal(0, 1200, size=(num_frames, 2))
-        ball_vel[:, 2] = rng.uniform(-400, 800, size=num_frames)
-
-        car_pos = np.zeros((num_frames, 2, 3), dtype=np.float32)
-        car_pos[:, 0, 0] = np.clip(ball_pos[:, 0] + rng.normal(0, 800, size=num_frames), -3800, 3800)
-        car_pos[:, 0, 1] = np.clip(ball_pos[:, 1] - rng.uniform(400, 1500, size=num_frames), -4800, 4800)
-        car_pos[:, 0, 2] = 17.0
-
-        car_pos[:, 1, 0] = np.clip(-car_pos[:, 0, 0] + rng.normal(0, 400, size=num_frames), -3800, 3800)
-        car_pos[:, 1, 1] = np.clip(-car_pos[:, 0, 1] + rng.normal(0, 400, size=num_frames), -4800, 4800)
-        car_pos[:, 1, 2] = 17.0
-
-        car_vel = np.zeros((num_frames, 2, 3), dtype=np.float32)
-        car_vel[:, 0, :2] = rng.normal(0, 1000, size=(num_frames, 2))
-        car_vel[:, 1, :2] = rng.normal(0, 1000, size=(num_frames, 2))
-
-        # Realistic heading distribution with natural approach angles, lateral cuts, and turnarounds
-        heading_to_ball_0 = np.arctan2(ball_pos[:, 1] - car_pos[:, 0, 1], ball_pos[:, 0] - car_pos[:, 0, 0])
-        heading_to_ball_1 = np.arctan2(ball_pos[:, 1] - car_pos[:, 1, 1], ball_pos[:, 0] - car_pos[:, 1, 0])
-
-        yaw_offsets_0 = rng.uniform(-np.pi, np.pi, size=num_frames) * rng.choice([0.0, 0.3, 0.7, 1.0], size=num_frames, p=[0.1, 0.4, 0.3, 0.2])
-        yaw_offsets_1 = rng.uniform(-np.pi, np.pi, size=num_frames) * rng.choice([0.0, 0.3, 0.7, 1.0], size=num_frames, p=[0.1, 0.4, 0.3, 0.2])
-
-        car_rot = np.zeros((num_frames, 2, 3), dtype=np.float32)
-        car_rot[:, 0, 1] = heading_to_ball_0 + yaw_offsets_0
-        car_rot[:, 1, 1] = heading_to_ball_1 + yaw_offsets_1
-
-        car_boost = np.zeros((num_frames, 2), dtype=np.float32)
-        car_boost[:, 0] = rng.uniform(20.0, 100.0, size=num_frames)
-        car_boost[:, 1] = rng.uniform(20.0, 100.0, size=num_frames)
-
-        return {
-            "ball_pos": ball_pos,
-            "ball_vel": ball_vel,
-            "car_pos": car_pos,
-            "car_vel": car_vel,
-            "car_rot": car_rot,
-            "car_boost": car_boost
-        }
+        # Genuine .replay parsing is not available — reject file rather than generating synthetic data
+        print(f"[ReplayParser] Genuine .replay parsing is not available for '{os.path.basename(file_path)}'. "
+              f"Please ingest pre-extracted .npz or .json datasets.")
+        return None

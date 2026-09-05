@@ -13,6 +13,7 @@ checkpoints/*Copy*
 checkpoints/bak/
 checkpoints/latest_model_before_alignment_*.pt
 *.bak
+*.synthetic_bak
 *.pid
 .system_generated/
 runs/

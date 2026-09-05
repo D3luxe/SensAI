@@ -56,7 +56,7 @@ class GoalReward(BaseReward):
         if dist_ball_to_net < 1400.0 and dist_car_to_net < 1600.0 and abs(arena.ball.pos[0]) < GOAL_HALF_WIDTH * 1.6:
             ball_vy_out = arena.ball.vel[1] if car.team == 0 else -arena.ball.vel[1]
             ball_vx_mag = abs(arena.ball.vel[0])
-            prev_t = self._prev_touches.get(car.id, 0)
+            prev_t = self._prev_touches.get(car.id, car.ball_touches)
             if car.ball_touches > prev_t and (ball_vy_out > 150.0 or (ball_vx_mag > 350.0 and ball_vy_out >= -100.0)):
                 self._prev_touches[car.id] = car.ball_touches
                 return self.save_weight
@@ -113,20 +113,23 @@ class BallToGoalVelocityReward(BaseReward):
             delta_y = abs(target_goal_y - arena.ball.pos[1])
             dt = delta_y / vy_forward
             x_impact = arena.ball.pos[0] + arena.ball.vel[0] * dt
-            if abs(x_impact) <= GOAL_HALF_WIDTH:
+            z_impact = arena.ball.pos[2] + arena.ball.vel[2] * dt + 0.5 * (-650.0) * (dt ** 2)
+            is_crossbar_miss = bool(z_impact > GOAL_HEIGHT + 35.0)
+            if abs(x_impact) <= GOAL_HALF_WIDTH and not is_crossbar_miss:
                 # Shot is directly on target into the net opening!
                 on_target_mult = 1.6
             elif ball_y_forward > 1000.0:
-                # Ball is in attacking half and heading wide into the backwall/corner
+                # Ball is in attacking half and heading wide into the backwall/corner or high over crossbar
                 # Strictly eliminate progression reward so the bot cannot farm pushing wide
-                miss_dist = abs(x_impact) - GOAL_HALF_WIDTH
+                miss_dist = max(abs(x_impact) - GOAL_HALF_WIDTH, (z_impact - GOAL_HEIGHT) if is_crossbar_miss else 0.0)
                 if miss_dist > 400.0:
                     on_target_mult = 0.0
                 else:
                     on_target_mult = max(0.0, 1.0 - (miss_dist / 400.0))
-            elif abs(x_impact) > GOAL_HALF_WIDTH * 1.3 and ball_y_forward > 0.0:
-                # Midfield wide trajectory dampening
-                miss_factor = min(1.0, (abs(x_impact) - GOAL_HALF_WIDTH) / 1500.0)
+            elif (abs(x_impact) > GOAL_HALF_WIDTH * 1.3 or is_crossbar_miss) and ball_y_forward > 0.0:
+                # Midfield wide/high trajectory dampening
+                miss_val = max(abs(x_impact) - GOAL_HALF_WIDTH, (z_impact - GOAL_HEIGHT) if is_crossbar_miss else 0.0)
+                miss_factor = min(1.0, miss_val / 1500.0)
                 on_target_mult = max(0.20, 1.0 - (0.80 * miss_factor))
 
         normalized_progress = (ball_velocity_toward_goal / BALL_MAX_SPEED) * on_target_mult
@@ -150,6 +153,7 @@ class PlayerToBallVelocityReward(BaseReward):
         super().__init__(weight)
         self._prev_dist: Dict[int, float] = {}
         self._prev_touches: Dict[int, int] = {}
+        self._prev_car_touches: Dict[int, int] = {}
         self._was_in_strike_zone: Dict[int, bool] = {}
 
     def _calc_dist(self, car_pos: np.ndarray, ball_pos: np.ndarray) -> float:
@@ -196,6 +200,7 @@ class PlayerToBallVelocityReward(BaseReward):
             for car in initial_state.cars
         }
         self._prev_touches = {car.id: car.ball_touches for car in initial_state.cars}
+        self._prev_car_touches = {car.id: car.ball_touches for car in initial_state.cars}
         self._was_in_strike_zone = {car.id: False for car in initial_state.cars}
 
     def get_reward(self, car: CarState, arena: RocketSimArena, action: np.ndarray, is_goal: bool, scoring_team: Optional[int]) -> float:
@@ -256,7 +261,14 @@ class PlayerToBallVelocityReward(BaseReward):
         was_strike = self._was_in_strike_zone.get(car.id, False)
         self._was_in_strike_zone[car.id] = in_strike
 
-        if was_strike and not in_strike and car.ball_touches == prev_t and fwd_alignment < -0.15:
+        opp_touched = any(
+            c.ball_touches > self._prev_car_touches.get(c.id, c.ball_touches)
+            for c in arena.cars if c.team != car.team
+        )
+        self._prev_car_touches = {c.id: c.ball_touches for c in arena.cars}
+
+        car_fwd_spd = float(np.dot(car.vel[:2], car.get_forward_vector()[:2]))
+        if was_strike and not in_strike and car.ball_touches == prev_t and fwd_alignment < -0.15 and not opp_touched and car_fwd_spd > 150.0:
             # Car was in the strike zone and flew past the ball without touching it!
             # Heavy penalty (-0.40), escalated if overshooting at supersonic speeds
             car_spd = float(np.linalg.norm(car.vel))
@@ -272,6 +284,11 @@ class PlayerToBallVelocityReward(BaseReward):
                 ceiling_penalty = -0.25
         else:
             raw_delta_dist = (prev_dist - curr_dist) / 2000.0
+
+        # When an opponent touches/clears the ball away, distance increased due to the opponent's strike;
+        # clamp the delta so the bot is not penalized with an artificial distance penalty cliff for an external hit.
+        if opp_touched and raw_delta_dist < 0.0:
+            raw_delta_dist = max(-0.08, raw_delta_dist)
 
         # 2. Distance Delta with Strike Zone Pacing
         # Downfield (> 450 uu): 100% distance closure rewarded
@@ -430,8 +447,8 @@ class PlayerToBallVelocityReward(BaseReward):
                 if (throttle > 0.35 or boost > 0.0) and rel_fwd_speed > 250.0 and not steer_into_ball:
                     turnaround_reward -= 0.25
 
-            # B. Close-Proximity Overshoot & Rear Bumper Resolution (ball behind center of mass and not in pocket):
-            elif curr_dist < 300.0 and local_x < 0.0:
+            # B. Close-Proximity Overshoot & Rear Bumper Resolution (ball behind center of mass on turf, not in pocket or on roof):
+            elif not is_roof_carry and curr_dist < 300.0 and local_x < 0.0 and ball_z < 160.0:
                 # Speed-Differential Aware Overshoot Resolution:
                 # 1. Car outrunning trailing ball downfield (rel_fwd_speed > 0):
                 if rel_fwd_speed > 0.0:
@@ -445,17 +462,26 @@ class PlayerToBallVelocityReward(BaseReward):
                         turnaround_reward = -0.25
                 # 2. Ball is already rolling faster and overtaking car (rel_fwd_speed <= 0):
                 else:
-                    # Ball is catching up naturally; reward gentle coasting / throttle feathering
-                    if 0.0 <= throttle <= 0.35 and boost <= 0.0:
-                        turnaround_reward = +0.25
-                    elif -0.25 <= throttle < -0.05:
-                        turnaround_reward = +0.10
-                    elif throttle < -0.25:
-                        # Heavy reverse braking when ball is already overtaking risks reversing into ball
+                    # Gate: require actual motion to earn pacing bonuses (prevents stationary idling exploits)
+                    car_speed_2d = float(np.linalg.norm(car.vel[:2]))
+                    ball_speed_2d = float(np.linalg.norm(arena.ball.vel[:2]))
+                    if car_speed_2d < 30.0 and ball_speed_2d < 30.0:
+                        # Both stationary — no bonus
                         turnaround_reward = 0.0
+                    elif car_fwd_speed > 100.0 or ball_fwd_speed > 100.0:
+                        # Ball is catching up naturally; reward gentle coasting / throttle feathering
+                        if 0.0 <= throttle <= 0.35 and boost <= 0.0:
+                            turnaround_reward = +0.25
+                        elif -0.25 <= throttle < -0.05:
+                            turnaround_reward = +0.10
+                        elif throttle < -0.25:
+                            # Heavy reverse braking when ball is already overtaking risks reversing into ball
+                            turnaround_reward = 0.0
 
                 # Active steering or powersliding to swing around the ball:
-                if (abs(steer) > 0.25) or handbrake > 0.0:
+                # Gate: require actual vehicle speed > 100 to prevent stationary spinning exploits
+                car_speed_for_steer = float(np.linalg.norm(car.vel[:2]))
+                if car_speed_for_steer > 100.0 and ((abs(steer) > 0.25) or handbrake > 0.0):
                     turnaround_reward += +0.25 * max(abs(steer), 0.6)
 
             elif fwd_alignment < -0.25:
@@ -515,7 +541,7 @@ class TouchBallReward(BaseReward):
         self._prev_touches = {car.id: car.ball_touches for car in initial_state.cars}
 
     def get_reward(self, car: CarState, arena: RocketSimArena, action: np.ndarray, is_goal: bool, scoring_team: Optional[int]) -> float:
-        prev = self._prev_touches.get(car.id, 0)
+        prev = self._prev_touches.get(car.id, car.ball_touches)
         curr = car.ball_touches
         self._prev_touches[car.id] = curr
 
@@ -535,7 +561,7 @@ class TouchBallReward(BaseReward):
             # Reward scoring strikes generously; never penalize the shot that enters the net
             if is_goal:
                 if scoring_team == car.team:
-                    return (self.weight * 2.5 * height_multiplier) + airborne_bonus + kickoff_bounty
+                    return self.weight * (2.5 * height_multiplier + airborne_bonus + kickoff_bounty)
                 else:
                     return 0.0
 
@@ -575,7 +601,9 @@ class TouchBallReward(BaseReward):
                     delta_y = abs(target_goal_y - arena.ball.pos[1])
                     dt = delta_y / vy_forward
                     x_impact = arena.ball.pos[0] + arena.ball.vel[0] * dt
-                    if abs(x_impact) <= GOAL_HALF_WIDTH:
+                    z_impact = arena.ball.pos[2] + arena.ball.vel[2] * dt + 0.5 * (-650.0) * (dt ** 2)
+                    is_crossbar_miss = bool(z_impact > GOAL_HEIGHT + 35.0)
+                    if abs(x_impact) <= GOAL_HALF_WIDTH and not is_crossbar_miss:
                         # Direct shot on target into the net opening!
                         goal_alignment = max(goal_alignment, 0.7) + 0.35
 
@@ -594,13 +622,13 @@ class TouchBallReward(BaseReward):
                 clear_bonus = 0.5 if is_defensive_clear else 0.0
                 base_touch = 0.25 if is_gentle_ground_push else (0.8 + clear_bonus)
 
-                return (self.weight * (base_touch + power_bonus) * direction_multiplier * height_multiplier) + airborne_bonus + kickoff_bounty
+                return self.weight * ((base_touch + power_bonus) * direction_multiplier * height_multiplier + airborne_bonus + kickoff_bounty)
 
             # --- CASE 2: Ball hit directed backward toward defending half / goal ---
             else:
                 if is_defensive_clear:
                     # Lateral pinch / side clear out of defensive third
-                    return self.weight * 0.8 * height_multiplier + airborne_bonus
+                    return self.weight * (0.8 * height_multiplier + airborne_bonus)
                 else:
                     # Direct touch toward own goal: Strictly penalized to prevent own-goal dribbling
                     penalty_scale = max(0.3, abs(goal_alignment))
@@ -871,12 +899,16 @@ class JumpBridgeReward(BaseReward):
 
         # ── 3b. Flick Launch Impulse & Goal Acceleration Bonus (Seer/Nexto Architecture) ──
         target_goal_y = ARENA_EXTENT_Y if car.team == 0 else -ARENA_EXTENT_Y
-        target_goal_dir = np.array([0.0, 1.0 if car.team == 0 else -1.0, 0.0], dtype=np.float32)
+        target_x = float(np.clip(arena.ball.pos[0], -GOAL_HALF_WIDTH * 0.8, GOAL_HALF_WIDTH * 0.8))
+        target_net_pos = np.array([target_x, target_goal_y, GOAL_HEIGHT * 0.35], dtype=np.float32)
+        ball_to_net = target_net_pos - arena.ball.pos
+        net_dist = float(np.linalg.norm(ball_to_net))
+        unit_to_goal = (ball_to_net / max(1e-4, net_dist)) if net_dist > 1e-4 else np.array([0.0, 1.0 if car.team == 0 else -1.0, 0.0], dtype=np.float32)
 
         if (is_flick_active or dist < 260.0) and car.ball_touches > prev_touch and (is_executing_dodge or car.just_dodged):
             prev_b_vel = self._prev_ball_vel.get(car.id, arena.ball.vel)
-            exit_speed_goal = float(np.dot(arena.ball.vel, target_goal_dir))
-            delta_v_goal = float(np.dot(arena.ball.vel - prev_b_vel, target_goal_dir))
+            exit_speed_goal = float(np.dot(arena.ball.vel, unit_to_goal))
+            delta_v_goal = float(np.dot(arena.ball.vel - prev_b_vel, unit_to_goal))
 
             if exit_speed_goal > 650.0 and delta_v_goal > 150.0:
                 # Genuine explosive flick on target net!
@@ -913,13 +945,15 @@ class JumpBridgeReward(BaseReward):
             self._halfflip_roll_executed[car.id] = False
 
         # Explicit Wavedash Detection:
-        # A wavedash occurs when dodging while very low to the turf (prev_pos_z < 55 uu)
+        # A wavedash occurs when dodging while very low to the turf (prev_pos_z < 55 uu or low airborne)
         # and immediately contacting turf, slamming the flip impulse into ground acceleration (> 120 uu/s)
-        is_wavedash = bool(car.on_ground and prev_pos_z < 55.0 and car.just_dodged and delta_tactical_speed > 120.0)
+        was_airborne_low = bool(not prev_ground and prev_pos_z < 55.0)
+        did_dodge_or_flip = bool(car.just_dodged or (prev_flip and not car.has_flip))
+        is_wavedash = bool(car.on_ground and (was_airborne_low or prev_pos_z < 55.0) and did_dodge_or_flip and delta_tactical_speed > 120.0)
         if is_wavedash:
             reward += self.weight * 1.5 * min(1.0, delta_tactical_speed / 400.0)
         else:
-            is_landing_or_dodge = bool((not prev_ground and car.on_ground) or car.just_dodged)
+            is_landing_or_dodge = bool((not prev_ground and car.on_ground) or did_dodge_or_flip)
             if is_landing_or_dodge and delta_tactical_speed > 60.0 and tactical_speed_curr > 500.0:
                 speed_factor = min(1.0, tactical_speed_curr / 2200.0)
                 impulse_factor = min(1.0, delta_tactical_speed / 400.0)
@@ -960,6 +994,9 @@ class BoostReward(BaseReward):
 
         if boost_diff > 1e-5:
             # ── 1. Boost Pad Collection Event Bonus & Low-Boost Hunger ─────────
+            # Strictly gate: if gain_weight is zero, pad collection contributes 0.0
+            if self.gain_weight <= 1e-6:
+                return 0.0
             # Heavy low-boost hunger: picking up pads when near zero boost is critical for mobility & defense
             hunger_mult = 1.0 + 2.0 * max(0.0, 1.0 - prev)
             base_gain = self.gain_weight * boost_diff * hunger_mult
@@ -969,10 +1006,13 @@ class BoostReward(BaseReward):
             # Big orb (+100 boost): +1.20 * hunger
             is_big_pad = bool((curr - prev) > 0.50)
             pickup_bonus = (1.20 if is_big_pad else 0.45) * max(0.5, 1.0 - prev)
-            return float(base_gain + pickup_bonus)
+            return float(base_gain + self.gain_weight * pickup_bonus)
 
         elif boost_diff < -1e-5:
             # ── 2. Boost Usage, Waste & Negative Momentum Penalties ─────────────
+            # Strictly gate: if lose_weight is zero, boost usage penalties contribute 0.0
+            if self.lose_weight <= 1e-6:
+                return 0.0
             height_factor = max(0.2, 1.0 - (car.pos[2] / GOAL_HEIGHT))
             loss_rew = self.lose_weight * boost_diff * height_factor
 
@@ -1060,7 +1100,7 @@ class BoostReward(BaseReward):
                         boost_hunger = (65.0 - car.boost) / 65.0
                         prox = 1.0 - (pad_dist / 550.0)
                         speed_fac = min(1.0, speed_to_pad / 1000.0)
-                        return float(0.20 * boost_hunger * pad_align * prox * speed_fac)
+                        return float(self.gain_weight * 0.20 * boost_hunger * pad_align * prox * speed_fac)
 
             return 0.0
 
@@ -1137,8 +1177,10 @@ class AirRollRecoveryReward(BaseReward):
         super().__init__(weight)
         self._prev_up_z: Dict[int, float] = {}
         self._prev_heading: Dict[int, float] = {}
+        self._prev_on_ground: Dict[int, bool] = {}
         self._airborne_ticks: Dict[int, int] = {}
         self._was_disoriented: Dict[int, bool] = {}
+        self._disoriented_this_flight: Dict[int, bool] = {}
         self._airborne_recovery_total: Dict[int, float] = {}
         self._wall_landed: Dict[int, bool] = {}
         self._halfflip_cancel_executed: Dict[int, bool] = {}
@@ -1147,35 +1189,22 @@ class AirRollRecoveryReward(BaseReward):
     def reset(self, initial_state: RocketSimArena):
         self._prev_up_z = {car.id: float(car.get_up_vector()[2]) for car in initial_state.cars}
         self._prev_heading = {car.id: 1.0 for car in initial_state.cars}
+        self._prev_on_ground = {car.id: car.on_ground for car in initial_state.cars}
         self._airborne_ticks = {car.id: 0 for car in initial_state.cars}
         self._was_disoriented = {car.id: False for car in initial_state.cars}
+        self._disoriented_this_flight = {car.id: False for car in initial_state.cars}
         self._airborne_recovery_total = {car.id: 0.0 for car in initial_state.cars}
         self._wall_landed = {car.id: False for car in initial_state.cars}
         self._halfflip_cancel_executed = {car.id: False for car in initial_state.cars}
         self._halfflip_cancel_total = {car.id: 0.0 for car in initial_state.cars}
 
     def get_reward(self, car: CarState, arena: RocketSimArena, action: np.ndarray, is_goal: bool, scoring_team: Optional[int]) -> float:
-        if car.on_ground:
-            self._airborne_ticks[car.id] = 0
-            self._prev_up_z[car.id] = 1.0
-            self._prev_heading[car.id] = 1.0
-            self._was_disoriented[car.id] = False
-            self._airborne_recovery_total[car.id] = 0.0
-            self._wall_landed[car.id] = False
-            self._halfflip_cancel_executed[car.id] = False
-            self._halfflip_cancel_total[car.id] = 0.0
-            return 0.0
-
-        air_ticks = self._airborne_ticks.get(car.id, 0) + 1
-        self._airborne_ticks[car.id] = air_ticks
+        prev_ground = self._prev_on_ground.get(car.id, car.on_ground)
+        self._prev_on_ground[car.id] = car.on_ground
 
         up = car.get_up_vector()
         up_z = float(up[2])
-        prev_up_z = self._prev_up_z.get(car.id, up_z)
-        self._prev_up_z[car.id] = up_z
-
         car_z = float(car.pos[2])
-        vel_z = float(car.vel[2])
 
         # Horizontal flight velocity & forward heading alignment
         v_horiz = car.vel[:2]
@@ -1190,12 +1219,36 @@ class AirRollRecoveryReward(BaseReward):
         else:
             curr_heading = 1.0
 
+        if car.on_ground and prev_ground:
+            self._airborne_ticks[car.id] = 0
+            self._prev_up_z[car.id] = 1.0
+            self._prev_heading[car.id] = 1.0
+            self._was_disoriented[car.id] = False
+            self._disoriented_this_flight[car.id] = False
+            self._airborne_recovery_total[car.id] = 0.0
+            self._wall_landed[car.id] = False
+            self._halfflip_cancel_executed[car.id] = False
+            self._halfflip_cancel_total[car.id] = 0.0
+            return 0.0
+
+        if not car.on_ground:
+            air_ticks = self._airborne_ticks.get(car.id, 0) + 1
+            self._airborne_ticks[car.id] = air_ticks
+        else:
+            air_ticks = self._airborne_ticks.get(car.id, 0)
+
+        prev_up_z = self._prev_up_z.get(car.id, up_z)
+        self._prev_up_z[car.id] = up_z
+
+        vel_z = float(car.vel[2])
+
         prev_heading = self._prev_heading.get(car.id, curr_heading)
         self._prev_heading[car.id] = curr_heading
 
         # Track if car was genuinely knocked off-axis / inverted during this airborne sequence
         if up_z < 0.3 or curr_heading < -0.2:
             self._was_disoriented[car.id] = True
+            self._disoriented_this_flight[car.id] = True
 
         car_to_ball = arena.ball.pos - car.pos
         dist_to_ball = float(np.linalg.norm(car_to_ball))
@@ -1213,7 +1266,7 @@ class AirRollRecoveryReward(BaseReward):
         roll_input = float(action[4])
         is_active_halfflip_cancel = bool(air_ticks <= 18 and (pitch_input > 0.3 or abs(roll_input) > 0.25))
 
-        if not is_aerial_engagement and is_recovering:
+        if not is_aerial_engagement and is_recovering and not car.on_ground:
             urgency = min(1.0, max(0.4, (800.0 - car_z) / 600.0))
             rec_spent = self._airborne_recovery_total.get(car.id, 0.0)
             rec_budget = max(0.0, 0.80 - rec_spent)
@@ -1254,29 +1307,42 @@ class AirRollRecoveryReward(BaseReward):
                 total_reward += step_cancel_reward
                 self._halfflip_cancel_total[car.id] = cancel_spent + step_cancel_reward
 
-            # Reset disorientation once upright attitude is fully restored
+            # Conclude in-flight roll/yaw recovery once upright attitude is restored (disoriented flag for touchdown is preserved)
             if up_z > 0.85 and curr_heading > 0.85:
                 self._was_disoriented[car.id] = False
 
-            # ── 2. Touchdown Alignment (Evaluated as a single impulse near ground contact) ──
-            if car_z < 60.0 and vel_z < -50.0:
+        # ── 2. Touchdown Alignment (Evaluated as a single impulse near ground contact) ──
+        if (car_z < 60.0 and vel_z < -50.0) or (not prev_ground and car.on_ground):
+            had_disorientation = bool(self._was_disoriented.get(car.id, False) or self._disoriented_this_flight.get(car.id, False) or self._halfflip_cancel_executed.get(car.id, False))
+            if had_disorientation:
                 if up_z > 0.70:
                     total_reward += (up_z * 0.5)
                     if speed_horiz > 300.0 and curr_heading > 0.30:
                         total_reward += (curr_heading * 0.5)
                         # 180° Turnaround Half-Flip Completion Bonus:
-                        # Massive +1.50 completion bonus when bot executes a flip-cancel turnaround
-                        # and lands cleanly facing forward in the direction of flight!
                         if self._halfflip_cancel_executed.get(car.id, False) and curr_heading > 0.60 and speed_horiz > 400.0:
                             total_reward += 1.50
                 # Consume disorientation so touchdown reward only fires once per landing
                 self._was_disoriented[car.id] = False
+                self._disoriented_this_flight[car.id] = False
                 self._halfflip_cancel_executed[car.id] = False
                 self._halfflip_cancel_total[car.id] = 0.0
 
                 # Upside down landing crash penalty (forgiven during active flip-cancels & quick half-flip air-rolls)
                 if up_z < 0.0 and not is_active_halfflip_cancel:
+                    urgency = min(1.0, max(0.4, (800.0 - car_z) / 600.0))
                     total_reward += (up_z * 0.5) * urgency
+
+        if car.on_ground:
+            self._airborne_ticks[car.id] = 0
+            self._prev_up_z[car.id] = 1.0
+            self._prev_heading[car.id] = 1.0
+            self._was_disoriented[car.id] = False
+            self._disoriented_this_flight[car.id] = False
+            self._airborne_recovery_total[car.id] = 0.0
+            self._wall_landed[car.id] = False
+            self._halfflip_cancel_executed[car.id] = False
+            self._halfflip_cancel_total[car.id] = 0.0
 
         # ── 3. Wall Landing Recovery (Airborne near side or back wall) ────────
         # Single-shot landing impulse when approaching wall with wheels oriented toward wall
@@ -1407,7 +1473,7 @@ class CombinedReward:
             car_to_ball = arena.ball.pos - car.pos
             dist = float(np.linalg.norm(car_to_ball))
             fwd_align = float(np.dot(fwd, car_to_ball / max(1e-4, dist)))
-            if fwd_speed > 300.0 and (steer_mag < 0.40 or fwd_align > 0.50):
+            if fwd_speed > 300.0 and (steer_mag < 0.25 or (fwd_align > 0.65 and steer_mag < 0.40)):
                 pen = -0.15 * float(action[7]) * min(1.0, fwd_speed / 1500.0)
                 total += pen
                 if include_breakdown:

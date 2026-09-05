@@ -276,6 +276,7 @@ class NectoNextoOpponentBot(BaseOpponent):
             if p is car:
                 main_idx = idx
                 kv[0, idx, 0] = 1.0  # is_self
+                kv[0, idx, 1] = 1.0  # is_teammate (self is own teammate per EARL spec)
             elif p.team == car.team:
                 kv[0, idx, 1] = 1.0  # is_mate
             else:
@@ -291,7 +292,6 @@ class NectoNextoOpponentBot(BaseOpponent):
             kv[0, idx, 23] = 1.0 if p.has_flip else 0.0
 
         if car.team == 1:
-            kv[0, :, (1, 2)] = kv[0, :, (2, 1)]
             kv *= EARL_INVERT
 
         kv /= EARL_NORM
@@ -337,6 +337,7 @@ class NectoNextoOpponentBot(BaseOpponent):
             if p is car:
                 main_idx = n
                 qkv[0, n, 0] = 1.0  # is_self
+                qkv[0, n, 1] = 1.0  # is_teammate (self is own teammate per EARL spec)
             elif p.team == car.team:
                 qkv[0, n, 1] = 1.0  # is_teammate
             else:
@@ -363,7 +364,6 @@ class NectoNextoOpponentBot(BaseOpponent):
 
         # Inversion for Orange team (Team 1)
         if car.team == 1:
-            qkv[0, :, (1, 2)] = qkv[0, :, (2, 1)]
             qkv *= EARL_INVERT
 
         # Build query

@@ -6,7 +6,7 @@ environment:
 hyperparameters:
   batch_size: 8192
   bc_decay_steps: 500000000
-  bc_regularization_weight: 0.1
+  bc_regularization_weight: 0.0
   clip_range: 0.2
   ent_coef: 0.012
   gae_lambda: 0.95
@@ -26,7 +26,7 @@ model:
   use_layer_norm: true
 ppo:
   bc_decay_steps: 30000000
-  bc_regularization_weight: 0.5
+  bc_regularization_weight: 0.0
 rewards:
   air_roll_recovery_weight: 0.1
   ball_to_goal_weight: 1.5

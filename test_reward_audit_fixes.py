@@ -896,6 +896,215 @@ class TestRewardAuditFixes(unittest.TestCase):
         self.assertEqual(chosen, "dribble_flick", f"WeightedScenarioSetter should select dribble_flick, got {chosen}")
 
 
+    def test_air_roll_touchdown_on_ground_transition(self):
+        """Test that touchdown alignment reward fires on ground contact after mid-air disorientation."""
+        rew = AirRollRecoveryReward(weight=0.10)
+        car = CarState(
+            id=0, team=0,
+            pos=np.array([0.0, 0.0, 17.0], dtype=np.float32),
+            vel=np.array([0.0, 500.0, 0.0], dtype=np.float32),
+            rot=np.array([0.0, math.pi / 2, 0.0], dtype=np.float32),
+            on_ground=True
+        )
+        self.arena.cars = [car]
+        rew.reset(self.arena)
+
+        # Simulate airborne disoriented frame
+        rew._prev_on_ground[car.id] = False
+        rew._disoriented_this_flight[car.id] = True
+        rew._halfflip_cancel_executed[car.id] = True
+
+        action = np.zeros(8, dtype=np.float32)
+        r = rew.get_reward(car, self.arena, action, False, None)
+
+        # Touchdown should award upright landing bonus + speed/heading alignment + half-flip completion
+        self.assertGreater(r, 0.15, f"Touchdown after half-flip disorientation recovery must award completion bonus, got {r}")
+        self.assertFalse(rew._disoriented_this_flight.get(car.id, False), "Disorientation flag should reset after touchdown")
+
+    def test_roof_carry_negative_local_x_no_penalty(self):
+        """Test that carrying the ball on the rear portion of the roof (local_x < 0) does not incur overshoot penalty."""
+        rew = PlayerToBallVelocityReward(weight=1.0)
+        car = CarState(
+            id=0, team=0,
+            pos=np.array([0.0, 0.0, 17.0], dtype=np.float32),
+            vel=np.array([0.0, 800.0, 0.0], dtype=np.float32),
+            rot=np.array([0.0, math.pi / 2, 0.0], dtype=np.float32),
+            on_ground=True
+        )
+        self.arena.cars = [car]
+        # Ball settled slightly behind center of mass on the roof (local_x = -20)
+        self.arena.ball.pos = np.array([0.0, -20.0, 145.0], dtype=np.float32)
+        self.arena.ball.vel = np.array([0.0, 800.0, 0.0], dtype=np.float32)
+        rew.reset(self.arena)
+
+        act = np.zeros(8, dtype=np.float32)
+        act[0] = 1.0  # Full throttle downfield
+        r_behind = rew.get_reward(car, self.arena, act, False, None)
+
+        # Ball slightly ahead of center (local_x = +20)
+        rew.reset(self.arena)
+        self.arena.ball.pos = np.array([0.0, 20.0, 145.0], dtype=np.float32)
+        r_ahead = rew.get_reward(car, self.arena, act, False, None)
+
+        self.assertAlmostEqual(r_behind, r_ahead, places=2,
+                               msg=f"Roof carry with local_x=-20 ({r_behind}) should not be penalized compared to local_x=+20 ({r_ahead})")
+
+    def test_ball_to_goal_high_crossbar_miss_no_on_target_bonus(self):
+        """Test that a high boomer shot flying over the crossbar does not receive on-target multiplier."""
+        rew = BallToGoalVelocityReward(weight=1.5)
+        car = CarState(
+            id=0, team=0,
+            pos=np.array([0.0, 2000.0, 17.0], dtype=np.float32),
+            rot=np.array([0.0, math.pi / 2, 0.0], dtype=np.float32)
+        )
+        # Ball at Y=3000 moving forward at 1500 uu/s, but climbing high so it hits backwall at Z=1200 (> GOAL_HEIGHT 642)
+        self.arena.ball.pos = np.array([0.0, 3000.0, 100.0], dtype=np.float32)
+        self.arena.ball.vel = np.array([0.0, 1500.0, 1000.0], dtype=np.float32)
+
+        action = np.zeros(8, dtype=np.float32)
+        r_high = rew.get_reward(car, self.arena, action, False, None)
+
+        # Low shot straight into net opening (vz = 0, z_impact ~ 100)
+        self.arena.ball.vel = np.array([0.0, 1500.0, 0.0], dtype=np.float32)
+        r_target = rew.get_reward(car, self.arena, action, False, None)
+
+        self.assertGreater(r_target, r_high * 1.5, f"Direct shot into net opening ({r_target}) should receive on-target multiplier over high crossbar miss ({r_high})")
+
+    def test_flick_launch_angled_goal_shot(self):
+        """Test that an angled flick from the flank into the opponent goal opening receives flick power bonus."""
+        rew = JumpBridgeReward(weight=0.35)
+        car = CarState(
+            id=0, team=0,
+            pos=np.array([1500.0, 2000.0, 80.0], dtype=np.float32),
+            vel=np.array([-500.0, 800.0, 50.0], dtype=np.float32),
+            rot=np.array([0.0, math.pi / 2, 0.0], dtype=np.float32),
+            on_ground=False,
+            has_flip=False,
+            ball_touches=1
+        )
+        self.arena.cars = [car]
+        rew.reset(self.arena)
+        rew._prev_on_ground[car.id] = False
+        rew._prev_has_flip[car.id] = True
+        rew._flick_window_active[car.id] = True
+        rew._prev_touches[car.id] = 0
+        rew._prev_vel[car.id] = car.vel.copy()
+        rew._prev_ball_vel[car.id] = np.array([-400.0, 600.0, 50.0], dtype=np.float32)
+
+        # Flicks diagonally toward net opening at (0, 5120):
+        self.arena.ball.pos = np.array([1500.0, 2050.0, 160.0], dtype=np.float32)
+        self.arena.ball.vel = np.array([-800.0, 1500.0, 300.0], dtype=np.float32)
+
+        act = np.zeros(8, dtype=np.float32)
+        act[2] = 1.0
+        act[5] = 1.0
+        r = rew.get_reward(car, self.arena, act, False, None)
+        self.assertGreater(r, 0.5, f"Angled flick toward goal opening should receive flick power bonus, got {r}")
+
+    def test_strike_zone_opponent_clear_no_whiff_penalty(self):
+        """Test that an opponent booming the ball away from the strike zone does NOT penalize the bot with a whiff penalty."""
+        rew = PlayerToBallVelocityReward(weight=1.0)
+        car = CarState(
+            id=0, team=0,
+            pos=np.array([0.0, 0.0, 17.0], dtype=np.float32),
+            vel=np.array([0.0, 100.0, 0.0], dtype=np.float32),
+            rot=np.array([0.0, math.pi / 2, 0.0], dtype=np.float32),
+            ball_touches=0
+        )
+        opp = CarState(
+            id=1, team=1,
+            pos=np.array([0.0, 300.0, 17.0], dtype=np.float32),
+            ball_touches=0
+        )
+        self.arena.cars = [car, opp]
+        self.arena.ball.pos = np.array([0.0, 200.0, 93.0], dtype=np.float32)  # inside strike zone (< 400)
+        rew.reset(self.arena)
+
+        # Step 1: Car is in strike zone
+        act = np.zeros(8, dtype=np.float32)
+        rew.get_reward(car, self.arena, act, False, None)
+        self.assertTrue(rew._was_in_strike_zone[car.id])
+
+        # Step 2: Opponent touches ball and booms it behind the car
+        opp.ball_touches = 1
+        self.arena.ball.pos = np.array([0.0, -800.0, 300.0], dtype=np.float32)  # Behind car at -Y
+        self.arena.ball.vel = np.array([0.0, -2000.0, 500.0], dtype=np.float32)
+
+        r = rew.get_reward(car, self.arena, act, False, None)
+        # Should NOT receive the -0.40 to -0.60 whiff penalty because opponent cleared it
+        self.assertGreater(r, -0.30, f"Opponent clear should not inflict whiff overshoot penalty, got {r}")
+
+    def test_powerslide_cut_no_handbrake_penalty_overlap(self):
+        """Test that a sharp powerslide cut does not incur handbrake economy penalty in CombinedReward."""
+        weights = {"powerslide_weight": 0.50}
+        combined = CombinedReward(weights)
+        car = CarState(
+            id=0, team=0,
+            pos=np.array([0.0, 0.0, 17.0], dtype=np.float32),
+            vel=np.array([0.0, 400.0, 0.0], dtype=np.float32),
+            ang_vel=np.array([0.0, 0.0, 2.0], dtype=np.float32),
+            rot=np.array([0.0, 0.0, 0.0], dtype=np.float32),  # Facing +X
+            on_ground=True
+        )
+        # Ball is off-axis at (0, 500) -> fwd_align = 0.0 (< 0.60)
+        self.arena.ball.pos = np.array([0.0, 500.0, 93.0], dtype=np.float32)
+        self.arena.cars = [car]
+        combined.reset(self.arena)
+
+        act = np.zeros(8, dtype=np.float32)
+        act[0] = 0.5
+        act[1] = 0.35  # Active cut steering
+        act[7] = 1.0   # Handbrake
+
+        total_r, breakdown = combined.get_reward(car, self.arena, act, False, None, include_breakdown=True)
+        self.assertNotIn("handbrake_penalty", breakdown, "Active powerslide cut must not receive handbrake economy penalty")
+        self.assertGreater(breakdown.get("powerslide", 0.0), 0.0, "PowerslideReward should be active")
+
+    def test_reward_weight_zero_suppresses_bonuses(self):
+        """Test that setting touch_weight and boost weights to 0.0 completely suppresses bonuses."""
+        touch_rew = TouchBallReward(weight=0.0)
+        boost_rew = BoostReward(gain_weight=0.0, lose_weight=0.0)
+        car = CarState(id=0, team=0, pos=np.array([0.0, 0.0, 17.0], dtype=np.float32), on_ground=False, ball_touches=1)
+        self.arena.ball.pos = np.array([0.0, 50.0, 500.0], dtype=np.float32)
+        self.arena.cars = [car]
+
+        touch_rew.reset(self.arena)
+        touch_rew._prev_touches[car.id] = 0
+        r_touch = touch_rew.get_reward(car, self.arena, np.zeros(8), False, None)
+        self.assertEqual(r_touch, 0.0, f"Weight 0.0 must yield 0.0 touch reward, got {r_touch}")
+
+        boost_rew.reset(self.arena)
+        car.boost = 100.0
+        boost_rew._prev_boost[car.id] = 0.1  # Big pad pickup
+        r_boost = boost_rew.get_reward(car, self.arena, np.zeros(8), False, None)
+        self.assertEqual(r_boost, 0.0, f"Gain weight 0.0 must yield 0.0 boost reward, got {r_boost}")
+
+    def test_wavedash_low_airborne_impulse(self):
+        """Test that executing a dodge while low to the turf onto ground triggers wavedash reward."""
+        rew = JumpBridgeReward(weight=0.35)
+        car = CarState(
+            id=0, team=0,
+            pos=np.array([0.0, 0.0, 17.0], dtype=np.float32),
+            vel=np.array([0.0, 1200.0, 0.0], dtype=np.float32),
+            rot=np.array([0.0, math.pi / 2, 0.0], dtype=np.float32),
+            on_ground=True,
+            has_flip=False
+        )
+        self.arena.ball.pos = np.array([0.0, 2000.0, 93.0], dtype=np.float32)
+        self.arena.cars = [car]
+        rew.reset(self.arena)
+
+        # Was airborne low (prev_pos_z = 35 < 55) and dodged
+        rew._prev_on_ground[car.id] = False
+        rew._prev_pos_z[car.id] = 35.0
+        rew._prev_has_flip[car.id] = True  # Consumed flip on landing
+        rew._prev_vel[car.id] = np.array([0.0, 950.0, 0.0], dtype=np.float32)  # delta_v = 250 > 120
+
+        act = np.zeros(8, dtype=np.float32)
+        r = rew.get_reward(car, self.arena, act, False, None)
+        self.assertGreater(r, 0.20, f"Wavedash ground impulse should be rewarded, got {r}")
+
+
 if __name__ == "__main__":
     unittest.main()
 

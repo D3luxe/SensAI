@@ -90,8 +90,14 @@ class RocketLeagueEnv:
         is_goal = False
         scoring_team = None
 
+        # Construct bot_mask: True = external Necto/Nexto agent, bypass jump sequencer
+        bot_mask = None
+        if self.is_baseline_env and self.baseline_bot is not None:
+            bot_mask = [False] * len(self.arena.cars)
+            bot_mask[1] = True  # Orange slot (index 1) is always the external bot in 1v1
+
         # Execute physics sub-ticks (full tick_skip interval)
-        is_goal, scoring_team = self.arena.step(parsed_actions, dt=float(self.tick_skip) / 120.0)
+        is_goal, scoring_team = self.arena.step(parsed_actions, dt=float(self.tick_skip) / 120.0, bot_mask=bot_mask)
 
         # Calculate rewards and observations
         if out_obs is None:
@@ -138,7 +144,9 @@ class RocketLeagueEnv:
 
         # Auto-reset on goal/max steps/stalled kickoff
         if done:
-            self.reset()
+            info["terminal_observation"] = out_obs.copy()
+            reset_obs = self.reset()
+            out_obs[:] = reset_obs[:]
 
         return out_obs, out_rews, dones, info
 

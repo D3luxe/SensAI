@@ -3,7 +3,7 @@
   "learning_rate": 0.0003,
   "ent_coef": 0.012,
   "clip_range": 0.2,
-  "bc_regularization_weight": 0.1,
+  "bc_regularization_weight": 0.0,
   "bc_decay_steps": 500000000,
   "baseline_opponent_ratio": 0.1,
   "baseline_opponent_type": "checkpoints/necto-model.pt",

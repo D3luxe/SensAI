@@ -20,14 +20,14 @@ OBS_MIRROR_MASK_NP = np.array([
     -1.0,  1.0,  1.0,   # car_pos (pos.x negated)
     -1.0,  1.0,  1.0,   # car_vel (vel.x negated)
     -1.0,  1.0,  1.0,   # fwd (fwd.x negated)
-     1.0, -1.0,  1.0,   # right (right.y negated across X=0 sagittal mirror plane)
+     1.0, -1.0, -1.0,   # right
     -1.0,  1.0,  1.0,   # up (up.x negated)
-    -1.0,  1.0, -1.0,   # ang_vel (roll.x, yaw.z negated)
+     1.0, -1.0, -1.0,   # ang_vel
      1.0,  1.0,  1.0,  1.0,  # boost, on_ground, has_jump, has_flip
     # 2. Ball State (9 features)
     -1.0,  1.0,  1.0,   # ball_pos (pos.x negated)
     -1.0,  1.0,  1.0,   # ball_vel (vel.x negated)
-    -1.0,  1.0, -1.0,   # ball_ang_vel (roll.x, yaw.z negated)
+     1.0, -1.0, -1.0,   # ball_ang_vel
     # 2b. Future Ball Trajectory Prediction (3 features)
     -1.0,  1.0,  1.0,   # future_ball_pos (pos.x negated)
     # 3. Relative Features in Car Local Frame (16 features)
@@ -48,6 +48,36 @@ OBS_MIRROR_MASK_NP = np.array([
     # 5. Boost Pad Spatial Vectors (6 features)
      1.0, -1.0,  1.0,   # nearest small pad (fwd, right negated, dist)
      1.0, -1.0,  1.0    # nearest big orb (fwd, right negated, dist)
+], dtype=np.float32)
+
+# Legacy (pre-fix) mirror mask preserved for checkpoint backward compatibility
+OBS_LEGACY_MIRROR_MASK_NP = np.array([
+    # Copy of the OLD mask before corrections
+    -1.0,  1.0,  1.0,
+    -1.0,  1.0,  1.0,
+    -1.0,  1.0,  1.0,
+     1.0, -1.0,  1.0,    # old right (index 11 was 1.0)
+    -1.0,  1.0,  1.0,
+    -1.0,  1.0, -1.0,    # old ang_vel (indices 15,16 were -1.0, 1.0)
+     1.0,  1.0,  1.0,  1.0,
+    -1.0,  1.0,  1.0,
+    -1.0,  1.0,  1.0,
+    -1.0,  1.0, -1.0,    # old ball ang_vel (indices 28,29 were -1.0, 1.0)
+    -1.0,  1.0,  1.0,
+     1.0, -1.0,  1.0,
+     1.0, -1.0,  1.0,
+     1.0, -1.0,  1.0,
+     1.0,
+     1.0, -1.0,  1.0,
+     1.0, -1.0,  1.0,
+     1.0,  1.0,  1.0,  1.0,
+    -1.0,  1.0,  1.0,
+    -1.0,  1.0,  1.0,
+     1.0, -1.0,  1.0,
+     1.0, -1.0,  1.0,
+     1.0,  1.0,
+     1.0, -1.0,  1.0,
+     1.0, -1.0,  1.0
 ], dtype=np.float32)
 
 # 8-Dimensional Action Reflection Mask: [throttle, steer, pitch, yaw, roll, jump, boost, handbrake]
@@ -116,8 +146,8 @@ class DefaultObservationBuilder:
         out[6], out[7], out[8] = fx, fy, fz
         out[9], out[10], out[11] = rx, ry, rz
         out[12], out[13], out[14] = ux, uy, uz
-        out[15] = float(ca[0]) * 0.1
-        out[16] = float(ca[1]) * 0.1
+        out[15] = float(ca[0]) * inv * 0.1
+        out[16] = float(ca[1]) * inv * 0.1
         out[17] = float(ca[2]) * 0.1
         out[18] = car.boost * 0.01
         out[19] = 1.0 if car.on_ground else 0.0
@@ -136,8 +166,8 @@ class DefaultObservationBuilder:
         out[25] = (bvx * inv) / BALL_MAX_SPEED
         out[26] = (bvy * inv) / BALL_MAX_SPEED
         out[27] = bvz / BALL_MAX_SPEED
-        out[28] = float(ba[0]) * 0.1
-        out[29] = float(ba[1]) * 0.1
+        out[28] = float(ba[0]) * inv * 0.1
+        out[29] = float(ba[1]) * inv * 0.1
         out[30] = float(ba[2]) * 0.1
 
         # 2b. Future Ball Trajectory Prediction (0.5s ahead = 60 ticks @ 120Hz)

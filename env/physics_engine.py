@@ -228,6 +228,16 @@ class RocketSimArena:
                 self._rsim_arena.set_ball_touch_callback(on_touch_cb)
                 self._rsim_pads = self._rsim_arena.get_boost_pads()
                 self._use_rsim = True
+                # Build boost_pads directly from RocketSim arena for 100% 1-to-1 index and position alignment (all 34 pads)
+                self.boost_pads = [
+                    BoostPad(
+                        pos=r_pad.get_pos().as_numpy().astype(np.float32),
+                        is_big=bool(r_pad.is_big),
+                        is_active=True,
+                        cooldown_timer=0.0
+                    )
+                    for r_pad in self._rsim_pads
+                ]
             except Exception:
                 self._use_rsim = False
                 self._rsim_pads = []
@@ -285,7 +295,39 @@ class RocketSimArena:
             else:
                 self.scenario_setter.kickoff_setter.reset(self._rsim_arena, self.num_players)
 
+            # Reset RocketSim boost pads to full active state
+            if self._rsim_pads:
+                for r_pad in self._rsim_pads:
+                    ps = r_pad.get_state()
+                    ps.is_active = True
+                    ps.cooldown = 0.0
+                    r_pad.set_state(ps)
+
             self._sync_from_rsim()
+
+            # Fix #6: Clear stale state carried across episode boundaries
+            for car in self.cars:
+                car.ball_touches = 0
+            if hasattr(self, "_touch_active_this_step"):
+                for k in self._touch_active_this_step:
+                    self._touch_active_this_step[k] = False
+            if hasattr(self, "_car_was_touching"):
+                for k in self._car_was_touching:
+                    self._car_was_touching[k] = False
+            self._cached_pred_step = -1
+            self._cached_rsim_preds = None
+            if hasattr(self, "_cached_threat"):
+                self._cached_threat.clear()
+            if hasattr(self, "_cached_pred_slices"):
+                self._cached_pred_slices.clear()
+
+            # Sync boost pad active/cooldown arrays from RocketSim
+            if hasattr(self, "_sm_pad_indices"):
+                for idx, pad_i in enumerate(self._sm_pad_indices):
+                    self._small_pad_active[idx] = self.boost_pads[pad_i].is_active
+                for idx, pad_i in enumerate(self._bg_pad_indices):
+                    self._big_pad_active[idx] = self.boost_pads[pad_i].is_active
+
             return
 
         # Pure-Python Fallback Reset
@@ -409,7 +451,7 @@ class RocketSimArena:
             car.boost = float(c_state.boost)
             car.on_ground = bool(c_state.is_on_ground)
             car.has_jump = bool(not c_state.has_jumped or c_state.is_on_ground)
-            car.has_flip = bool(not c_state.has_flipped and not c_state.is_on_ground)
+            car.has_flip = bool(not c_state.has_flipped and not c_state.has_double_jumped and not c_state.is_on_ground)
             car.just_dodged = bool(c_state.is_flipping or c_state.has_flipped)
             car.is_supersonic = bool(c_state.is_supersonic)
             car.demoed = bool(c_state.is_demoed)
@@ -430,10 +472,11 @@ class RocketSimArena:
             for idx, pad_i in enumerate(self._bg_pad_indices):
                 self._big_pad_active[idx] = self.boost_pads[pad_i].is_active
 
-    def step(self, actions: List[np.ndarray], dt: float = 1.0 / 15.0) -> Tuple[bool, Optional[int]]:
+    def step(self, actions: List[np.ndarray], dt: float = 1.0 / 15.0, bot_mask: Optional[List[bool]] = None) -> Tuple[bool, Optional[int]]:
         """
         Step simulation by dt seconds.
         Uses C++ RocketSim native Bullet Physics when available.
+        bot_mask: If provided, True entries bypass SenseiBot's jump sequencer for external bot agents.
         """
         self.step_count += 1
 
@@ -445,6 +488,21 @@ class RocketSimArena:
             for tick in range(total_ticks):
                 for i, r_car in enumerate(self._rsim_cars):
                     act = actions[i] if i < len(actions) else np.zeros(8, dtype=np.float32)
+
+                    # External bot pass-through: bypass jump sequencer and axis negations
+                    if bot_mask and i < len(bot_mask) and bot_mask[i]:
+                        r_car.set_controls(rsim.CarControls(
+                            throttle=float(act[0]),
+                            steer=float(act[1]),
+                            pitch=float(act[2]),
+                            yaw=float(act[3]),
+                            roll=float(act[4]),
+                            jump=bool(act[5] > 0.0),
+                            boost=bool(act[6] > 0.0),
+                            handbrake=bool(act[7] > 0.0)
+                        ))
+                        continue
+
                     c_state = r_car.get_state()
                     is_on_gnd = bool(c_state.is_on_ground)
                     has_flip = bool(c_state.has_flipped or c_state.has_double_jumped)

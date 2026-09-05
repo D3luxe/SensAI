@@ -142,8 +142,8 @@ class PPOTrainer:
             continuous_actions=self.continuous_actions,
             use_layer_norm=self.use_layer_norm
         ).to(self.device)
-
-        self.optimizer = optim.Adam(self.agent.parameters(), lr=self.lr, eps=1e-5, weight_decay=self.weight_decay)
+        # Switch to AdamW with decoupled weight decay (0.0 for standard PPO stability, preventing LayerNorm decay collapse)
+        self.optimizer = optim.AdamW(self.agent.parameters(), lr=self.lr, eps=1e-5, weight_decay=0.0)
 
         # Left-Right Mirror Augmentation Masks (Strict Bilateral Symmetry)
         self.obs_mirror_mask = torch.tensor(OBS_MIRROR_MASK_NP, dtype=torch.float32, device=self.device)
@@ -451,7 +451,7 @@ class PPOTrainer:
                 logp_buf[step] = logprob
 
                 # Environment step
-                act_np = action.numpy().reshape(self.num_envs, self.num_agents_per_env, -1) if self.continuous_actions else action.numpy().reshape(self.num_envs, self.num_agents_per_env)
+                act_np = action.detach().cpu().numpy().reshape(self.num_envs, self.num_agents_per_env, -1) if self.continuous_actions else action.detach().cpu().numpy().reshape(self.num_envs, self.num_agents_per_env)
 
                 next_obs, rews, dones, infos = self.env.step(act_np)
 
@@ -606,7 +606,7 @@ class PPOTrainer:
 
                     # In-place guard for exploration standard deviation parameter
                     if self.continuous_actions and hasattr(self.agent, "actor_log_std"):
-                        self.agent.actor_log_std.data.clamp_(min=-2.5, max=-1.2)
+                        self.agent.actor_log_std.data.clamp_(min=-2.5, max=-0.5)
 
                     pg_losses.append(pg_loss.item())
                     v_losses.append(v_loss.item())
@@ -622,8 +622,8 @@ class PPOTrainer:
             sps = int(self.total_actors * self.num_steps / (time.time() - iter_start_time))
 
             # Fast zero-copy telemetry directly from rollout tensors
-            act_np = b_actions.numpy()
-            obs_np = b_obs.numpy()
+            act_np = b_actions.detach().cpu().numpy()
+            obs_np = b_obs.detach().cpu().numpy()
 
             thr_col = act_np[:, 0]
             str_col = act_np[:, 1]

@@ -127,47 +127,21 @@ def get_cached_or_run_tests(force_refresh: bool = False) -> Dict[str, Any]:
             cached["total"] = cached["total_tests"]
         return cached
 
-    # Provide default verified state if test runner hasn't been triggered yet
-    default_payload = {
+    # No cache exists and no tests have been run yet
+    return {
         "timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),
-        "total_tests": 79,
-        "total": 79,
-        "passed": 79,
+        "status": "NOT_RUN",
+        "total_tests": 0,
+        "total": 0,
+        "passed": 0,
         "failures": 0,
         "errors": 0,
-        "pass_rate_pct": 100.0,
+        "pass_rate_pct": 0.0,
         "duration_seconds": 0.0,
-        "all_passed": True,
-        "subsystems": [
-            {
-                "name": "🏎️ Physics & Controls Pipeline",
-                "description": "Pitch/Yaw/Steer sign alignment, 4-2-2 tick jump timing, and ground-dodge cooldowns.",
-                "status": "PASS",
-                "icon": "✅"
-            },
-            {
-                "name": "🧠 Neural Architecture & Regularization",
-                "description": "LayerNorm bounded activations, LeakyReLU gradient flow, and output head desaturation.",
-                "status": "PASS",
-                "icon": "✅"
-            },
-            {
-                "name": "🎯 Scenario Setters & Dynamic Resets",
-                "description": "Kickoffs, Aerials, Wall Plays, and Goalie Save scenario generators.",
-                "status": "PASS",
-                "icon": "✅"
-            },
-            {
-                "name": "📁 Replay Ingestion & Frame Dataset",
-                "description": "Replay parsing, frame dataset buffering, and batch ingestion limits.",
-                "status": "PASS",
-                "icon": "✅"
-            }
-        ],
-        "raw_output": "Initial baseline verified. Click '🧪 Run All Unit Tests' for live re-verification."
+        "all_passed": False,
+        "subsystems": [],
+        "raw_output": "No test run has been executed yet. Click '🧪 Run All Unit Tests' to run the full test suite."
     }
-    _save_cache(default_payload)
-    return default_payload
 
 
 def format_test_results_markdown(res: Dict[str, Any]) -> str:

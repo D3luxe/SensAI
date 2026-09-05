@@ -66,7 +66,7 @@ class KickoffSetter(BaseStateSetter):
         k_pos = self.KICKOFF_LOCATIONS[loc_idx]
 
         for i, car in enumerate(rsim_arena.get_cars()):
-            cs = car.get_state()
+            cs = rsim.CarState()
             cs.vel = rsim.Vec(0, 0, 0)
             cs.ang_vel = rsim.Vec(0, 0, 0)
             cs.boost = 33.3
@@ -105,7 +105,7 @@ class AerialScenarioSetter(BaseStateSetter):
 
         # Attacking car
         for i, car in enumerate(rsim_arena.get_cars()):
-            cs = car.get_state()
+            cs = rsim.CarState()
             cs.boost = random.uniform(60.0, 100.0)
             team = i % 2
 
@@ -147,7 +147,7 @@ class WallPlaySetter(BaseStateSetter):
         rsim_arena.ball.set_state(bs)
 
         for i, car in enumerate(rsim_arena.get_cars()):
-            cs = car.get_state()
+            cs = rsim.CarState()
             cs.boost = random.uniform(50.0, 100.0)
             team = i % 2
 
@@ -197,7 +197,7 @@ class GoalieSaveSetter(BaseStateSetter):
         rsim_arena.ball.set_state(bs)
 
         for i, car in enumerate(rsim_arena.get_cars()):
-            cs = car.get_state()
+            cs = rsim.CarState()
             cs.boost = random.uniform(40.0, 100.0)
             team = i % 2
 
@@ -240,7 +240,7 @@ class ReplayStateSetter(BaseStateSetter):
         # Set car states
         cars = rsim_arena.get_cars()
         for i in range(min(len(cars), num_players)):
-            cs = cars[i].get_state()
+            cs = rsim.CarState()
             cs.pos = rsim.Vec(*sample["car_pos"][i])
             cs.vel = rsim.Vec(*sample["car_vel"][i])
             rot = sample["car_rot"][i]
@@ -278,7 +278,7 @@ class TurnaroundRecoverySetter(BaseStateSetter):
             rsim_arena.ball.set_state(bs)
 
             for i, car in enumerate(rsim_arena.get_cars()):
-                cs = car.get_state()
+                cs = rsim.CarState()
                 cs.boost = random.uniform(20.0, 50.0)
                 team = i % 2
 
@@ -316,7 +316,7 @@ class TurnaroundRecoverySetter(BaseStateSetter):
             rsim_arena.ball.set_state(bs)
 
             for i, car in enumerate(rsim_arena.get_cars()):
-                cs = car.get_state()
+                cs = rsim.CarState()
                 cs.boost = random.uniform(20.0, 70.0)
                 team = i % 2
 
@@ -353,7 +353,7 @@ class TurnaroundRecoverySetter(BaseStateSetter):
             rsim_arena.ball.set_state(bs)
 
             for i, car in enumerate(rsim_arena.get_cars()):
-                cs = car.get_state()
+                cs = rsim.CarState()
                 cs.boost = random.uniform(35.0, 80.0)
                 team = i % 2
 
@@ -390,7 +390,7 @@ class TurnaroundRecoverySetter(BaseStateSetter):
             rsim_arena.ball.set_state(bs)
 
             for i, car in enumerate(rsim_arena.get_cars()):
-                cs = car.get_state()
+                cs = rsim.CarState()
                 cs.boost = random.uniform(40.0, 80.0)
                 team = i % 2
 
@@ -437,7 +437,7 @@ class TurnaroundRecoverySetter(BaseStateSetter):
             rsim_arena.ball.set_state(bs)
 
             for i, car in enumerate(rsim_arena.get_cars()):
-                cs = car.get_state()
+                cs = rsim.CarState()
                 cs.boost = random.uniform(0.0, 40.0)
                 team = i % 2
 
@@ -468,7 +468,7 @@ class TurnaroundRecoverySetter(BaseStateSetter):
             rsim_arena.ball.set_state(bs)
 
             for i, car in enumerate(rsim_arena.get_cars()):
-                cs = car.get_state()
+                cs = rsim.CarState()
                 cs.boost = random.uniform(30.0, 80.0)
                 team = i % 2
 
@@ -556,7 +556,7 @@ class CustomScenarioSetter(BaseStateSetter):
             cvy = float(c_cfg.get("vel", [0, 0, 0])[1]) + random.uniform(-vel_jit, vel_jit)
             cvz = float(c_cfg.get("vel", [0, 0, 0])[2])
 
-            cs = cars[0].get_state()
+            cs = rsim.CarState()
             cs.pos = rsim.Vec(
                 max(-ARENA_EXTENT_X + 150.0, min(ARENA_EXTENT_X - 150.0, cx)),
                 max(-ARENA_EXTENT_Y + 150.0, min(ARENA_EXTENT_Y - 150.0, cy)),
@@ -571,7 +571,7 @@ class CustomScenarioSetter(BaseStateSetter):
         if len(cars) > 1:
             opp_cfg = scenario.get("opponent", {})
             opp_mode = opp_cfg.get("mode", "goalie")
-            cs1 = cars[1].get_state()
+            cs1 = rsim.CarState()
             if opp_mode == "goalie":
                 cs1.pos = rsim.Vec(random.uniform(-400, 400), 4800.0, 17.0)
                 cs1.rot_mat = rsim.Angle(pitch=0.0, yaw=-math.pi / 2, roll=0.0).as_rot_mat()
@@ -665,7 +665,7 @@ class WallBounceReboundSetter(BaseStateSetter):
 
         cars = rsim_arena.get_cars()
         for i, car in enumerate(cars):
-            cs = car.get_state()
+            cs = rsim.CarState()
             cs.boost = random.uniform(40.0, 90.0)
             team = i % 2
 
@@ -763,7 +763,7 @@ class DribbleFlickScenarioSetter(BaseStateSetter):
 
         cars = rsim_arena.get_cars()
         for i, car in enumerate(cars):
-            cs = car.get_state()
+            cs = rsim.CarState()
             cs.boost = random.uniform(35.0, 80.0)
             team = i % 2
 

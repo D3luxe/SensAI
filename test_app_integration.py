@@ -8,6 +8,11 @@ from ui.app import create_ui
 from utils.process_manager import TrainingProcessManager
 
 def test_integration():
+    # Safety guard: refuse to run if active training is in progress
+    mgr_check = TrainingProcessManager.get_instance()
+    if mgr_check.is_running():
+        print("[Integration Test] SKIPPED: Active training session detected. Run this test offline.")
+        return
     print("[Integration Test] Building Gradio UI...")
     demo = create_ui()
     assert demo is not None, "Gradio UI instance failed to create."
