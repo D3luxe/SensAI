@@ -161,6 +161,7 @@ class TestFlippingAndMechanics(unittest.TestCase):
         bridge.reset(self.arena)
 
         car = self.arena.cars[0]
+        car.pos = np.array([0.0, 0.0, 40.0], dtype=np.float32)
         car.on_ground = True # Just contacted turf
         car.just_dodged = True
         bridge._prev_pos_z[car.id] = 40.0 # Low height when dodging (< 55 uu)

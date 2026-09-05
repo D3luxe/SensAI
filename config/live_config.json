@@ -1,7 +1,7 @@
 {
-  "updated_at": 1788555425.3484874,
+  "updated_at": 1788566114.2552373,
   "learning_rate": 0.0003,
-  "ent_coef": 0.005,
+  "ent_coef": 0.01,
   "clip_range": 0.2,
   "bc_regularization_weight": 0.1,
   "bc_decay_steps": 150000000,

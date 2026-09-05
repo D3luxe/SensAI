@@ -6,7 +6,7 @@ environment:
 hyperparameters:
   batch_size: 8192
   clip_range: 0.2
-  ent_coef: 0.005
+  ent_coef: 0.01
   gae_lambda: 0.95
   gamma: 0.995
   learning_rate: 0.0003
