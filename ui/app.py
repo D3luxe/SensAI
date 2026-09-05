@@ -632,16 +632,55 @@ def create_ui():
                                 </div>
                                 """
                             )
+
+                    with gr.Accordion("⚖️ Scenario Weight Lock & Auto-Fill Popover", open=False):
+                        gr.Markdown("#### 🎯 Specify Target Scenario Weights & Auto-Balance Remaining to 100%")
+                        gr.Markdown("*Check the box next to any scenarios you want to lock at a specific percentage. Any unselected/unlocked scenarios will automatically divide the remaining percentage evenly to reach exactly 100%.*")
+                        with gr.Row():
+                            with gr.Column():
+                                with gr.Row():
+                                    pop_lock_k = gr.Checkbox(label="Lock Kickoff", value=False)
+                                    pop_val_k = gr.Number(label="Kickoff %", value=int(round(float(sc_cfg.get("kickoff_prob", 0.20)) * 100)), minimum=0, maximum=100, step=1)
+                                with gr.Row():
+                                    pop_lock_r = gr.Checkbox(label="Lock Replay", value=False)
+                                    pop_val_r = gr.Number(label="Replay %", value=int(round(float(sc_cfg.get("replay_prob", 0.15)) * 100)), minimum=0, maximum=100, step=1)
+                                with gr.Row():
+                                    pop_lock_a = gr.Checkbox(label="Lock Aerial", value=False)
+                                    pop_val_a = gr.Number(label="Aerial %", value=int(round(float(sc_cfg.get("aerial_prob", 0.11)) * 100)), minimum=0, maximum=100, step=1)
+                                with gr.Row():
+                                    pop_lock_c = gr.Checkbox(label="Lock Custom", value=False)
+                                    pop_val_c = gr.Number(label="Custom %", value=int(round(float(sc_cfg.get("custom_prob", 0.15)) * 100)), minimum=0, maximum=100, step=1)
+                            with gr.Column():
+                                with gr.Row():
+                                    pop_lock_tr = gr.Checkbox(label="Lock Turnaround", value=False)
+                                    pop_val_tr = gr.Number(label="Turnaround %", value=int(round(float(sc_cfg.get("turnaround_prob", 0.13)) * 100)), minimum=0, maximum=100, step=1)
+                                with gr.Row():
+                                    pop_lock_w = gr.Checkbox(label="Lock Wall Play", value=False)
+                                    pop_val_w = gr.Number(label="Wall Play %", value=int(round(float(sc_cfg.get("wall_prob", 0.07)) * 100)), minimum=0, maximum=100, step=1)
+                                with gr.Row():
+                                    pop_lock_wr = gr.Checkbox(label="Lock Wall Rebound", value=False)
+                                    pop_val_wr = gr.Number(label="Wall Rebound %", value=int(round(float(sc_cfg.get("wall_rebound_prob", 0.08)) * 100)), minimum=0, maximum=100, step=1)
+                                with gr.Row():
+                                    pop_lock_s = gr.Checkbox(label="Lock Goalie Save", value=False)
+                                    pop_val_s = gr.Number(label="Goalie Save %", value=int(round(float(sc_cfg.get("save_prob", 0.07)) * 100)), minimum=0, maximum=100, step=1)
+
+                        with gr.Row():
+                            pop_sync_btn = gr.Button("🔄 Sync from Sliders", variant="secondary", size="sm")
+                            pop_confirm_btn = gr.Button("⚡ Confirm & Auto-Balance to 100%", variant="primary", size="sm")
+
+                        popover_status_msg = gr.Markdown("")
+
                     with gr.Row():
                         with gr.Column():
-                            kickoff_prob_slider = gr.Slider(0.0, 1.0, value=float(sc_cfg.get("kickoff_prob", 0.21)), step=0.01, label="Kickoff Scenario Probability", info="Standard 1v1 kickoff formations.")
-                            replay_prob_slider = gr.Slider(0.0, 1.0, value=float(sc_cfg.get("replay_prob", 0.17)), step=0.01, label="Human Replay Scenario Probability", info="Authentic match situations sampled from replays.")
-                            aerial_prob_slider = gr.Slider(0.0, 1.0, value=float(sc_cfg.get("aerial_prob", 0.08)), step=0.01, label="High Aerial Scenario Probability", info="Floating & rising balls for aerial training.")
-                            custom_prob_slider = gr.Slider(0.0, 1.0, value=float(sc_cfg.get("custom_prob", 0.25)), step=0.01, label="🎯 Custom Scenarios Probability", info="User-designed custom situations.")
+                            kickoff_prob_slider = gr.Slider(0.0, 1.0, value=float(sc_cfg.get("kickoff_prob", 0.20)), step=0.01, label="Kickoff Scenario Probability", info="Standard 1v1 kickoff formations.")
+                            replay_prob_slider = gr.Slider(0.0, 1.0, value=float(sc_cfg.get("replay_prob", 0.15)), step=0.01, label="Human Replay Scenario Probability", info="Authentic match situations sampled from replays.")
+                            aerial_prob_slider = gr.Slider(0.0, 1.0, value=float(sc_cfg.get("aerial_prob", 0.11)), step=0.01, label="High Aerial Scenario Probability", info="Floating & rising balls for aerial training.")
+                            custom_prob_slider = gr.Slider(0.0, 1.0, value=float(sc_cfg.get("custom_prob", 0.15)), step=0.01, label="🎯 Custom Scenarios Probability", info="User-designed custom situations.")
 
                         with gr.Column():
-                            turnaround_prob_slider = gr.Slider(0.0, 1.0, value=float(sc_cfg.get("turnaround_prob", 0.14)), step=0.01, label="Turnaround Recovery Probability", info="Fast downfield spawns moving away from ball.")
-                            wall_prob_slider = gr.Slider(0.0, 1.0, value=float(sc_cfg.get("wall_prob", 0.07)), step=0.01, label="Wall Play Scenario Probability", info="Sidewall rolling and backboard rebounds.")
+                            turnaround_prob_slider = gr.Slider(0.0, 1.0, value=float(sc_cfg.get("turnaround_prob", 0.13)), step=0.01, label="Turnaround Recovery Probability", info="Fast downfield spawns moving away from ball.")
+                            wall_prob_slider = gr.Slider(0.0, 1.0, value=float(sc_cfg.get("wall_prob", 0.07)), step=0.01, label="Wall Play Scenario Probability", info="Sidewall rolling and backboard rides.")
+                            wall_rebound_prob_slider = gr.Slider(0.0, 1.0, value=float(sc_cfg.get("wall_rebound_prob", 0.08)), step=0.01, label="Wall Rebound & Bounce Probability", info="High-speed sidewall & backboard clears to practice reading rebounds.")
                             save_prob_slider = gr.Slider(0.0, 1.0, value=float(sc_cfg.get("save_prob", 0.07)), step=0.01, label="Goalie Save Scenario Probability", info="Fast opponent shots into defending net.")
 
                     custom_sc_count = len(ScenarioManager.get_instance().get_active_scenarios())
@@ -1243,7 +1282,7 @@ def create_ui():
             g_w, c_w, sv_w,
             b2g_w, p2b_w, jb_w, ar_w, pw_w, tch_w,
             bg_w, bl_w,
-            k_p, r_p, a_p, tr_p, w_p, s_p, c_p,
+            k_p, r_p, a_p, c_p, tr_p, w_p, wr_p, s_p,
             bc_w, bc_dec
         ):
             rewards = {
@@ -1263,10 +1302,11 @@ def create_ui():
                 "kickoff_prob": float(k_p),
                 "replay_prob": float(r_p),
                 "aerial_prob": float(a_p),
+                "custom_prob": float(c_p),
                 "turnaround_prob": float(tr_p),
                 "wall_prob": float(w_p),
-                "save_prob": float(s_p),
-                "custom_prob": float(c_p)
+                "wall_rebound_prob": float(wr_p),
+                "save_prob": float(s_p)
             }
 
             payload = {
@@ -1295,21 +1335,22 @@ def create_ui():
                 goal_slider, concede_slider, save_slider,
                 ball_to_goal_slider, player_to_ball_slider, jump_bridge_slider, air_roll_recovery_slider, powerslide_slider, touch_slider,
                 boost_gain_slider, boost_lose_slider,
-                kickoff_prob_slider, replay_prob_slider, aerial_prob_slider, turnaround_prob_slider, wall_prob_slider, save_prob_slider, custom_prob_slider,
+                kickoff_prob_slider, replay_prob_slider, aerial_prob_slider, custom_prob_slider,
+                turnaround_prob_slider, wall_prob_slider, wall_rebound_prob_slider, save_prob_slider,
                 bc_weight_slider, bc_decay_input
             ],
             outputs=[curriculum_apply_msg]
         )
 
-        # Dynamic 100% Normalized Scenario Rebalancing Handler (7 Scenario Mix)
-        def rebalance_scenarios_handler(changed_idx, new_val, k, r, a, tr, w, s, c):
-            current_vals = [float(k), float(r), float(a), float(tr), float(w), float(s), float(c)]
+        # Dynamic 100% Normalized Scenario Rebalancing Handler (8 Scenario Mix)
+        def rebalance_scenarios_handler(changed_idx, new_val, k, r, a, c, tr, w, wr, s):
+            current_vals = [float(k), float(r), float(a), float(c), float(tr), float(w), float(wr), float(s)]
             new_val = round(max(0.0, min(1.0, float(new_val))), 2)
             vals = list(current_vals)
             vals[changed_idx] = new_val
 
             rem = round(1.0 - new_val, 4)
-            other_indices = [i for i in range(7) if i != changed_idx]
+            other_indices = [i for i in range(8) if i != changed_idx]
             other_sum = sum(current_vals[i] for i in other_indices)
 
             if other_sum > 0.0001:
@@ -1336,17 +1377,144 @@ def create_ui():
                 <span class="status-badge-running" style="font-size: 1.0em; padding: 6px 16px;">● Total Mix: {pct_total}%</span>
             </div>
             """
+
+            # Save dynamically to live_config.json so active training updates without lag
+            try:
+                sc_dict = {
+                    "kickoff_prob": vals[0],
+                    "replay_prob": vals[1],
+                    "aerial_prob": vals[2],
+                    "custom_prob": vals[3],
+                    "turnaround_prob": vals[4],
+                    "wall_prob": vals[5],
+                    "wall_rebound_prob": vals[6],
+                    "save_prob": vals[7]
+                }
+                TrainingProcessManager.get_instance().update_live_config({"scenarios": sc_dict})
+            except Exception:
+                pass
+
             return tuple(vals) + (badge_html,)
 
-        scenario_sliders = [kickoff_prob_slider, replay_prob_slider, aerial_prob_slider, turnaround_prob_slider, wall_prob_slider, save_prob_slider, custom_prob_slider]
+        scenario_sliders = [
+            kickoff_prob_slider, replay_prob_slider, aerial_prob_slider, custom_prob_slider,
+            turnaround_prob_slider, wall_prob_slider, wall_rebound_prob_slider, save_prob_slider
+        ]
         rebalance_outputs = scenario_sliders + [scenario_total_badge]
 
+        # Use .release() instead of .change() so dragging sliders is instant in-browser without processing flicker!
         for i, sld in enumerate(scenario_sliders):
-            sld.change(
+            sld.release(
                 fn=lambda *args, idx=i: rebalance_scenarios_handler(idx, args[0], *args[1:]),
                 inputs=[sld] + scenario_sliders,
                 outputs=rebalance_outputs
             )
+
+        # Popover Auto-Balance Confirm Handler
+        def on_popover_confirm(
+            lock_k, val_k, lock_r, val_r, lock_a, val_a, lock_c, val_c,
+            lock_tr, val_tr, lock_w, val_w, lock_wr, val_wr, lock_s, val_s
+        ):
+            locks = [bool(lock_k), bool(lock_r), bool(lock_a), bool(lock_c), bool(lock_tr), bool(lock_w), bool(lock_wr), bool(lock_s)]
+            raw_vals = [
+                float(val_k or 0) / 100.0, float(val_r or 0) / 100.0, float(val_a or 0) / 100.0, float(val_c or 0) / 100.0,
+                float(val_tr or 0) / 100.0, float(val_w or 0) / 100.0, float(val_wr or 0) / 100.0, float(val_s or 0) / 100.0
+            ]
+            names = ["Kickoff", "Replay", "High Aerial", "Custom", "Turnaround", "Wall Play", "Wall Rebound", "Goalie Save"]
+
+            locked_sum = sum(raw_vals[i] for i in range(8) if locks[i])
+            unlocked_indices = [i for i in range(8) if not locks[i]]
+
+            final_vals = list(raw_vals)
+            if locked_sum > 1.0:
+                scale = 1.0 / locked_sum
+                for i in range(8):
+                    final_vals[i] = round(raw_vals[i] * scale, 2) if locks[i] else 0.0
+                tot = sum(final_vals)
+                diff = round(1.0 - tot, 2)
+                if abs(diff) > 0.0001:
+                    first_l = next(i for i in range(8) if locks[i])
+                    final_vals[first_l] = round(final_vals[first_l] + diff, 2)
+                note = f"⚠️ Locked weights exceeded 100% (was {int(round(locked_sum * 100))}%)! Scaled down proportionally to 100%."
+            else:
+                rem = round(1.0 - locked_sum, 4)
+                if unlocked_indices:
+                    even = round(rem / len(unlocked_indices), 2)
+                    for i in unlocked_indices:
+                        final_vals[i] = even
+                    tot = sum(final_vals)
+                    diff = round(1.0 - tot, 2)
+                    if abs(diff) > 0.0001:
+                        final_vals[unlocked_indices[0]] = round(final_vals[unlocked_indices[0]] + diff, 2)
+
+                    locked_names = [f"**{names[i]} ({int(round(final_vals[i] * 100))}%)**" for i in range(8) if locks[i]]
+                    unlocked_names = [f"{names[i]} ({int(round(final_vals[i] * 100))}%)" for i in unlocked_indices]
+                    if locked_names:
+                        note = f"✅ **Auto-Balanced!** Locked: {', '.join(locked_names)}. Remaining **{int(round(rem * 100))}%** evenly distributed across: {', '.join(unlocked_names)}."
+                    else:
+                        note = f"✅ **Auto-Balanced!** No locks checked — distributed equally across all 8 scenarios ({int(round(100 / 8))}% each)."
+                else:
+                    tot = sum(final_vals)
+                    diff = round(1.0 - tot, 2)
+                    if abs(diff) > 0.0001:
+                        final_vals[0] = round(final_vals[0] + diff, 2)
+                    note = "✅ **All 8 scenarios locked** (Total: 100%)."
+
+            pct_total = int(round(sum(final_vals) * 100))
+            badge_html = f"""
+            <div style="display: flex; justify-content: flex-end; align-items: center; height: 100%;">
+                <span class="status-badge-running" style="font-size: 1.0em; padding: 6px 16px;">● Total Mix: {pct_total}%</span>
+            </div>
+            """
+
+            # Save dynamically to live config and default config
+            try:
+                sc_dict = {
+                    "kickoff_prob": final_vals[0],
+                    "replay_prob": final_vals[1],
+                    "aerial_prob": final_vals[2],
+                    "custom_prob": final_vals[3],
+                    "turnaround_prob": final_vals[4],
+                    "wall_prob": final_vals[5],
+                    "wall_rebound_prob": final_vals[6],
+                    "save_prob": final_vals[7]
+                }
+                TrainingProcessManager.get_instance().update_live_config({"scenarios": sc_dict})
+                base_cfg = load_yaml_config("config/default_config.yaml")
+                base_cfg["scenarios"] = sc_dict
+                save_yaml_config(base_cfg, "config/default_config.yaml")
+            except Exception:
+                pass
+
+            new_pop_nums = [int(round(v * 100)) for v in final_vals]
+            return tuple(final_vals) + (badge_html,) + tuple(new_pop_nums) + (note,)
+
+        pop_inputs = [
+            pop_lock_k, pop_val_k,
+            pop_lock_r, pop_val_r,
+            pop_lock_a, pop_val_a,
+            pop_lock_c, pop_val_c,
+            pop_lock_tr, pop_val_tr,
+            pop_lock_w, pop_val_w,
+            pop_lock_wr, pop_val_wr,
+            pop_lock_s, pop_val_s
+        ]
+        pop_val_outputs = [
+            pop_val_k, pop_val_r, pop_val_a, pop_val_c,
+            pop_val_tr, pop_val_w, pop_val_wr, pop_val_s
+        ]
+
+        pop_sync_btn.click(
+            fn=lambda *sl_vals: tuple(int(round(float(v) * 100)) for v in sl_vals),
+            inputs=scenario_sliders,
+            outputs=pop_val_outputs
+        )
+
+        pop_confirm_btn.click(
+            fn=on_popover_confirm,
+            inputs=pop_inputs,
+            outputs=scenario_sliders + [scenario_total_badge] + pop_val_outputs + [popover_status_msg]
+        )
 
         # Reset Rewards to Balanced Defaults
         def on_reset_rewards():
@@ -1370,13 +1538,14 @@ def create_ui():
                 rew.get("touch_weight", 1.2),
                 rew.get("boost_gain_weight", 0.6),
                 rew.get("boost_lose_weight", 0.3),
-                sc.get("kickoff_prob", 0.21),
-                sc.get("replay_prob", 0.17),
-                sc.get("aerial_prob", 0.08),
-                sc.get("turnaround_prob", 0.14),
+                sc.get("kickoff_prob", 0.20),
+                sc.get("replay_prob", 0.15),
+                sc.get("aerial_prob", 0.11),
+                sc.get("custom_prob", 0.15),
+                sc.get("turnaround_prob", 0.13),
                 sc.get("wall_prob", 0.07),
+                sc.get("wall_rebound_prob", 0.08),
                 sc.get("save_prob", 0.07),
-                sc.get("custom_prob", 0.25),
                 badge_html,
                 "🔄 **Reset dials to balanced standard configuration.**"
             )
@@ -1387,7 +1556,8 @@ def create_ui():
                 goal_slider, concede_slider, save_slider,
                 ball_to_goal_slider, player_to_ball_slider, jump_bridge_slider, air_roll_recovery_slider, powerslide_slider, touch_slider,
                 boost_gain_slider, boost_lose_slider,
-                kickoff_prob_slider, replay_prob_slider, aerial_prob_slider, turnaround_prob_slider, wall_prob_slider, save_prob_slider, custom_prob_slider,
+                kickoff_prob_slider, replay_prob_slider, aerial_prob_slider, custom_prob_slider,
+                turnaround_prob_slider, wall_prob_slider, wall_rebound_prob_slider, save_prob_slider,
                 scenario_total_badge,
                 curriculum_apply_msg
             ]
