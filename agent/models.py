@@ -70,8 +70,8 @@ class ActorCritic(nn.Module):
         # Calibrated deterministic activation thresholds for binary Bernoulli buttons:
         # Index 0 (Jump): p > 0.15 (logit > -1.7346) - calibrated for deliberate takeoff/dodges without phantom low-speed turn hops
         # Index 1 (Boost): p > 0.25 (logit > -1.0986)
-        # Index 2 (Handbrake): p > 0.40 (logit > -0.4055)
-        self.register_buffer("bin_thresh_logits", torch.tensor([-1.7346, -1.0986, -0.4055], dtype=torch.float32), persistent=False)
+        # Index 2 (Handbrake): p > 0.52 (logit > 0.0800)
+        self.register_buffer("bin_thresh_logits", torch.tensor([-1.7346, -1.0986, 0.0800], dtype=torch.float32), persistent=False)
 
         act_cls = get_activation_cls(activation)
 

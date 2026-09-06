@@ -36,6 +36,47 @@ class OpponentThreat:
         self.arrival_time = arrival_time
 
 
+def compute_trajectory_arrival_time(
+    pos: np.ndarray,
+    vel: np.ndarray,
+    target_pos: np.ndarray,
+    target_vel: Optional[np.ndarray] = None
+) -> Tuple[float, float, float]:
+    """
+    Canonical kinematics helper.
+    Computes (arrival_time, dist, closing_speed) along line-of-sight.
+    """
+    rel_pos = target_pos - pos
+    dist = float(np.linalg.norm(rel_pos))
+    if dist < 1e-4:
+        return 0.0, 0.0, 0.0
+    unit_dir = rel_pos / dist
+    if target_vel is not None:
+        rel_vel = vel - target_vel
+        closing_speed = float(np.dot(rel_vel, unit_dir))
+    else:
+        closing_speed = float(np.dot(vel, unit_dir))
+
+    if closing_speed > 50.0:
+        arrival = dist / closing_speed
+    else:
+        # Fallback when closing speed <= 50 uu/s:
+        # Assumes vehicle can accelerate toward target from baseline speed
+        speed = float(np.linalg.norm(vel))
+        arrival = dist / max(50.0, speed * 0.35 + 100.0)
+    return arrival, dist, closing_speed
+
+
+def compute_car_arrival_time(
+    car: CarState,
+    target_pos: np.ndarray,
+    target_vel: Optional[np.ndarray] = None
+) -> float:
+    """Computes arrival time in seconds for car relative to target_pos."""
+    arrival, _, _ = compute_trajectory_arrival_time(car.pos, car.vel, target_pos, target_vel)
+    return arrival
+
+
 def compute_opponent_threats(
     car: CarState,
     arena: RocketSimArena,
@@ -58,17 +99,7 @@ def compute_opponent_threats(
     for opp in opponents:
         if opp.demoed or opp.id == car.id or opp.team == car.team:
             continue
-        opp_to_target = ref_pos - opp.pos
-        dist = float(np.linalg.norm(opp_to_target))
-        if dist < 1e-4:
-            threats.append(OpponentThreat(opp, dist, 0.0, 0.0))
-            continue
-        unit_dir = opp_to_target / dist
-        closing_speed = float(np.dot(opp.vel, unit_dir))
-        if closing_speed > 50.0:
-            arrival = dist / closing_speed
-        else:
-            arrival = dist / max(50.0, float(np.linalg.norm(opp.vel)) * 0.3)
+        arrival, dist, closing_speed = compute_trajectory_arrival_time(opp.pos, opp.vel, ref_pos)
         threats.append(OpponentThreat(opp, dist, closing_speed, arrival))
 
     threats.sort(key=lambda t: t.arrival_time)
@@ -513,13 +544,19 @@ class PlayerToBallVelocityReward(BaseReward):
             abs(local_y) < 60.0
         )
 
-        # 3. Strike-Zone Velocity Matching & Brake Incentives (< 450 uu)
+        # 3. Strike-Zone Velocity Matching, Arrival Pacing & Anti-Overshoot (< 500 uu)
         vel_matching_bonus = 0.0
+        pacing_penalty = 0.0
         brake_incentive = 0.0
         wrong_side_push_penalty = 0.0
         dribble_boost_penalty = 0.0
 
-        in_strike_zone = (raw_ball_dist < 450.0) or (car.on_ground and horiz_ball_dist < 450.0 and ball_z < 650.0)
+        self_tti, dist_to_ball, closing_spd = compute_trajectory_arrival_time(car.pos, car.vel, arena.ball.pos, arena.ball.vel)
+        threats = compute_opponent_threats(car, arena)
+        opp_tti = threats[0].arrival_time if threats else 999.0
+        delta_t = opp_tti - self_tti  # > 0: bot arrives first
+
+        in_strike_zone = (raw_ball_dist < 500.0) or (car.on_ground and horiz_ball_dist < 500.0 and ball_z < 650.0)
         if in_strike_zone and fwd_alignment > 0.2:
             car_speed = float(np.linalg.norm(car.vel))
             ball_speed = float(np.linalg.norm(arena.ball.vel))
@@ -531,7 +568,7 @@ class PlayerToBallVelocityReward(BaseReward):
             effective_car_speed = car_speed_2d if (car.on_ground and ball_z < 650.0) else car_speed
             effective_ball_speed = ball_speed_2d if (car.on_ground and ball_z < 650.0) else ball_speed
             effective_rel_speed = rel_speed_2d if (car.on_ground and ball_z < 650.0) else rel_speed
-            
+
             # Gated Velocity Matching:
             # Velocity matching should only reward pacing a moving ball (ball_speed > 250 and car_speed > 200),
             # preventing continuous reward farming when car is merely nose-pushing a grounded ball
@@ -542,23 +579,41 @@ class PlayerToBallVelocityReward(BaseReward):
                 if not is_ground_pushing and effective_ball_speed > 250.0 and effective_car_speed > 200.0:
                     vel_matching_bonus = 0.30 * max(0.0, 1.0 - (effective_rel_speed / 700.0))
 
-                # High-Speed Overshoot Braking:
-                # When closing fast on a much slower ball in the strike zone, reward braking to pace/control.
-                # Evaluates horizontal velocity so vertical gravity speed on falling balls does not disable braking.
-                # Strictly gated on car.on_ground as mid-air reverse input does not brake airborne flight.
-                if car.on_ground and effective_car_speed > 850.0 and effective_ball_speed < 700.0 and float(action[0]) < -0.05:
-                    brake_incentive = 0.35 * min(1.0, -float(action[0]))
+                # Kinetic Arrival Velocity Pacing Envelope:
+                # When closing toward the ball on the ground, evaluate required approach pacing:
+                if car.on_ground and not is_roof_carry and not is_ground_pushing:
+                    safe_speed_margin = max(150.0, (min(curr_dist, 500.0) / 500.0) * 650.0)
+                    desired_speed = effective_ball_speed + safe_speed_margin
+
+                    # Pacing penalty is mutually exclusive with overshoot penalty (approach vs aftermath)
+                    if overshoot_penalty == 0.0:
+                        if self_tti < 0.40 and effective_car_speed > desired_speed:
+                            excess = (effective_car_speed - desired_speed) / 800.0
+                            pacing_penalty = -0.35 * min(1.0, max(0.0, excess))
+                            if float(action[0]) < -0.05:
+                                brake_incentive = 0.35 * min(1.0, -float(action[0]))
+                        elif self_tti < 0.85 and effective_car_speed <= desired_speed:
+                            uncontested_mult = 1.5 if delta_t > 0.60 else 1.0
+                            pacing_bonus = 0.25 * uncontested_mult * max(0.0, fwd_alignment)
+                            vel_matching_bonus = max(vel_matching_bonus, pacing_bonus)
             else:
                 # Car is pushing ball toward own net: apply wrong-side push penalty
                 wrong_side_push_penalty = -0.30 * max(0.0, car_vy_defend / 1500.0) * max(0.0, fwd_alignment)
 
             # Dribble Proximity Pacing & Anti-Overshoot:
-            # If car is within 350 uu of a low or bouncing ball and outpacing it (car_speed > ball_speed + 150),
-            # penalize boosting to blow past the ball! (Exempt during roof carries so bot can accelerate carry)
             is_close_approach = bool(raw_ball_dist < 350.0 or (horiz_ball_dist < 350.0 and ball_z < 650.0))
             if is_close_approach and car.on_ground and not is_roof_carry:
                 if effective_car_speed > effective_ball_speed + 150.0 and float(action[6]) > 0.0:
                     dribble_boost_penalty = -0.30 * float(action[6])
+
+            # Hard Anti-Stacking Floor:
+            # Clamps combined strike-zone approach penalties to a maximum floor of -0.50
+            total_approach_penalties = overshoot_penalty + pacing_penalty + dribble_boost_penalty
+            if total_approach_penalties < -0.50:
+                scale = -0.50 / total_approach_penalties
+                overshoot_penalty *= scale
+                pacing_penalty *= scale
+                dribble_boost_penalty *= scale
 
         # 4. Projected Velocity Toward Ball (Airborne Climbing vs Ground Traversal)
         vel_toward_ball = 0.0
@@ -738,7 +793,7 @@ class PlayerToBallVelocityReward(BaseReward):
                     roof_carry_reward = 0.40 * center_score * goal_progress + velcro_bonus + sync_bonus
 
         total_reward = self.weight * (
-            delta_dist + vel_toward_ball + vel_matching_bonus + brake_incentive + dribble_boost_penalty +
+            delta_dist + vel_toward_ball + vel_matching_bonus + pacing_penalty + brake_incentive + dribble_boost_penalty +
             overshoot_penalty + ceiling_penalty + wrong_side_push_penalty + turnaround_reward + roof_carry_reward
         )
         return float(total_reward)
@@ -868,7 +923,21 @@ class TouchBallReward(BaseReward):
                     clear_bonus = 0.5 * clear_urgency * max(0.0, (clear_quality - 0.5) / 0.5)
                 else:
                     clear_bonus = 0.0
-                base_touch = 0.25 if is_gentle_ground_push else (0.8 + clear_bonus)
+
+                # Soft Possession Catch Bonus:
+                # When uncontested (opponent threat arrival > 1.2s or no threats) on a grounded/low ball,
+                # reward cushioning the ball (rel_speed < 350.0 uu/s) into an immediate dribble/carry
+                # rather than blasting it away uncontrollably.
+                soft_catch_bonus = 0.0
+                if car.on_ground and ball_z < 200.0 and not is_defensive_clear:
+                    threats = compute_opponent_threats(car, arena)
+                    opp_arr = threats[0].arrival_time if threats else 999.0
+                    self_arr, _, _ = compute_trajectory_arrival_time(car.pos, car.vel, arena.ball.pos, arena.ball.vel)
+                    delta_t = opp_arr - self_arr
+                    if delta_t > 0.60 and rel_speed < 350.0:
+                        soft_catch_bonus = 0.80 * max(0.0, 1.0 - (rel_speed / 350.0))
+
+                base_touch = 0.25 if is_gentle_ground_push else (0.8 + clear_bonus + soft_catch_bonus)
 
                 # Physical Lateral Tire Slip Dampening on Ground Contact:
                 # When striking a grounded ball, if the car is sliding laterally across the turf
@@ -983,9 +1052,12 @@ class JumpBridgeReward(BaseReward):
         is_opponent_challenging = False
         if threats:
             most_urgent = threats[0]
+            self_arr = compute_car_arrival_time(car, arena.ball.pos, arena.ball.vel)
+            delta_t = most_urgent.arrival_time - self_arr
             is_opponent_challenging = bool(
                 most_urgent.dist <= 650.0 or
-                (most_urgent.closing_speed > 100.0 and most_urgent.arrival_time < 0.85)
+                (most_urgent.closing_speed > 100.0 and most_urgent.arrival_time < 0.85) or
+                (abs(delta_t) < 0.30 and self_arr < 0.60)
             )
 
         # Tactical vector (toward shadow intercept position when retreating, toward ball when attacking/contesting)
@@ -1292,6 +1364,12 @@ class BoostReward(BaseReward):
             if speed >= 2150.0 and action[6] > 0.0:
                 loss_rew -= 0.35 if car.on_ground else 0.20
 
+            # Strike-zone overspeed boost waste penalty: burning boost when closing on ball too fast
+            self_arr = compute_car_arrival_time(car, arena.ball.pos, arena.ball.vel)
+            ball_speed = float(np.linalg.norm(arena.ball.vel))
+            if car.on_ground and action[6] > 0.0 and self_arr < 0.35 and speed > ball_speed + 200.0:
+                loss_rew -= 0.25
+
             # Ceiling and vertical climb boost waste penalty: burning boost along ceiling or climbing vertically away from a lower ball
             is_climbing_above_ball = bool(car.vel[2] > 100.0 and car.pos[2] > arena.ball.pos[2] + 200.0)
             if (car.pos[2] > 1750.0 or is_climbing_above_ball) and action[6] > 0.0 and arena.ball.pos[2] < car.pos[2] - 200.0:
@@ -1387,9 +1465,9 @@ class BoostReward(BaseReward):
 # ==============================================================================
 class PowerslideReward(BaseReward):
     """
-    Rewards active handbrake / powerslide usage during sharp ground turnarounds.
-    Incentivizes pressing handbrake (action[7] > 0.0) when the ball is off-axis (fwd_alignment < 0.7)
-    proportional to turning rate toward the ball, enabling tight U-turns and cuts without orbiting.
+    Rewards tight, responsive ground turnarounds and snap cuts toward the ball.
+    Purely outcome-driven based on yaw velocity and positive heading alignment rate when off-axis,
+    gated with proximity and self-TTI arrival suppression to prevent drift-skating into the ball.
     """
     def __init__(self, weight: float = 0.30):
         super().__init__(weight)
@@ -1416,25 +1494,26 @@ class PowerslideReward(BaseReward):
         prev_align = self._prev_alignment.get(car.id, fwd_alignment)
         self._prev_alignment[car.id] = fwd_alignment
 
-        # Proximity guard: PowerslideReward is for macro turnarounds and cuts when recovering or off-axis at distance.
-        # Do not reward powersliding when inside the close striking zone (dist < 220.0 and fwd_alignment > 0.30)
-        if dist < 220.0 and fwd_alignment > 0.30:
+        # Proximity & Imminent Arrival Suppression:
+        # Powerslide / drift cuts are strictly for macro turnarounds and pivots at distance.
+        # Drift-skating into the strike zone causes uncontrollable lateral slide and overshoots.
+        self_tti = compute_car_arrival_time(car, arena.ball.pos, arena.ball.vel)
+        if dist < 300.0 or self_tti < 0.40:
             return 0.0
 
-        # Active on ground during sharp off-axis cuts (fwd_alignment < 0.60, steer > 0.25, handbrake active)
-        # Enables low-speed cut turns and U-turns (speed > 50.0 uu/s) when pivoting rapidly toward target
+        # Outcome-driven turning performance on ground (fwd_alignment < 0.60, steer > 0.25, speed > 50 uu/s)
+        # Eliminates explicit button-checking (action[7] > 0) so any effective turnaround is rewarded,
+        # while straightaway powersliding is penalized by CombinedReward's economy penalty.
         speed = float(np.linalg.norm(car.vel))
         steer_mag = abs(float(action[1]))
         yaw_rate = abs(float(car.ang_vel[2])) if hasattr(car, "ang_vel") else 0.0
-        handbrake_active = float(action[7]) > 0.0
 
-        if car.on_ground and fwd_alignment < 0.60 and steer_mag > 0.25 and speed > 50.0 and handbrake_active:
+        if car.on_ground and fwd_alignment < 0.60 and steer_mag > 0.25 and speed > 50.0:
             alignment_rate = max(0.0, fwd_alignment - prev_align)
-            handbrake_intensity = max(0.0, float(action[7]))
             # Rapid pivoting (high yaw velocity) or positive heading alignment progression:
             if yaw_rate > 1.2 or alignment_rate > 0.02:
                 pivot_efficiency = min(1.0, max(alignment_rate * 5.0, yaw_rate / 3.5))
-                turn_bonus = pivot_efficiency * (0.6 + 0.4 * steer_mag) * handbrake_intensity
+                turn_bonus = pivot_efficiency * (0.6 + 0.4 * steer_mag)
                 return self.weight * turn_bonus
 
         return 0.0
