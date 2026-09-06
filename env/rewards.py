@@ -10,7 +10,8 @@ import numpy as np
 from typing import Dict, Any, List, Optional, Tuple
 from env.physics_engine import (
     CarState, BallState, RocketSimArena,
-    CAR_MAX_SPEED, BALL_MAX_SPEED, GOAL_HALF_WIDTH, GOAL_HEIGHT, ARENA_EXTENT_X, ARENA_EXTENT_Y
+    CAR_MAX_SPEED, BALL_MAX_SPEED, GOAL_HALF_WIDTH, GOAL_HEIGHT, ARENA_EXTENT_X, ARENA_EXTENT_Y, ARENA_HEIGHT_Z,
+    WALL_BOUNCE_VX_THRESHOLD, WALL_BOUNCE_VY_THRESHOLD
 )
 
 
@@ -23,6 +24,152 @@ class BaseReward:
 
     def get_reward(self, car: CarState, arena: RocketSimArena, action: np.ndarray, is_goal: bool, scoring_team: Optional[int]) -> float:
         raise NotImplementedError
+
+
+class OpponentThreat:
+    __slots__ = ("opp", "dist", "closing_speed", "arrival_time")
+
+    def __init__(self, opp: CarState, dist: float, closing_speed: float, arrival_time: float):
+        self.opp = opp
+        self.dist = dist
+        self.closing_speed = closing_speed
+        self.arrival_time = arrival_time
+
+
+def compute_opponent_threats(
+    car: CarState,
+    arena: RocketSimArena,
+    target_pos: Optional[np.ndarray] = None,
+    opponents: Optional[List[CarState]] = None
+) -> List[OpponentThreat]:
+    """
+    Computes threat arrival time for active (non-demoed) opponents relative to
+    target_pos (defaults to arena.ball.pos).
+    If opponents list is provided, it is used directly (ideal for unit testing);
+    otherwise, filters [c for c in arena.cars if c.team != car.team and not c.demoed].
+    Returns list of OpponentThreat sorted by arrival_time ascending (most urgent first).
+    """
+    if opponents is None:
+        opponents = [c for c in arena.cars if c.team != car.team and not c.demoed]
+
+    ref_pos = arena.ball.pos if target_pos is None else target_pos
+
+    threats: List[OpponentThreat] = []
+    for opp in opponents:
+        if opp.demoed or opp.id == car.id or opp.team == car.team:
+            continue
+        opp_to_target = ref_pos - opp.pos
+        dist = float(np.linalg.norm(opp_to_target))
+        if dist < 1e-4:
+            threats.append(OpponentThreat(opp, dist, 0.0, 0.0))
+            continue
+        unit_dir = opp_to_target / dist
+        closing_speed = float(np.dot(opp.vel, unit_dir))
+        if closing_speed > 50.0:
+            arrival = dist / closing_speed
+        else:
+            arrival = dist / max(50.0, float(np.linalg.norm(opp.vel)) * 0.3)
+        threats.append(OpponentThreat(opp, dist, closing_speed, arrival))
+
+    threats.sort(key=lambda t: t.arrival_time)
+    return threats
+
+
+def evaluate_clear_quality(
+    ball_pos: np.ndarray,
+    ball_vel: np.ndarray,
+    car_team: int,
+    arena: Optional[RocketSimArena] = None,
+    opponents: Optional[List[CarState]] = None,
+    min_mult: float = 0.6,
+    max_mult: float = 1.3
+) -> float:
+    """
+    Evaluates the quality of a clearance strike based on active opponent threat arrival,
+    angular alignment, safe pocket targeting, and breakout potential.
+    Returns quality multiplier clamped strictly to [min_mult, max_mult].
+    """
+    if opponents is None and arena is not None:
+        opponents = [c for c in arena.cars if c.team != car_team and not c.demoed]
+    elif opponents is None:
+        opponents = []
+
+    active_opps = [c for c in opponents if not c.demoed and c.team != car_team]
+    if not active_opps:
+        return 1.0
+
+    ball_speed = float(np.linalg.norm(ball_vel))
+    if ball_speed < 50.0:
+        return 1.0
+
+    eff_vel = ball_vel.copy()
+    defending_y = -ARENA_EXTENT_Y if car_team == 0 else ARENA_EXTENT_Y
+    ball_vy_out = eff_vel[1] if car_team == 0 else -eff_vel[1]
+    dist_to_defend = abs(ball_pos[1] - defending_y)
+
+    # Lookahead for backboard pinch / rebounds into defensive wall
+    if dist_to_defend < 600.0 and ball_vy_out < 0.0 and arena is not None and hasattr(arena, "get_predicted_ball_pos"):
+        pred_pos = arena.get_predicted_ball_pos(20)
+        if pred_pos is not None:
+            pred_disp = pred_pos - ball_pos
+            pred_dt = 20 / 120.0  # 20 ticks at 120Hz
+            pred_vel = pred_disp / max(1e-4, pred_dt)
+            pred_vy_out = pred_vel[1] if car_team == 0 else -pred_vel[1]
+            if pred_vy_out > 100.0:
+                eff_vel = pred_vel
+                ball_vy_out = pred_vy_out
+                ball_speed = float(np.linalg.norm(eff_vel))
+
+    unit_ball_vel = eff_vel / max(1e-4, ball_speed)
+
+    # 1. Opponent Threat & Direct Rebound Alignment Penalty
+    max_danger_penalty = 0.0
+    all_opps_in_defensive_half = True
+    opp_fwd_y_positions = []
+
+    for opp in active_opps:
+        ball_to_opp = opp.pos - ball_pos
+        d_to_opp = max(1e-4, float(np.linalg.norm(ball_to_opp)))
+        unit_to_opp = ball_to_opp / d_to_opp
+
+        cos_theta = float(np.dot(unit_ball_vel, unit_to_opp))
+
+        rel_closing = float(np.dot(eff_vel - opp.vel, unit_to_opp))
+        if rel_closing > 50.0:
+            t_intercept = d_to_opp / rel_closing
+        else:
+            t_intercept = d_to_opp / max(50.0, float(np.linalg.norm(opp.vel)) * 0.3)
+
+        if cos_theta > 0.4 and t_intercept < 1.5:
+            align_factor = min(1.0, (cos_theta - 0.4) / 0.5)
+            time_factor = min(1.0, max(0.2, (1.5 - t_intercept) / 0.7))
+            danger = 0.40 * align_factor * time_factor
+            if danger > max_danger_penalty:
+                max_danger_penalty = danger
+
+        opp_vy_fwd = opp.pos[1] if car_team == 0 else -opp.pos[1]
+        opp_fwd_y_positions.append(opp_vy_fwd)
+        dist_opp_to_defend = abs(opp.pos[1] - defending_y)
+        if dist_opp_to_defend >= ARENA_EXTENT_Y:
+            all_opps_in_defensive_half = False
+
+    # 2. Safe Pocket / Corner Targeting Bonus
+    pocket_bonus = 0.0
+    ball_vx_mag = abs(eff_vel[0])
+    if abs(ball_pos[0]) > 1800.0 or (ball_vx_mag > 350.0 and (eff_vel[0] * ball_pos[0]) > 0):
+        if ball_vy_out >= 0.0 and ball_vx_mag > 350.0:
+            pocket_bonus = 0.15
+
+    # 3. Beat-the-Press / Breakout Bonus
+    breakout_bonus = 0.0
+    ball_fwd_y = ball_pos[1] if car_team == 0 else -ball_pos[1]
+    if ball_vy_out > 750.0 and opp_fwd_y_positions:
+        max_opp_fwd_y = max(opp_fwd_y_positions)
+        if ball_fwd_y > max_opp_fwd_y or (all_opps_in_defensive_half and ball_vy_out > 1000.0):
+            breakout_bonus = 0.15
+
+    raw_mult = 1.0 - max_danger_penalty + pocket_bonus + breakout_bonus
+    return float(np.clip(raw_mult, min_mult, max_mult))
 
 
 # ==============================================================================
@@ -57,9 +204,16 @@ class GoalReward(BaseReward):
             ball_vy_out = arena.ball.vel[1] if car.team == 0 else -arena.ball.vel[1]
             ball_vx_mag = abs(arena.ball.vel[0])
             prev_t = self._prev_touches.get(car.id, car.ball_touches)
-            if car.ball_touches > prev_t and (ball_vy_out > 150.0 or (ball_vx_mag > 350.0 and ball_vy_out >= -100.0)):
+            if car.ball_touches > prev_t and (
+                ball_vy_out > 150.0 or
+                (ball_vx_mag > 350.0 and ball_vy_out >= -100.0) or
+                (arena.ball.vel[2] > 400.0 and ball_vy_out >= -50.0)
+            ):
                 self._prev_touches[car.id] = car.ball_touches
-                return self.save_weight
+                clear_quality = evaluate_clear_quality(
+                    arena.ball.pos, arena.ball.vel, car.team, arena=arena
+                )
+                return self.save_weight * clear_quality
 
         self._prev_touches[car.id] = car.ball_touches
         return 0.0
@@ -179,13 +333,34 @@ class PlayerToBallVelocityReward(BaseReward):
 
         ball_speed = float(np.linalg.norm(arena.ball.vel))
         if ball_speed > 300.0 and hasattr(arena, "get_predicted_ball_pos"):
-            pred_pos = arena.get_predicted_ball_pos(60)
+            bx, by = float(arena.ball.pos[0]), float(arena.ball.pos[1])
+            bvx, bvy = float(arena.ball.vel[0]), float(arena.ball.vel[1])
+
+            # Detect impending wall or backboard rebound:
+            # Ball moving fast toward sidewall (|vx| > 500, heading outward, |x| > 2500)
+            # or fast toward backboard (|vy| > 600, heading outward, |y| > 3500)
+            is_sidewall_bounce = (abs(bvx) > WALL_BOUNCE_VX_THRESHOLD and (bvx * bx) > 0.0 and abs(bx) > 2500.0)
+            is_backboard_bounce = (abs(bvy) > WALL_BOUNCE_VY_THRESHOLD and (bvy * by) > 0.0 and abs(by) > 3500.0)
+
+            # Use 1.5s (180 ticks) post-bounce slice for wall bounces; 0.5s (60 ticks) for standard play
+            slice_ticks = 180 if (is_sidewall_bounce or is_backboard_bounce) else 60
+            pred_pos = arena.get_predicted_ball_pos(slice_ticks)
+
             if pred_pos is not None:
                 raw_ball_dist = self._calc_dist(car_pos, arena.ball.pos)
                 proximity_factor = min(1.0, max(0.0, (raw_ball_dist - 250.0) / 350.0))
                 speed_factor = min(1.0, max(0.0, (ball_speed - 300.0) / 1200.0))
-                blend = 0.65 * proximity_factor * speed_factor
-                target_pos = (1.0 - blend) * arena.ball.pos + blend * pred_pos
+                # For impending wall bounces, allow stronger blend toward the rebound point
+                max_blend = 0.85 if (is_sidewall_bounce or is_backboard_bounce) else 0.65
+                blend = max_blend * proximity_factor * speed_factor
+                blended = (1.0 - blend) * arena.ball.pos + blend * pred_pos
+
+                # Clamp within arena bounds to prevent numerical overshoot
+                target_pos = np.array([
+                    float(np.clip(blended[0], -ARENA_EXTENT_X + 100.0, ARENA_EXTENT_X - 100.0)),
+                    float(np.clip(blended[1], -ARENA_EXTENT_Y + 100.0, ARENA_EXTENT_Y - 100.0)),
+                    float(np.clip(blended[2], 93.0, ARENA_HEIGHT_Z - 100.0))
+                ], dtype=np.float32)
         return target_pos
 
     def reset(self, initial_state: RocketSimArena):
@@ -443,13 +618,33 @@ class PlayerToBallVelocityReward(BaseReward):
                 ball_z < 200.0
             )
 
+            lateral_slip = abs(float(np.dot(car.vel[:2], right_vec[:2])))
+            forward_strike_vel = float(np.dot(car.vel[:2], fwd_vec[:2]))
+            yaw_rate = abs(float(car.ang_vel[2])) if hasattr(car, "ang_vel") else 0.0
+
             if is_lateral_pocket:
                 # 1. Hook Cut / Lateral Pop: Steering directly into the ball
                 steer_into_ball = bool(steer * local_y > 0.15)
                 if steer_into_ball:
-                    cut_bonus = 0.30 * min(1.0, abs(steer))
-                    if handbrake > 0.0:
-                        cut_bonus += 0.10  # Sharp powerslide cut
+                    # Pure Physics-Driven Two-Stage Cut Mechanic:
+                    # Phase 1: Initiation Angular Redirection (dist > 180 uu or off-angle fwd_alignment < 0.65)
+                    # Phase 2: Tire Bite & Strike Drive (dist <= 180 uu and fwd_alignment >= 0.65)
+                    is_strike_window = bool(curr_dist <= 180.0 and fwd_alignment >= 0.65)
+                    if is_strike_window:
+                        if lateral_slip < 80.0 and forward_strike_vel > 250.0:
+                            # Tires gripping turf with forward momentum: loads suspension for solid pop
+                            grip_factor = 1.0 - (lateral_slip / 80.0)
+                            fwd_factor = min(1.0, forward_strike_vel / 1200.0)
+                            cut_bonus = 0.30 * min(1.0, abs(steer)) + 0.25 * grip_factor * fwd_factor
+                        elif lateral_slip > 150.0:
+                            # Drifting sideways into the ball on ice: penalize lateral tire slip
+                            cut_bonus = -0.20 * min(1.0, (lateral_slip - 100.0) / 400.0)
+                        else:
+                            cut_bonus = 0.20 * min(1.0, abs(steer))
+                    else:
+                        # Initiation: Reward rapid angular yaw rotation toward the ball
+                        yaw_bonus = 0.15 * min(1.0, yaw_rate / 2.5)
+                        cut_bonus = 0.30 * min(1.0, abs(steer)) + yaw_bonus
                     turnaround_reward += cut_bonus
 
                 # 2. Downfield Speed Matching / Escort in Pocket:
@@ -502,18 +697,23 @@ class PlayerToBallVelocityReward(BaseReward):
                             # Reversing toward trailing ball receives 0.0 (no unearned input bonus, but no penalty to allow half-flip setup)
                             turnaround_reward = 0.0
 
-                # Active steering or powersliding to swing around the ball:
+                # Active steering or rotation to swing around the ball:
                 # Gate: require actual vehicle speed > 100 to prevent stationary spinning exploits
+                # Rewarded for physical yaw rotation rate, scaled by steering deflection
                 car_speed_for_steer = float(np.linalg.norm(car.vel[:2]))
-                if car_speed_for_steer > 100.0 and ((abs(steer) > 0.25) or handbrake > 0.0):
-                    turnaround_reward += +0.25 * max(abs(steer), 0.6)
+                steer_mag = abs(steer)
+                if car_speed_for_steer > 100.0 and steer_mag > 0.15:
+                    rot_mult = 0.5 + 0.5 * min(1.0, yaw_rate / 2.5)
+                    turnaround_reward += +0.25 * rot_mult * steer_mag
 
             elif fwd_alignment < -0.25:
-                # Downfield ball-behind: penalize straight reverse creeping, reward powerslides / hard cuts
-                if throttle < -0.10 and abs(steer) < 0.30:
+                # Downfield ball-behind: penalize straight reverse creeping, reward rapid turnaround rotation
+                steer_mag = abs(steer)
+                if throttle < -0.10 and steer_mag < 0.30:
                     turnaround_reward = -0.20 * abs(fwd_alignment)
-                elif abs(steer) > 0.35 or handbrake > 0.0:
-                    turnaround_reward = +0.20 * max(abs(steer), 0.5)
+                elif steer_mag > 0.20:
+                    rot_mult = 0.5 + 0.5 * min(1.0, yaw_rate / 2.5)
+                    turnaround_reward += +0.20 * rot_mult * steer_mag
 
             # C. Roof Dribble Carry & Velcro Settling (Seer/Nexto Architecture):
             if is_roof_carry:
@@ -617,6 +817,25 @@ class TouchBallReward(BaseReward):
                 )
             )
 
+            clear_quality = 1.0
+            clear_urgency = 1.0
+            if is_defensive_clear:
+                threats = compute_opponent_threats(car, arena)
+                if threats:
+                    arr_time = threats[0].arrival_time
+                    if arr_time < 0.7:
+                        clear_urgency = 1.2
+                    elif arr_time > 2.5:
+                        clear_urgency = 0.7
+                    else:
+                        clear_urgency = 1.0
+                else:
+                    clear_urgency = 1.0
+
+                clear_quality = evaluate_clear_quality(
+                    arena.ball.pos, arena.ball.vel, car.team, arena=arena
+                )
+
             # --- CASE 1: Ball hit directed toward opponent half / goal ---
             if goal_alignment >= 0.0:
                 # On-Target Trajectory Bonus: Check if touch velocity produces a direct shot into the net
@@ -639,12 +858,29 @@ class TouchBallReward(BaseReward):
 
                 # Power and directional strike bonus:
                 # Rewards solid impact velocity transferred into the ball toward the opponent net
+                fwd_vec = car.get_forward_vector()
+                effective_rel_strike = abs(float(np.dot(car.vel[:2] - arena.ball.vel[:2], fwd_vec[:2]))) if car.on_ground else rel_speed
                 power_bonus = 0.0
                 if goal_alignment > 0.2 and not is_gentle_ground_push:
-                    power_bonus = min(1.5, max(ball_speed, rel_speed) / 1500.0)
+                    power_bonus = min(1.5, max(ball_speed, effective_rel_strike) / 1500.0)
 
-                clear_bonus = 0.5 if is_defensive_clear else 0.0
+                if is_defensive_clear:
+                    clear_bonus = 0.5 * clear_urgency * max(0.0, (clear_quality - 0.5) / 0.5)
+                else:
+                    clear_bonus = 0.0
                 base_touch = 0.25 if is_gentle_ground_push else (0.8 + clear_bonus)
+
+                # Physical Lateral Tire Slip Dampening on Ground Contact:
+                # When striking a grounded ball, if the car is sliding laterally across the turf
+                # (high lateral slip), the strike lacks traction and glances weakly.
+                # Solid strikes with wheels gripping the pitch transfer full impulse into the ball.
+                if car.on_ground and ball_z < 180.0:
+                    contact_lateral_slip = abs(float(np.dot(car.vel[:2], car.get_right_vector()[:2])))
+                    if contact_lateral_slip > 80.0:
+                        slip_factor = max(0.2, 1.0 - (contact_lateral_slip - 80.0) / 300.0)
+                        base_touch *= slip_factor
+                        power_bonus *= slip_factor
+                        kickoff_bounty *= slip_factor
 
                 return self.weight * ((base_touch + power_bonus) * direction_multiplier * height_multiplier + airborne_bonus + kickoff_bounty)
 
@@ -652,7 +888,12 @@ class TouchBallReward(BaseReward):
             else:
                 if is_defensive_clear:
                     # Lateral pinch / side clear out of defensive third
-                    return self.weight * (0.8 * height_multiplier + airborne_bonus)
+                    if car.on_ground and ball_z < 180.0:
+                        contact_lateral_slip = abs(float(np.dot(car.vel[:2], car.get_right_vector()[:2])))
+                        clear_base = 0.8 * clear_quality * max(0.4, 1.0 - (contact_lateral_slip / 500.0))
+                    else:
+                        clear_base = 0.8 * clear_quality
+                    return self.weight * (clear_base * height_multiplier + airborne_bonus)
                 else:
                     # Direct touch toward own goal: Strictly penalized to prevent own-goal dribbling
                     penalty_scale = max(0.3, abs(goal_alignment))
@@ -738,20 +979,14 @@ class JumpBridgeReward(BaseReward):
         is_wrong_side = bool(is_ball_in_defensive_half and (dist_car_to_defend > dist_ball_to_defend + 100.0))
 
         # Opponent challenge detection:
-        opponents = [c for c in arena.cars if c.team != car.team and not c.demoed]
+        threats = compute_opponent_threats(car, arena)
         is_opponent_challenging = False
-        opp_min_dist = 9999.0
-        for opp in opponents:
-            opp_to_ball = arena.ball.pos - opp.pos
-            opp_dist = float(np.linalg.norm(opp_to_ball))
-            if opp_dist < opp_min_dist:
-                opp_min_dist = opp_dist
-            if opp_dist <= 650.0:
-                is_opponent_challenging = True
-            elif opp_dist <= 900.0:
-                opp_closing = float(np.dot(opp.vel, opp_to_ball / max(1e-4, opp_dist)))
-                if opp_closing > 150.0:
-                    is_opponent_challenging = True
+        if threats:
+            most_urgent = threats[0]
+            is_opponent_challenging = bool(
+                most_urgent.dist <= 650.0 or
+                (most_urgent.closing_speed > 100.0 and most_urgent.arrival_time < 0.85)
+            )
 
         # Tactical vector (toward shadow intercept position when retreating, toward ball when attacking/contesting)
         # Instead of retreating blindly to the goal-line (which leads to overshooting and panicking),
@@ -1077,7 +1312,13 @@ class BoostReward(BaseReward):
             # Only exempt when genuinely boosting in forward retreat direction toward defending net
             defend_goal_y = -ARENA_EXTENT_Y if car.team == 0 else ARENA_EXTENT_Y
             car_vy_defend = -car.vel[1] if car.team == 0 else car.vel[1]
-            is_retreating_to_defend = bool(car_vy_defend > 100.0 and fwd_speed > 100.0)
+            dist_ball_to_defend = abs(arena.ball.pos[1] - defend_goal_y)
+
+            threats = compute_opponent_threats(car, arena)
+            threat_active = bool(
+                not threats or threats[0].arrival_time < 1.8 or dist_ball_to_defend < 3000.0
+            )
+            is_retreating_to_defend = bool(car_vy_defend > 100.0 and fwd_speed > 100.0 and threat_active)
 
             car_to_ball = arena.ball.pos - car.pos
             dist_to_ball = float(np.linalg.norm(car_to_ball))
@@ -1174,6 +1415,11 @@ class PowerslideReward(BaseReward):
         fwd_alignment = float(np.dot(car.get_forward_vector(), unit_to_ball))
         prev_align = self._prev_alignment.get(car.id, fwd_alignment)
         self._prev_alignment[car.id] = fwd_alignment
+
+        # Proximity guard: PowerslideReward is for macro turnarounds and cuts when recovering or off-axis at distance.
+        # Do not reward powersliding when inside the close striking zone (dist < 220.0 and fwd_alignment > 0.30)
+        if dist < 220.0 and fwd_alignment > 0.30:
+            return 0.0
 
         # Active on ground during sharp off-axis cuts (fwd_alignment < 0.60, steer > 0.25, handbrake active)
         # Enables low-speed cut turns and U-turns (speed > 50.0 uu/s) when pivoting rapidly toward target
@@ -1516,6 +1762,20 @@ class CombinedReward:
             total += rew
             if include_breakdown:
                 breakdown[name] = rew
+
+        # Strike-Zone Lateral Slip Regularization:
+        # Penalize sliding sideways into the ball in the immediate strike zone instead of biting the turf with traction
+        if car.on_ground:
+            car_to_ball = arena.ball.pos - car.pos
+            dist = float(np.linalg.norm(car_to_ball))
+            fwd = car.get_forward_vector()
+            fwd_align = float(np.dot(fwd, car_to_ball / max(1e-4, dist)))
+            lateral_slip = abs(float(np.dot(car.vel[:2], car.get_right_vector()[:2])))
+            if dist < 220.0 and fwd_align > 0.50 and arena.ball.pos[2] < 180.0 and lateral_slip > 150.0:
+                slip_pen = -0.20 * min(1.0, (lateral_slip - 100.0) / 400.0)
+                total += slip_pen
+                if include_breakdown:
+                    breakdown["lateral_slip_penalty"] = slip_pen
 
         # Handbrake Economy Regularization:
         # Penalize dragging handbrake while driving forward on straightaways or gentle curves

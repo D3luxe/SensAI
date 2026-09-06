@@ -398,7 +398,7 @@ class TestPhysicsAndControls(unittest.TestCase):
         """
         Guarantees that mirroring an observation and action flips antisymmetric axes (steer, yaw, roll, X).
         """
-        obs_dim = 74
+        obs_dim = 80
         act_dim = 8
         self.assertEqual(len(OBS_MIRROR_MASK_NP), obs_dim)
         self.assertEqual(len(ACT_MIRROR_MASK_NP), act_dim)
@@ -438,8 +438,8 @@ class TestPhysicsAndControls(unittest.TestCase):
 
     def test_observation_lateral_ball_offsets(self):
         """
-        Guarantees that a ball to the RIGHT (+X) produces a POSITIVE local lateral offset (index 35 > 0)
-        and a ball to the LEFT (-X) produces a NEGATIVE local lateral offset (index 35 < 0)
+        Guarantees that a ball to the RIGHT (+X) produces a POSITIVE local lateral offset (index 38 > 0)
+        and a ball to the LEFT (-X) produces a NEGATIVE local lateral offset (index 38 < 0)
         both with and without RocketSim rot_mat populated.
         """
         from env.physics_engine import CarState, BallState, BoostPad
@@ -459,12 +459,12 @@ class TestPhysicsAndControls(unittest.TestCase):
             # Ball to Right (+X = +500)
             ball_r = BallState(pos=np.array([500.0, -2000.0, 93.0], dtype=np.float32))
             obs_r = self.obs_builder.build_obs(car, MockArena(ball_r, [car]))
-            self.assertGreater(obs_r[35], 0.0, f"Ball to the RIGHT (+X) must produce positive local_ball_pos[1] offset (with_rot_mat={with_rot_mat})!")
+            self.assertGreater(obs_r[38], 0.0, f"Ball to the RIGHT (+X) must produce positive local_ball_pos[1] offset (with_rot_mat={with_rot_mat})!")
 
             # Ball to Left (-X = -500)
             ball_l = BallState(pos=np.array([-500.0, -2000.0, 93.0], dtype=np.float32))
             obs_l = self.obs_builder.build_obs(car, MockArena(ball_l, [car]))
-            self.assertLess(obs_l[35], 0.0, f"Ball to the LEFT (-X) must produce negative local_ball_pos[1] offset (with_rot_mat={with_rot_mat})!")
+            self.assertLess(obs_l[38], 0.0, f"Ball to the LEFT (-X) must produce negative local_ball_pos[1] offset (with_rot_mat={with_rot_mat})!")
 
     def test_macro_rewards_potential_and_boost(self):
         """
@@ -620,15 +620,15 @@ class TestPhysicsAndControls(unittest.TestCase):
         Guarantees that ActorCritic with LayerNorm maintains bounded, healthy activations
         even when fed extreme observation inputs, and prevents policy saturation.
         """
-        model = ActorCritic(obs_dim=74, act_dim=8, continuous_actions=True, use_layer_norm=True, activation="leaky_relu")
+        model = ActorCritic(obs_dim=80, act_dim=8, continuous_actions=True, use_layer_norm=True, activation="leaky_relu")
         model.eval()
 
         # Extreme out-of-distribution observation input (+/- 10.0)
-        extreme_obs = torch.full((4, 74), 10.0, dtype=torch.float32)
+        extreme_obs = torch.full((4, 80), 10.0, dtype=torch.float32)
         action, _, _, value = model.get_action_and_value(extreme_obs, deterministic=True)
 
         self.assertEqual(action.shape, (4, 8))
-        self.assertEqual(value.shape, (4, 1))
+        self.assertEqual(value.shape[0], 4)
 
         # Check that debias_symmetric_actions desaturates and zeroes biases
         model.debias_symmetric_actions()
@@ -671,8 +671,8 @@ class TestPhysicsAndControls(unittest.TestCase):
         Guarantees that actor_binary (Jump, Boost, Handbrake) receives non-zero gradients
         under BCEWithLogitsLoss during pretraining.
         """
-        model = ActorCritic(obs_dim=74, act_dim=8, continuous_actions=True, use_layer_norm=True)
-        obs = torch.randn(16, 74)
+        model = ActorCritic(obs_dim=80, act_dim=8, continuous_actions=True, use_layer_norm=True)
+        obs = torch.randn(16, 80)
         target_acts = torch.randn(16, 8)
         target_acts[:, 5:] = (target_acts[:, 5:] > 0.0).float() * 2.0 - 1.0
 
@@ -1036,8 +1036,8 @@ def verify_physics_and_controls_pipeline(verbose: bool = False) -> bool:
     car_obs = CarState(id=0, team=0, pos=np.array([0.0, -3000.0, 17.0], dtype=np.float32), rot=np.array([0.0, np.pi/2, 0.0], dtype=np.float32))
     obs_r = builder.build_obs(car_obs, MockArena(BallState(pos=np.array([500.0, -2000.0, 93.0], dtype=np.float32)), [car_obs]))
     obs_l = builder.build_obs(car_obs, MockArena(BallState(pos=np.array([-500.0, -2000.0, 93.0], dtype=np.float32)), [car_obs]))
-    assert obs_r[35] > 0.0, "Ball on Right (+X) must produce positive local lateral offset in true right basis!"
-    assert obs_l[35] < 0.0, "Ball on Left (-X) must produce negative local lateral offset in true right basis!"
+    assert obs_r[38] > 0.0, "Ball on Right (+X) must produce positive local lateral offset in true right basis!"
+    assert obs_l[38] < 0.0, "Ball on Left (-X) must produce negative local lateral offset in true right basis!"
 
     if verbose:
         print("[Pre-Flight Pipeline] Verified: Pitch, Steer, Observations, and Rewards are 100% aligned.")

@@ -42,6 +42,10 @@ BALL_RESTITUTION = 0.6
 BALL_DRAG = 0.03
 GRAVITY = -650.0                 # GRAVITY (uu/s^2)
 
+# Wall / Rebound Trajectory Detection Thresholds
+WALL_BOUNCE_VX_THRESHOLD = 500.0
+WALL_BOUNCE_VY_THRESHOLD = 600.0
+
 CAR_MAX_SPEED = 2300.0           # CAR_MAX_SPEED
 CAR_SUPERSONIC_SPEED = 2200.0    # SUPERSONIC_THRESHOLD
 CAR_MAX_ANG_VEL = 5.5            # CAR_MAX_ANG_VEL (rad/s)
@@ -589,15 +593,41 @@ class RocketSimArena:
             pred_pos = self.ball_prediction_slice
 
         if pred_pos is None:
-            dt = slice_idx / 120.0
-            px = self.ball.pos[0] + self.ball.vel[0] * dt
-            py = self.ball.pos[1] + self.ball.vel[1] * dt
-            pz = max(93.0, self.ball.pos[2] + self.ball.vel[2] * dt + 0.5 * (-650.0) * (dt ** 2))
-            if abs(px) > 4000.0:
-                px = np.sign(px) * (4000.0 - (abs(px) - 4000.0) * 0.6)
-            if abs(py) > 5000.0:
-                py = np.sign(py) * (5000.0 - (abs(py) - 5000.0) * 0.6)
-            pred_pos = np.array([px, py, pz], dtype=np.float32)
+            # Multi-substep pure-Python simulation for accurate multi-bounce trajectory across 1.5s+
+            dt_total = slice_idx / 120.0
+            substeps = max(1, int(round(dt_total * 60.0)))
+            s_dt = dt_total / substeps
+            p = self.ball.pos.copy().astype(np.float64)
+            v = self.ball.vel.copy().astype(np.float64)
+            g = GRAVITY
+            restitution = BALL_RESTITUTION
+            b_rad = BALL_RADIUS
+
+            for _ in range(substeps):
+                v[2] += g * s_dt
+                p += v * s_dt
+                # Floor bounce
+                if p[2] < b_rad:
+                    p[2] = b_rad + (b_rad - p[2]) * restitution
+                    v[2] = -v[2] * restitution
+                # Ceiling bounce
+                elif p[2] > ARENA_HEIGHT_Z - b_rad:
+                    p[2] = (ARENA_HEIGHT_Z - b_rad) - (p[2] - (ARENA_HEIGHT_Z - b_rad)) * restitution
+                    v[2] = -v[2] * restitution
+                # Side wall bounces (X = +/- 4096)
+                if abs(p[0]) > ARENA_EXTENT_X - b_rad:
+                    sign_x = 1.0 if p[0] > 0 else -1.0
+                    limit_x = ARENA_EXTENT_X - b_rad
+                    p[0] = sign_x * (limit_x - (abs(p[0]) - limit_x) * restitution)
+                    v[0] = -v[0] * restitution
+                # Back wall bounces (Y = +/- 5120)
+                if abs(p[1]) > ARENA_EXTENT_Y - b_rad:
+                    sign_y = 1.0 if p[1] > 0 else -1.0
+                    limit_y = ARENA_EXTENT_Y - b_rad
+                    p[1] = sign_y * (limit_y - (abs(p[1]) - limit_y) * restitution)
+                    v[1] = -v[1] * restitution
+
+            pred_pos = p.astype(np.float32)
 
         if not hasattr(self, "_cached_pred_slices"):
             self._cached_pred_slices = {}

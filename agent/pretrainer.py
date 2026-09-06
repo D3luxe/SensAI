@@ -104,17 +104,17 @@ class BehavioralCloningTrainer:
 
     def generate_expert_dataset(self, parser: ReplayParser, max_samples: int = 50000) -> Tuple[np.ndarray, np.ndarray]:
         """
-        Builds (N, 74) observation and (N, 8) expert action training pairs from replay pool.
+        Builds (N, obs_dim) observation and (N, 8) expert action training pairs from replay pool.
         """
         if parser.states_buffer is None:
             parser.load_pool()
         if parser.states_buffer is None:
-            return np.zeros((0, 74), dtype=np.float32), np.zeros((0, 8), dtype=np.float32)
+            return np.zeros((0, self.obs_builder.obs_dim), dtype=np.float32), np.zeros((0, 8), dtype=np.float32)
 
         data = parser.states_buffer
         total_frames = len(data["ball_pos"])
         if total_frames == 0:
-            return np.zeros((0, 74), dtype=np.float32), np.zeros((0, 8), dtype=np.float32)
+            return np.zeros((0, self.obs_builder.obs_dim), dtype=np.float32), np.zeros((0, 8), dtype=np.float32)
 
         indices = np.arange(total_frames)
         if total_frames > max_samples:
@@ -567,28 +567,39 @@ class BehavioralCloningTrainer:
                 progress_cb(self.status)
             return self.status
 
+        obs_tensor = torch.tensor(obs_data, dtype=torch.float32, device=self.device)
+        act_tensor = torch.tensor(act_data, dtype=torch.float32, device=self.device)
+        in_dim = obs_tensor.shape[1] if len(obs_tensor) > 0 else self.obs_builder.obs_dim
+
         # Initialize or load model
-        model = ActorCritic(obs_dim=74, act_dim=8, continuous_actions=True, use_layer_norm=True).to(self.device)
+        model = ActorCritic(obs_dim=in_dim, act_dim=8, continuous_actions=True, use_layer_norm=True).to(self.device)
         orig_iteration = 0
         orig_global_step = 0
         if base_checkpoint and os.path.exists(base_checkpoint):
             try:
                 ckpt = torch.load(base_checkpoint, map_location=self.device)
-                if isinstance(ckpt, dict) and "model_state_dict" in ckpt:
-                    model.load_state_dict(ckpt["model_state_dict"], strict=False)
-                    orig_iteration = ckpt.get("iteration", 0)
-                    orig_global_step = ckpt.get("global_step", 0)
-                elif isinstance(ckpt, dict):
-                    model.load_state_dict(ckpt, strict=False)
+                saved_state = ckpt["model_state_dict"] if isinstance(ckpt, dict) and "model_state_dict" in ckpt else (ckpt if isinstance(ckpt, dict) else ckpt)
+                model_state = model.state_dict()
+                migrated = False
+                for k in list(saved_state.keys()):
+                    if k in model_state:
+                        saved_param = saved_state[k]
+                        curr_param = model_state[k]
+                        if saved_param.shape != curr_param.shape:
+                            migrated = True
+                            slices = tuple(slice(0, min(s, c)) for s, c in zip(saved_param.shape, curr_param.shape))
+                            curr_param[slices] = saved_param[slices]
+                            model_state[k] = curr_param
+                        else:
+                            model_state[k] = saved_param
+                model.load_state_dict(model_state, strict=False)
+                if isinstance(ckpt, dict):
                     orig_iteration = ckpt.get("iteration", 0)
                     orig_global_step = ckpt.get("global_step", 0)
             except Exception as e:
                 print(f"[Pretrainer] Warning: Could not load base checkpoint: {e}")
 
         optimizer = optim.Adam(model.parameters(), lr=lr, weight_decay=1e-5)
-
-        obs_tensor = torch.tensor(obs_data, dtype=torch.float32, device=self.device)
-        act_tensor = torch.tensor(act_data, dtype=torch.float32, device=self.device)
 
         dataset_size = len(obs_tensor)
         num_batches = max(1, dataset_size // batch_size)
@@ -664,7 +675,7 @@ class BehavioralCloningTrainer:
         os.makedirs(os.path.dirname(self.checkpoint_path), exist_ok=True)
         payload = {
             "model_state_dict": model.state_dict(),
-            "obs_dim": 74,
+            "obs_dim": in_dim,
             "act_dim": 8,
             "continuous_actions": True,
             "continuous": True,

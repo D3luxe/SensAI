@@ -84,7 +84,7 @@ class RocketLeagueEnv:
         self.episode_goals = [0] * 2
 
         self.current_scenario = self.arena.current_scenario
-        self.scenario_timeout = SCENARIO_TIMEOUTS.get(self.current_scenario, self.max_episode_steps)
+        self.scenario_timeout = min(self.max_episode_steps, SCENARIO_TIMEOUTS.get(self.current_scenario, self.max_episode_steps))
         if self.current_scenario == "goalie_save":
             bvy = float(self.arena.ball.vel[1])
             self._save_defend_sign = -1.0 if bvy < 0.0 else 1.0

@@ -13,46 +13,47 @@ from env.physics_engine import (
     CAR_MAX_SPEED, BALL_MAX_SPEED, GOAL_HEIGHT
 )
 
-# 74-Dimensional Left-Right (X -> -X) Observation Symmetry Reflection Mask
+# 80-Dimensional Left-Right (X -> -X) Observation Symmetry Reflection Mask
 # Multiplies features by -1.0 for lateral X components, roll, yaw, and relative right offsets
 OBS_MIRROR_MASK_NP = np.array([
-    # 1. Self Car State (22 features)
-    -1.0,  1.0,  1.0,   # car_pos (pos.x negated)
-    -1.0,  1.0,  1.0,   # car_vel (vel.x negated)
-    -1.0,  1.0,  1.0,   # fwd (fwd.x negated)
-     1.0, -1.0, -1.0,   # right
-    -1.0,  1.0,  1.0,   # up (up.x negated)
-     1.0, -1.0, -1.0,   # ang_vel
-     1.0,  1.0,  1.0,  1.0,  # boost, on_ground, has_jump, has_flip
-    # 2. Ball State (9 features)
-    -1.0,  1.0,  1.0,   # ball_pos (pos.x negated)
-    -1.0,  1.0,  1.0,   # ball_vel (vel.x negated)
-     1.0, -1.0, -1.0,   # ball_ang_vel
-    # 2b. Future Ball Trajectory Prediction (3 features)
-    -1.0,  1.0,  1.0,   # future_ball_pos (pos.x negated)
-    # 3. Relative Features in Car Local Frame (16 features)
-     1.0, -1.0,  1.0,   # local_ball_pos (right offset negated)
-     1.0, -1.0,  1.0,   # local_future_ball_pos (right offset negated)
-     1.0, -1.0,  1.0,   # local_ball_vel (right vel negated)
-     1.0,             # dist_ball
-     1.0, -1.0,  1.0,   # local_target_goal (right offset negated)
-     1.0, -1.0,  1.0,   # local_defend_goal (right offset negated)
-    # 3b/3c. Sensors (4 features)
-     1.0,  1.0,  1.0,  1.0,  # threat_intensity, threat_z, is_kickoff, is_first_touch
-    # 4. Opponent State (14 features)
-    -1.0,  1.0,  1.0,   # opp_pos (pos.x negated)
-    -1.0,  1.0,  1.0,   # opp_vel (vel.x negated)
-     1.0, -1.0,  1.0,   # local_opp_pos (right offset negated)
-     1.0, -1.0,  1.0,   # local_opp_vel (right vel negated)
-     1.0,  1.0,        # opp_boost, opp_on_ground
-    # 5. Boost Pad Spatial Vectors (6 features)
-     1.0, -1.0,  1.0,   # nearest small pad (fwd, right negated, dist)
-     1.0, -1.0,  1.0    # nearest big orb (fwd, right negated, dist)
+    # 1. Self Car State (22 features: 0..21)
+    -1.0,  1.0,  1.0,   # car_pos (pos.x negated) [0..2]
+    -1.0,  1.0,  1.0,   # car_vel (vel.x negated) [3..5]
+    -1.0,  1.0,  1.0,   # fwd (fwd.x negated) [6..8]
+     1.0, -1.0, -1.0,   # right [9..11]
+    -1.0,  1.0,  1.0,   # up (up.x negated) [12..14]
+     1.0, -1.0, -1.0,   # ang_vel [15..17]
+     1.0,  1.0,  1.0,  1.0,  # boost, on_ground, has_jump, has_flip [18..21]
+    # 2. Ball State (9 features: 22..30)
+    -1.0,  1.0,  1.0,   # ball_pos (pos.x negated) [22..24]
+    -1.0,  1.0,  1.0,   # ball_vel (vel.x negated) [25..27]
+     1.0, -1.0, -1.0,   # ball_ang_vel [28..30]
+    # 2b. Future Ball Trajectory Prediction (6 features: 31..36)
+    -1.0,  1.0,  1.0,   # future_ball_pos_0_5s (pos.x negated) [31..33]
+    -1.0,  1.0,  1.0,   # future_ball_pos_1_5s (pos.x negated) [34..36]
+    # 3. Relative Features in Car Local Frame (19 features: 37..55)
+     1.0, -1.0,  1.0,   # local_ball_pos (right offset negated) [37..39]
+     1.0, -1.0,  1.0,   # local_future_ball_pos_0_5s (right offset negated) [40..42]
+     1.0, -1.0,  1.0,   # local_future_ball_pos_1_5s (right offset negated) [43..45]
+     1.0, -1.0,  1.0,   # local_ball_vel (right vel negated) [46..48]
+     1.0,             # dist_ball [49]
+     1.0, -1.0,  1.0,   # local_target_goal (right offset negated) [50..52]
+     1.0, -1.0,  1.0,   # local_defend_goal (right offset negated) [53..55]
+    # 3b/3c. Sensors (4 features: 56..59)
+     1.0,  1.0,  1.0,  1.0,  # threat_intensity, threat_z, is_kickoff, is_first_touch [56..59]
+    # 4. Opponent State (14 features: 60..73)
+    -1.0,  1.0,  1.0,   # opp_pos (pos.x negated) [60..62]
+    -1.0,  1.0,  1.0,   # opp_vel (vel.x negated) [63..65]
+     1.0, -1.0,  1.0,   # local_opp_pos (right offset negated) [66..68]
+     1.0, -1.0,  1.0,   # local_opp_vel (right vel negated) [69..71]
+     1.0,  1.0,        # opp_boost, opp_on_ground [72..73]
+    # 5. Boost Pad Spatial Vectors (6 features: 74..79)
+     1.0, -1.0,  1.0,   # nearest small pad (fwd, right negated, dist) [74..76]
+     1.0, -1.0,  1.0    # nearest big orb (fwd, right negated, dist) [77..79]
 ], dtype=np.float32)
 
-# Legacy (pre-fix) mirror mask preserved for checkpoint backward compatibility
+# Legacy mirror mask extended to 80 dimensions for backward compatibility
 OBS_LEGACY_MIRROR_MASK_NP = np.array([
-    # Copy of the OLD mask before corrections
     -1.0,  1.0,  1.0,
     -1.0,  1.0,  1.0,
     -1.0,  1.0,  1.0,
@@ -63,21 +64,23 @@ OBS_LEGACY_MIRROR_MASK_NP = np.array([
     -1.0,  1.0,  1.0,
     -1.0,  1.0,  1.0,
     -1.0,  1.0, -1.0,    # old ball ang_vel (indices 28,29 were -1.0, 1.0)
-    -1.0,  1.0,  1.0,
-     1.0, -1.0,  1.0,
-     1.0, -1.0,  1.0,
-     1.0, -1.0,  1.0,
-     1.0,
-     1.0, -1.0,  1.0,
-     1.0, -1.0,  1.0,
-     1.0,  1.0,  1.0,  1.0,
-    -1.0,  1.0,  1.0,
-    -1.0,  1.0,  1.0,
-     1.0, -1.0,  1.0,
-     1.0, -1.0,  1.0,
-     1.0,  1.0,
-     1.0, -1.0,  1.0,
-     1.0, -1.0,  1.0
+    -1.0,  1.0,  1.0,    # future_ball_pos_0_5s
+    -1.0,  1.0,  1.0,    # future_ball_pos_1_5s
+     1.0, -1.0,  1.0,    # local_ball_pos
+     1.0, -1.0,  1.0,    # local_future_ball_pos_0_5s
+     1.0, -1.0,  1.0,    # local_future_ball_pos_1_5s
+     1.0, -1.0,  1.0,    # local_ball_vel
+     1.0,             # dist_ball
+     1.0, -1.0,  1.0,    # local_target_goal
+     1.0, -1.0,  1.0,    # local_defend_goal
+     1.0,  1.0,  1.0,  1.0,  # sensors
+    -1.0,  1.0,  1.0,    # opp_pos
+    -1.0,  1.0,  1.0,    # opp_vel
+     1.0, -1.0,  1.0,    # local_opp_pos
+     1.0, -1.0,  1.0,    # local_opp_vel
+     1.0,  1.0,        # opp flags
+     1.0, -1.0,  1.0,    # small pad
+     1.0, -1.0,  1.0     # big pad
 ], dtype=np.float32)
 
 # 8-Dimensional Action Reflection Mask: [throttle, steer, pitch, yaw, roll, jump, boost, handbrake]
@@ -100,11 +103,11 @@ class DefaultObservationBuilder:
     """
     def __init__(self, symmetric: bool = True):
         self.symmetric = symmetric
-        self.obs_dim = 74
+        self.obs_dim = 80
 
     def build_obs(self, car: CarState, arena: RocketSimArena, out: Optional[np.ndarray] = None) -> np.ndarray:
         if out is None:
-            out = np.empty(74, dtype=np.float32)
+            out = np.empty(80, dtype=np.float32)
 
         # Symmetry multiplier: if Orange (team 1) and symmetric is True, flip X and Y
         inv = -1.0 if (self.symmetric and car.team == 1) else 1.0
@@ -136,7 +139,7 @@ class DefaultObservationBuilder:
         ca = car.ang_vel
         cpx, cpy, cpz = float(cp[0]), float(cp[1]), float(cp[2])
 
-        # 1. Self Car State (22 features)
+        # 1. Self Car State (22 features: 0..21)
         out[0] = (cpx * inv) / ARENA_EXTENT_X
         out[1] = (cpy * inv) / ARENA_EXTENT_Y
         out[2] = cpz / ARENA_HEIGHT_Z
@@ -154,7 +157,7 @@ class DefaultObservationBuilder:
         out[20] = 1.0 if car.has_jump else 0.0
         out[21] = 1.0 if car.has_flip else 0.0
 
-        # 2. Ball State (9 features)
+        # 2. Ball State (9 features: 22..30)
         bp = arena.ball.pos
         bv = arena.ball.vel
         ba = arena.ball.ang_vel
@@ -170,7 +173,7 @@ class DefaultObservationBuilder:
         out[29] = float(ba[1]) * inv * 0.1
         out[30] = float(ba[2]) * 0.1
 
-        # 2b. Future Ball Trajectory Prediction (0.5s ahead = 60 ticks @ 120Hz)
+        # 2b. Short-Term Ball Trajectory Prediction (0.5s ahead = 60 ticks @ 120Hz)
         future_ball_pos = arena.get_predicted_ball_pos(60) if hasattr(arena, "get_predicted_ball_pos") else None
         if future_ball_pos is None:
             dt = 0.5
@@ -188,55 +191,80 @@ class DefaultObservationBuilder:
         out[32] = (fpy * inv) / ARENA_EXTENT_Y
         out[33] = fpz / ARENA_HEIGHT_Z
 
-        # 3. Relative Features in Car Local Frame (16 features)
+        # 2c. Medium-Term Ball Trajectory Prediction (1.5s ahead = 180 ticks @ 120Hz)
+        future_ball_pos_180 = arena.get_predicted_ball_pos(180) if hasattr(arena, "get_predicted_ball_pos") else None
+        if future_ball_pos_180 is None:
+            dt2 = 1.5
+            fpx2 = bx + bvx * dt2
+            fpy2 = by + bvy * dt2
+            fpz2 = max(93.0, bz + bvz * dt2 + 0.5 * (-650.0) * (dt2 ** 2))
+            if abs(fpx2) > 4000.0:
+                fpx2 = math.copysign(4000.0 - (abs(fpx2) - 4000.0) * 0.6, fpx2)
+            if abs(fpy2) > 5000.0:
+                fpy2 = math.copysign(5000.0 - (abs(fpy2) - 5000.0) * 0.6, fpy2)
+        else:
+            fpx2, fpy2, fpz2 = float(future_ball_pos_180[0]), float(future_ball_pos_180[1]), float(future_ball_pos_180[2])
+
+        out[34] = (fpx2 * inv) / ARENA_EXTENT_X
+        out[35] = (fpy2 * inv) / ARENA_EXTENT_Y
+        out[36] = fpz2 / ARENA_HEIGHT_Z
+
+        # 3. Relative Features in Car Local Frame (19 features: 37..55)
         dx = (bx - cpx) * inv
         dy = (by - cpy) * inv
         dz = bz - cpz
-        out[34] = (dx * fx + dy * fy + dz * fz) * 0.0005
-        out[35] = (dx * rx + dy * ry + dz * rz) * 0.0005
-        out[36] = (dx * ux + dy * uy + dz * uz) * 0.0005
+        out[37] = (dx * fx + dy * fy + dz * fz) * 0.0005
+        out[38] = (dx * rx + dy * ry + dz * rz) * 0.0005
+        out[39] = (dx * ux + dy * uy + dz * uz) * 0.0005
 
         fdx = (fpx - cpx) * inv
         fdy = (fpy - cpy) * inv
         fdz = fpz - cpz
-        out[37] = (fdx * fx + fdy * fy + fdz * fz) * 0.0005
-        out[38] = (fdx * rx + fdy * ry + fdz * rz) * 0.0005
-        out[39] = (fdx * ux + fdy * uy + fdz * uz) * 0.0005
+        out[40] = (fdx * fx + fdy * fy + fdz * fz) * 0.0005
+        out[41] = (fdx * rx + fdy * ry + fdz * rz) * 0.0005
+        out[42] = (fdx * ux + fdy * uy + fdz * uz) * 0.0005
+
+        fdx2 = (fpx2 - cpx) * inv
+        fdy2 = (fpy2 - cpy) * inv
+        fdz2 = fpz2 - cpz
+        out[43] = (fdx2 * fx + fdy2 * fy + fdz2 * fz) * 0.0005
+        out[44] = (fdx2 * rx + fdy2 * ry + fdz2 * rz) * 0.0005
+        out[45] = (fdx2 * ux + fdy2 * uy + fdz2 * uz) * 0.0005
 
         dvx = (bvx - float(cv[0])) * inv
         dvy = (bvy - float(cv[1])) * inv
         dvz = bvz - float(cv[2])
-        out[40] = (dvx * fx + dvy * fy + dvz * fz) / CAR_MAX_SPEED
-        out[41] = (dvx * rx + dvy * ry + dvz * rz) / CAR_MAX_SPEED
-        out[42] = (dvx * ux + dvy * uy + dvz * uz) / CAR_MAX_SPEED
-        out[43] = math.sqrt(dx * dx + dy * dy + dz * dz) / 6000.0
+        out[46] = (dvx * fx + dvy * fy + dvz * fz) / CAR_MAX_SPEED
+        out[47] = (dvx * rx + dvy * ry + dvz * rz) / CAR_MAX_SPEED
+        out[48] = (dvx * ux + dvy * uy + dvz * uz) / CAR_MAX_SPEED
+        out[49] = math.sqrt(dx * dx + dy * dy + dz * dz) / 6000.0
 
         # Goal vectors relative to car in local frame
         c_inv_x, c_inv_y = cpx * inv, cpy * inv
         tg_x, tg_y, tg_z = -c_inv_x, ARENA_EXTENT_Y - c_inv_y, (GOAL_HEIGHT * 0.5) - cpz
         norm_tg = 1.0 / max(1e-4, math.sqrt(tg_x * tg_x + tg_y * tg_y + tg_z * tg_z))
         tg_ux, tg_uy, tg_uz = tg_x * norm_tg, tg_y * norm_tg, tg_z * norm_tg
-        out[44] = tg_ux * fx + tg_uy * fy + tg_uz * fz
-        out[45] = tg_ux * rx + tg_uy * ry + tg_uz * rz
-        out[46] = tg_ux * ux + tg_uy * uy + tg_uz * uz
+        out[50] = tg_ux * fx + tg_uy * fy + tg_uz * fz
+        out[51] = tg_ux * rx + tg_uy * ry + tg_uz * rz
+        out[52] = tg_ux * ux + tg_uy * uy + tg_uz * uz
 
         dg_x, dg_y, dg_z = -c_inv_x, -ARENA_EXTENT_Y - c_inv_y, (GOAL_HEIGHT * 0.5) - cpz
         norm_dg = 1.0 / max(1e-4, math.sqrt(dg_x * dg_x + dg_y * dg_y + dg_z * dg_z))
         dg_ux, dg_uy, dg_uz = dg_x * norm_dg, dg_y * norm_dg, dg_z * norm_dg
-        out[47] = dg_ux * fx + dg_uy * fy + dg_uz * fz
-        out[48] = dg_ux * rx + dg_uy * ry + dg_uz * rz
-        out[49] = dg_ux * ux + dg_uy * uy + dg_uz * uz
+        out[53] = dg_ux * fx + dg_uy * fy + dg_uz * fz
+        out[54] = dg_ux * rx + dg_uy * ry + dg_uz * rz
+        out[55] = dg_ux * ux + dg_uy * uy + dg_uz * uz
 
-        # 3b/3c. Threat and kickoff sensors (4 features)
+        # 3b/3c. Threat and kickoff sensors (4 features: 56..59)
         is_threat, threat_intensity, threat_z = arena.get_shot_threat(car.team) if hasattr(arena, "get_shot_threat") else (False, 0.0, 0.0)
-        out[50] = float(threat_intensity)
-        out[51] = float(threat_z)
+        out[56] = float(threat_intensity)
+        out[57] = float(threat_z)
         is_center_ball = bool(abs(bx) < 50.0 and abs(by) < 50.0 and (abs(bvx) + abs(bvy) + abs(bvz)) < 80.0)
         is_first_touch = bool(arena.cars[0].ball_touches == 0 and arena.cars[1].ball_touches == 0) if len(arena.cars) >= 2 else bool(arena.cars[0].ball_touches == 0)
-        out[52] = 1.0 if (is_center_ball and is_first_touch) else 0.0
-        out[53] = 1.0 if is_first_touch else 0.0
+        out[58] = 1.0 if (is_center_ball and is_first_touch) else 0.0
+        out[59] = 1.0 if is_first_touch else 0.0
 
-        # 4. Opponents / Other Players (14 features)
+        # 4. Opponents / Other Players (14 features: 60..73)
         opponents = [c for c in arena.cars if c.team != car.team]
         if opponents:
             opp = opponents[0]
@@ -244,32 +272,32 @@ class DefaultObservationBuilder:
             ov = opp.vel
             opx, opy, opz = float(op[0]), float(op[1]), float(op[2])
             ovx, ovy, ovz = float(ov[0]), float(ov[1]), float(ov[2])
-            out[54] = (opx * inv) / ARENA_EXTENT_X
-            out[55] = (opy * inv) / ARENA_EXTENT_Y
-            out[56] = opz / ARENA_HEIGHT_Z
-            out[57] = (ovx * inv) / CAR_MAX_SPEED
-            out[58] = (ovy * inv) / CAR_MAX_SPEED
-            out[59] = ovz / CAR_MAX_SPEED
+            out[60] = (opx * inv) / ARENA_EXTENT_X
+            out[61] = (opy * inv) / ARENA_EXTENT_Y
+            out[62] = opz / ARENA_HEIGHT_Z
+            out[63] = (ovx * inv) / CAR_MAX_SPEED
+            out[64] = (ovy * inv) / CAR_MAX_SPEED
+            out[65] = ovz / CAR_MAX_SPEED
 
             odx = (opx - cpx) * inv
             ody = (opy - cpy) * inv
             odz = opz - cpz
-            out[60] = (odx * fx + ody * fy + odz * fz) * 0.0005
-            out[61] = (odx * rx + ody * ry + odz * rz) * 0.0005
-            out[62] = (odx * ux + ody * uy + odz * uz) * 0.0005
+            out[66] = (odx * fx + ody * fy + odz * fz) * 0.0005
+            out[67] = (odx * rx + ody * ry + odz * rz) * 0.0005
+            out[68] = (odx * ux + ody * uy + odz * uz) * 0.0005
 
             odvx = (ovx - float(cv[0])) * inv
             odvy = (ovy - float(cv[1])) * inv
             odvz = ovz - float(cv[2])
-            out[63] = (odvx * fx + odvy * fy + odvz * fz) / CAR_MAX_SPEED
-            out[64] = (odvx * rx + odvy * ry + odvz * rz) / CAR_MAX_SPEED
-            out[65] = (odvx * ux + odvy * uy + odvz * uz) / CAR_MAX_SPEED
-            out[66] = opp.boost * 0.01
-            out[67] = 1.0 if opp.on_ground else 0.0
+            out[69] = (odvx * fx + odvy * fy + odvz * fz) / CAR_MAX_SPEED
+            out[70] = (odvx * rx + odvy * ry + odvz * rz) / CAR_MAX_SPEED
+            out[71] = (odvx * ux + odvy * uy + odvz * uz) / CAR_MAX_SPEED
+            out[72] = opp.boost * 0.01
+            out[73] = 1.0 if opp.on_ground else 0.0
         else:
-            out[54:68] = 0.0
+            out[60:74] = 0.0
 
-        # 5. Fast Zero-Allocation Boost Pad Spatial Vectors (6 features)
+        # 5. Fast Zero-Allocation Boost Pad Spatial Vectors (6 features: 74..79)
         if hasattr(arena, "_small_pad_pos_3d") and hasattr(arena, "_small_pad_active"):
             sm_act = arena._small_pad_active
             sm_poses = arena._small_pad_pos_3d
@@ -290,11 +318,11 @@ class DefaultObservationBuilder:
                 sm_x = (float(sm_poses[min_sm_idx, 0]) - cpx) * inv
                 sm_y = (float(sm_poses[min_sm_idx, 1]) - cpy) * inv
                 sm_z = float(sm_poses[min_sm_idx, 2]) - cpz
-                out[68] = (sm_x * fx + sm_y * fy + sm_z * fz) * 0.0005
-                out[69] = (sm_x * rx + sm_y * ry + sm_z * rz) * 0.0005
-                out[70] = math.sqrt(min_sm_d2) * 0.00025
+                out[74] = (sm_x * fx + sm_y * fy + sm_z * fz) * 0.0005
+                out[75] = (sm_x * rx + sm_y * ry + sm_z * rz) * 0.0005
+                out[76] = math.sqrt(min_sm_d2) * 0.00025
             else:
-                out[68], out[69], out[70] = 0.0, 0.0, 1.0
+                out[74], out[75], out[76] = 0.0, 0.0, 1.0
 
             bg_act = arena._big_pad_active
             bg_poses = arena._big_pad_pos_3d
@@ -315,12 +343,12 @@ class DefaultObservationBuilder:
                 bg_x = (float(bg_poses[min_bg_idx, 0]) - cpx) * inv
                 bg_y = (float(bg_poses[min_bg_idx, 1]) - cpy) * inv
                 bg_z = float(bg_poses[min_bg_idx, 2]) - cpz
-                out[71] = (bg_x * fx + bg_y * fy + bg_z * fz) * (1.0 / 3000.0)
-                out[72] = (bg_x * rx + bg_y * ry + bg_z * rz) * (1.0 / 3000.0)
-                out[73] = math.sqrt(min_bg_d2) * (1.0 / 6000.0)
+                out[77] = (bg_x * fx + bg_y * fy + bg_z * fz) * (1.0 / 3000.0)
+                out[78] = (bg_x * rx + bg_y * ry + bg_z * rz) * (1.0 / 3000.0)
+                out[79] = math.sqrt(min_bg_d2) * (1.0 / 6000.0)
             else:
-                out[71], out[72], out[73] = 0.0, 0.0, 1.0
+                out[77], out[78], out[79] = 0.0, 0.0, 1.0
         else:
-            out[68:74] = 0.0
+            out[74:80] = 0.0
 
         return out

@@ -104,6 +104,8 @@ class TestFlippingAndMechanics(unittest.TestCase):
     def test_half_flip_sequence_awards_cancel_and_turnaround_bonus(self):
         """Guarantees that active flip cancel and roll earns cancel reward and +1.50 turnaround bonus."""
         recovery = AirRollRecoveryReward(weight=1.0)
+        self.arena.ball.pos = np.array([0.0, 3000.0, 93.0], dtype=np.float32)
+        self.arena.ball.vel = np.array([0.0, 0.0, 0.0], dtype=np.float32)
         recovery.reset(self.arena)
 
         car = self.arena.cars[0]
