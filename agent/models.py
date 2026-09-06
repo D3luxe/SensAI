@@ -49,7 +49,9 @@ class ActorCritic(nn.Module):
         activation: str = "leaky_relu",
         continuous_actions: bool = True,
         use_layer_norm: bool = True,
-        legacy_mirror_mask: bool = False
+        legacy_mirror_mask: bool = False,
+        use_action_masking: bool = True,
+        handbrake_height_buffer: float = 120.0
     ):
         super().__init__()
         self.obs_dim = obs_dim
@@ -57,6 +59,9 @@ class ActorCritic(nn.Module):
         self.continuous_actions = continuous_actions
         self.use_layer_norm = use_layer_norm
         self.legacy_mirror_mask = legacy_mirror_mask
+        self.use_action_masking = use_action_masking
+        self.handbrake_height_buffer = float(handbrake_height_buffer)
+        self.height_buffer_norm = self.handbrake_height_buffer / 2044.0
 
         # Use legacy (pre-fix) mirror mask for evaluating old checkpoints, corrected mask for new training
         mirror_mask_np = OBS_LEGACY_MIRROR_MASK_NP if legacy_mirror_mask else OBS_MIRROR_MASK_NP
@@ -171,7 +176,8 @@ class ActorCritic(nn.Module):
         self,
         obs: torch.Tensor,
         action: Optional[torch.Tensor] = None,
-        deterministic: bool = False
+        deterministic: bool = False,
+        apply_masking: Optional[bool] = None
     ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         features = self.actor_backbone(obs)
         value = self.critic(obs)
@@ -193,33 +199,113 @@ class ActorCritic(nn.Module):
                 action_mean = torch.tanh(self.actor_mean(features))
                 bin_logits = self.actor_binary(features)
 
-            # Continuous Gaussian distribution (0..4: Throttle, Steer, Pitch, Yaw, Roll)
             clamped_log_std = torch.clamp(self.actor_log_std, min=-2.5, max=-0.7)
-            action_log_std = clamped_log_std.expand_as(action_mean)
-            action_std = torch.exp(action_log_std)
-            dist_cont = Normal(action_mean, action_std)
+            action_std = torch.exp(clamped_log_std).expand_as(action_mean)
 
-            # Binary Bernoulli distribution (5..7: Jump, Boost, Handbrake)
-            dist_bin = Bernoulli(logits=bin_logits)
+            should_mask = self.use_action_masking if apply_masking is None else apply_masking
+            if should_mask and obs.shape[-1] >= 22:
+                # Step 3: Gated Action Masking with Physical Conditions
+                # Indices in self car state (0..21):
+                # 2: car_pos.z (normed by 2044.0)
+                # 18: boost (normed by 0.01)
+                # 19: on_ground (1.0 or 0.0)
+                # 20: has_jump (1.0 or 0.0)
+                # 21: has_flip (1.0 or 0.0)
+                is_grounded = obs[..., 19] > 0.5
+                is_airborne = ~is_grounded
+                near_ground = obs[..., 2] < self.height_buffer_norm
+                can_boost = obs[..., 18] > 0.001
+                can_jump = (obs[..., 20] > 0.5) | (obs[..., 21] > 0.5)
+                can_slide = is_grounded | near_ground
 
-            if action is None:
-                if deterministic:
-                    act_cont = action_mean
-                    thresh = self.bin_thresh_logits.to(bin_logits.device)
-                    act_bin = (bin_logits > thresh).float() * 2.0 - 1.0
+                # A. Mask Bernoulli Logits (-1e4 forces sigmoid to ~0.0)
+                btn_mask = torch.stack([can_jump, can_boost, can_slide], dim=-1)
+                masked_bin_logits = torch.where(
+                    btn_mask, bin_logits, torch.full_like(bin_logits, -1e4)
+                )
+
+                # B. Mask Continuous Means & Collapse Standard Deviations (pure out-of-place construction)
+                m0 = torch.where(is_airborne, torch.clamp(action_mean[..., 0], min=0.0), action_mean[..., 0])
+                m1 = action_mean[..., 1]
+                grd = is_grounded.unsqueeze(-1)
+                m234 = torch.where(grd, torch.zeros_like(action_mean[..., 2:5]), action_mean[..., 2:5])
+                masked_mean = torch.cat([m0.unsqueeze(-1), m1.unsqueeze(-1), m234], dim=-1)
+
+                s01 = action_std[..., :2]
+                s234 = torch.where(grd, torch.full_like(action_std[..., 2:5], 1e-4), action_std[..., 2:5])
+                masked_std = torch.cat([s01, s234], dim=-1)
+
+                # Step 4: Distribution Construction
+                dist_cont = Normal(masked_mean, masked_std)
+                dist_bin = Bernoulli(logits=masked_bin_logits)
+
+                # Step 5: Action Sampling
+                if action is None:
+                    if deterministic:
+                        act_cont = masked_mean
+                        thresh = self.bin_thresh_logits.to(masked_bin_logits.device)
+                        act_bin = (masked_bin_logits > thresh).float() * 2.0 - 1.0
+                    else:
+                        raw_act_cont = dist_cont.rsample()
+                        # Strictly zero out ground rotational channels to eliminate float subnormal epsilon noise
+                        act_c234 = torch.where(grd, torch.zeros_like(raw_act_cont[..., 2:5]), raw_act_cont[..., 2:5])
+                        act_cont = torch.cat([raw_act_cont[..., :2], act_c234], dim=-1)
+                        raw_act_bin = dist_bin.sample() * 2.0 - 1.0
+                        act_bin = torch.where(btn_mask, raw_act_bin, torch.full_like(raw_act_bin, -1.0))
+                    action = torch.cat([act_cont, act_bin], dim=-1)
                 else:
-                    act_cont = dist_cont.rsample()
-                    act_bin = dist_bin.sample() * 2.0 - 1.0
-                action = torch.cat([act_cont, act_bin], dim=-1)
-            else:
-                act_cont = action[..., :5]
-                act_bin = action[..., 5:]
+                    act_cont = action[..., :5]
+                    act_bin = action[..., 5:]
 
-            # Exact log probs and entropy across hybrid action space
-            bin_binary_01 = (act_bin > 0.0).float()
-            log_prob = dist_cont.log_prob(act_cont).sum(dim=-1) + dist_bin.log_prob(bin_binary_01).sum(dim=-1)
-            entropy = dist_cont.entropy().sum(dim=-1) + dist_bin.entropy().sum(dim=-1)
-            return action, log_prob, entropy, value
+                # Exact Log Probabilities across active channels (zeroing masked channels eliminates dead gradient noise)
+                bin_binary_01 = (act_bin > 0.0).float()
+                raw_cont_logp = dist_cont.log_prob(act_cont)
+                c_mask = torch.cat([torch.ones_like(raw_cont_logp[..., :2]), (~is_grounded).float().unsqueeze(-1).expand_as(raw_cont_logp[..., 2:5])], dim=-1)
+                cont_logp = raw_cont_logp * c_mask
+
+                raw_bin_logp = dist_bin.log_prob(bin_binary_01)
+                bin_logp = raw_bin_logp * btn_mask.float()
+                log_prob = cont_logp.sum(dim=-1) + bin_logp.sum(dim=-1)
+
+                # Active Channel Entropy Normalization
+                raw_ent_cont = dist_cont.entropy()
+                ent_cont = raw_ent_cont * c_mask
+
+                raw_ent_bin = dist_bin.entropy()
+                ent_bin = raw_ent_bin * btn_mask.float()
+
+                active_dims = (
+                    2.0
+                    + is_airborne.float() * 3.0
+                    + can_jump.float()
+                    + can_boost.float()
+                    + can_slide.float()
+                )
+                # Rescale by (act_dim / active_dims) so standard ppo.py entropy division by act_dim yields exact active-mean entropy
+                entropy = (ent_cont.sum(dim=-1) + ent_bin.sum(dim=-1)) * (float(self.act_dim) / active_dims)
+                return action, log_prob, entropy, value
+            else:
+                # Unmasked baseline pass (identical to original behavior)
+                dist_cont = Normal(action_mean, action_std)
+                dist_bin = Bernoulli(logits=bin_logits)
+
+                if action is None:
+                    if deterministic:
+                        act_cont = action_mean
+                        thresh = self.bin_thresh_logits.to(bin_logits.device)
+                        act_bin = (bin_logits > thresh).float() * 2.0 - 1.0
+                    else:
+                        act_cont = dist_cont.rsample()
+                        act_bin = dist_bin.sample() * 2.0 - 1.0
+                    action = torch.cat([act_cont, act_bin], dim=-1)
+                else:
+                    act_cont = action[..., :5]
+                    act_bin = action[..., 5:]
+
+                bin_binary_01 = (act_bin > 0.0).float()
+                log_prob = dist_cont.log_prob(act_cont).sum(dim=-1) + dist_bin.log_prob(bin_binary_01).sum(dim=-1)
+                entropy = dist_cont.entropy().sum(dim=-1) + dist_bin.entropy().sum(dim=-1)
+                return action, log_prob, entropy, value
         else:
             logits = self.actor_logits(features)
             dist = Categorical(logits=logits)

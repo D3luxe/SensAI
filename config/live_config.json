@@ -1,5 +1,5 @@
 {
-  "updated_at": 1788704986.6601427,
+  "updated_at": 1788709710.6507807,
   "learning_rate": 0.0003,
   "ent_coef": 0.01,
   "clip_range": 0.2,
@@ -8,6 +8,8 @@
   "baseline_opponent_ratio": 0.04,
   "baseline_opponent_type": "checkpoints/necto-model.pt",
   "paused": false,
+  "use_action_masking": true,
+  "handbrake_height_buffer": 120.0,
   "save_checkpoint_requested": false,
   "rewards": {
     "goal_weight": 30.0,

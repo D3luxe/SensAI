@@ -24,6 +24,8 @@ model:
   activation: leaky_relu
   continuous_actions: true
   use_layer_norm: true
+  use_action_masking: true
+  handbrake_height_buffer: 120.0
 ppo:
   bc_decay_steps: 30000000
   bc_regularization_weight: 0.0

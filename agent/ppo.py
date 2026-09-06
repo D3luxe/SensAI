@@ -140,7 +140,9 @@ class PPOTrainer:
             critic_hidden_dims=model_cfg.get("critic_hidden_dims", [256, 256, 128]),
             activation=self.activation,
             continuous_actions=self.continuous_actions,
-            use_layer_norm=self.use_layer_norm
+            use_layer_norm=self.use_layer_norm,
+            use_action_masking=bool(model_cfg.get("use_action_masking", True)),
+            handbrake_height_buffer=float(model_cfg.get("handbrake_height_buffer", 120.0))
         ).to(self.device)
         # Switch to AdamW with decoupled weight decay (0.0 for standard PPO stability, preventing LayerNorm decay collapse)
         self.optimizer = optim.AdamW(self.agent.parameters(), lr=self.lr, eps=1e-5, weight_decay=0.0)
@@ -246,6 +248,13 @@ class PPOTrainer:
                 if ratio_changed or type_changed:
                     self.env.update_baseline_opponent(self.baseline_opponent_ratio, self.baseline_opponent_type)
                     print(f"[Live Config] Opponent bot dynamically updated: Ratio={self.baseline_opponent_ratio:.2f}, Type='{self.baseline_opponent_type}'")
+
+                # Update action masking parameters
+                if "use_action_masking" in live:
+                    self.agent.use_action_masking = bool(live["use_action_masking"])
+                if "handbrake_height_buffer" in live:
+                    self.agent.handbrake_height_buffer = float(live["handbrake_height_buffer"])
+                    self.agent.height_buffer_norm = float(live["handbrake_height_buffer"]) / 2044.0
 
                 # Check manual save checkpoint trigger
                 if live.get("save_checkpoint_requested", False):
