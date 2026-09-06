@@ -1640,6 +1640,11 @@ class AirRollRecoveryReward(BaseReward):
         roll_input = float(action[4])
         is_active_halfflip_cancel = bool(air_ticks <= 18 and (pitch_input > 0.3 or abs(roll_input) > 0.25))
 
+        ang_vel = car.ang_vel if hasattr(car, "ang_vel") and car.ang_vel is not None else np.zeros(3, dtype=np.float32)
+        # Roll rate: rotation around the car's longitudinal (forward) axis
+        roll_rate = float(np.dot(car.get_forward_vector(), ang_vel))
+        total_ang_speed = float(np.linalg.norm(ang_vel))
+
         if not is_aerial_engagement and is_recovering and not car.on_ground:
             urgency = min(1.0, max(0.4, (800.0 - car_z) / 600.0))
             rec_spent = self._airborne_recovery_total.get(car.id, 0.0)
@@ -1655,7 +1660,24 @@ class AirRollRecoveryReward(BaseReward):
                 rec_budget = max(0.0, rec_budget - roll_rec)
                 self._airborne_recovery_total[car.id] = rec_spent + roll_rec
 
-            # 1b. Active Yaw & Momentum Heading Recovery (delta_heading > 0)
+            # 1b. Roll Rate Damping & Settling (D-term):
+            # As the car approaches flat attitude (up_z > 0.75), damp angular velocity to prevent rotational overshoot.
+            is_touchdown = bool((car_z < 60.0 and vel_z < -50.0) or (not prev_ground and car.on_ground))
+            if up_z > 0.75 and not is_touchdown:
+                abs_roll = abs(roll_rate)
+                # Require both roll rate AND total angular velocity to be controlled (eliminates pitch-tumble blindspot)
+                if abs_roll < 1.0 and total_ang_speed < 1.8 and (prev_up_z < 0.90 or delta_up > 0.01):
+                    # Stabilized attitude bonus: reward arresting roll velocity near flat
+                    settle_bonus = min(rec_budget, (1.0 - abs_roll) * 0.15 * urgency)
+                    total_reward += settle_bonus
+                    rec_budget = max(0.0, rec_budget - settle_bonus)
+                    self._airborne_recovery_total[car.id] = rec_spent + settle_bonus
+                elif abs_roll > 2.2 and up_z > 0.85:
+                    # Excess rotational inertia penalty: penalize violent spin that will blow past upright
+                    excess_spin = min(1.0, (abs_roll - 2.2) / 2.5)
+                    total_reward -= excess_spin * 0.15 * urgency
+
+            # 1c. Active Yaw & Momentum Heading Recovery (delta_heading > 0)
             delta_heading = curr_heading - prev_heading
             if delta_heading > 0.0 and prev_heading < 0.90 and speed_horiz > 250.0:
                 heading_inversion_mult = 1.0 + max(0.0, -prev_heading) * 1.0
@@ -1663,7 +1685,7 @@ class AirRollRecoveryReward(BaseReward):
                 total_reward += yaw_rec
                 self._airborne_recovery_total[car.id] = self._airborne_recovery_total.get(car.id, 0.0) + yaw_rec
 
-            # 1c. Dedicated Half-Flip Flip-Cancel & Air-Roll Bonus Budget
+            # 1d. Dedicated Half-Flip Flip-Cancel & Air-Roll Bonus Budget
             # Has its own independent budget (0.60) so passive delta_up cannot starve the active cancel!
             cancel_spent = self._halfflip_cancel_total.get(car.id, 0.0)
             cancel_budget = max(0.0, 0.80 - cancel_spent)
@@ -1681,31 +1703,45 @@ class AirRollRecoveryReward(BaseReward):
                 total_reward += step_cancel_reward
                 self._halfflip_cancel_total[car.id] = cancel_spent + step_cancel_reward
 
-            # Conclude in-flight roll/yaw recovery once upright attitude is restored (disoriented flag for touchdown is preserved)
-            if up_z > 0.85 and curr_heading > 0.85:
+            # Conclude in-flight roll/yaw recovery once upright attitude is restored AND total angular velocity has settled
+            if up_z > 0.88 and curr_heading > 0.85 and total_ang_speed < 1.5:
                 self._was_disoriented[car.id] = False
+
+        # Upright Roll Input Suppression:
+        # Prevents continuous Gaussian action noise or persistent roll holding from rolling off-axis once upright
+        if not car.on_ground and up_z > 0.90 and not is_active_halfflip_cancel and not is_aerial_engagement:
+            if abs(roll_input) > 0.15:
+                total_reward -= (abs(roll_input) - 0.15) * 0.10
 
         # ── 2. Touchdown Alignment (Evaluated as a single impulse near ground contact) ──
         if (car_z < 60.0 and vel_z < -50.0) or (not prev_ground and car.on_ground):
             had_disorientation = bool(self._was_disoriented.get(car.id, False) or self._disoriented_this_flight.get(car.id, False) or self._halfflip_cancel_executed.get(car.id, False))
             if had_disorientation:
-                if up_z > 0.70:
+                if up_z > 0.85:
                     total_reward += (up_z * 0.5)
+                    # Touchdown spin penalty: landing with high rotational speed causes the car to bounce onto its roof
+                    if total_ang_speed > 1.5:
+                        spin_excess = min(1.0, (total_ang_speed - 1.5) / 2.5)
+                        total_reward -= spin_excess * 0.30
                     if speed_horiz > 300.0 and curr_heading > 0.30:
                         total_reward += (curr_heading * 0.5)
                         # 180° Turnaround Half-Flip Completion Bonus:
                         if self._halfflip_cancel_executed.get(car.id, False) and curr_heading > 0.60 and speed_horiz > 400.0 and self._takeoff_heading.get(car.id, 1.0) < -0.20:
                             total_reward += 1.50
+                elif up_z < 0.65 and not is_active_halfflip_cancel:
+                    urgency = min(1.0, max(0.4, (800.0 - car_z) / 600.0))
+                    # Continuous monotonic penalty: from 0.0 at up_z=0.65, to -0.40 at up_z=0.0 (door), to -0.50 at up_z=-1.0 (inverted roof)
+                    if up_z >= 0.0:
+                        door_crash = -0.40 * (1.0 - up_z / 0.65)
+                    else:
+                        door_crash = -0.40 + (up_z * 0.10)
+                    total_reward += door_crash * urgency
+
                 # Consume disorientation so touchdown reward only fires once per landing
                 self._was_disoriented[car.id] = False
                 self._disoriented_this_flight[car.id] = False
                 self._halfflip_cancel_executed[car.id] = False
                 self._halfflip_cancel_total[car.id] = 0.0
-
-                # Upside down landing crash penalty (forgiven during active flip-cancels & quick half-flip air-rolls)
-                if up_z < 0.0 and not is_active_halfflip_cancel:
-                    urgency = min(1.0, max(0.4, (800.0 - car_z) / 600.0))
-                    total_reward += (up_z * 0.5) * urgency
 
         if car.on_ground:
             self._airborne_ticks[car.id] = 0
