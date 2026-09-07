@@ -13,8 +13,11 @@ from env.physics_engine import (
     CAR_MAX_SPEED, BALL_MAX_SPEED, GOAL_HEIGHT
 )
 
-# 80-Dimensional Left-Right (X -> -X) Observation Symmetry Reflection Mask
+OBS_DIM = 94
+
+# 94-Dimensional Left-Right (X -> -X) Observation Symmetry Reflection Mask
 # Multiplies features by -1.0 for lateral X components, roll, yaw, and relative right offsets
+# Features 80..93 (pad active flags and cooldown timers) are strictly positive scalars (+1.0)
 OBS_MIRROR_MASK_NP = np.array([
     # 1. Self Car State (22 features: 0..21)
     -1.0,  1.0,  1.0,   # car_pos (pos.x negated) [0..2]
@@ -49,10 +52,30 @@ OBS_MIRROR_MASK_NP = np.array([
      1.0,  1.0,        # opp_boost, opp_on_ground [72..73]
     # 5. Boost Pad Spatial Vectors (6 features: 74..79)
      1.0, -1.0,  1.0,   # nearest small pad (fwd, right negated, dist) [74..76]
-     1.0, -1.0,  1.0    # nearest big orb (fwd, right negated, dist) [77..79]
+     1.0, -1.0,  1.0,   # nearest big orb (fwd, right negated, dist) [77..79]
+    # 6. Nearest Pad Cooldown Timers (2 features: 80..81)
+     1.0,                # nearest small pad cooldown timer [80]
+     1.0,                # nearest big pad cooldown timer [81]
+    # 7. Strategic 6 Big Orbs in Symmetric Team Perspective (12 features: 82..93)
+     1.0,  1.0,         # Defending Left Corner Orb (is_active, cooldown) [82..83]
+     1.0,  1.0,         # Defending Right Corner Orb (is_active, cooldown) [84..85]
+     1.0,  1.0,         # Midfield Left Orb (is_active, cooldown) [86..87]
+     1.0,  1.0,         # Midfield Right Orb (is_active, cooldown) [88..89]
+     1.0,  1.0,         # Attacking Left Corner Orb (is_active, cooldown) [90..91]
+     1.0,  1.0          # Attacking Right Corner Orb (is_active, cooldown) [92..93]
 ], dtype=np.float32)
 
-# Legacy mirror mask extended to 80 dimensions for backward compatibility
+# Bilateral Permutation Indices for Mirror Reflection across X=0:
+# Swaps Left <-> Right orb pairs:
+# Defending Left [82, 83] <-> Defending Right [84, 85]
+# Midfield Left [86, 87] <-> Midfield Right [88, 89]
+# Attacking Left [90, 91] <-> Attacking Right [92, 93]
+OBS_MIRROR_INDICES_NP = np.arange(OBS_DIM, dtype=int)
+OBS_MIRROR_INDICES_NP[[82, 83, 84, 85, 86, 87, 88, 89, 90, 91, 92, 93]] = [
+    84, 85, 82, 83, 88, 89, 86, 87, 92, 93, 90, 91
+]
+
+# Legacy mirror mask extended to 94 dimensions for backward compatibility
 OBS_LEGACY_MIRROR_MASK_NP = np.array([
     -1.0,  1.0,  1.0,
     -1.0,  1.0,  1.0,
@@ -80,7 +103,9 @@ OBS_LEGACY_MIRROR_MASK_NP = np.array([
      1.0, -1.0,  1.0,    # local_opp_vel
      1.0,  1.0,        # opp flags
      1.0, -1.0,  1.0,    # small pad
-     1.0, -1.0,  1.0     # big pad
+     1.0, -1.0,  1.0,    # big pad
+     1.0,  1.0,        # timers (80..81)
+     1.0,  1.0,  1.0,  1.0,  1.0,  1.0,  1.0,  1.0,  1.0,  1.0,  1.0,  1.0 # big pads (82..93)
 ], dtype=np.float32)
 
 # 8-Dimensional Action Reflection Mask: [throttle, steer, pitch, yaw, roll, jump, boost, handbrake]
@@ -88,8 +113,11 @@ ACT_MIRROR_MASK_NP = np.array([1.0, -1.0, 1.0, -1.0, -1.0, 1.0, 1.0, 1.0], dtype
 
 
 def mirror_obs(obs: np.ndarray) -> np.ndarray:
-    """Mirrors a single or batched numpy observation across the X=0 plane."""
-    return obs * OBS_MIRROR_MASK_NP
+    """Mirrors a single or batched numpy observation across the X=0 plane with bilateral pair swaps."""
+    if obs.shape[-1] == OBS_DIM:
+        return (obs * OBS_MIRROR_MASK_NP)[..., OBS_MIRROR_INDICES_NP]
+    else:
+        return obs * OBS_MIRROR_MASK_NP[:obs.shape[-1]]
 
 
 def mirror_act(act: np.ndarray) -> np.ndarray:
@@ -103,11 +131,11 @@ class DefaultObservationBuilder:
     """
     def __init__(self, symmetric: bool = True):
         self.symmetric = symmetric
-        self.obs_dim = 80
+        self.obs_dim = OBS_DIM
 
     def build_obs(self, car: CarState, arena: RocketSimArena, out: Optional[np.ndarray] = None) -> np.ndarray:
         if out is None:
-            out = np.empty(80, dtype=np.float32)
+            out = np.empty(self.obs_dim, dtype=np.float32)
 
         # Symmetry multiplier: if Orange (team 1) and symmetric is True, flip X and Y
         inv = -1.0 if (self.symmetric and car.team == 1) else 1.0
@@ -298,11 +326,12 @@ class DefaultObservationBuilder:
             out[60:74] = 0.0
 
         # 5. Fast Zero-Allocation Boost Pad Spatial Vectors (6 features: 74..79)
+        min_sm_idx = -1
+        min_bg_idx = -1
         if hasattr(arena, "_small_pad_pos_3d") and hasattr(arena, "_small_pad_active"):
             sm_act = arena._small_pad_active
             sm_poses = arena._small_pad_pos_3d
             min_sm_d2 = 1e12
-            min_sm_idx = -1
             for p_idx in range(len(sm_act)):
                 if sm_act[p_idx]:
                     px = float(sm_poses[p_idx, 0])
@@ -327,7 +356,6 @@ class DefaultObservationBuilder:
             bg_act = arena._big_pad_active
             bg_poses = arena._big_pad_pos_3d
             min_bg_d2 = 1e12
-            min_bg_idx = -1
             for p_idx in range(len(bg_act)):
                 if bg_act[p_idx]:
                     px = float(bg_poses[p_idx, 0])
@@ -350,5 +378,46 @@ class DefaultObservationBuilder:
                 out[77], out[78], out[79] = 0.0, 0.0, 1.0
         else:
             out[74:80] = 0.0
+
+        # 6. Nearest Pad Cooldown Timers (2 features: 80..81)
+        pads = getattr(arena, "boost_pads", None)
+        num_pads = len(pads) if pads is not None else 0
+
+        if min_sm_idx >= 0 and hasattr(arena, "_sm_pad_indices") and min_sm_idx < len(arena._sm_pad_indices):
+            sm_pad_idx = arena._sm_pad_indices[min_sm_idx]
+            if sm_pad_idx < num_pads:
+                out[80] = min(1.0, max(0.0, getattr(pads[sm_pad_idx], "cooldown_timer", 0.0) / 4.0))
+            else:
+                out[80] = 0.0
+        else:
+            out[80] = 0.0
+
+        if min_bg_idx >= 0 and hasattr(arena, "_bg_pad_indices") and min_bg_idx < len(arena._bg_pad_indices):
+            bg_pad_idx = arena._bg_pad_indices[min_bg_idx]
+            if bg_pad_idx < num_pads:
+                out[81] = min(1.0, max(0.0, getattr(pads[bg_pad_idx], "cooldown_timer", 0.0) / 10.0))
+            else:
+                out[81] = 0.0
+        else:
+            out[81] = 0.0
+
+        # 7. Strategic 6 Big Orbs in Symmetric Team Perspective (12 features: 82..93)
+        # Standard RocketSim indices: [3, 4, 15, 18, 29, 30]
+        # Team 0 (Blue): [3: DefL, 4: DefR, 15: MidL, 18: MidR, 29: AttL, 30: AttR]
+        # Team 1 (Orange inverted): [30: DefL, 29: DefR, 18: MidL, 15: MidR, 4: AttL, 3: AttR]
+        if self.symmetric and car.team == 1:
+            big_pad_slots = (30, 29, 18, 15, 4, 3)
+        else:
+            big_pad_slots = (3, 4, 15, 18, 29, 30)
+
+        for k, p_idx in enumerate(big_pad_slots):
+            base_idx = 82 + 2 * k
+            if p_idx < num_pads:
+                pad = pads[p_idx]
+                out[base_idx] = 1.0 if pad.is_active else 0.0
+                out[base_idx + 1] = min(1.0, max(0.0, getattr(pad, "cooldown_timer", 0.0) / 10.0))
+            else:
+                out[base_idx] = 1.0
+                out[base_idx + 1] = 0.0
 
         return out

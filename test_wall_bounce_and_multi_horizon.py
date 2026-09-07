@@ -16,6 +16,7 @@ from env.physics_engine import (
     WALL_BOUNCE_VX_THRESHOLD, WALL_BOUNCE_VY_THRESHOLD
 )
 from env.observations import (
+    OBS_DIM,
     DefaultObservationBuilder,
     OBS_MIRROR_MASK_NP,
     OBS_LEGACY_MIRROR_MASK_NP,
@@ -39,14 +40,14 @@ class TestWallBounceAndMultiHorizon(unittest.TestCase):
         self.obs_builder = DefaultObservationBuilder(symmetric=True)
 
     def test_observation_dimensions_and_structure(self):
-        """Verify DefaultObservationBuilder outputs 80 features and matches mask dimensions."""
-        self.assertEqual(self.obs_builder.obs_dim, 80)
-        self.assertEqual(len(OBS_MIRROR_MASK_NP), 80)
-        self.assertEqual(len(OBS_LEGACY_MIRROR_MASK_NP), 80)
+        """Verify DefaultObservationBuilder outputs OBS_DIM features and matches mask dimensions."""
+        self.assertEqual(self.obs_builder.obs_dim, OBS_DIM)
+        self.assertEqual(len(OBS_MIRROR_MASK_NP), OBS_DIM)
+        self.assertEqual(len(OBS_LEGACY_MIRROR_MASK_NP), OBS_DIM)
 
         car = self.arena.cars[0]
         obs = self.obs_builder.build_obs(car, self.arena)
-        self.assertEqual(obs.shape, (80,))
+        self.assertEqual(obs.shape, (OBS_DIM,))
         self.assertFalse(np.isnan(obs).any(), "Observation vector must not contain NaNs")
 
     def test_reflection_symmetry_across_80_dimensions(self):

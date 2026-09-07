@@ -1424,38 +1424,73 @@ class BoostReward(BaseReward):
             return loss_rew
         else:
             # ── 3. Continuous Transit Pad Approach & Alignment Shaping ──────────
-            # When low on boost (< 65) and driving on the ground, reward steering toward and routing
-            # through active boost pads along the travel path, eliminating straight-line pad skipping.
-            if car.on_ground and car.boost < 65.0 and hasattr(arena, "_small_pad_pos_3d") and hasattr(arena, "_small_pad_active"):
-                sm_act = arena._small_pad_active
-                sm_poses = arena._small_pad_pos_3d
+            # When low on boost, reward steering toward and routing through active boost pads
+            # along the travel path, eliminating straight-line pad skipping.
+            if car.on_ground:
                 cpx, cpy = float(car.pos[0]), float(car.pos[1])
-                min_sm_d2 = 550.0 * 550.0
-                min_sm_idx = -1
-                for p_idx in range(len(sm_act)):
-                    if sm_act[p_idx]:
-                        dx = float(sm_poses[p_idx, 0]) - cpx
-                        dy = float(sm_poses[p_idx, 1]) - cpy
-                        d2 = dx * dx + dy * dy
-                        if d2 < min_sm_d2:
-                            min_sm_d2 = d2
-                            min_sm_idx = p_idx
+                fwd = car.get_forward_vector()
 
-                if min_sm_idx >= 0:
-                    pad_dist = math.sqrt(min_sm_d2)
-                    dx = float(sm_poses[min_sm_idx, 0]) - cpx
-                    dy = float(sm_poses[min_sm_idx, 1]) - cpy
-                    pad_dir_x = dx / max(1e-4, pad_dist)
-                    pad_dir_y = dy / max(1e-4, pad_dist)
-                    fwd = car.get_forward_vector()
-                    pad_align = fwd[0] * pad_dir_x + fwd[1] * pad_dir_y
-                    speed_to_pad = car.vel[0] * pad_dir_x + car.vel[1] * pad_dir_y
+                # 3a. Strategic Big Orb Transit Shaping (gated at boost < 50.0, 1200 uu search radius)
+                if car.boost < 50.0 and hasattr(arena, "_big_pad_pos_3d") and hasattr(arena, "_big_pad_active"):
+                    bg_act = arena._big_pad_active
+                    bg_poses = arena._big_pad_pos_3d
+                    min_bg_d2 = 1200.0 * 1200.0
+                    min_bg_idx = -1
+                    for p_idx in range(len(bg_act)):
+                        if bg_act[p_idx]:
+                            dx = float(bg_poses[p_idx, 0]) - cpx
+                            dy = float(bg_poses[p_idx, 1]) - cpy
+                            d2 = dx * dx + dy * dy
+                            if d2 < min_bg_d2:
+                                min_bg_d2 = d2
+                                min_bg_idx = p_idx
 
-                    if pad_align > 0.25 and speed_to_pad > 150.0:
-                        boost_hunger = (65.0 - car.boost) / 65.0
-                        prox = 1.0 - (pad_dist / 550.0)
-                        speed_fac = min(1.0, speed_to_pad / 1000.0)
-                        return float(self.gain_weight * 0.20 * boost_hunger * pad_align * prox * speed_fac)
+                    if min_bg_idx >= 0:
+                        pad_dist = math.sqrt(min_bg_d2)
+                        dx = float(bg_poses[min_bg_idx, 0]) - cpx
+                        dy = float(bg_poses[min_bg_idx, 1]) - cpy
+                        pad_dir_x = dx / max(1e-4, pad_dist)
+                        pad_dir_y = dy / max(1e-4, pad_dist)
+                        pad_align = fwd[0] * pad_dir_x + fwd[1] * pad_dir_y
+                        speed_to_pad = car.vel[0] * pad_dir_x + car.vel[1] * pad_dir_y
+
+                        if pad_align > 0.20 and speed_to_pad > 150.0:
+                            boost_hunger = (50.0 - car.boost) / 50.0
+                            if car.boost < 20.0:
+                                boost_hunger = min(1.5, boost_hunger * 1.3)
+                            prox = 1.0 - (pad_dist / 1200.0)
+                            speed_fac = min(1.0, speed_to_pad / 1000.0)
+                            return float(self.gain_weight * 0.40 * boost_hunger * pad_align * prox * speed_fac)
+
+                # 3b. Transit Small Pad Shaping (gated at boost < 65.0, 550 uu search radius)
+                if car.boost < 65.0 and hasattr(arena, "_small_pad_pos_3d") and hasattr(arena, "_small_pad_active"):
+                    sm_act = arena._small_pad_active
+                    sm_poses = arena._small_pad_pos_3d
+                    min_sm_d2 = 550.0 * 550.0
+                    min_sm_idx = -1
+                    for p_idx in range(len(sm_act)):
+                        if sm_act[p_idx]:
+                            dx = float(sm_poses[p_idx, 0]) - cpx
+                            dy = float(sm_poses[p_idx, 1]) - cpy
+                            d2 = dx * dx + dy * dy
+                            if d2 < min_sm_d2:
+                                min_sm_d2 = d2
+                                min_sm_idx = p_idx
+
+                    if min_sm_idx >= 0:
+                        pad_dist = math.sqrt(min_sm_d2)
+                        dx = float(sm_poses[min_sm_idx, 0]) - cpx
+                        dy = float(sm_poses[min_sm_idx, 1]) - cpy
+                        pad_dir_x = dx / max(1e-4, pad_dist)
+                        pad_dir_y = dy / max(1e-4, pad_dist)
+                        pad_align = fwd[0] * pad_dir_x + fwd[1] * pad_dir_y
+                        speed_to_pad = car.vel[0] * pad_dir_x + car.vel[1] * pad_dir_y
+
+                        if pad_align > 0.25 and speed_to_pad > 150.0:
+                            boost_hunger = (65.0 - car.boost) / 65.0
+                            prox = 1.0 - (pad_dist / 550.0)
+                            speed_fac = min(1.0, speed_to_pad / 1000.0)
+                            return float(self.gain_weight * 0.20 * boost_hunger * pad_align * prox * speed_fac)
 
             return 0.0
 

@@ -39,11 +39,11 @@ class TestResetAndBoundaryIntegrity(unittest.TestCase):
         
         # Terminal observation should reflect the state at step 5
         terminal_obs = last_info["terminal_observation"]
-        self.assertEqual(terminal_obs.shape, (2, 80))
+        self.assertEqual(terminal_obs.shape, (2, env.obs_dim))
 
         # Returned observation should match the newly reset arena (step 0 of new episode)
         self.assertEqual(env.current_step, 0, "Environment current_step must be reset to 0")
-        current_arena_obs = np.empty((2, 80), dtype=np.float32)
+        current_arena_obs = np.empty((2, env.obs_dim), dtype=np.float32)
         for i, car in enumerate(env.arena.cars):
             env.obs_builder.build_obs(car, env.arena, out=current_arena_obs[i])
 

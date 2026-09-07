@@ -8,14 +8,14 @@ import torch
 import numpy as np
 
 from agent.models import ActorCritic
-from env.observations import OBS_MIRROR_MASK_NP, ACT_MIRROR_MASK_NP
+from env.observations import OBS_DIM, OBS_MIRROR_MASK_NP, ACT_MIRROR_MASK_NP
 
 
 class TestActionMasking(unittest.TestCase):
     def setUp(self):
         torch.manual_seed(42)
         np.random.seed(42)
-        self.obs_dim = 80
+        self.obs_dim = OBS_DIM
         self.act_dim = 8
         self.model = ActorCritic(
             obs_dim=self.obs_dim,
@@ -188,7 +188,7 @@ class TestActionMasking(unittest.TestCase):
         obs[21] = 1.0             # has flip
 
         obs_batch = obs.unsqueeze(0)
-        obs_mirror = (obs * self.model.obs_mirror_mask).unsqueeze(0)
+        obs_mirror = (obs * self.model.obs_mirror_mask)[self.model.obs_mirror_indices].unsqueeze(0)
 
         with torch.no_grad():
             act1, _, _, _ = self.model.get_action_and_value(obs_batch, deterministic=True)

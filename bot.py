@@ -162,6 +162,8 @@ class SenseiRLBot(BaseAgent):
                         curr_param = model_state[k]
                         if saved_param.shape != curr_param.shape:
                             migrated = True
+                            curr_param = curr_param.clone()
+                            curr_param.zero_()
                             slices = tuple(slice(0, min(s, c)) for s, c in zip(saved_param.shape, curr_param.shape))
                             curr_param[slices] = saved_param[slices]
                             model_state[k] = curr_param
@@ -300,6 +302,7 @@ class SenseiRLBot(BaseAgent):
                         for std_idx, packet_idx in enumerate(boost_pad_mapping):
                             if packet_idx < len(game_boosts):
                                 self.boost_pads[std_idx].is_active = bool(game_boosts[packet_idx].is_active)
+                                self.boost_pads[std_idx].cooldown_timer = float(getattr(game_boosts[packet_idx], "timer", 0.0))
 
                     self._small_pad_active = np.array([self.boost_pads[i].is_active for i in self._sm_pad_indices], dtype=bool)
                     self._big_pad_active = np.array([self.boost_pads[i].is_active for i in self._bg_pad_indices], dtype=bool)

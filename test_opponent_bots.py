@@ -70,7 +70,7 @@ class TestOpponentBots(unittest.TestCase):
         obs = vec_env.reset()
         dummy_actions = np.zeros((4, 2, 8), dtype=np.float32)
         next_obs, rews, dones, infos = vec_env.step(dummy_actions)
-        self.assertEqual(next_obs.shape, (4, 2, 80))
+        self.assertEqual(next_obs.shape, (4, 2, vec_env.obs_dim))
 
     def test_simulate_match(self):
         opp = "checkpoints/necto-model.pt" if os.path.exists("checkpoints/necto-model.pt") else "baseline"

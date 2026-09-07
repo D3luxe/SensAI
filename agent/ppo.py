@@ -367,6 +367,8 @@ class PPOTrainer:
                 curr_param = model_state[k]
                 if saved_param.shape != curr_param.shape:
                     migrated = True
+                    curr_param = curr_param.clone()
+                    curr_param.zero_()
                     slices = tuple(slice(0, min(s, c)) for s, c in zip(saved_param.shape, curr_param.shape))
                     curr_param[slices] = saved_param[slices]
                     model_state[k] = curr_param
@@ -377,6 +379,7 @@ class PPOTrainer:
             self.agent.load_state_dict(model_state)
             self.iteration = checkpoint.get("iteration", 0)
             self.global_step = checkpoint.get("global_step", 0)
+            self.agent.debias_symmetric_actions()
             print(f"[PPO Trainer] Successfully migrated weights to new dimensions (Obs: {self.obs_dim}, Act: {self.act_dim}) from {path} (Iter: {self.iteration})")
             return
 

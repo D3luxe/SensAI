@@ -11,7 +11,7 @@ import torch.nn as nn
 import RocketSim as rsim
 
 from env.physics_engine import RocketSimArena
-from env.observations import DefaultObservationBuilder, OBS_MIRROR_MASK_NP, ACT_MIRROR_MASK_NP
+from env.observations import DefaultObservationBuilder, OBS_DIM, OBS_MIRROR_MASK_NP, ACT_MIRROR_MASK_NP
 from agent.models import ActorCritic
 from bot import SenseiRLBot
 
@@ -398,7 +398,7 @@ class TestPhysicsAndControls(unittest.TestCase):
         """
         Guarantees that mirroring an observation and action flips antisymmetric axes (steer, yaw, roll, X).
         """
-        obs_dim = 80
+        obs_dim = OBS_DIM
         act_dim = 8
         self.assertEqual(len(OBS_MIRROR_MASK_NP), obs_dim)
         self.assertEqual(len(ACT_MIRROR_MASK_NP), act_dim)
@@ -620,11 +620,11 @@ class TestPhysicsAndControls(unittest.TestCase):
         Guarantees that ActorCritic with LayerNorm maintains bounded, healthy activations
         even when fed extreme observation inputs, and prevents policy saturation.
         """
-        model = ActorCritic(obs_dim=80, act_dim=8, continuous_actions=True, use_layer_norm=True, activation="leaky_relu")
+        model = ActorCritic(obs_dim=OBS_DIM, act_dim=8, continuous_actions=True, use_layer_norm=True, activation="leaky_relu")
         model.eval()
 
         # Extreme out-of-distribution observation input (+/- 10.0)
-        extreme_obs = torch.full((4, 80), 10.0, dtype=torch.float32)
+        extreme_obs = torch.full((4, OBS_DIM), 10.0, dtype=torch.float32)
         action, _, _, value = model.get_action_and_value(extreme_obs, deterministic=True)
 
         self.assertEqual(action.shape, (4, 8))
@@ -671,8 +671,8 @@ class TestPhysicsAndControls(unittest.TestCase):
         Guarantees that actor_binary (Jump, Boost, Handbrake) receives non-zero gradients
         under BCEWithLogitsLoss during pretraining.
         """
-        model = ActorCritic(obs_dim=80, act_dim=8, continuous_actions=True, use_layer_norm=True)
-        obs = torch.randn(16, 80)
+        model = ActorCritic(obs_dim=OBS_DIM, act_dim=8, continuous_actions=True, use_layer_norm=True)
+        obs = torch.randn(16, OBS_DIM)
         target_acts = torch.randn(16, 8)
         target_acts[:, 5:] = (target_acts[:, 5:] > 0.0).float() * 2.0 - 1.0
 

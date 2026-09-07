@@ -31,7 +31,7 @@ def get_activation_cls(activation: str):
         return nn.Tanh
 
 
-from env.observations import OBS_MIRROR_MASK_NP, ACT_MIRROR_MASK_NP
+from env.observations import OBS_DIM, OBS_MIRROR_MASK_NP, OBS_MIRROR_INDICES_NP, ACT_MIRROR_MASK_NP
 
 try:
     from env.observations import OBS_LEGACY_MIRROR_MASK_NP
@@ -42,7 +42,7 @@ except ImportError:
 class ActorCritic(nn.Module):
     def __init__(
         self,
-        obs_dim: int = 64,
+        obs_dim: int = OBS_DIM,
         act_dim: int = 8,
         actor_hidden_dims: List[int] = [256, 256, 128],
         critic_hidden_dims: List[int] = [256, 256, 128],
@@ -65,7 +65,13 @@ class ActorCritic(nn.Module):
 
         # Use legacy (pre-fix) mirror mask for evaluating old checkpoints, corrected mask for new training
         mirror_mask_np = OBS_LEGACY_MIRROR_MASK_NP if legacy_mirror_mask else OBS_MIRROR_MASK_NP
+        if obs_dim < len(mirror_mask_np):
+            mirror_mask_np = mirror_mask_np[:obs_dim]
+        mirror_indices_np = OBS_MIRROR_INDICES_NP
+        if obs_dim < len(mirror_indices_np):
+            mirror_indices_np = np.arange(obs_dim, dtype=int)
         self.register_buffer("obs_mirror_mask", torch.tensor(mirror_mask_np, dtype=torch.float32), persistent=False)
+        self.register_buffer("obs_mirror_indices", torch.tensor(mirror_indices_np, dtype=torch.long), persistent=False)
         self.register_buffer("act_mirror_mask", torch.tensor(ACT_MIRROR_MASK_NP, dtype=torch.float32), persistent=False)
         # Calibrated deterministic activation thresholds for binary Bernoulli buttons:
         # Index 0 (Jump): p > 0.15 (logit > -1.7346) - calibrated for deliberate takeoff/dodges without phantom low-speed turn hops
@@ -184,8 +190,11 @@ class ActorCritic(nn.Module):
 
         if self.continuous_actions:
             if obs.shape[-1] == self.obs_mirror_mask.shape[-1] and self.act_dim == self.act_mirror_mask.shape[-1]:
-                # Equivariant Bilateral Symmetry Forward Pass
-                obs_mirr = obs * self.obs_mirror_mask
+                # Equivariant Bilateral Symmetry Forward Pass with bilateral pad pair permutation
+                if hasattr(self, "obs_mirror_indices") and self.obs_mirror_indices is not None and self.obs_mirror_indices.shape[-1] == obs.shape[-1]:
+                    obs_mirr = (obs * self.obs_mirror_mask)[..., self.obs_mirror_indices]
+                else:
+                    obs_mirr = obs * self.obs_mirror_mask
                 feat_mirr = self.actor_backbone(obs_mirr)
 
                 raw_mean = torch.tanh(self.actor_mean(features))

@@ -45,6 +45,8 @@ class MockArenaForObs:
         self.ball = ball
         self.cars = cars
         self.boost_pads = MockArenaForObs._SHARED_PADS
+        self._sm_pad_indices = MockArenaForObs._SM_PAD_INDICES
+        self._bg_pad_indices = MockArenaForObs._BG_PAD_INDICES
         self._small_pad_pos_3d = MockArenaForObs._SMALL_PAD_POS_3D
         self._big_pad_pos_3d = MockArenaForObs._BIG_PAD_POS_3D
         self._small_pad_active = MockArenaForObs._SMALL_PAD_ACTIVE
