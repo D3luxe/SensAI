@@ -436,7 +436,10 @@ def get_cockpit_leaderboard_df(evaluator: TrueSkillEvaluator, max_rows: int = 15
 
 def build_cockpit_leaderboard_summary_html(evaluator: TrueSkillEvaluator) -> str:
     """Builds a sleek cyber-styled summary badge card for the Live Cockpit leaderboard."""
-    ratings = list(evaluator.ratings.values())
+    ratings = [
+        r for r in evaluator.ratings.values()
+        if "latest_model" not in r.path.lower() and "latest_model" not in r.name.lower()
+    ]
     if not ratings:
         return """
         <div style="background: rgba(15, 23, 42, 0.7); border: 1px solid #334155; border-radius: 8px; padding: 10px 18px; margin-bottom: 8px; font-size: 0.9em; color: #94a3b8;">

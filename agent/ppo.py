@@ -775,6 +775,8 @@ class PPOTrainer:
                 # Automated TrueSkill Bayesian Grading & League Promotion
                 if hasattr(self, "league_manager") and self.league_manager.enabled:
                     self.league_manager.grade_checkpoint(ckpt_path, device="cpu")
+                    # Advance Gauntlet trials for top contenders
+                    self.league_manager.step_contender_gauntlet(device="cpu")
                     # Update league environment stratification with new ratings
                     strat_assignments = self.league_manager.get_stratified_distribution(self.num_envs)
                     self.env.set_stratified_opponents(strat_assignments)

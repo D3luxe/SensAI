@@ -47,10 +47,24 @@ class LeagueManager:
         default_anchors = [
             "checkpoints/pretrained_baseline.pt",
             "checkpoints/necto-model.pt",
+            "checkpoints/nexto-model.pt",
             "heuristic"
         ]
         self.anchor_candidates = self.config.get("anchors", default_anchors)
         self.active_anchors: List[str] = []
+
+        # Gauntlet Contender Queue Configuration
+        self.min_contender_mu = float(self.config.get("min_contender_mu", 25.5))
+        self.min_contender_win_rate = float(self.config.get("min_contender_win_rate", 45.0))
+        self.max_consecutive_losses = int(self.config.get("max_consecutive_losses", 4))
+        self.grace_period_matches = int(self.config.get("grace_period_matches", 6))
+        self.target_eval_matches = int(self.config.get("target_eval_matches", 16))
+        self.max_active_contenders = int(self.config.get("max_active_contenders", 3))
+        self.contender_eval_matches_per_step = int(self.config.get("contender_eval_matches_per_step", 2))
+
+        # Gauntlet State
+        self.contender_queue: List[str] = []
+        self.contender_consecutive_losses: Dict[str, int] = {}
 
         # League state
         self.king_of_the_hill: Optional[str] = None
@@ -104,6 +118,9 @@ class LeagueManager:
 
         for key, rec in self.evaluator.ratings.items():
             norm_key = self._normalize_path(key)
+            # Ephemeral rolling files like latest_model.pt are never eligible for King or elite pool
+            if "latest_model" in norm_key.lower():
+                continue
             # Anchors are valid
             if rec.is_anchor or norm_key == "heuristic":
                 valid_models.append((norm_key, rec.conservative_rating, rec))
@@ -138,6 +155,138 @@ class LeagueManager:
 
         self.elite_pool = pool_paths
 
+    def _admit_contender(self, ckpt_path: str):
+        """Admits or preempts into the active Gauntlet contender queue based on raw skill (mu)."""
+        if ckpt_path in self.contender_queue:
+            return
+
+        rec = self.evaluator.ratings.get(ckpt_path)
+        if not rec:
+            return
+
+        if len(self.contender_queue) < self.max_active_contenders:
+            self.contender_queue.append(ckpt_path)
+            self.contender_consecutive_losses[ckpt_path] = 0
+            print(f"[League Manager] [Gauntlet Admission] Admitted '{rec.name}' to Contender Queue (mu={rec.mu:.2f}, WR={rec.win_rate:.1f}%)")
+        else:
+            # Check preemption: replace the lowest mu contender if new contender has higher mu
+            contender_ratings = [(p, self.evaluator.ratings.get(p)) for p in self.contender_queue]
+            valid_contenders = [c for c in contender_ratings if c[1] is not None]
+            if valid_contenders:
+                lowest_path, lowest_rec = min(valid_contenders, key=lambda c: c[1].mu)
+                if rec.mu > lowest_rec.mu:
+                    self.contender_queue.remove(lowest_path)
+                    self.contender_consecutive_losses.pop(lowest_path, None)
+                    self.contender_queue.append(ckpt_path)
+                    self.contender_consecutive_losses[ckpt_path] = 0
+                    print(f"[League Manager] [Gauntlet Preemption] '{rec.name}' (mu={rec.mu:.2f}) replaced '{lowest_rec.name}' (mu={lowest_rec.mu:.2f}) in Gauntlet Queue")
+
+    def step_contender_gauntlet(self, device: str = "cpu") -> Optional[Dict[str, Any]]:
+        """
+        Advances the Gauntlet promotion/demotion trials by running matches for the top active contender.
+        Evaluates early demotion (after grace period) and graduation (once target matches reached).
+        """
+        if not self.enabled or not self.contender_queue:
+            return None
+
+        # Clean queue of any non-existent files
+        self.contender_queue = [p for p in self.contender_queue if os.path.exists(p)]
+        if not self.contender_queue:
+            return None
+
+        # Pick contender with highest raw skill (mu)
+        contender_path = max(
+            self.contender_queue,
+            key=lambda p: getattr(self.evaluator.ratings.get(p), "mu", 0.0)
+        )
+        rec = self.evaluator.ratings.get(contender_path)
+        if not rec:
+            self.contender_queue.remove(contender_path)
+            return None
+
+        # Standardized Gauntlet pairing: 1 match vs reference anchor, 1 match vs King
+        ref_anchor = None
+        for cand in ["checkpoints/necto-model.pt", "checkpoints/nexto-model.pt"] + self.active_anchors:
+            norm_c = self._normalize_path(cand)
+            if (os.path.exists(norm_c) or norm_c == "heuristic") and norm_c != contender_path:
+                ref_anchor = norm_c
+                break
+
+        opponents = []
+        if ref_anchor:
+            opponents.append(ref_anchor)
+
+        king = self.king_of_the_hill
+        if king and king != contender_path and king not in opponents and "latest_model" not in king.lower():
+            opponents.append(king)
+        elif not opponents and self.active_anchors:
+            opponents.append(self.active_anchors[0])
+
+        if not opponents:
+            return None
+
+        prev_wins = rec.wins
+        prev_losses = rec.losses
+
+        print(f"[League Manager] [Gauntlet Trial] Testing contender '{rec.name}' against {len(opponents)} opponent(s)...")
+        for opp in opponents:
+            try:
+                self.evaluator.evaluate_pairing(
+                    model_a_path=contender_path,
+                    model_b_path=opp,
+                    matches_per_pair=max(2, self.contender_eval_matches_per_step // len(opponents)),
+                    max_steps=self.eval_max_steps,
+                    enable_overtime=True,
+                    device=device
+                )
+            except Exception as e:
+                print(f"[League Manager] Warning: Gauntlet trial error {contender_path} vs {opp}: {e}")
+
+        # Refresh rating after matches
+        rec = self.evaluator.ratings.get(contender_path, rec)
+        new_wins = rec.wins - prev_wins
+        new_losses = rec.losses - prev_losses
+
+        if new_losses > new_wins:
+            self.contender_consecutive_losses[contender_path] = self.contender_consecutive_losses.get(contender_path, 0) + new_losses
+        elif new_wins > 0:
+            self.contender_consecutive_losses[contender_path] = max(0, self.contender_consecutive_losses.get(contender_path, 0) - new_wins)
+
+        consec_losses = self.contender_consecutive_losses.get(contender_path, 0)
+
+        # 1. Check Graduation (if qualified by skill and matches)
+        if (rec.matches_played >= self.target_eval_matches or rec.sigma <= 2.0) and rec.mu >= self.min_contender_mu and rec.win_rate >= self.min_contender_win_rate:
+            print(f"[League Manager] [Gauntlet Graduation] '{rec.name}' graduated with established rating: mu={rec.mu:.2f}, sigma={rec.sigma:.2f}, Score={rec.conservative_rating:.2f} over {rec.matches_played} matches!")
+            self.contender_queue.remove(contender_path)
+            self.contender_consecutive_losses.pop(contender_path, None)
+            self.refresh_pool()
+            return {"status": "graduated", "model": rec.name, "score": rec.conservative_rating}
+
+        # 2. Check Demotion (Only after grace period matches)
+        should_demote = False
+        demote_reason = ""
+        if rec.matches_played >= self.grace_period_matches:
+            if rec.mu < self.min_contender_mu:
+                should_demote = True
+                demote_reason = f"Skill floor breached (mu={rec.mu:.2f} < {self.min_contender_mu:.2f})"
+            elif rec.win_rate < self.min_contender_win_rate:
+                should_demote = True
+                demote_reason = f"Win rate dropped below floor (WR={rec.win_rate:.1f}% < {self.min_contender_win_rate:.1f}%)"
+            elif consec_losses >= self.max_consecutive_losses:
+                should_demote = True
+                demote_reason = f"Loss streak knockout ({consec_losses} >= {self.max_consecutive_losses} consecutive losses)"
+
+        if should_demote:
+            print(f"[League Manager] [Gauntlet Demotion] '{rec.name}' evicted from contender queue. Reason: {demote_reason}")
+            self.contender_queue.remove(contender_path)
+            self.contender_consecutive_losses.pop(contender_path, None)
+            self.refresh_pool()
+            return {"status": "demoted", "model": rec.name, "reason": demote_reason}
+
+        print(f"[League Manager] [Gauntlet Progress] '{rec.name}' now at {rec.matches_played}/{self.target_eval_matches} matches (mu={rec.mu:.2f}, sigma={rec.sigma:.2f}, Score={rec.conservative_rating:.2f})")
+        self.refresh_pool()
+        return {"status": "progress", "model": rec.name, "matches": rec.matches_played, "score": rec.conservative_rating}
+
     def grade_checkpoint(self, checkpoint_path: str, device: str = "cpu") -> ModelRating:
         """
         Automatically grades a newly saved checkpoint in fast headless matches against:
@@ -147,6 +296,9 @@ class LeagueManager:
         Updates ratings in logs/trueskill_leaderboard.json and updates King-of-the-Hill status.
         """
         norm_ckpt = self._normalize_path(checkpoint_path)
+        if "latest_model" in norm_ckpt.lower():
+            return self.evaluator.get_or_create_rating(norm_ckpt)
+
         if not os.path.exists(norm_ckpt):
             print(f"[League Manager] Warning: Checkpoint not found on disk: {checkpoint_path}")
             return self.evaluator.get_or_create_rating(norm_ckpt)
@@ -156,12 +308,12 @@ class LeagueManager:
 
         # Determine benchmark opponents
         opponents_to_test: List[str] = []
-        if self.king_of_the_hill and self.king_of_the_hill != norm_ckpt:
+        if self.king_of_the_hill and self.king_of_the_hill != norm_ckpt and "latest_model" not in self.king_of_the_hill.lower():
             opponents_to_test.append(self.king_of_the_hill)
 
         # Pick best anchor not already included
         for anc in self.active_anchors:
-            if anc != norm_ckpt and anc not in opponents_to_test:
+            if anc != norm_ckpt and anc not in opponents_to_test and "latest_model" not in anc.lower():
                 opponents_to_test.append(anc)
                 break
 
@@ -191,12 +343,17 @@ class LeagueManager:
         king_name = get_model_display_name(self.king_of_the_hill) if self.king_of_the_hill else "None"
         print(f"[League Manager] Grading complete for {rec.name}: mu={rec.mu:.2f} (Score: {rec.conservative_rating:.2f}). King of the Hill: {king_name}")
 
+        # Check qualification for Gauntlet Promotion Queue
+        if not rec.is_anchor and norm_ckpt != "heuristic" and "latest_model" not in norm_ckpt.lower():
+            if rec.mu >= 26.0 and rec.win_rate >= 50.0:
+                self._admit_contender(norm_ckpt)
+
         return rec
 
     def get_protected_checkpoint_paths(self) -> Set[str]:
         """
-        Returns a set of normalized file paths for top-K checkpoints that must
-        NEVER be pruned by rolling checkpoint cleanups.
+        Returns a set of normalized file paths for top-K checkpoints and active
+        Gauntlet contenders that must NEVER be pruned by rolling checkpoint cleanups.
         """
         self.refresh_pool()
         protected = set()
@@ -211,6 +368,11 @@ class LeagueManager:
                 count += 1
                 if count >= self.protect_top_k:
                     break
+
+        # Protect all active Gauntlet contenders from rolling disk cleanup
+        for c_path in self.contender_queue:
+            if os.path.exists(c_path):
+                protected.add(os.path.abspath(c_path))
 
         return protected
 

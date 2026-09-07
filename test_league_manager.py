@@ -116,8 +116,99 @@ class TestLeagueManager(unittest.TestCase):
         self.assertIn("king_of_the_hill", telem)
         self.assertIn("king_score", telem)
         self.assertIn("elite_pool_size", telem)
-        self.assertIn("protected_checkpoints_count", telem)
         self.assertTrue(telem["league_enabled"])
+
+    def test_latest_model_permanently_excluded(self):
+        """Verify latest_model.pt is never assigned King of the Hill or entered into elite pool."""
+        latest_path = os.path.join(self.test_dir, "latest_model.pt")
+        shutil.copyfile(self.dummy_ckpt_path, latest_path)
+        rec = self.evaluator.get_or_create_rating(latest_path)
+        rec.mu = 40.0
+        rec.sigma = 0.5
+        rec.update_conservative()
+
+        self.league.refresh_pool()
+        norm_latest = self.league._normalize_path(latest_path)
+        self.assertNotEqual(self.league.king_of_the_hill, norm_latest)
+        self.assertNotIn(norm_latest, self.league.elite_pool)
+
+    def test_contender_queue_admission_and_protection(self):
+        """Verify qualification on debut and immunity in get_protected_checkpoint_paths."""
+        ckpt_a = os.path.join(self.test_dir, "checkpoint_iter_40.pt")
+        shutil.copyfile(self.dummy_ckpt_path, ckpt_a)
+        rec_a = self.evaluator.get_or_create_rating(ckpt_a)
+        rec_a.mu = 27.5
+        rec_a.win_rate = 60.0
+        rec_a.update_conservative()
+
+        norm_a = self.league._normalize_path(ckpt_a)
+        self.league._admit_contender(norm_a)
+        self.assertIn(norm_a, self.league.contender_queue)
+
+        protected = self.league.get_protected_checkpoint_paths()
+        self.assertIn(os.path.abspath(ckpt_a), protected)
+
+    def test_contender_queue_preemption(self):
+        """Verify preemption replaces lowest-mu contender when queue is full."""
+        self.league.max_active_contenders = 2
+        self.league.contender_queue.clear()
+
+        paths = []
+        for i, mu in enumerate([26.5, 27.0, 28.5]):
+            p = os.path.join(self.test_dir, f"checkpoint_iter_{100 + i*20}.pt")
+            shutil.copyfile(self.dummy_ckpt_path, p)
+            r = self.evaluator.get_or_create_rating(p)
+            r.mu = mu
+            r.win_rate = 55.0
+            r.update_conservative()
+            paths.append(self.league._normalize_path(p))
+
+        self.league._admit_contender(paths[0])
+        self.league._admit_contender(paths[1])
+        self.assertEqual(len(self.league.contender_queue), 2)
+        self.assertIn(paths[0], self.league.contender_queue)
+        self.assertIn(paths[1], self.league.contender_queue)
+
+        # Higher mu (28.5) should preempt the lowest (26.5)
+        self.league._admit_contender(paths[2])
+        self.assertEqual(len(self.league.contender_queue), 2)
+        self.assertNotIn(paths[0], self.league.contender_queue)
+        self.assertIn(paths[1], self.league.contender_queue)
+        self.assertIn(paths[2], self.league.contender_queue)
+
+    def test_gauntlet_graduation_and_demotion(self):
+        """Verify graduation when matches reach target and demotion after grace period."""
+        # 1. Graduation
+        c_grad = os.path.join(self.test_dir, "checkpoint_iter_200.pt")
+        shutil.copyfile(self.dummy_ckpt_path, c_grad)
+        norm_grad = self.league._normalize_path(c_grad)
+        r_grad = self.evaluator.get_or_create_rating(norm_grad)
+        r_grad.mu = 29.0
+        r_grad.matches_played = self.league.target_eval_matches
+        r_grad.wins = 12
+        r_grad.sigma = 1.8
+        r_grad.update_conservative()
+
+        self.league.contender_queue = [norm_grad]
+        res = self.league.step_contender_gauntlet()
+        self.assertIsNotNone(res)
+        self.assertEqual(res["status"], "graduated")
+        self.assertNotIn(norm_grad, self.league.contender_queue)
+
+        # 2. Demotion (after grace period)
+        c_dem = os.path.join(self.test_dir, "checkpoint_iter_220.pt")
+        shutil.copyfile(self.dummy_ckpt_path, c_dem)
+        norm_dem = self.league._normalize_path(c_dem)
+        r_dem = self.evaluator.get_or_create_rating(norm_dem)
+        r_dem.mu = 23.0  # Below 25.5
+        r_dem.matches_played = self.league.grace_period_matches + 1
+        r_dem.update_conservative()
+
+        self.league.contender_queue = [norm_dem]
+        res_dem = self.league.step_contender_gauntlet()
+        self.assertIsNotNone(res_dem)
+        self.assertEqual(res_dem["status"], "demoted")
+        self.assertNotIn(norm_dem, self.league.contender_queue)
 
 
 class TestStratifiedVectorizedEnv(unittest.TestCase):

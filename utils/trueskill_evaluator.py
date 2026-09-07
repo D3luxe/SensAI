@@ -485,8 +485,12 @@ class TrueSkillEvaluator:
             return pd.DataFrame(columns=cols)
 
         # Sort by conservative rating (mu - 3*sigma) descending, then by win rate
-        records = sorted(
-            self.ratings.values(),
+        # Ephemeral moving files like latest_model.pt are excluded from ranked TrueSkill standings
+        records = [
+            r for r in self.ratings.values()
+            if "latest_model" not in r.path.lower() and "latest_model" not in r.name.lower()
+        ]
+        records.sort(
             key=lambda r: (r.conservative_rating, r.win_rate, r.mu),
             reverse=True
         )
@@ -522,8 +526,11 @@ class TrueSkillEvaluator:
             return fig
 
         # Sort ascending for horizontal bar chart (highest at top)
-        records = sorted(
-            self.ratings.values(),
+        records = [
+            r for r in self.ratings.values()
+            if "latest_model" not in r.path.lower() and "latest_model" not in r.name.lower()
+        ]
+        records.sort(
             key=lambda r: (r.conservative_rating, r.mu),
             reverse=False
         )

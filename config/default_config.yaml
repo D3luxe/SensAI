@@ -5,6 +5,8 @@ environment:
   tick_skip: 8
 hyperparameters:
   batch_size: 8192
+  bc_decay_steps: 500000000
+  bc_regularization_weight: 0.02
   clip_range: 0.2
   ent_coef: 0.006
   gae_lambda: 0.95
@@ -50,9 +52,9 @@ rewards:
   touch_weight: 1.5
 scenarios:
   aerial_prob: 0.04
-  custom_prob: 0.1
-  kickoff_prob: 0.1
-  replay_prob: 0.6
+  custom_prob: 0.09
+  kickoff_prob: 0.06
+  replay_prob: 0.65
   save_prob: 0.04
   turnaround_prob: 0.04
   wall_prob: 0.04
