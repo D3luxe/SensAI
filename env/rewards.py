@@ -778,11 +778,16 @@ class TouchBallReward(BaseReward):
     def __init__(self, weight: float = 1.2):
         super().__init__(weight)
         self._prev_touches: Dict[int, int] = {}
+        self._prev_ball_vel: Dict[int, np.ndarray] = {}
 
     def reset(self, initial_state: RocketSimArena):
         self._prev_touches = {car.id: car.ball_touches for car in initial_state.cars}
+        self._prev_ball_vel = {car.id: initial_state.ball.vel.copy() for car in initial_state.cars}
 
     def get_reward(self, car: CarState, arena: RocketSimArena, action: np.ndarray, is_goal: bool, scoring_team: Optional[int]) -> float:
+        prev_b_vel = self._prev_ball_vel.get(car.id, arena.ball.vel.copy())
+        self._prev_ball_vel[car.id] = arena.ball.vel.copy()
+
         prev = self._prev_touches.get(car.id, car.ball_touches)
         curr = car.ball_touches
         self._prev_touches[car.id] = curr
@@ -792,8 +797,8 @@ class TouchBallReward(BaseReward):
             ball_z = float(arena.ball.pos[2])
             height_multiplier = 1.0 + 1.5 * max(0.0, min(1.0, (ball_z - 150.0) / 1850.0))
 
-            # Aerial airborne touch bonus (car airborne contesting high ball)
-            airborne_bonus = 1.2 if (not car.on_ground and ball_z > 350.0) else 0.0
+            # Aerial airborne touch bonus: rewards leaving the turf to intercept bouncing or aerial balls cleanly
+            airborne_bonus = 1.2 * min(1.0, max(0.4, (ball_z - 120.0) / 300.0)) if (not car.on_ground and ball_z > 140.0) else 0.0
 
             # Kickoff first-touch race bounty
             is_kickoff_touch = bool(abs(arena.ball.pos[0]) < 200.0 and abs(arena.ball.pos[1]) < 200.0 and arena.ball.pos[2] < 150.0 and all(c.ball_touches <= 1 for c in arena.cars))
@@ -876,11 +881,15 @@ class TouchBallReward(BaseReward):
 
                 # Power and directional strike bonus:
                 # Rewards solid impact velocity transferred into the ball toward the opponent net
-                fwd_vec = car.get_forward_vector()
-                effective_rel_strike = abs(float(np.dot(car.vel[:2] - arena.ball.vel[:2], fwd_vec[:2]))) if car.on_ground else rel_speed
                 power_bonus = 0.0
                 if goal_alignment > 0.2 and not is_gentle_ground_push:
-                    power_bonus = min(1.5, max(ball_speed, effective_rel_strike) / 1500.0)
+                    power_bonus = min(1.5, ball_speed / 1500.0)
+
+                # Directional Kinetic Impulse Transfer:
+                # Measures instantaneous velocity vector progress transferred into the ball along unit_to_goal
+                delta_v_vec = arena.ball.vel - prev_b_vel
+                delta_v_goal = float(np.dot(delta_v_vec, unit_to_goal))
+                impulse_bonus = min(0.80, max(0.0, delta_v_goal / 1500.0)) if goal_alignment > 0.15 else 0.0
 
                 if is_defensive_clear:
                     clear_bonus = 0.5 * clear_urgency * max(0.0, (clear_quality - 0.5) / 0.5)
@@ -912,20 +921,25 @@ class TouchBallReward(BaseReward):
                         slip_factor = max(0.2, 1.0 - (contact_lateral_slip - 80.0) / 300.0)
                         base_touch *= slip_factor
                         power_bonus *= slip_factor
+                        impulse_bonus *= slip_factor
                         kickoff_bounty *= slip_factor
 
-                return self.weight * ((base_touch + power_bonus) * direction_multiplier * height_multiplier + airborne_bonus + kickoff_bounty)
+                return self.weight * ((base_touch + power_bonus + impulse_bonus) * direction_multiplier * height_multiplier + airborne_bonus + kickoff_bounty)
 
             # --- CASE 2: Ball hit directed backward toward defending half / goal ---
             else:
                 if is_defensive_clear:
                     # Lateral pinch / side clear out of defensive third
+                    unit_clear_y = 1.0 if car.team == 0 else -1.0
+                    delta_v_vec = arena.ball.vel - prev_b_vel
+                    delta_v_clear = float(delta_v_vec[1] * unit_clear_y)
+                    clear_impulse = min(0.50, max(0.0, delta_v_clear / 1500.0))
                     if car.on_ground and ball_z < 180.0:
                         contact_lateral_slip = abs(float(np.dot(car.vel[:2], car.get_right_vector()[:2])))
                         clear_base = 0.8 * clear_quality * max(0.4, 1.0 - (contact_lateral_slip / 500.0))
                     else:
                         clear_base = 0.8 * clear_quality
-                    return self.weight * (clear_base * height_multiplier + airborne_bonus)
+                    return self.weight * ((clear_base + clear_impulse) * height_multiplier + airborne_bonus)
                 else:
                     # Direct touch toward own goal: Strictly penalized to prevent own-goal dribbling
                     penalty_scale = max(0.3, abs(goal_alignment))
@@ -1061,7 +1075,7 @@ class JumpBridgeReward(BaseReward):
             # 1a. Close-Quarters Strike Liftoff, 50/50 Challenge, and Flick Pop Setup:
             is_contested_5050 = bool(dist <= 450.0 and is_opponent_challenging and ball_z < 220.0 and car.pos[2] < 150.0)
             is_flick_liftoff = bool(dist <= 260.0 and 115.0 <= ball_z <= 280.0 and car.pos[2] < 150.0 and abs(local_x) < 90.0 and abs(local_y) < 70.0)
-            is_strike_liftoff = bool(dist <= 500.0 and ball_z < 250.0 and car.pos[2] < 150.0 and forward_alignment > 0.20 and takeoff_closing_vel > 150.0 and pitch_input >= -0.10)
+            is_strike_liftoff = bool(dist <= 650.0 and ball_z < 320.0 and car.pos[2] < 150.0 and forward_alignment > 0.20 and takeoff_closing_vel > 150.0 and pitch_input >= -0.10)
 
             if is_contested_5050 or is_flick_liftoff or is_strike_liftoff:
                 if is_contested_5050:

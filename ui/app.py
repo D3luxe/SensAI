@@ -38,6 +38,7 @@ from utils.scenario_manager import (
     simulate_custom_scenario,
     DEFAULT_CUSTOM_SCENARIOS
 )
+from utils.trueskill_evaluator import TrueSkillEvaluator
 
 
 def load_yaml_config(path: str = "config/default_config.yaml") -> dict:
@@ -390,6 +391,95 @@ def build_full_diagnostic_export() -> tuple[str, str]:
     return overview_md, export_text
 
 
+def get_cockpit_leaderboard_df(evaluator: TrueSkillEvaluator, max_rows: int = 15) -> pd.DataFrame:
+    """
+    Returns a formatted DataFrame of top-performing checkpoints and models
+    ranked by conservative TrueSkill rating (mu - 3*sigma).
+    Highlights checkpoint iterations cleanly.
+    """
+    df = evaluator.get_leaderboard_dataframe()
+    if df.empty:
+        return pd.DataFrame(columns=[
+            "Rank", "Iteration / Model", "Rating (μ)", "Uncertainty (σ)",
+            "Conservative Score", "Win Rate", "Record (W-L-D)", "Goal Diff", "Matches"
+        ])
+
+    rename_dict = {}
+    for col in df.columns:
+        if "Rating" in col:
+            rename_dict[col] = "Rating (μ)"
+        elif "Uncertainty" in col:
+            rename_dict[col] = "Uncertainty (σ)"
+        elif col == "Model":
+            rename_dict[col] = "Iteration / Model"
+    df = df.rename(columns=rename_dict)
+
+    def format_iteration_label(name: str) -> str:
+        name_str = str(name)
+        if "checkpoint_iter_" in name_str.lower():
+            try:
+                parts = name_str.lower().split("checkpoint_iter_")
+                iter_num = parts[1].split(".")[0].split()[0]
+                return f"⚡ Iteration {iter_num} ({name_str})"
+            except Exception:
+                return f"⚡ {name_str}"
+        elif "latest" in name_str.lower():
+            return "🟢 Latest Policy (latest_model.pt)"
+        return name_str
+
+    if "Iteration / Model" in df.columns:
+        df["Iteration / Model"] = df["Iteration / Model"].apply(format_iteration_label)
+
+    return df.head(max_rows)
+
+
+def build_cockpit_leaderboard_summary_html(evaluator: TrueSkillEvaluator) -> str:
+    """Builds a sleek cyber-styled summary badge card for the Live Cockpit leaderboard."""
+    ratings = list(evaluator.ratings.values())
+    if not ratings:
+        return """
+        <div style="background: rgba(15, 23, 42, 0.7); border: 1px solid #334155; border-radius: 8px; padding: 10px 18px; margin-bottom: 8px; font-size: 0.9em; color: #94a3b8;">
+            <span>ℹ️ No models evaluated in TrueSkill tournament yet. Checkpoints are automatically graded on save (every 20 iterations).</span>
+        </div>
+        """
+
+    sorted_ratings = sorted(ratings, key=lambda r: (r.conservative_rating, r.win_rate, r.mu), reverse=True)
+    king = sorted_ratings[0]
+
+    ckpts = [r for r in sorted_ratings if not r.is_anchor and ("checkpoint_iter" in r.path.lower() or "checkpoint_iter" in r.name.lower())]
+    best_ckpt = ckpts[0] if ckpts else None
+
+    king_name = king.name
+    king_score = king.conservative_rating
+    total_matches = sum(r.matches_played for r in ratings) // 2
+
+    if best_ckpt:
+        try:
+            iter_id = best_ckpt.name.split("checkpoint_iter_")[-1].split(".")[0]
+            best_ckpt_str = f"Iteration {iter_id} (Score: {best_ckpt.conservative_rating:.1f})"
+        except Exception:
+            best_ckpt_str = f"{best_ckpt.name} (Score: {best_ckpt.conservative_rating:.1f})"
+    else:
+        best_ckpt_str = "Awaiting first checkpoint"
+
+    return f"""
+    <div style="background: linear-gradient(135deg, rgba(30, 41, 59, 0.85) 0%, rgba(15, 23, 42, 0.95) 100%); border: 1px solid #3b82f6; border-radius: 8px; padding: 12px 20px; margin-bottom: 10px; display: flex; justify-content: space-between; align-items: center; box-shadow: 0 4px 14px rgba(0, 0, 0, 0.25);">
+        <div>
+            <span style="color: #94a3b8; font-size: 0.82em; text-transform: uppercase; letter-spacing: 0.5px; font-weight: 700;">👑 Reigning King of the Hill</span>
+            <div style="font-size: 1.15em; font-weight: 800; color: #38bdf8;">{king_name} <span style="font-size: 0.85em; color: #a855f7; font-weight: 600;">(Score: {king_score:.2f})</span></div>
+        </div>
+        <div style="text-align: center;">
+            <span style="color: #94a3b8; font-size: 0.82em; text-transform: uppercase; letter-spacing: 0.5px; font-weight: 700;">⚡ Peak Checkpoint Iteration</span>
+            <div style="font-size: 1.05em; font-weight: 700; color: #4ade80;">{best_ckpt_str}</div>
+        </div>
+        <div style="text-align: right;">
+            <span style="color: #94a3b8; font-size: 0.82em; text-transform: uppercase; letter-spacing: 0.5px; font-weight: 700;">📊 Graded Roster</span>
+            <div style="font-size: 1.05em; font-weight: 700; color: #f1f5f9;">{len(ratings)} Models <span style="font-size: 0.85em; color: #94a3b8; font-weight: normal;">({total_matches} matches)</span></div>
+        </div>
+    </div>
+    """
+
+
 def create_ui():
     mgr = TrainingProcessManager.get_instance()
     bc_trainer = BehavioralCloningTrainer()
@@ -430,6 +520,7 @@ def create_ui():
             pass
 
     init_status = mgr.get_status_info()
+    ts_evaluator = TrueSkillEvaluator()
 
     with gr.Blocks(title="SensAI - Rocket League ML Studio") as demo:
         gr.HTML(f"<style>{CUSTOM_CSS}</style>")
@@ -600,6 +691,22 @@ def create_ui():
                                 interactive=False,
                                 autoscroll=True
                             )
+
+                gr.Markdown("---")
+                # -------------------------------------------------------------
+                # SECTION: 🏆 TOP PERFORMING ITERATIONS LEADERBOARD
+                # -------------------------------------------------------------
+                with gr.Group():
+                    with gr.Row():
+                        gr.Markdown("### 🏆 Top Performing Iterations (Live TrueSkill Leaderboard)")
+                        refresh_cockpit_lb_btn = gr.Button("🔄 Refresh Standings", size="sm", scale=1)
+
+                    cockpit_lb_summary = gr.HTML(build_cockpit_leaderboard_summary_html(ts_evaluator))
+                    cockpit_lb_table = gr.Dataframe(
+                        value=get_cockpit_leaderboard_df(ts_evaluator),
+                        label="Top Performing Checkpoints & Baselines (Ranked by Conservative Score: μ - 3σ)",
+                        interactive=False
+                    )
 
             # =========================================================
             # TAB 2: 🎛️ REWARDS & CURRICULUM STUDIO
@@ -1100,7 +1207,72 @@ def create_ui():
 
                 gr.Markdown("---")
 
-                # SECTION 4: Comprehensive System Snapshot & AI Assistant Export
+                # SECTION 4: TrueSkill Bayesian Rating & Tournament Leaderboard
+                with gr.Group():
+                    gr.Markdown("### 🏆 TrueSkill Bayesian Rating & Tournament Leaderboard")
+                    gr.Markdown(
+                        """
+                        > **⚔️ Competitive Evaluation Hub:**
+                        > Run symmetric home/away matches between saved checkpoints and benchmark anchors with golden-goal sudden-death overtime.
+                        > Models are ranked by conservative rating ($\\mu - 3\\sigma$).
+                        """
+                    )
+                    with gr.Row():
+                        with gr.Column(scale=5):
+                            all_ckpts = get_available_checkpoints()
+                            init_selected = [c for c in all_ckpts if "latest_model" in c or "pretrained" in c]
+                            ts_ckpt_multiselect = gr.Dropdown(
+                                choices=all_ckpts,
+                                value=init_selected if init_selected else (all_ckpts[:2] if len(all_ckpts) >= 2 else all_ckpts),
+                                multiselect=True,
+                                label="Select Checkpoints to Evaluate",
+                                info="Choose trained models to participate in the tournament."
+                            )
+                            with gr.Row():
+                                ts_select_all_btn = gr.Button("✅ Select All", size="sm")
+                                ts_clear_all_btn = gr.Button("🧹 Clear All", size="sm")
+                                ts_refresh_ckpts_btn = gr.Button("🔄 Scan Checkpoints", size="sm")
+
+                            anchor_choices = ["Baseline Chaser (Heuristic)"]
+                            if os.path.exists("checkpoints/pretrained_baseline.pt"):
+                                anchor_choices.append("Pretrained Baseline (BC)")
+                            if os.path.exists("checkpoints/necto-model.pt"):
+                                anchor_choices.append("Necto (EARL TorchScript)")
+                            if os.path.exists("checkpoints/nexto-model.pt"):
+                                anchor_choices.append("Nexto (EARL TorchScript)")
+
+                            ts_anchors_checkbox = gr.CheckboxGroup(
+                                choices=anchor_choices,
+                                value=["Baseline Chaser (Heuristic)"],
+                                label="Include Reference Benchmarks & Anchors"
+                            )
+
+                            with gr.Row():
+                                ts_matches_slider = gr.Slider(2, 6, value=2, step=2, label="Matches per Pair", info="Symmetric home/away (even #).")
+                                ts_steps_slider = gr.Slider(100, 600, value=350, step=50, label="Simulation Steps", info="Match length.")
+
+                            ts_overtime_check = gr.Checkbox(value=True, label="Sudden-Death Golden Goal Overtime (break ties)")
+
+                            with gr.Row():
+                                run_tournament_btn = gr.Button("⚔️ Run TrueSkill Tournament", variant="primary", scale=2)
+                                reset_leaderboard_btn = gr.Button("🗑️ Reset Leaderboard", variant="secondary", scale=1)
+
+                            ts_status_md = gr.Markdown("#### 🏁 Tournament Status: Ready. Select models and click 'Run TrueSkill Tournament'.")
+
+                        with gr.Column(scale=7):
+                            ts_leaderboard_table = gr.Dataframe(
+                                value=ts_evaluator.get_leaderboard_dataframe(),
+                                label="🏆 Ranked Model Standings",
+                                interactive=False
+                            )
+                            ts_leaderboard_plot = gr.Plot(
+                                value=ts_evaluator.render_leaderboard_plot(),
+                                label="📊 TrueSkill Rating Distribution (μ ± 2σ Confidence Intervals)"
+                            )
+
+                gr.Markdown("---")
+
+                # SECTION 5: Comprehensive System Snapshot & AI Assistant Export
                 with gr.Group():
                     with gr.Row():
                         gr.Markdown("### 📋 System Snapshot & AI Assistant Export")
@@ -2111,12 +2283,114 @@ def create_ui():
         )
 
         # -------------------------------------------------------------
+        # TRUESKILL TOURNAMENT & LEADERBOARD HANDLERS
+        # -------------------------------------------------------------
+        def on_ts_select_all():
+            ckpts = get_available_checkpoints()
+            return gr.Dropdown(value=ckpts)
+
+        def on_ts_clear_all():
+            return gr.Dropdown(value=[])
+
+        def on_ts_refresh_ckpts():
+            ckpts = get_available_checkpoints()
+            return gr.Dropdown(choices=ckpts)
+
+        def on_ts_reset_leaderboard():
+            ts_evaluator.reset_leaderboard()
+            return (
+                "#### 🗑️ TrueSkill leaderboard reset successfully.",
+                ts_evaluator.get_leaderboard_dataframe(),
+                ts_evaluator.render_leaderboard_plot()
+            )
+
+        def on_run_ts_tournament(ckpts, anchors, matches_per_pair, steps, enable_ot):
+            model_list = list(ckpts or [])
+            for a in (anchors or []):
+                if "heuristic" in a.lower():
+                    model_list.append("heuristic")
+                elif "pretrained" in a.lower() and os.path.exists("checkpoints/pretrained_baseline.pt"):
+                    model_list.append("checkpoints/pretrained_baseline.pt")
+                elif "necto" in a.lower() and os.path.exists("checkpoints/necto-model.pt"):
+                    model_list.append("checkpoints/necto-model.pt")
+                elif "nexto" in a.lower() and os.path.exists("checkpoints/nexto-model.pt"):
+                    model_list.append("checkpoints/nexto-model.pt")
+
+            model_list = list(dict.fromkeys([os.path.normpath(m).replace("\\", "/") for m in model_list if m]))
+            if len(model_list) < 2:
+                yield (
+                    "#### ⚠️ Error: Please select at least 2 contestants for the tournament.",
+                    ts_evaluator.get_leaderboard_dataframe(),
+                    ts_evaluator.render_leaderboard_plot()
+                )
+                return
+
+            yield (
+                f"#### ⚔️ Initializing tournament with {len(model_list)} models...",
+                ts_evaluator.get_leaderboard_dataframe(),
+                ts_evaluator.render_leaderboard_plot()
+            )
+
+            for update in ts_evaluator.run_tournament(
+                model_paths=model_list,
+                matches_per_pair=int(matches_per_pair),
+                max_steps=int(steps),
+                enable_overtime=bool(enable_ot),
+                device="cpu"
+            ):
+                p_idx = update["pairing_index"]
+                total_p = update["total_pairings"]
+                mA = update["model_a"]
+                mB = update["model_b"]
+                res_list = update["results"]
+
+                summary_parts = []
+                for r in res_list:
+                    ot = " (OT)" if r["overtime"] else ""
+                    summary_parts.append(f"{r['blue_name']} {r['blue_goals']}-{r['orange_goals']} {r['orange_name']}{ot}")
+
+                status_md = f"""
+                #### ⚔️ Tournament Progress: Matchup {p_idx}/{total_p}
+                * **Pairing:** `{mA}` vs `{mB}`
+                * **Results:** {', '.join(summary_parts)}
+                """
+                df = ts_evaluator.get_leaderboard_dataframe()
+                fig = ts_evaluator.render_leaderboard_plot()
+                yield status_md, df, fig
+
+            final_md = f"#### 🏆 Tournament Complete! All {len(model_list)} models ranked."
+            yield final_md, ts_evaluator.get_leaderboard_dataframe(), ts_evaluator.render_leaderboard_plot()
+
+        ts_select_all_btn.click(fn=on_ts_select_all, outputs=[ts_ckpt_multiselect])
+        ts_clear_all_btn.click(fn=on_ts_clear_all, outputs=[ts_ckpt_multiselect])
+        ts_refresh_ckpts_btn.click(fn=on_ts_refresh_ckpts, outputs=[ts_ckpt_multiselect])
+        reset_leaderboard_btn.click(
+            fn=on_ts_reset_leaderboard,
+            outputs=[ts_status_md, ts_leaderboard_table, ts_leaderboard_plot]
+        )
+        run_tournament_btn.click(
+            fn=on_run_ts_tournament,
+            inputs=[ts_ckpt_multiselect, ts_anchors_checkbox, ts_matches_slider, ts_steps_slider, ts_overtime_check],
+            outputs=[ts_status_md, ts_leaderboard_table, ts_leaderboard_plot]
+        )
+
+        def on_refresh_cockpit_leaderboard():
+            ts_evaluator.load_leaderboard()
+            return build_cockpit_leaderboard_summary_html(ts_evaluator), get_cockpit_leaderboard_df(ts_evaluator)
+
+        refresh_cockpit_lb_btn.click(
+            fn=on_refresh_cockpit_leaderboard,
+            outputs=[cockpit_lb_summary, cockpit_lb_table]
+        )
+
+        # -------------------------------------------------------------
         # REAL-TIME BACKGROUND REFRESH TIMER & INITIAL LOAD
         # -------------------------------------------------------------
         _last_history_mtime = [0.0]
         _last_history_size = [0]
         _last_log_str = [""]
         _last_view_mode = ["Recent 100"]
+        _last_leaderboard_mtime = [0.0]
 
         def on_timer_tick(view_mode: str = "Recent 100"):
             status = mgr.get_status_info()
@@ -2163,7 +2437,22 @@ def create_ui():
                 _last_view_mode[0] = view_mode
                 plot_update = render_training_curves_plot(history_file=history_file, mode=mode_param)
 
-            return card_html, start_btn_update, pause_btn_update, stop_btn_update, logs_update, plot_update
+            # Smart Leaderboard Update: zero overhead if leaderboard JSON hasn't changed
+            lb_file = "logs/trueskill_leaderboard.json"
+            curr_lb_mtime = os.path.getmtime(lb_file) if os.path.exists(lb_file) else 0.0
+            if curr_lb_mtime == _last_leaderboard_mtime[0]:
+                lb_summary_update = gr.update()
+                lb_table_update = gr.update()
+            else:
+                _last_leaderboard_mtime[0] = curr_lb_mtime
+                ts_evaluator.load_leaderboard()
+                lb_summary_update = build_cockpit_leaderboard_summary_html(ts_evaluator)
+                lb_table_update = get_cockpit_leaderboard_df(ts_evaluator)
+
+            return (
+                card_html, start_btn_update, pause_btn_update, stop_btn_update,
+                logs_update, plot_update, lb_summary_update, lb_table_update
+            )
 
         def on_change_view_mode(mode_val):
             mode_param = "full" if "full" in str(mode_val).lower() else "recent"
@@ -2179,14 +2468,22 @@ def create_ui():
         status_timer.tick(
             fn=on_timer_tick,
             inputs=[metrics_window_radio],
-            outputs=[status_card, start_btn, pause_btn, stop_btn, console_output, live_metrics_plot]
+            outputs=[
+                status_card, start_btn, pause_btn, stop_btn,
+                console_output, live_metrics_plot,
+                cockpit_lb_summary, cockpit_lb_table
+            ]
         )
 
         # Initialize UI on page load
         demo.load(
             fn=on_timer_tick,
             inputs=[metrics_window_radio],
-            outputs=[status_card, start_btn, pause_btn, stop_btn, console_output, live_metrics_plot]
+            outputs=[
+                status_card, start_btn, pause_btn, stop_btn,
+                console_output, live_metrics_plot,
+                cockpit_lb_summary, cockpit_lb_table
+            ]
         )
 
     return demo

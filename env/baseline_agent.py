@@ -94,9 +94,12 @@ class BaselineChaser(BaseOpponent):
         return np.array([throttle, steer, pitch, yaw, roll, jump, boost, handbrake], dtype=np.float32)
 
 
+_CHECKPOINT_MODEL_CACHE: Dict[Tuple[str, str], Tuple[float, Any, bool]] = {}
+
+
 class CheckpointOpponentBot(BaseOpponent):
     """
-    Opponent Bot powered by a trained SenseiBot Actor-Critic checkpoint (.pt).
+    Opponent Bot powered by a trained SenseiBot ActorCritic checkpoint (.pt).
     """
     def __init__(self, model_path: str, continuous_actions: bool = True, device: str = "cpu"):
         self.model_path = model_path
@@ -111,6 +114,17 @@ class CheckpointOpponentBot(BaseOpponent):
     def _load_checkpoint(self):
         from agent.models import ActorCritic
         try:
+            norm_path = os.path.normpath(self.model_path).replace("\\", "/")
+            curr_mtime = os.path.getmtime(self.model_path) if os.path.exists(self.model_path) else 0.0
+            cache_key = (norm_path, str(self.device))
+
+            if cache_key in _CHECKPOINT_MODEL_CACHE:
+                cached_mtime, cached_model, cached_cont = _CHECKPOINT_MODEL_CACHE[cache_key]
+                if cached_mtime == curr_mtime:
+                    self.model = cached_model
+                    self.continuous_actions = cached_cont
+                    return
+
             ckpt = torch.load(self.model_path, map_location=self.device, weights_only=False)
             if not isinstance(ckpt, dict) or "model_state_dict" not in ckpt:
                 raise ValueError(f"Invalid ActorCritic checkpoint format in {self.model_path}")
@@ -149,6 +163,7 @@ class CheckpointOpponentBot(BaseOpponent):
                 self.model.load_state_dict(saved_state)
 
             self.model.eval()
+            _CHECKPOINT_MODEL_CACHE[cache_key] = (curr_mtime, self.model, self.continuous_actions)
             print(f"[Opponent Bot] Successfully loaded Sensei Checkpoint opponent: {os.path.basename(self.model_path)}")
         except Exception as e:
             print(f"[Opponent Bot] Error loading checkpoint {self.model_path}: {e}. Fallback to BaselineChaser.")

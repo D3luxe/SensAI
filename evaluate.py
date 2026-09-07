@@ -12,11 +12,19 @@ from utils.visualizer import simulate_match
 
 
 def main():
+    import sys
+    try:
+        if hasattr(sys.stdout, "reconfigure"):
+            sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    except Exception:
+        pass
+
     parser = argparse.ArgumentParser(description="Evaluate Rocket League Policy")
     parser.add_argument("--model", type=str, default="checkpoints/latest_model.pt", help="Path to checkpoint model")
     parser.add_argument("--episodes", type=int, default=5, help="Number of evaluation episodes")
     parser.add_argument("--steps", type=int, default=500, help="Max steps per episode")
     parser.add_argument("--save-plot", type=str, default="logs/eval_match.png", help="Save visualization plot")
+    parser.add_argument("--trueskill", action="store_true", help="Update TrueSkill rating and benchmark against baselines")
     args = parser.parse_args()
 
     print("=" * 60)
@@ -70,6 +78,34 @@ def main():
         os.makedirs(os.path.dirname(args.save_plot), exist_ok=True)
         last_fig.savefig(args.save_plot, dpi=120, bbox_inches="tight")
         print(f"Saved evaluation trajectory plot to: {args.save_plot}")
+
+    if args.trueskill:
+        print("\n" + "=" * 60)
+        print("          TRUESKILL BAYESIAN RATING BENCHMARK          ")
+        print("=" * 60)
+        from utils.trueskill_evaluator import TrueSkillEvaluator
+        evaluator = TrueSkillEvaluator()
+        anchors = ["heuristic"]
+        if os.path.exists("checkpoints/pretrained_baseline.pt") and args.model != "checkpoints/pretrained_baseline.pt":
+            anchors.append("checkpoints/pretrained_baseline.pt")
+
+        print(f"Evaluating {args.model} against reference anchors: {anchors}...")
+        for anchor in anchors:
+            evaluator.evaluate_pairing(
+                model_a_path=args.model,
+                model_b_path=anchor,
+                matches_per_pair=2,
+                max_steps=args.steps,
+                enable_overtime=True
+            )
+
+        rec = evaluator.get_or_create_rating(args.model)
+        print(f"Updated TrueSkill for {rec.name}:")
+        print(f"  Rating (mu):        {rec.mu:.2f}")
+        print(f"  Uncertainty (sigma): +/-{rec.sigma:.2f}")
+        print(f"  Conservative Score: {rec.conservative_rating:.2f}")
+        print(f"  Record:             {rec.wins}W - {rec.losses}L - {rec.draws}D (Win Rate: {rec.win_rate:.1f}%)")
+        print("=" * 60)
 
 
 if __name__ == "__main__":

@@ -1,12 +1,16 @@
 {
-  "updated_at": 1788760108.8291204,
+  "updated_at": 1788795387.5629854,
   "learning_rate": 0.0003,
-  "ent_coef": 0.01,
+  "ent_coef": 0.006,
   "clip_range": 0.2,
   "bc_regularization_weight": 0.02,
   "bc_decay_steps": 500000000,
-  "baseline_opponent_ratio": 0.04,
+  "baseline_opponent_ratio": 0.1,
   "baseline_opponent_type": "checkpoints/necto-model.pt",
+  "league_enabled": true,
+  "self_play_ratio": 0.5,
+  "king_ratio": 0.25,
+  "pool_ratio": 0.25,
   "paused": false,
   "use_action_masking": true,
   "handbrake_height_buffer": 120.0,
@@ -17,18 +21,21 @@
     "save_weight": 12.0,
     "ball_to_goal_weight": 1.5,
     "player_to_ball_weight": 0.6,
+    "jump_bridge_weight": 0.3,
+    "air_roll_recovery_weight": 0.25,
+    "powerslide_weight": 0.2,
     "touch_weight": 1.5,
     "boost_gain_weight": 1.35,
-    "boost_lose_weight": 0.45
+    "boost_lose_weight": 0.55
   },
   "scenarios": {
-    "kickoff_prob": 0.13,
-    "replay_prob": 0.5,
-    "aerial_prob": 0.05,
-    "custom_prob": 0.12,
-    "turnaround_prob": 0.05,
-    "wall_prob": 0.05,
-    "wall_rebound_prob": 0.05,
-    "save_prob": 0.05
+    "kickoff_prob": 0.1,
+    "replay_prob": 0.6,
+    "aerial_prob": 0.04,
+    "custom_prob": 0.1,
+    "turnaround_prob": 0.04,
+    "wall_prob": 0.04,
+    "wall_rebound_prob": 0.04,
+    "save_prob": 0.04
   }
 }

@@ -18,4 +18,4 @@ checkpoints/latest_model_before_alignment_*.pt
 *.pid
 .system_generated/
 runs/
-
+*.npz

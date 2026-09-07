@@ -11,7 +11,7 @@ from env.physics_engine import RocketSimArena, CarState
 from env.rewards import RewardManager
 from env.observations import DefaultObservationBuilder
 from env.actions import ContinuousActionParser, DiscreteActionParser
-from env.baseline_agent import BaselineChaser, BaseOpponent, create_opponent_bot
+from env.baseline_agent import BaselineChaser, BaseOpponent, NectoNextoOpponentBot, create_opponent_bot
 
 
 SCENARIO_TIMEOUTS: Dict[str, int] = {
@@ -116,7 +116,7 @@ class RocketLeagueEnv:
 
         # Construct bot_mask: True = external Necto/Nexto agent, bypass jump sequencer
         bot_mask = None
-        if self.is_baseline_env and self.baseline_bot is not None:
+        if self.is_baseline_env and self.baseline_bot is not None and isinstance(self.baseline_bot, NectoNextoOpponentBot):
             bot_mask = [False] * len(self.arena.cars)
             bot_mask[1] = True  # Orange slot (index 1) is always the external bot in 1v1
 
@@ -339,6 +339,25 @@ class VectorizedRocketEnv:
             env.is_baseline_env = is_baseline
             env.baseline_opponent_type = self.baseline_opponent_type
             env.baseline_bot = create_opponent_bot(self.baseline_opponent_type, continuous_actions=self.continuous_actions) if is_baseline else None
+
+    def set_stratified_opponents(self, opponent_assignments: List[Optional[str]]):
+        """
+        Dynamically configures per-environment opponent assignments for stratified league self-play.
+        opponent_assignments: list of length num_envs containing opponent bot path/identifier or None for pure self-play.
+        """
+        for i, opp_spec in enumerate(opponent_assignments[:self.num_envs]):
+            env = self.envs[i]
+            if opp_spec is None:
+                # Pure Self-Play: both Blue and Orange are policy learners
+                env.is_baseline_env = False
+                env.baseline_opponent_type = "self_play"
+                env.baseline_bot = None
+            else:
+                # League / Baseline Opponent: Blue is learner, Orange is opponent bot
+                env.is_baseline_env = True
+                if getattr(env, "baseline_opponent_type", None) != opp_spec or env.baseline_bot is None:
+                    env.baseline_opponent_type = opp_spec
+                    env.baseline_bot = create_opponent_bot(opp_spec, continuous_actions=self.continuous_actions)
 
     def get_learner_mask(self) -> np.ndarray:
         """

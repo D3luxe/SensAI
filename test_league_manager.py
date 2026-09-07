@@ -1,0 +1,162 @@
+"""
+Unit & Integration Tests for LeagueManager, Automated TrueSkill Grading, and Stratified Vectorized Self-Play.
+"""
+
+from __future__ import annotations
+import os
+import shutil
+import tempfile
+import unittest
+import numpy as np
+import torch
+
+from agent.models import ActorCritic
+from env.rocket_env import VectorizedRocketEnv
+from utils.trueskill_evaluator import TrueSkillEvaluator
+from utils.league_manager import LeagueManager
+
+
+class TestLeagueManager(unittest.TestCase):
+    def setUp(self):
+        self.test_dir = tempfile.mkdtemp(prefix="sensai_test_league_")
+        self.leaderboard_path = os.path.join(self.test_dir, "test_leaderboard.json")
+        self.evaluator = TrueSkillEvaluator(leaderboard_path=self.leaderboard_path)
+
+        # Create dummy checkpoint
+        self.dummy_ckpt_path = os.path.join(self.test_dir, "checkpoint_iter_20.pt")
+        model = ActorCritic(obs_dim=94, act_dim=8, continuous_actions=True)
+        torch.save({
+            "iteration": 20,
+            "global_step": 20480,
+            "model_state_dict": model.state_dict(),
+            "continuous_actions": True,
+            "use_layer_norm": True
+        }, self.dummy_ckpt_path)
+
+        self.league = LeagueManager(
+            evaluator=self.evaluator,
+            config={
+                "enabled": True,
+                "self_play_ratio": 0.50,
+                "king_ratio": 0.25,
+                "pool_ratio": 0.25,
+                "eval_matches_per_grade": 2,
+                "eval_max_steps": 50,  # Fast for unit tests
+                "protect_top_k": 3
+            },
+            leaderboard_path=self.leaderboard_path
+        )
+
+    def tearDown(self):
+        shutil.rmtree(self.test_dir, ignore_errors=True)
+
+    def test_cold_start_and_anchors(self):
+        """Verify cold start gracefully falls back to anchor and never crashes."""
+        self.assertIsNotNone(self.league.king_of_the_hill)
+        self.assertGreaterEqual(len(self.league.elite_pool), 1)
+        self.assertIn("heuristic", self.league.active_anchors)
+
+    def test_stratified_distribution_allocation(self):
+        """Test stratification logic across various environment counts."""
+        # 64 envs: 32 self-play, 16 king, 16 pool
+        dist64 = self.league.get_stratified_distribution(64)
+        self.assertEqual(len(dist64), 64)
+        self.assertEqual(dist64.count(None), 32)
+        # Remaining 32 are opponents
+        self.assertEqual(sum(x is not None for x in dist64), 32)
+
+        # 16 envs: 8 self-play, 4 king, 4 pool
+        dist16 = self.league.get_stratified_distribution(16)
+        self.assertEqual(len(dist16), 16)
+        self.assertEqual(dist16.count(None), 8)
+        self.assertEqual(sum(x is not None for x in dist16), 8)
+
+        # 4 envs: 2 self-play, 1 king, 1 pool
+        dist4 = self.league.get_stratified_distribution(4)
+        self.assertEqual(len(dist4), 4)
+        self.assertEqual(dist4.count(None), 2)
+        self.assertEqual(sum(x is not None for x in dist4), 2)
+
+        # 1 env: Temporal alternation across rollouts
+        t1 = self.league.get_stratified_distribution(1)
+        t2 = self.league.get_stratified_distribution(1)
+        t3 = self.league.get_stratified_distribution(1)
+        self.assertEqual(len(t1), 1)
+        self.assertEqual(len(t2), 1)
+        self.assertEqual(len(t3), 1)
+        # Should have cycled through different modes
+        cycle_types = [t1[0] is None, t2[0] is None, t3[0] is None]
+        self.assertTrue(any(cycle_types), "Temporal alternation must include self-play")
+        self.assertFalse(all(cycle_types), "Temporal alternation must also include opponent bots")
+
+    def test_auto_grade_checkpoint(self):
+        """Verify auto-grading runs matches, updates Bayesian ratings, and persists results."""
+        rec = self.league.grade_checkpoint(self.dummy_ckpt_path)
+        self.assertIsNotNone(rec)
+        self.assertGreater(rec.matches_played, 0)
+        self.assertGreater(rec.sigma, 0.0)
+
+        # Check leaderboard file exists and contains the model
+        self.assertTrue(os.path.exists(self.leaderboard_path))
+        self.evaluator.load_leaderboard()
+        norm_key = self.league._normalize_path(self.dummy_ckpt_path)
+        self.assertIn(norm_key, self.evaluator.ratings)
+
+    def test_protected_checkpoints(self):
+        """Verify protected checkpoints include top-K models and King-of-the-Hill."""
+        self.league.grade_checkpoint(self.dummy_ckpt_path)
+        protected = self.league.get_protected_checkpoint_paths()
+        abs_dummy = os.path.abspath(self.dummy_ckpt_path)
+        self.assertIn(abs_dummy, protected)
+
+    def test_telemetry(self):
+        """Verify telemetry output structure."""
+        telem = self.league.get_telemetry()
+        self.assertIn("league_enabled", telem)
+        self.assertIn("king_of_the_hill", telem)
+        self.assertIn("king_score", telem)
+        self.assertIn("elite_pool_size", telem)
+        self.assertIn("protected_checkpoints_count", telem)
+        self.assertTrue(telem["league_enabled"])
+
+
+class TestStratifiedVectorizedEnv(unittest.TestCase):
+    def test_stratified_opponents_and_learner_mask(self):
+        vec_env = VectorizedRocketEnv(
+            num_envs=4,
+            game_mode="1v1",
+            tick_skip=8,
+            max_episode_steps=100
+        )
+
+        # Env 0: None (Self-Play)
+        # Env 1: heuristic
+        # Env 2: None (Self-Play)
+        # Env 3: heuristic
+        assignments = [None, "heuristic", None, "heuristic"]
+        vec_env.set_stratified_opponents(assignments)
+
+        self.assertFalse(vec_env.envs[0].is_baseline_env)
+        self.assertTrue(vec_env.envs[1].is_baseline_env)
+        self.assertFalse(vec_env.envs[2].is_baseline_env)
+        self.assertTrue(vec_env.envs[3].is_baseline_env)
+
+        mask = vec_env.get_learner_mask()
+        # Shape: 4 envs * 2 players = 8
+        self.assertEqual(len(mask), 8)
+        # Expected: [True, True, True, False, True, True, True, False]
+        expected = np.array([True, True, True, False, True, True, True, False])
+        np.testing.assert_array_equal(mask, expected)
+
+        # Test stepping
+        obs = vec_env.reset()
+        self.assertEqual(obs.shape, (4, 2, vec_env.obs_dim))
+        actions = np.zeros((4, 2, vec_env.act_dim), dtype=np.float32)
+        next_obs, rews, dones, infos = vec_env.step(actions)
+        self.assertEqual(next_obs.shape, (4, 2, vec_env.obs_dim))
+        self.assertEqual(rews.shape, (4, 2))
+        self.assertEqual(len(infos), 4)
+
+
+if __name__ == "__main__":
+    unittest.main()

@@ -18,6 +18,7 @@ from typing import Dict, Any, Optional
 from env.rocket_env import VectorizedRocketEnv
 from env.observations import OBS_MIRROR_MASK_NP, ACT_MIRROR_MASK_NP
 from agent.models import ActorCritic
+from utils.league_manager import LeagueManager
 
 
 class PPOTrainer:
@@ -119,6 +120,14 @@ class PPOTrainer:
             baseline_opponent_ratio=self.baseline_opponent_ratio,
             baseline_opponent_type=self.baseline_opponent_type
         )
+
+        # Initialize League Manager (Stratified Vectorized League Self-Play)
+        league_cfg = self.config.get("league", {})
+        self.league_manager = LeagueManager(config=league_cfg)
+        if self.league_manager.enabled:
+            strat_assignments = self.league_manager.get_stratified_distribution(self.num_envs)
+            self.env.set_stratified_opponents(strat_assignments)
+            print(f"[PPO Trainer] Stratified League Self-Play active across {self.num_envs} envs (King: {self.league_manager.king_of_the_hill})")
 
         sc_cfg = self.config.get("scenarios", {})
         if sc_cfg:
@@ -246,8 +255,34 @@ class PPOTrainer:
                     type_changed = True
 
                 if ratio_changed or type_changed:
-                    self.env.update_baseline_opponent(self.baseline_opponent_ratio, self.baseline_opponent_type)
-                    print(f"[Live Config] Opponent bot dynamically updated: Ratio={self.baseline_opponent_ratio:.2f}, Type='{self.baseline_opponent_type}'")
+                    if not (hasattr(self, "league_manager") and self.league_manager.enabled):
+                        self.env.update_baseline_opponent(self.baseline_opponent_ratio, self.baseline_opponent_type)
+                        print(f"[Live Config] Opponent bot dynamically updated: Ratio={self.baseline_opponent_ratio:.2f}, Type='{self.baseline_opponent_type}'")
+
+                # Update League Manager dynamic parameters
+                if hasattr(self, "league_manager"):
+                    league_changed = False
+                    if "league_enabled" in live and bool(live["league_enabled"]) != self.league_manager.enabled:
+                        self.league_manager.enabled = bool(live["league_enabled"])
+                        league_changed = True
+                    if "self_play_ratio" in live and abs(float(live["self_play_ratio"]) - self.league_manager.self_play_ratio) > 1e-4:
+                        self.league_manager.self_play_ratio = float(live["self_play_ratio"])
+                        league_changed = True
+                    if "king_ratio" in live and abs(float(live["king_ratio"]) - self.league_manager.king_ratio) > 1e-4:
+                        self.league_manager.king_ratio = float(live["king_ratio"])
+                        league_changed = True
+                    if "pool_ratio" in live and abs(float(live["pool_ratio"]) - self.league_manager.pool_ratio) > 1e-4:
+                        self.league_manager.pool_ratio = float(live["pool_ratio"])
+                        league_changed = True
+
+                    if league_changed:
+                        if self.league_manager.enabled:
+                            strat_assignments = self.league_manager.get_stratified_distribution(self.num_envs)
+                            self.env.set_stratified_opponents(strat_assignments)
+                            print(f"[Live Config] Stratified League reconfigured: SP={self.league_manager.self_play_ratio:.2f}, King={self.league_manager.king_ratio:.2f}, Pool={self.league_manager.pool_ratio:.2f}")
+                        else:
+                            self.env.update_baseline_opponent(self.baseline_opponent_ratio, self.baseline_opponent_type)
+                            print(f"[Live Config] Stratified League disabled. Reverted to static baseline ratio.")
 
                 # Update action masking parameters
                 if "use_action_masking" in live:
@@ -339,7 +374,16 @@ class PPOTrainer:
 
             sorted_ckpts = sorted(ckpts, key=get_ckpt_iteration, reverse=True)
             to_remove = sorted_ckpts[limit:]
+
+            # Query protected high-TrueSkill checkpoints from league manager
+            protected_paths = set()
+            if hasattr(self, "league_manager") and self.league_manager:
+                protected_paths = self.league_manager.get_protected_checkpoint_paths()
+
             for old_file in to_remove:
+                abs_old = os.path.abspath(old_file)
+                if abs_old in protected_paths:
+                    continue
                 try:
                     os.remove(old_file)
                     print(f"[PPO Trainer] Rolling Cleanup: Removed old checkpoint {os.path.basename(old_file)}")
@@ -442,6 +486,11 @@ class PPOTrainer:
 
             # 1. Dynamic live parameter check
             self.check_live_config()
+
+            # Dynamic Stratified League Rotation (Resample Pool Opponents every 5 iterations)
+            if hasattr(self, "league_manager") and self.league_manager.enabled and self.iteration % 5 == 0:
+                strat_assignments = self.league_manager.get_stratified_distribution(self.num_envs)
+                self.env.set_stratified_opponents(strat_assignments)
 
             iter_start_time = time.time()
             episode_rewards_list = []
@@ -686,6 +735,10 @@ class PPOTrainer:
                 "telemetry": telemetry
             }
 
+            # Add League Manager telemetry
+            if hasattr(self, "league_manager") and self.league_manager:
+                metrics_payload["league"] = self.league_manager.get_telemetry()
+
             metrics_file = os.path.join(self.log_dir, "metrics.json")
             with open(metrics_file, "w") as f:
                 json.dump(metrics_payload, f, indent=2)
@@ -715,14 +768,22 @@ class PPOTrainer:
                 f"SPS: {sps}"
             )
 
-            # Auto-save checkpoints with rolling retention
+            # Auto-save checkpoints with rolling retention & TrueSkill auto-grading
             if self.iteration % self.checkpoint_interval == 0:
                 ckpt_path = os.path.join(self.save_dir, f"checkpoint_iter_{self.iteration}.pt")
                 latest_path = os.path.join(self.save_dir, "latest_model.pt")
                 self.save_checkpoint(ckpt_path)
                 self.save_checkpoint(latest_path)
+
+                # Automated TrueSkill Bayesian Grading & League Promotion
+                if hasattr(self, "league_manager") and self.league_manager.enabled:
+                    self.league_manager.grade_checkpoint(ckpt_path, device="cpu")
+                    # Update league environment stratification with new ratings
+                    strat_assignments = self.league_manager.get_stratified_distribution(self.num_envs)
+                    self.env.set_stratified_opponents(strat_assignments)
+
                 self.cleanup_old_checkpoints(max_to_keep=self.max_checkpoints_to_keep)
-                print(f"[PPO Trainer] Saved checkpoint to {ckpt_path} (Preserving latest {self.max_checkpoints_to_keep} checkpoints)")
+                print(f"[PPO Trainer] Saved checkpoint to {ckpt_path} (Preserving latest {self.max_checkpoints_to_keep} + protected TrueSkill checkpoints)")
 
         if self.writer:
             self.writer.close()
