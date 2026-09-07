@@ -11,7 +11,7 @@ from env.physics_engine import RocketSimArena, CarState
 from env.rewards import RewardManager
 from env.observations import DefaultObservationBuilder
 from env.actions import ContinuousActionParser, DiscreteActionParser
-from env.baseline_agent import BaselineChaser, BaseOpponent, NectoNextoOpponentBot, create_opponent_bot
+from env.baseline_agent import BaselineChaser, BaseOpponent, NectoNextoOpponentBot, CheckpointOpponentBot, create_opponent_bot
 
 
 SCENARIO_TIMEOUTS: Dict[str, int] = {
@@ -96,7 +96,14 @@ class RocketLeagueEnv:
             obs.append(self.obs_builder.build_obs(car, self.arena))
         return np.array(obs, dtype=np.float32)
 
-    def step(self, raw_actions: np.ndarray, out_obs: Optional[np.ndarray] = None, out_rews: Optional[np.ndarray] = None, include_breakdown: bool = False) -> Tuple[np.ndarray, np.ndarray, np.ndarray, Dict[str, Any]]:
+    def step(
+        self,
+        raw_actions: np.ndarray,
+        out_obs: Optional[np.ndarray] = None,
+        out_rews: Optional[np.ndarray] = None,
+        include_breakdown: bool = False,
+        opponent_action: Optional[np.ndarray] = None
+    ) -> Tuple[np.ndarray, np.ndarray, np.ndarray, Dict[str, Any]]:
         """
         Step simulation by tick_skip sub-ticks.
         raw_actions: shape (num_players, action_dim)
@@ -106,8 +113,11 @@ class RocketLeagueEnv:
         actions_to_parse = raw_actions.copy()
 
         # If baseline environment in 1v1, override Orange bot action with BaselineChaser / Opponent Bot
-        if self.is_baseline_env and self.baseline_bot is not None and len(self.arena.cars) > 1:
-            actions_to_parse[1] = self.baseline_bot.get_action(self.arena.cars[1], self.arena)
+        if self.is_baseline_env and len(self.arena.cars) > 1:
+            if opponent_action is not None:
+                actions_to_parse[1] = opponent_action
+            elif self.baseline_bot is not None:
+                actions_to_parse[1] = self.baseline_bot.get_action(self.arena.cars[1], self.arena)
 
         parsed_actions = self.action_parser.parse_actions(actions_to_parse)
 
@@ -271,6 +281,15 @@ class VectorizedRocketEnv:
         self._rew_buffer = np.zeros((num_envs, self.num_players_per_env), dtype=np.float32)
         self._done_buffer = np.zeros((num_envs, self.num_players_per_env), dtype=bool)
 
+        # Opponent batched inference engine state
+        self._opponent_prev_actions = np.zeros((num_envs, 8), dtype=np.float32)
+        self._batched_opp_actions: List[Optional[np.ndarray]] = [None] * num_envs
+        self._nexto_envs: List[int] = []
+        self._necto_envs: List[int] = []
+        self._checkpoint_groups: Dict[str, List[int]] = {}
+        self._heuristic_envs: List[int] = []
+        self._build_opponent_groups()
+
         # Multi-threaded worker engine for parallel environment stepping (default 1 for zero-overhead in-memory execution)
         import threading
         if num_workers is None:
@@ -315,13 +334,80 @@ class VectorizedRocketEnv:
                 _, _, dones, info = self.envs[i].step(
                     self._actions_ref[i],
                     out_obs=self._obs_buffer[i],
-                    out_rews=self._rew_buffer[i]
+                    out_rews=self._rew_buffer[i],
+                    opponent_action=self._batched_opp_actions[i]
                 )
                 self._done_buffer[i] = dones
+                if dones[0]:
+                    self._opponent_prev_actions[i].fill(0.0)
                 chunk_infos.append(info)
 
             self._worker_infos[w_idx] = chunk_infos
             self.done_events[w_idx].set()
+
+    def _build_opponent_groups(self):
+        """Pre-groups environment indices by opponent model type for zero-overhead batched execution."""
+        self._nexto_envs = []
+        self._necto_envs = []
+        self._checkpoint_groups = {}
+        self._heuristic_envs = []
+
+        for i, env in enumerate(self.envs):
+            if not env.is_baseline_env or env.baseline_bot is None or len(env.arena.cars) <= 1:
+                continue
+            bot = env.baseline_bot
+            if isinstance(bot, NectoNextoOpponentBot):
+                if bot.is_nexto:
+                    self._nexto_envs.append(i)
+                else:
+                    self._necto_envs.append(i)
+            elif isinstance(bot, CheckpointOpponentBot):
+                path = getattr(bot, "model_path", "default")
+                if path not in self._checkpoint_groups:
+                    self._checkpoint_groups[path] = []
+                self._checkpoint_groups[path].append(i)
+            else:
+                self._heuristic_envs.append(i)
+
+    def _batch_evaluate_opponents(self):
+        """Vectorized batched forward pass across all baseline/league opponent bots."""
+        # 1. Nexto (batched)
+        if self._nexto_envs:
+            bot = self.envs[self._nexto_envs[0]].baseline_bot
+            cars = [self.envs[i].arena.cars[1] for i in self._nexto_envs]
+            arenas = [self.envs[i].arena for i in self._nexto_envs]
+            pas = [self._opponent_prev_actions[i] for i in self._nexto_envs]
+            acts = bot.batch_get_actions(cars, arenas, prev_actions=pas)
+            for k, i in enumerate(self._nexto_envs):
+                act = acts[k]
+                self._batched_opp_actions[i] = act
+                self._opponent_prev_actions[i] = act.copy()
+
+        # 2. Necto (batched)
+        if self._necto_envs:
+            bot = self.envs[self._necto_envs[0]].baseline_bot
+            cars = [self.envs[i].arena.cars[1] for i in self._necto_envs]
+            arenas = [self.envs[i].arena for i in self._necto_envs]
+            pas = [self._opponent_prev_actions[i] for i in self._necto_envs]
+            acts = bot.batch_get_actions(cars, arenas, prev_actions=pas)
+            for k, i in enumerate(self._necto_envs):
+                act = acts[k]
+                self._batched_opp_actions[i] = act
+                self._opponent_prev_actions[i] = act.copy()
+
+        # 3. Checkpoint bots (grouped by checkpoint model)
+        for path, indices in self._checkpoint_groups.items():
+            bot = self.envs[indices[0]].baseline_bot
+            cars = [self.envs[i].arena.cars[1] for i in indices]
+            arenas = [self.envs[i].arena for i in indices]
+            acts = bot.batch_get_actions(cars, arenas)
+            for k, i in enumerate(indices):
+                self._batched_opp_actions[i] = acts[k]
+
+        # 4. Heuristic Chaser
+        for i in self._heuristic_envs:
+            bot = self.envs[i].baseline_bot
+            self._batched_opp_actions[i] = bot.get_action(self.envs[i].arena.cars[1], self.envs[i].arena)
 
     def update_baseline_ratio(self, ratio: float):
         """Dynamically reconfigures the number of environments running against the baseline opponent."""
@@ -339,6 +425,7 @@ class VectorizedRocketEnv:
             env.is_baseline_env = is_baseline
             env.baseline_opponent_type = self.baseline_opponent_type
             env.baseline_bot = create_opponent_bot(self.baseline_opponent_type, continuous_actions=self.continuous_actions) if is_baseline else None
+        self._build_opponent_groups()
 
     def set_stratified_opponents(self, opponent_assignments: List[Optional[str]]):
         """
@@ -358,6 +445,7 @@ class VectorizedRocketEnv:
                 if getattr(env, "baseline_opponent_type", None) != opp_spec or env.baseline_bot is None:
                     env.baseline_opponent_type = opp_spec
                     env.baseline_bot = create_opponent_bot(opp_spec, continuous_actions=self.continuous_actions)
+        self._build_opponent_groups()
 
     def get_learner_mask(self) -> np.ndarray:
         """
@@ -381,6 +469,7 @@ class VectorizedRocketEnv:
             env.update_scenarios(config_dict)
 
     def reset(self) -> np.ndarray:
+        self._opponent_prev_actions.fill(0.0)
         for i, env in enumerate(self.envs):
             obs = env.reset()
             self._obs_buffer[i] = obs
@@ -391,6 +480,8 @@ class VectorizedRocketEnv:
         actions shape: (num_envs, num_players, act_dim)
         Parallel step updating pre-allocated internal numpy buffers across persistent worker threads.
         """
+        self._batch_evaluate_opponents()
+
         if self.num_workers > 1:
             self._actions_ref = actions
             for w in range(self.num_workers):
@@ -416,9 +507,12 @@ class VectorizedRocketEnv:
                 _, _, dones, info = env.step(
                     actions[i],
                     out_obs=self._obs_buffer[i],
-                    out_rews=self._rew_buffer[i]
+                    out_rews=self._rew_buffer[i],
+                    opponent_action=self._batched_opp_actions[i]
                 )
                 self._done_buffer[i] = dones
+                if dones[0]:
+                    self._opponent_prev_actions[i].fill(0.0)
                 all_infos.append(info)
 
             return (

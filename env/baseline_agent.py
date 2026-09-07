@@ -109,6 +109,7 @@ class CheckpointOpponentBot(BaseOpponent):
         self.continuous_parser = ContinuousActionParser()
         self.model: Optional[nn.Module] = None
         self.continuous_actions = continuous_actions
+        self._obs_buf = np.zeros(self.obs_builder.obs_dim, dtype=np.float32)
         self._load_checkpoint()
 
     def _load_checkpoint(self):
@@ -173,15 +174,55 @@ class CheckpointOpponentBot(BaseOpponent):
         if self.model is None or not isinstance(arena_or_ball, RocketSimArena):
             return BaselineChaser().get_action(car, arena_or_ball)
 
-        obs = self.obs_builder.build_obs(car, arena_or_ball)
+        self.obs_builder.build_obs(car, arena_or_ball, out=self._obs_buf)
         with torch.no_grad():
-            obs_t = torch.tensor(obs, dtype=torch.float32, device=self.device).unsqueeze(0)
-            act_t, _, _, _ = self.model.get_action_and_value(obs_t, deterministic=True)
+            obs_t = torch.from_numpy(self._obs_buf).unsqueeze(0).to(self.device)
+            if hasattr(self.model, "get_action"):
+                act_t = self.model.get_action(obs_t, deterministic=True)
+            else:
+                act_t, _, _, _ = self.model.get_action_and_value(obs_t, deterministic=True)
             if self.continuous_actions:
                 return self.continuous_parser.parse_actions(act_t.squeeze(0).cpu().numpy())
             else:
                 act_idx = int(act_t.squeeze().cpu().item())
                 return self.discrete_parser.parse_actions(act_idx)
+
+    def batch_get_actions(
+        self,
+        cars: List[CarState],
+        arenas: List[RocketSimArena]
+    ) -> List[np.ndarray]:
+        """
+        Fast vectorized batched inference across multiple environment cars simultaneously.
+        """
+        if self.model is None or not cars:
+            return [self.get_action(c, a) for c, a in zip(cars, arenas)]
+
+        try:
+            obs_list = []
+            for c, a in zip(cars, arenas):
+                obs = np.empty(self.obs_builder.obs_dim, dtype=np.float32)
+                self.obs_builder.build_obs(c, a, out=obs)
+                obs_list.append(obs)
+
+            obs_batch = torch.from_numpy(np.stack(obs_list)).to(self.device)
+            with torch.no_grad():
+                if hasattr(self.model, "get_action"):
+                    act_batch = self.model.get_action(obs_batch, deterministic=True).cpu().numpy()
+                else:
+                    act_batch, _, _, _ = self.model.get_action_and_value(obs_batch, deterministic=True)
+                    act_batch = act_batch.cpu().numpy()
+
+            actions = []
+            if self.continuous_actions:
+                for k in range(len(cars)):
+                    actions.append(self.continuous_parser.parse_actions(act_batch[k]))
+            else:
+                for k in range(len(cars)):
+                    actions.append(self.discrete_parser.parse_actions(int(act_batch[k])))
+            return actions
+        except Exception:
+            return [self.get_action(c, a) for c, a in zip(cars, arenas)]
 
 
 BOOST_LOCATIONS = np.array([
@@ -262,7 +303,7 @@ class NectoNextoOpponentBot(BaseOpponent):
             print(f"[Opponent Bot] Error loading TorchScript model {self.model_path}: {e}")
             self.model = None
 
-    def _build_nexto_inputs(self, car: CarState, arena: RocketSimArena) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    def _build_nexto_inputs(self, car: CarState, arena: RocketSimArena, prev_action: Optional[np.ndarray] = None) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         n_players = len(arena.cars)
         n_boosts = len(BOOST_LOCATIONS)
         n_entities = n_players + 1 + n_boosts
@@ -311,8 +352,9 @@ class NectoNextoOpponentBot(BaseOpponent):
 
         kv /= EARL_NORM
 
+        act = self.prev_action if prev_action is None else prev_action
         q[0, 0, :24] = kv[0, main_idx, :].copy()
-        q[0, 0, 24:] = self.prev_action
+        q[0, 0, 24:] = act
 
         # Convert to relative heading frame
         kv[..., 5:8] -= q[..., 5:8]
@@ -334,7 +376,7 @@ class NectoNextoOpponentBot(BaseOpponent):
             torch.from_numpy(m).to(self.device).bool()
         )
 
-    def _build_necto_inputs(self, car: CarState, arena: RocketSimArena) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    def _build_necto_inputs(self, car: CarState, arena: RocketSimArena, prev_action: Optional[np.ndarray] = None) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         n_boosts = len(BOOST_LOCATIONS)
         n_players = len(arena.cars)
         qkv = np.zeros((1, 1 + n_players + n_boosts, 24), dtype=np.float32)
@@ -382,8 +424,9 @@ class NectoNextoOpponentBot(BaseOpponent):
             qkv *= EARL_INVERT
 
         # Build query
+        act = self.prev_action if prev_action is None else prev_action
         q = qkv[0, main_idx, :].copy()
-        q = np.expand_dims(np.concatenate((q, self.prev_action), axis=0), axis=(0, 1))
+        q = np.expand_dims(np.concatenate((q, act), axis=0), axis=(0, 1))
 
         # Convert to relative coordinates
         kv = qkv.copy()
@@ -442,6 +485,89 @@ class NectoNextoOpponentBot(BaseOpponent):
             return action
         except Exception as e:
             return BaselineChaser().get_action(car, arena_or_ball)
+
+    def batch_get_actions(
+        self,
+        cars: List[CarState],
+        arenas: List[RocketSimArena],
+        prev_actions: Optional[List[np.ndarray]] = None
+    ) -> List[np.ndarray]:
+        """
+        Vectorized batched inference for Necto/Nexto across multiple environment cars simultaneously.
+        """
+        if self.model is None or not cars:
+            return [self.get_action(c, a) for c, a in zip(cars, arenas)]
+
+        try:
+            if self.is_nexto:
+                qs, kvs, masks = [], [], []
+                for i, (c, a) in enumerate(zip(cars, arenas)):
+                    pa = prev_actions[i] if prev_actions is not None else None
+                    q_t, kv_t, mask_t = self._build_nexto_inputs(c, a, prev_action=pa)
+                    qs.append(q_t)
+                    kvs.append(kv_t)
+                    masks.append(mask_t)
+
+                q_b = torch.cat(qs, dim=0)
+                kv_b = torch.cat(kvs, dim=0)
+                mask_b = torch.cat(masks, dim=0)
+
+                with torch.no_grad():
+                    out = self.model((q_b, kv_b, mask_b))
+                logits = out[0] if isinstance(out, (tuple, list)) else out
+                best_indices = torch.argmax(logits, dim=-1).cpu().numpy()
+
+                actions = []
+                for idx in best_indices:
+                    actions.append(self.nexto_action_table[idx].numpy().copy())
+                return actions
+            else:
+                qs, kvs, masks = [], [], []
+                for i, (c, a) in enumerate(zip(cars, arenas)):
+                    pa = prev_actions[i] if prev_actions is not None else None
+                    q_t, kv_t, mask_t = self._build_necto_inputs(c, a, prev_action=pa)
+                    qs.append(q_t)
+                    kvs.append(kv_t)
+                    masks.append(mask_t)
+
+                q_b = torch.cat(qs, dim=0)
+                kv_b = torch.cat(kvs, dim=0)
+                mask_b = torch.cat(masks, dim=0)
+
+                with torch.no_grad():
+                    out, _ = self.model((q_b, kv_b, mask_b))
+
+                max_shape = max(o.shape[-1] for o in out)
+                logits = torch.stack(
+                    [
+                        l if l.shape[-1] == max_shape
+                        else torch.nn.functional.pad(l, pad=(0, max_shape - l.shape[-1]), value=float("-inf"))
+                        for l in out
+                    ]
+                ).swapdims(0, 1).squeeze()
+
+                if logits.ndim == 1:
+                    logits = logits.unsqueeze(0)
+
+                parsed_actions_all = torch.argmax(logits, dim=-1).cpu().numpy().reshape((len(cars), 5))
+                parsed_actions_all[:, 0] = parsed_actions_all[:, 0] - 1
+                parsed_actions_all[:, 1] = parsed_actions_all[:, 1] - 1
+
+                actions = []
+                for k in range(len(cars)):
+                    parsed = np.zeros(8, dtype=np.float32)
+                    parsed[0] = parsed_actions_all[k, 0]
+                    parsed[1] = parsed_actions_all[k, 1]
+                    parsed[2] = parsed_actions_all[k, 0]
+                    parsed[3] = parsed_actions_all[k, 1] * (1 - parsed_actions_all[k, 4])
+                    parsed[4] = parsed_actions_all[k, 1] * parsed_actions_all[k, 4]
+                    parsed[5] = parsed_actions_all[k, 2]
+                    parsed[6] = parsed_actions_all[k, 3]
+                    parsed[7] = parsed_actions_all[k, 4]
+                    actions.append(parsed)
+                return actions
+        except Exception:
+            return [self.get_action(c, a) for c, a in zip(cars, arenas)]
 
 
 def create_opponent_bot(

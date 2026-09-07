@@ -328,3 +328,95 @@ class ActorCritic(nn.Module):
             log_prob = dist.log_prob(action)
             entropy = dist.entropy()
             return action, log_prob, entropy, value
+
+    def get_action(
+        self,
+        obs: torch.Tensor,
+        deterministic: bool = True,
+        apply_masking: Optional[bool] = None
+    ) -> torch.Tensor:
+        """
+        Fast actor-only forward pass for evaluation and opponent bot stepping.
+        Bypasses the entire critic value network, log-probabilities, distributions,
+        and entropy calculations for maximum inference throughput.
+        """
+        features = self.actor_backbone(obs)
+
+        if self.continuous_actions:
+            if obs.shape[-1] == self.obs_mirror_mask.shape[-1] and self.act_dim == self.act_mirror_mask.shape[-1]:
+                # Equivariant Bilateral Symmetry Forward Pass with bilateral pad pair permutation
+                if hasattr(self, "obs_mirror_indices") and self.obs_mirror_indices is not None and self.obs_mirror_indices.shape[-1] == obs.shape[-1]:
+                    obs_mirr = (obs * self.obs_mirror_mask)[..., self.obs_mirror_indices]
+                else:
+                    obs_mirr = obs * self.obs_mirror_mask
+                feat_mirr = self.actor_backbone(obs_mirr)
+
+                raw_mean = torch.tanh(self.actor_mean(features))
+                mirr_mean = torch.tanh(self.actor_mean(feat_mirr)) * self.act_mirror_mask[:5]
+                action_mean = 0.5 * (raw_mean + mirr_mean)
+
+                raw_bin = self.actor_binary(features)
+                mirr_bin = self.actor_binary(feat_mirr)
+                bin_logits = 0.5 * (raw_bin + mirr_bin)
+            else:
+                action_mean = torch.tanh(self.actor_mean(features))
+                bin_logits = self.actor_binary(features)
+
+            should_mask = self.use_action_masking if apply_masking is None else apply_masking
+            if should_mask and obs.shape[-1] >= 22:
+                # Gated Action Masking with Physical Conditions
+                is_grounded = obs[..., 19] > 0.5
+                is_airborne = ~is_grounded
+                near_ground = obs[..., 2] < self.height_buffer_norm
+                can_boost = obs[..., 18] > 0.001
+                can_jump = (obs[..., 20] > 0.5) | (obs[..., 21] > 0.5)
+                can_slide = is_grounded | near_ground
+
+                btn_mask = torch.stack([can_jump, can_boost, can_slide], dim=-1)
+                masked_bin_logits = torch.where(
+                    btn_mask, bin_logits, torch.full_like(bin_logits, -1e4)
+                )
+
+                m0 = torch.where(is_airborne, torch.clamp(action_mean[..., 0], min=0.0), action_mean[..., 0])
+                m1 = action_mean[..., 1]
+                grd = is_grounded.unsqueeze(-1)
+                m234 = torch.where(grd, torch.zeros_like(action_mean[..., 2:5]), action_mean[..., 2:5])
+                masked_mean = torch.cat([m0.unsqueeze(-1), m1.unsqueeze(-1), m234], dim=-1)
+
+                if deterministic:
+                    thresh = self.bin_thresh_logits.to(masked_bin_logits.device)
+                    act_bin = (masked_bin_logits > thresh).float() * 2.0 - 1.0
+                else:
+                    clamped_log_std = torch.clamp(self.actor_log_std, min=-2.5, max=-0.7)
+                    action_std = torch.exp(clamped_log_std).expand_as(action_mean)
+                    s01 = action_std[..., :2]
+                    s234 = torch.where(grd, torch.full_like(action_std[..., 2:5], 1e-4), action_std[..., 2:5])
+                    masked_std = torch.cat([s01, s234], dim=-1)
+                    dist_cont = Normal(masked_mean, masked_std)
+                    dist_bin = Bernoulli(logits=masked_bin_logits)
+                    raw_act_cont = dist_cont.rsample()
+                    act_c234 = torch.where(grd, torch.zeros_like(raw_act_cont[..., 2:5]), raw_act_cont[..., 2:5])
+                    masked_mean = torch.cat([raw_act_cont[..., :2], act_c234], dim=-1)
+                    raw_act_bin = dist_bin.sample() * 2.0 - 1.0
+                    act_bin = torch.where(btn_mask, raw_act_bin, torch.full_like(raw_act_bin, -1.0))
+                return torch.cat([masked_mean, act_bin], dim=-1)
+            else:
+                if deterministic:
+                    thresh = self.bin_thresh_logits.to(bin_logits.device)
+                    act_bin = (bin_logits > thresh).float() * 2.0 - 1.0
+                    return torch.cat([action_mean, act_bin], dim=-1)
+                else:
+                    clamped_log_std = torch.clamp(self.actor_log_std, min=-2.5, max=-0.7)
+                    action_std = torch.exp(clamped_log_std).expand_as(action_mean)
+                    dist_cont = Normal(action_mean, action_std)
+                    dist_bin = Bernoulli(logits=bin_logits)
+                    act_cont = dist_cont.rsample()
+                    act_bin = dist_bin.sample() * 2.0 - 1.0
+                    return torch.cat([act_cont, act_bin], dim=-1)
+        else:
+            logits = self.actor_logits(features)
+            if deterministic:
+                return torch.argmax(logits, dim=-1)
+            else:
+                return Categorical(logits=logits).sample()
+

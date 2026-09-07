@@ -290,6 +290,11 @@ class PPOTrainer:
                 if "handbrake_height_buffer" in live:
                     self.agent.handbrake_height_buffer = float(live["handbrake_height_buffer"])
                     self.agent.height_buffer_norm = float(live["handbrake_height_buffer"]) / 2044.0
+                if "torch_num_threads" in live:
+                    try:
+                        torch.set_num_threads(int(live["torch_num_threads"]))
+                    except Exception:
+                        pass
 
                 # Check manual save checkpoint trigger
                 if live.get("save_checkpoint_requested", False):
@@ -516,7 +521,7 @@ class PPOTrainer:
 
                 next_obs, rews, dones, infos = self.env.step(act_np)
 
-                rew_tensor = torch.from_numpy(rews).float().flatten()
+                rew_tensor = torch.from_numpy(rews).float().flatten().to(self.device)
                 rew_buf[step] = rew_tensor
 
                 for info in infos:
@@ -526,8 +531,8 @@ class PPOTrainer:
                         episode_touches_list.extend(info.get("episode_touches", []))
                         episode_goals_list.append(sum(info.get("episode_goals", [0, 0])))
 
-                obs_tensor = torch.from_numpy(next_obs).float().reshape(-1, self.obs_dim)
-                done_tensor = torch.from_numpy(dones).float().flatten()
+                obs_tensor = torch.from_numpy(next_obs).float().reshape(-1, self.obs_dim).to(self.device)
+                done_tensor = torch.from_numpy(dones).float().flatten().to(self.device)
 
             # 3. Generalized Advantage Estimation (GAE)
             with torch.no_grad():

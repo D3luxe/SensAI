@@ -44,6 +44,13 @@ def main():
         print(f"\n[FATAL] Pre-Flight Physics Verification Failed: {e}")
         sys.exit(1)
 
+    # Optimize CPU intra-op thread count to prevent OpenMP barrier lock thrashing
+    # Note: Opponent bot inference (Nexto/Necto/Checkpoints) runs on CPU even when PPO runs on CUDA.
+    try:
+        torch.set_num_threads(4)
+    except Exception:
+        pass
+
     trainer = PPOTrainer(
         config_path=args.config,
         live_config_path=args.live_config,
