@@ -568,40 +568,39 @@ class TestRewardAuditFixes(unittest.TestCase):
         self.assertTrue(rew._challenge_jump_active.get(car.id, False), "50/50 backflip challenge should activate _challenge_jump_active")
 
     def test_dribble_overshoot_braking_and_coasting_rewarded(self):
-        """Test that tap-braking and coasting/throttle release are both rewarded when overshooting a dribble."""
+        """Test that overshooting recovery is purely outcome-driven: penalizing racing away while rewarding reversing to recover."""
         rew = PlayerToBallVelocityReward(weight=1.0)
         # Car at Y=150, ball at Y=0 (local_x < 0, ball behind bumper, dist=150 < 300)
-        car = CarState(
+        # Car racing further downfield away from trailing ball at 500 uu/s (rel_fwd_speed = 350 > 150)
+        car_racing = CarState(
             id=0, team=0,
             pos=np.array([0.0, 150.0, 17.0], dtype=np.float32),
-            vel=np.array([0.0, 200.0, 0.0], dtype=np.float32),
+            vel=np.array([0.0, 500.0, 0.0], dtype=np.float32),
             rot=np.array([0.0, math.pi / 2, 0.0], dtype=np.float32),  # Facing +Y
+            on_ground=True
+        )
+        # Car reversing back toward the ball at 300 uu/s to recover
+        car_reversing = CarState(
+            id=0, team=0,
+            pos=np.array([0.0, 150.0, 17.0], dtype=np.float32),
+            vel=np.array([0.0, -300.0, 0.0], dtype=np.float32),
+            rot=np.array([0.0, math.pi / 2, 0.0], dtype=np.float32),
             on_ground=True
         )
         self.arena.ball.pos = np.array([0.0, 0.0, 93.0], dtype=np.float32)
         self.arena.ball.vel = np.array([0.0, 150.0, 0.0], dtype=np.float32)
-        self.arena.cars = [car]
+        self.arena.cars = [car_racing]
         rew.reset(self.arena)
 
-        # 1. Tap-braking: throttle = -1.0
-        act_brake = np.zeros(8, dtype=np.float32)
-        act_brake[0] = -1.0
-        r_brake = rew.get_reward(car, self.arena, act_brake, False, None)
+        act_neu = np.zeros(8, dtype=np.float32)
+        r_racing = rew.get_reward(car_racing, self.arena, act_neu, False, None)
 
-        # 2. Coasting / Throttle release: throttle = 0.0, boost = 0.0
-        act_coast = np.zeros(8, dtype=np.float32)
-        act_coast[0] = 0.0
-        r_coast = rew.get_reward(car, self.arena, act_coast, False, None)
+        rew.reset(self.arena)
+        rew._prev_dist[0] = 180.0
+        r_reversing = rew.get_reward(car_reversing, self.arena, act_neu, False, None)
 
-        # 3. Driving away: throttle = 1.0
-        act_drive_away = np.zeros(8, dtype=np.float32)
-        act_drive_away[0] = 1.0
-        r_drive_away = rew.get_reward(car, self.arena, act_drive_away, False, None)
-
-        self.assertGreater(r_brake, 0.0, f"Tap-braking on dribble overshoot should be positive, got {r_brake}")
-        self.assertGreater(r_coast, 0.0, f"Coasting/throttle release on dribble overshoot should be positive, got {r_coast}")
-        self.assertGreater(r_brake, r_coast, f"Active tap-braking should be rewarded more than passive coasting, got brake={r_brake} vs coast={r_coast}")
-        self.assertLess(r_drive_away, 0.0, f"Driving away from ball on overshoot should be penalized, got {r_drive_away}")
+        self.assertLess(r_racing, 0.0, f"Racing away from trailing ball on overshoot must be penalized, got {r_racing}")
+        self.assertGreater(r_reversing, r_racing, f"Reversing back toward overshot ball must exceed racing away, got rev={r_reversing} vs racing={r_racing}")
 
     def test_lateral_pocket_pacing_and_cut_in(self):
         """Test that driving alongside the ball downfield awards pocket pacing, hook cuts, and letting ball roll ahead."""
@@ -649,7 +648,7 @@ class TestRewardAuditFixes(unittest.TestCase):
         self.assertGreater(r_let_roll, 0.15, f"Coasting to let ball roll ahead from pocket should be rewarded, got {r_let_roll}")
 
     def test_speed_differential_overshoot_resolution(self):
-        """Test that overshoot rewards dynamically adapt when ball is already overtaking the car."""
+        """Test that overshoot resolution is outcome-driven and avoids unearned input bounties."""
         rew = PlayerToBallVelocityReward(weight=1.0)
         # Car at (0, 150, 17), facing +Y. Ball at (0, 0, 93) trailing behind.
         # Case: Ball is rolling FASTER than car (ball_vel = 800, car_vel = 300 -> rel_fwd_speed = -500)
@@ -665,17 +664,16 @@ class TestRewardAuditFixes(unittest.TestCase):
         self.arena.cars = [car]
         rew.reset(self.arena)
 
-        # Coasting / feather throttle to receive the overtaking ball smoothly
         act_coast = np.zeros(8, dtype=np.float32)
         act_coast[0] = 0.1
         r_coast = rew.get_reward(car, self.arena, act_coast, False, None)
 
-        # Hard reverse braking (-1.0) when ball is already overtaking rapidly
         act_hard_reverse = np.zeros(8, dtype=np.float32)
         act_hard_reverse[0] = -1.0
         r_hard_reverse = rew.get_reward(car, self.arena, act_hard_reverse, False, None)
 
-        self.assertGreater(r_coast, r_hard_reverse, f"When ball is already overtaking from behind, coasting must be preferred over slamming reverse into it! (got coast={r_coast} vs rev={r_hard_reverse})")
+        # Action neutrality: action inputs alone do not award unearned bounties
+        self.assertEqual(r_coast, r_hard_reverse, "Action inputs alone must not award unearned bounties during overshoot resolution")
 
     def test_roof_carry_goal_directed_reward(self):
         """Test that carrying the ball on the roof towards the opponent goal is rewarded, while carrying towards own goal is not."""

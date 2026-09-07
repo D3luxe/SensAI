@@ -729,7 +729,10 @@ class TestPhysicsAndControls(unittest.TestCase):
 
     def test_strike_zone_throttle_pacing_reward(self):
         """
-        Guarantees that PlayerToBallVelocityReward provides braking incentive when closing fast on a slower ball.
+        Guarantees that PlayerToBallVelocityReward enforces outcome-driven pacing:
+        1. Overspeeding in the strike zone incurs a pacing penalty.
+        2. A properly paced approach avoids the penalty and earns higher net reward.
+        3. Pressing reverse does NOT award unearned action bounties when vehicle physics is unchanged.
         """
         from env.rewards import PlayerToBallVelocityReward
         from env.physics_engine import CarState, BallState, BoostPad
@@ -740,29 +743,44 @@ class TestPhysicsAndControls(unittest.TestCase):
                 self.boost_pads = BoostPad.create_standard_pads()
 
         ball = BallState(pos=np.array([0, -2800, 93], dtype=np.float32), vel=np.array([0, 200, 0], dtype=np.float32))
-        car = CarState(id=0, team=0, pos=np.array([0, -3000, 17], dtype=np.float32),
-                       vel=np.array([0, 1500, 0], dtype=np.float32),
-                       rot=np.array([0, math.pi / 2, 0], dtype=np.float32), on_ground=True)
 
-        p2b = PlayerToBallVelocityReward(weight=1.0)
-        p2b.reset(MockArena(ball, [car]))
+        # Overspeeding approach (1500 uu/s toward ball)
+        car_fast = CarState(id=0, team=0, pos=np.array([0, -3000, 17], dtype=np.float32),
+                            vel=np.array([0, 1500, 0], dtype=np.float32),
+                            rot=np.array([0, math.pi / 2, 0], dtype=np.float32), on_ground=True)
 
-        # Braking action (act[0] = -1.0)
+        # Properly paced approach (400 uu/s toward ball)
+        car_paced = CarState(id=0, team=0, pos=np.array([0, -3000, 17], dtype=np.float32),
+                             vel=np.array([0, 400, 0], dtype=np.float32),
+                             rot=np.array([0, math.pi / 2, 0], dtype=np.float32), on_ground=True)
+
+        p2b_fast = PlayerToBallVelocityReward(weight=1.0)
+        p2b_fast.reset(MockArena(ball, [car_fast]))
+        act_neu = np.array([0, 0, 0, 0, 0, 0, 0, 0], dtype=np.float32)
         act_brake = np.array([-1.0, 0, 0, 0, 0, 0, 0, 0], dtype=np.float32)
-        rew_brake = p2b.get_reward(car, MockArena(ball, [car]), act_brake, False, None)
-
-        # Full throttle action (act[0] = +1.0)
         act_thr = np.array([1.0, 0, 0, 0, 0, 0, 0, 0], dtype=np.float32)
-        rew_thr = p2b.get_reward(car, MockArena(ball, [car]), act_thr, False, None)
 
-        self.assertGreater(rew_brake, rew_thr, "Braking when closing too fast on slow ball must yield higher reward than full throttle!")
+        rew_fast_brake = p2b_fast.get_reward(car_fast, MockArena(ball, [car_fast]), act_brake, False, None)
+        rew_fast_thr = p2b_fast.get_reward(car_fast, MockArena(ball, [car_fast]), act_thr, False, None)
+
+        # 1. Action neutrality: No unearned input bounty for pressing reverse
+        self.assertEqual(rew_fast_brake, rew_fast_thr,
+                         "Outcome-driven pacing must not award artificial input bounties for holding reverse!")
+
+        # 2. Outcome comparison: Paced car avoids pacing penalty
+        p2b_paced = PlayerToBallVelocityReward(weight=1.0)
+        p2b_paced.reset(MockArena(ball, [car_paced]))
+        rew_paced = p2b_paced.get_reward(car_paced, MockArena(ball, [car_paced]), act_neu, False, None)
+
+        self.assertGreater(rew_paced, rew_fast_thr,
+                           f"Properly paced approach ({rew_paced}) must exceed overspeeding approach ({rew_fast_thr}) due to pacing penalty avoidance!")
 
     def test_bouncing_and_falling_ball_pacing_and_braking(self):
         """
         Guarantees that PlayerToBallVelocityReward:
-        1. Correctly awards braking incentive when closing fast on a falling/bouncing ball (vz < -500 uu/s).
+        1. Penalizes overspeeding when closing on a falling ball, rewarding proper approach pacing.
         2. Penalizes full boost sprint directly underneath a bouncing ball.
-        3. Awards tap-braking and penalizes driving away when overshooting a bouncing ball.
+        3. Penalizes racing away from an overshot ball, while rewarding reversing back toward it.
         4. Applies anti-overshoot penalty when zooming past a bouncing ball without touching.
         """
         from env.rewards import PlayerToBallVelocityReward
@@ -776,40 +794,47 @@ class TestPhysicsAndControls(unittest.TestCase):
         # 1. Falling ball with vertical gravity velocity (-850 uu/s) at Z=400, horizontal speed 100 uu/s
         ball_falling = BallState(pos=np.array([0, -2800, 400], dtype=np.float32),
                                  vel=np.array([0, 100, -850], dtype=np.float32))
-        car = CarState(id=0, team=0, pos=np.array([0, -3000, 17], dtype=np.float32),
-                       vel=np.array([0, 1400, 0], dtype=np.float32),
-                       rot=np.array([0, math.pi / 2, 0], dtype=np.float32), on_ground=True)
+        car_fast = CarState(id=0, team=0, pos=np.array([0, -3000, 17], dtype=np.float32),
+                            vel=np.array([0, 1400, 0], dtype=np.float32),
+                            rot=np.array([0, math.pi / 2, 0], dtype=np.float32), on_ground=True)
+        car_paced = CarState(id=0, team=0, pos=np.array([0, -3000, 17], dtype=np.float32),
+                             vel=np.array([0, 400, 0], dtype=np.float32),
+                             rot=np.array([0, math.pi / 2, 0], dtype=np.float32), on_ground=True)
 
-        p2b = PlayerToBallVelocityReward(weight=1.0)
-        p2b.reset(MockArena(ball_falling, [car]))
+        p2b_fast = PlayerToBallVelocityReward(weight=1.0)
+        p2b_fast.reset(MockArena(ball_falling, [car_fast]))
+        act_neu = np.array([0, 0, 0, 0, 0, 0, 0, 0], dtype=np.float32)
+        rew_fast = p2b_fast.get_reward(car_fast, MockArena(ball_falling, [car_fast]), act_neu, False, None)
 
-        act_brake = np.array([-1.0, 0, 0, 0, 0, 0, 0, 0], dtype=np.float32)
-        rew_brake = p2b.get_reward(car, MockArena(ball_falling, [car]), act_brake, False, None)
+        p2b_paced = PlayerToBallVelocityReward(weight=1.0)
+        p2b_paced.reset(MockArena(ball_falling, [car_paced]))
+        rew_paced = p2b_paced.get_reward(car_paced, MockArena(ball_falling, [car_paced]), act_neu, False, None)
 
-        act_thr = np.array([1.0, 0, 0, 0, 0, 0, 0, 0], dtype=np.float32)
-        rew_thr = p2b.get_reward(car, MockArena(ball_falling, [car]), act_thr, False, None)
-
-        self.assertGreater(rew_brake, rew_thr,
-                            f"Braking when closing fast on falling ball must exceed full throttle! brake={rew_brake} thr={rew_thr}")
+        self.assertGreater(rew_paced, rew_fast,
+                           f"Properly paced approach on falling ball must exceed overspeeding rush! paced={rew_paced} fast={rew_fast}")
 
         # 2. Overshooting a bouncing ball (Z=320, trailing behind car at local_x < 0)
         ball_bouncing_behind = BallState(pos=np.array([0, -3100, 320], dtype=np.float32),
                                           vel=np.array([0, 50, -200], dtype=np.float32))
-        car_past = CarState(id=0, team=0, pos=np.array([0, -3000, 17], dtype=np.float32),
-                            vel=np.array([0, 300, 0], dtype=np.float32),
-                            rot=np.array([0, math.pi / 2, 0], dtype=np.float32), on_ground=True)
+        # Car racing further away from the trailing ball downfield
+        car_racing_away = CarState(id=0, team=0, pos=np.array([0, -3000, 17], dtype=np.float32),
+                                   vel=np.array([0, 400, 0], dtype=np.float32),
+                                   rot=np.array([0, math.pi / 2, 0], dtype=np.float32), on_ground=True)
+        # Car reversing back toward the trailing ball to recover
+        car_reversing_back = CarState(id=0, team=0, pos=np.array([0, -3000, 17], dtype=np.float32),
+                                      vel=np.array([0, -400, 0], dtype=np.float32),
+                                      rot=np.array([0, math.pi / 2, 0], dtype=np.float32), on_ground=True)
 
-        p2b_os = PlayerToBallVelocityReward(weight=1.0)
-        p2b_os.reset(MockArena(ball_bouncing_behind, [car_past]))
+        p2b_away = PlayerToBallVelocityReward(weight=1.0)
+        p2b_away.reset(MockArena(ball_bouncing_behind, [car_racing_away]))
+        rew_away = p2b_away.get_reward(car_racing_away, MockArena(ball_bouncing_behind, [car_racing_away]), act_neu, False, None)
 
-        act_brake_os = np.array([-1.0, 0, 0, 0, 0, 0, 0, 0], dtype=np.float32)
-        rew_brake_os = p2b_os.get_reward(car_past, MockArena(ball_bouncing_behind, [car_past]), act_brake_os, False, None)
+        p2b_back = PlayerToBallVelocityReward(weight=1.0)
+        p2b_back.reset(MockArena(ball_bouncing_behind, [car_reversing_back]))
+        rew_back = p2b_back.get_reward(car_reversing_back, MockArena(ball_bouncing_behind, [car_reversing_back]), act_neu, False, None)
 
-        act_drive_away = np.array([1.0, 0, 0, 0, 0, 0, 0, 0], dtype=np.float32)
-        rew_drive_away = p2b_os.get_reward(car_past, MockArena(ball_bouncing_behind, [car_past]), act_drive_away, False, None)
-
-        self.assertGreater(rew_brake_os, 0.0, f"Tap braking when overshooting bouncing ball must be positive! got {rew_brake_os}")
-        self.assertLess(rew_drive_away, 0.0, f"Driving away from bouncing ball must be penalized! got {rew_drive_away}")
+        self.assertLess(rew_away, 0.0, f"Racing away from trailing ball must be penalized! got {rew_away}")
+        self.assertGreater(rew_back, rew_away, f"Reversing back toward trailing ball must exceed racing away! back={rew_back} away={rew_away}")
 
         # 3. Anti-overshoot penalty when zooming past bouncing ball without touch
         ball_bounce = BallState(pos=np.array([0, -2800, 450], dtype=np.float32), vel=np.array([0, 0, 0], dtype=np.float32))
@@ -819,6 +844,7 @@ class TestPhysicsAndControls(unittest.TestCase):
         p2b_strike = PlayerToBallVelocityReward(weight=1.0)
         p2b_strike.reset(MockArena(ball_bounce, [car_approaching]))
 
+        act_thr = np.array([1.0, 0, 0, 0, 0, 0, 0, 0], dtype=np.float32)
         # Step 1: inside horizontal strike zone (horiz_dist = 200 < 380)
         p2b_strike.get_reward(car_approaching, MockArena(ball_bounce, [car_approaching]), act_thr, False, None)
         self.assertTrue(p2b_strike._was_in_strike_zone[0], "Car within 200 uu horiz of bounce must be marked in strike zone!")
@@ -982,6 +1008,79 @@ class TestPhysicsAndControls(unittest.TestCase):
         act_cancel = np.array([1.0, 0.0, 1.0, 0.0, 1.0, 0.0, 1.0, 0.0], dtype=np.float32)
         rew_cancel = air_roll_rew.get_reward(car_inverted, MockArena(ball, [car_inverted]), act_cancel, False, None)
         self.assertGreaterEqual(rew_cancel, 0.0, "Active flip cancel + air roll must NOT receive upside-down landing crash penalty!")
+
+    def test_backwards_closure_and_anti_reverse_exploit(self):
+        """
+        Guarantees that PlayerToBallVelocityReward:
+        1. Fully rewards backwards momentum when closing distance to a ball behind the car (half-flip / rear clears).
+        2. Awards zero velocity reward and negative delta_dist when reversing away from a ball in front of the car.
+        3. Awards higher reward for pushing forward through a slow ball into net than reversing beside it.
+        """
+        from env.rewards import PlayerToBallVelocityReward
+        from env.physics_engine import CarState, BallState, BoostPad
+
+        class MockArena:
+            def __init__(self, ball, cars):
+                self.ball, self.cars = ball, cars
+                self.boost_pads = BoostPad.create_standard_pads()
+
+        # 1. Car on goal side facing defending goal (-Y), ball behind it at -2800 (+Y).
+        # Car reversing backwards toward ball at 600 uu/s (+Y).
+        ball_behind = BallState(pos=np.array([0, -2800, 93], dtype=np.float32), vel=np.array([0, 0, 0], dtype=np.float32))
+        car_rev_to_ball = CarState(id=0, team=0, pos=np.array([0, -3200, 17], dtype=np.float32),
+                                   vel=np.array([0, 600, 0], dtype=np.float32),
+                                   rot=np.array([0, -math.pi / 2, 0], dtype=np.float32), on_ground=True)
+
+        p2b_rev = PlayerToBallVelocityReward(weight=1.0)
+        p2b_rev.reset(MockArena(ball_behind, [car_rev_to_ball]))
+        # Previous distance was 450, now at 400 (closing distance in reverse)
+        p2b_rev._prev_dist[0] = 450.0
+
+        act_neu = np.zeros(8, dtype=np.float32)
+        rew_rev_closure = p2b_rev.get_reward(car_rev_to_ball, MockArena(ball_behind, [car_rev_to_ball]), act_neu, False, None)
+        self.assertGreater(rew_rev_closure, 0.05,
+                           f"Reversing toward ball behind car must earn positive distance closure and velocity! got {rew_rev_closure}")
+
+        # 2. Car facing +Y, ball ahead at -2000. Car reversing AWAY from ball in front at -600 uu/s.
+        ball_ahead = BallState(pos=np.array([0, -2000, 93], dtype=np.float32), vel=np.array([0, 0, 0], dtype=np.float32))
+        car_rev_away = CarState(id=0, team=0, pos=np.array([0, -2500, 17], dtype=np.float32),
+                                vel=np.array([0, -600, 0], dtype=np.float32),
+                                rot=np.array([0, math.pi / 2, 0], dtype=np.float32), on_ground=True)
+
+        p2b_away = PlayerToBallVelocityReward(weight=1.0)
+        p2b_away.reset(MockArena(ball_ahead, [car_rev_away]))
+        # Previous distance was 450, now at 500 (moving away in reverse)
+        p2b_away._prev_dist[0] = 450.0
+
+        act_brake = np.array([-1.0, 0, 0, 0, 0, 0, 0, 0], dtype=np.float32)
+        rew_rev_away = p2b_away.get_reward(car_rev_away, MockArena(ball_ahead, [car_rev_away]), act_brake, False, None)
+        self.assertLess(rew_rev_away, 0.0,
+                        f"Reversing away from a ball in front must yield non-positive reward, never free bounties! got {rew_rev_away}")
+
+        # 3. Slow ball rolling toward opponent net (+Y) with car beside it
+        ball_slow_goal = BallState(pos=np.array([50, 2000, 93], dtype=np.float32), vel=np.array([0, 150, 0], dtype=np.float32))
+        car_forward_push = CarState(id=0, team=0, pos=np.array([0, 1950, 17], dtype=np.float32),
+                                    vel=np.array([0, 300, 0], dtype=np.float32),
+                                    rot=np.array([0, math.pi / 2, 0], dtype=np.float32), on_ground=True)
+        car_creeping_reverse = CarState(id=0, team=0, pos=np.array([0, 1950, 17], dtype=np.float32),
+                                        vel=np.array([0, -100, 0], dtype=np.float32),
+                                        rot=np.array([0, math.pi / 2, 0], dtype=np.float32), on_ground=True)
+
+        p2b_push = PlayerToBallVelocityReward(weight=1.0)
+        p2b_push.reset(MockArena(ball_slow_goal, [car_forward_push]))
+        p2b_push._prev_dist[0] = 120.0
+        rew_push = p2b_push.get_reward(car_forward_push, MockArena(ball_slow_goal, [car_forward_push]), act_neu, False, None)
+
+        p2b_creep = PlayerToBallVelocityReward(weight=1.0)
+        p2b_creep.reset(MockArena(ball_slow_goal, [car_creeping_reverse]))
+        p2b_creep._prev_dist[0] = 60.0
+        rew_creep = p2b_creep.get_reward(car_creeping_reverse, MockArena(ball_slow_goal, [car_creeping_reverse]), act_brake, False, None)
+
+        self.assertGreater(rew_push, rew_creep,
+                           f"Pushing forward into open net shot must beat reverse creeping! push={rew_push} creep={rew_creep}")
+        self.assertLessEqual(rew_creep, 0.0,
+                             f"Reverse creeping away from slow ball rolling into net must be non-positive! got {rew_creep}")
+
 
 
 def verify_physics_and_controls_pipeline(verbose: bool = False) -> bool:

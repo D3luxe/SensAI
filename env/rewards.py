@@ -528,8 +528,9 @@ class PlayerToBallVelocityReward(BaseReward):
         # Protects the ENTIRE airborne flight of a dodge/flip (not just the initial tick):
         is_in_flip_flight = bool(not car.on_ground and not car.has_flip and car_horiz_speed > 300.0 and travel_align_to_ball > 0.35)
         is_dodging_toward_ball = bool((car.just_dodged or is_in_flip_flight) and car_horiz_speed > 250.0 and travel_align_to_ball > 0.35)
+        is_traveling_toward_ball = bool(travel_align_to_ball > 0.35 and car_horiz_speed > 100.0)
 
-        if fwd_alignment < 0.0 and delta_dist > 0.0 and not is_dodging_toward_ball:
+        if fwd_alignment < 0.0 and delta_dist > 0.0 and not is_dodging_toward_ball and not is_traveling_toward_ball:
             delta_dist = delta_dist * max(0.0, fwd_alignment + 1.0) * 0.2
 
         fwd_vec = car.get_forward_vector()
@@ -543,11 +544,11 @@ class PlayerToBallVelocityReward(BaseReward):
             abs(local_x) < 80.0 and
             abs(local_y) < 60.0
         )
+        is_ground_pushing = bool(raw_ball_dist < 180.0 and ball_z < 130.0 and car.on_ground)
 
         # 3. Strike-Zone Velocity Matching, Arrival Pacing & Anti-Overshoot (< 500 uu)
         vel_matching_bonus = 0.0
         pacing_penalty = 0.0
-        brake_incentive = 0.0
         wrong_side_push_penalty = 0.0
         dribble_boost_penalty = 0.0
 
@@ -573,14 +574,14 @@ class PlayerToBallVelocityReward(BaseReward):
             # Velocity matching should only reward pacing a moving ball (ball_speed > 250 and car_speed > 200),
             # preventing continuous reward farming when car is merely nose-pushing a grounded ball
             # or sitting stationary near a stopped ball.
-            is_ground_pushing = bool(raw_ball_dist < 180.0 and ball_z < 130.0 and car.on_ground)
-
             if not (is_wrong_side and car_vy_defend > 100.0):
                 if not is_ground_pushing and effective_ball_speed > 250.0 and effective_car_speed > 200.0:
                     vel_matching_bonus = 0.30 * max(0.0, 1.0 - (effective_rel_speed / 700.0))
 
                 # Kinetic Arrival Velocity Pacing Envelope:
                 # When closing toward the ball on the ground, evaluate required approach pacing:
+                # Pure outcome-driven penalty avoidance: overspeeding incurs pacing_penalty,
+                # decelerating to desired speed brings penalty to 0.0. No positive per-tick hovering bounties.
                 if car.on_ground and not is_roof_carry and not is_ground_pushing:
                     safe_speed_margin = max(150.0, (min(curr_dist, 500.0) / 500.0) * 650.0)
                     desired_speed = effective_ball_speed + safe_speed_margin
@@ -590,12 +591,6 @@ class PlayerToBallVelocityReward(BaseReward):
                         if self_tti < 0.40 and effective_car_speed > desired_speed:
                             excess = (effective_car_speed - desired_speed) / 800.0
                             pacing_penalty = -0.35 * min(1.0, max(0.0, excess))
-                            if float(action[0]) < -0.05:
-                                brake_incentive = 0.35 * min(1.0, -float(action[0]))
-                        elif self_tti < 0.85 and effective_car_speed <= desired_speed:
-                            uncontested_mult = 1.5 if delta_t > 0.60 else 1.0
-                            pacing_bonus = 0.25 * uncontested_mult * max(0.0, fwd_alignment)
-                            vel_matching_bonus = max(vel_matching_bonus, pacing_bonus)
             else:
                 # Car is pushing ball toward own net: apply wrong-side push penalty
                 wrong_side_push_penalty = -0.30 * max(0.0, car_vy_defend / 1500.0) * max(0.0, fwd_alignment)
@@ -641,12 +636,17 @@ class PlayerToBallVelocityReward(BaseReward):
         else:
             # Grounded or low ball: Gate downfield rush when pushing towards defending goal
             if not (is_wrong_side and car_vy_defend > 100.0):
-                speed_taper = min(1.0, max(0.0, (eff_dist - 180.0) / 320.0))
                 fwd_speed_to_ball = max(0.0, float(np.dot(car.vel, unit_to_ball)))
-                effective_alignment = travel_align_to_ball if is_dodging_toward_ball else fwd_alignment
-                vel_toward_ball = (fwd_speed_to_ball / 2300.0) * 0.20 * max(0.0, effective_alignment) * speed_taper
-                if is_on_wall and (is_ball_infield or is_car_above_ball or is_elevated_aerial):
-                    vel_toward_ball *= 0.15
+                eff_ball_spd = float(np.linalg.norm(arena.ball.vel[:2])) if car.on_ground else float(np.linalg.norm(arena.ball.vel))
+                # Prevent nose-push farming when merely rolling behind ball at matching speed:
+                if is_ground_pushing and fwd_speed_to_ball <= eff_ball_spd + 50.0:
+                    vel_toward_ball = 0.0
+                else:
+                    speed_taper = min(1.0, max(0.35, (eff_dist - 180.0) / 320.0))
+                    effective_alignment = max(fwd_alignment, travel_align_to_ball) if (is_dodging_toward_ball or is_traveling_toward_ball) else max(0.0, fwd_alignment)
+                    vel_toward_ball = (fwd_speed_to_ball / 2300.0) * 0.20 * max(0.0, effective_alignment) * speed_taper
+                    if is_on_wall and (is_ball_infield or is_car_above_ball or is_elevated_aerial):
+                        vel_toward_ball *= 0.15
 
         # 5. Turnaround Incentive, Lateral Flank Pocket, and Overshoot Resolution
         turnaround_reward = 0.0
@@ -708,49 +708,17 @@ class PlayerToBallVelocityReward(BaseReward):
                     pacing_bonus = 0.25 * max(0.0, 1.0 - min(1.0, abs(rel_fwd_speed) / 400.0))
                     turnaround_reward += pacing_bonus
 
-                # 3. Letting Ball Roll Ahead to Absorb 50/50 or Transition to Catch:
-                # If car is slightly ahead and outpacing ball, reward coasting or tap-braking
-                if local_x < 50.0 and rel_fwd_speed > 80.0:
-                    if throttle < -0.05:
-                        turnaround_reward += 0.25 * min(1.0, -throttle)
-                    elif throttle <= 0.10 and boost <= 0.0:
-                        turnaround_reward += 0.20
-
-                # 4. Penalize driving away from pocket:
-                if (throttle > 0.35 or boost > 0.0) and rel_fwd_speed > 250.0 and not steer_into_ball:
-                    turnaround_reward -= 0.25
+                # 3. Penalize racing ahead and abandoning pocket without cutting:
+                if rel_fwd_speed > 250.0 and forward_strike_vel > 200.0 and not steer_into_ball:
+                    turnaround_reward -= 0.25 * min(1.0, (rel_fwd_speed - 250.0) / 400.0)
 
             # B. Close-Proximity Overshoot & Rear Bumper Resolution (ball behind center of mass on turf or bounce, not in pocket or on roof):
             elif not is_roof_carry and (curr_dist < 300.0 or (horiz_ball_dist < 300.0 and ball_z < 650.0)) and local_x < 0.0 and ball_z < 650.0:
                 # Speed-Differential Aware Overshoot Resolution:
-                # 1. Car outrunning trailing ball downfield (rel_fwd_speed > 0):
-                if rel_fwd_speed > 0.0:
-                    if throttle < -0.05:
-                        brake_scale = 0.35 if rel_fwd_speed > 150.0 else 0.30
-                        turnaround_reward = +brake_scale * min(1.0, -throttle)
-                    elif throttle <= 0.10 and boost <= 0.0:
-                        coast_scale = 0.20 if rel_fwd_speed <= 150.0 else 0.15
-                        turnaround_reward = +coast_scale
-                    elif throttle > 0.30 or boost > 0.0:
-                        turnaround_reward = -0.25
-                # 2. Ball is already rolling faster and overtaking car (rel_fwd_speed <= 0):
-                else:
-                    # Gate: require actual motion to earn pacing bonuses (prevents stationary idling exploits)
-                    car_speed_2d = float(np.linalg.norm(car.vel[:2]))
-                    ball_speed_2d = float(np.linalg.norm(arena.ball.vel[:2]))
-                    if car_speed_2d < 30.0 and ball_speed_2d < 30.0:
-                        # Both stationary — no bonus
-                        turnaround_reward = 0.0
-                    elif car_fwd_speed > 100.0 or ball_fwd_speed > 100.0:
-                        # Ball is catching up naturally downfield; reward gentle forward coasting / tap braking
-                        if car_fwd_speed > 50.0:
-                            if 0.0 <= throttle <= 0.35 and boost <= 0.0:
-                                turnaround_reward = +0.25
-                            elif -0.25 <= throttle < -0.05:
-                                turnaround_reward = +0.10
-                        else:
-                            # Reversing toward trailing ball receives 0.0 (no unearned input bonus, but no penalty to allow half-flip setup)
-                            turnaround_reward = 0.0
+                # 1. Car outrunning trailing ball downfield:
+                # Penalize widening the gap away from the trailing ball downfield:
+                if rel_fwd_speed > 150.0 and car_fwd_speed > 150.0:
+                    turnaround_reward = -0.25 * min(1.0, (rel_fwd_speed - 150.0) / 400.0)
 
                 # Active steering or rotation to swing around the ball:
                 # Gate: require actual vehicle speed > 100 to prevent stationary spinning exploits
@@ -762,11 +730,9 @@ class PlayerToBallVelocityReward(BaseReward):
                     turnaround_reward += +0.25 * rot_mult * steer_mag
 
             elif fwd_alignment < -0.25:
-                # Downfield ball-behind: penalize straight reverse creeping, reward rapid turnaround rotation
+                # Downfield ball-behind: reward rapid turnaround rotation to reorient toward ball
                 steer_mag = abs(steer)
-                if throttle < -0.10 and steer_mag < 0.30:
-                    turnaround_reward = -0.20 * abs(fwd_alignment)
-                elif steer_mag > 0.20:
+                if steer_mag > 0.20:
                     rot_mult = 0.5 + 0.5 * min(1.0, yaw_rate / 2.5)
                     turnaround_reward += +0.20 * rot_mult * steer_mag
 
@@ -793,7 +759,7 @@ class PlayerToBallVelocityReward(BaseReward):
                     roof_carry_reward = 0.40 * center_score * goal_progress + velcro_bonus + sync_bonus
 
         total_reward = self.weight * (
-            delta_dist + vel_toward_ball + vel_matching_bonus + pacing_penalty + brake_incentive + dribble_boost_penalty +
+            delta_dist + vel_toward_ball + vel_matching_bonus + pacing_penalty + dribble_boost_penalty +
             overshoot_penalty + ceiling_penalty + wrong_side_push_penalty + turnaround_reward + roof_carry_reward
         )
         return float(total_reward)

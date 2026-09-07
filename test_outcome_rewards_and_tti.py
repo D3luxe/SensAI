@@ -124,8 +124,8 @@ class TestOutcomeRewardsAndTTI(unittest.TestCase):
 
         act = np.array([0.3, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0], dtype=np.float32)
         r_matched = rew.get_reward(car_matched, arena, act, False, None)
-        # Receives velocity pacing bonus (> 0.20)
-        self.assertGreater(r_matched, 0.20)
+        # Avoids pacing penalty and earns positive progress
+        self.assertGreater(r_matched, 0.0)
 
         # Overspeed car (1200 uu/s) closing fast on slower ball (200 uu/s) inside 0.40s
         car_overspeed = CarState(
@@ -141,10 +141,11 @@ class TestOutcomeRewardsAndTTI(unittest.TestCase):
         # Throttle incurs pacing penalty
         act_thr = np.array([1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0], dtype=np.float32)
         r_thr = rew.get_reward(car_overspeed, arena_fast, act_thr, False, None)
-        # Braking action receives brake incentive
+        # Braking action: pure outcome-driven, no artificial action bonus
         act_brake = np.array([-1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0], dtype=np.float32)
         r_brake = rew.get_reward(car_overspeed, arena_fast, act_brake, False, None)
-        self.assertGreater(r_brake, r_thr, 'Braking when overspeeding in strike zone must exceed full throttle')
+        self.assertEqual(r_brake, r_thr, 'No artificial input bounty for holding reverse')
+        self.assertGreater(r_matched, r_thr, 'Paced approach must exceed overspeeding approach due to penalty avoidance')
 
     def test_touch_ball_soft_catch_bonus(self):
         rew = TouchBallReward(weight=1.0)
