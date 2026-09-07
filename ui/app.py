@@ -9,6 +9,7 @@ import sys
 import glob
 import time
 import math
+import re
 import json
 import yaml
 import torch
@@ -449,21 +450,53 @@ def build_cockpit_leaderboard_summary_html(evaluator: TrueSkillEvaluator) -> str
     ckpts = [r for r in sorted_ratings if not r.is_anchor and ("checkpoint_iter" in r.path.lower() or "checkpoint_iter" in r.name.lower())]
     best_ckpt = ckpts[0] if ckpts else None
 
+    def parse_iter(r) -> int:
+        match = re.search(r"checkpoint_iter_(\d+)", f"{r.path} {r.name}".lower())
+        if match:
+            try:
+                return int(match.group(1))
+            except ValueError:
+                pass
+        return -1
+
+    iter_ckpts = [r for r in ckpts if parse_iter(r) >= 0]
+    if iter_ckpts:
+        recent_ckpt = max(iter_ckpts, key=lambda r: parse_iter(r))
+    else:
+        recent_ckpt = max(ckpts, key=lambda r: r.last_updated) if ckpts else None
+
     king_name = king.name
     king_score = king.conservative_rating
     total_matches = sum(r.matches_played for r in ratings) // 2
 
     if best_ckpt:
         try:
-            iter_id = best_ckpt.name.split("checkpoint_iter_")[-1].split(".")[0]
-            best_ckpt_str = f"Iteration {iter_id} (Score: {best_ckpt.conservative_rating:.1f})"
+            b_iter = parse_iter(best_ckpt)
+            if b_iter >= 0:
+                best_ckpt_str = f"Iteration {b_iter} (Score: {best_ckpt.conservative_rating:.1f})"
+            else:
+                iter_id = best_ckpt.name.split("checkpoint_iter_")[-1].split(".")[0]
+                best_ckpt_str = f"Iteration {iter_id} (Score: {best_ckpt.conservative_rating:.1f})"
         except Exception:
             best_ckpt_str = f"{best_ckpt.name} (Score: {best_ckpt.conservative_rating:.1f})"
     else:
         best_ckpt_str = "Awaiting first checkpoint"
 
+    if recent_ckpt:
+        try:
+            r_iter = parse_iter(recent_ckpt)
+            if r_iter >= 0:
+                recent_ckpt_str = f"Iteration {r_iter} (Score: {recent_ckpt.conservative_rating:.1f})"
+            else:
+                iter_id = recent_ckpt.name.split("checkpoint_iter_")[-1].split(".")[0]
+                recent_ckpt_str = f"Iteration {iter_id} (Score: {recent_ckpt.conservative_rating:.1f})"
+        except Exception:
+            recent_ckpt_str = f"{recent_ckpt.name} (Score: {recent_ckpt.conservative_rating:.1f})"
+    else:
+        recent_ckpt_str = "Awaiting first checkpoint"
+
     return f"""
-    <div style="background: linear-gradient(135deg, rgba(30, 41, 59, 0.85) 0%, rgba(15, 23, 42, 0.95) 100%); border: 1px solid #3b82f6; border-radius: 8px; padding: 12px 20px; margin-bottom: 10px; display: flex; justify-content: space-between; align-items: center; box-shadow: 0 4px 14px rgba(0, 0, 0, 0.25);">
+    <div style="background: linear-gradient(135deg, rgba(30, 41, 59, 0.85) 0%, rgba(15, 23, 42, 0.95) 100%); border: 1px solid #3b82f6; border-radius: 8px; padding: 12px 20px; margin-bottom: 10px; display: flex; justify-content: space-between; align-items: center; box-shadow: 0 4px 14px rgba(0, 0, 0, 0.25); flex-wrap: wrap; gap: 14px;">
         <div>
             <span style="color: #94a3b8; font-size: 0.82em; text-transform: uppercase; letter-spacing: 0.5px; font-weight: 700;">👑 Reigning King of the Hill</span>
             <div style="font-size: 1.15em; font-weight: 800; color: #38bdf8;">{king_name} <span style="font-size: 0.85em; color: #a855f7; font-weight: 600;">(Score: {king_score:.2f})</span></div>
@@ -471,6 +504,10 @@ def build_cockpit_leaderboard_summary_html(evaluator: TrueSkillEvaluator) -> str
         <div style="text-align: center;">
             <span style="color: #94a3b8; font-size: 0.82em; text-transform: uppercase; letter-spacing: 0.5px; font-weight: 700;">⚡ Peak Checkpoint Iteration</span>
             <div style="font-size: 1.05em; font-weight: 700; color: #4ade80;">{best_ckpt_str}</div>
+        </div>
+        <div style="text-align: center;">
+            <span style="color: #94a3b8; font-size: 0.82em; text-transform: uppercase; letter-spacing: 0.5px; font-weight: 700;">🕒 Most Recent Checkpoint</span>
+            <div style="font-size: 1.05em; font-weight: 700; color: #38bdf8;">{recent_ckpt_str}</div>
         </div>
         <div style="text-align: right;">
             <span style="color: #94a3b8; font-size: 0.82em; text-transform: uppercase; letter-spacing: 0.5px; font-weight: 700;">📊 Graded Roster</span>
