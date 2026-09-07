@@ -660,10 +660,7 @@ class PlayerToBallVelocityReward(BaseReward):
             ball_fwd_speed = float(np.dot(arena.ball.vel[:2], fwd_vec[:2]))
             rel_fwd_speed = car_fwd_speed - ball_fwd_speed
 
-            throttle = float(action[0])
             steer = float(action[1])
-            boost = float(action[6])
-            handbrake = float(action[7])
 
             # A. Lateral Flank / Pocket Control (ball rolling alongside car: doors / fenders):
             is_lateral_pocket = bool(
@@ -1167,16 +1164,17 @@ class JumpBridgeReward(BaseReward):
             elif is_forward_backflip or is_uncontested_dribble_backflip:
                 reward -= self.weight * 0.80  # Strict penalty against forward backflips and uncontested dribble overshoot backflips
 
-        # Active Half-Flip In-Flight Shaping (Flip Cancel & Air Roll):
-        # Once an intended half-flip is initiated, reward pushing pitch forward to cancel
-        # and rolling onto wheels, guiding the agent to discover the full mechanics.
+        # Active Half-Flip In-Flight Shaping (Outcome-Driven Flip Cancel Milestone):
+        # Once an intended half-flip is initiated, reward physical pitch tumble arrest
+        # while inverted, stopping the backflip so the car can roll onto its wheels.
         if not car.on_ground and self._halfflip_in_progress.get(car.id, False):
-            if pitch_input > 0.25:
-                self._halfflip_cancel_executed[car.id] = True
-                reward += self.weight * 0.35 * min(1.0, pitch_input)
-            if abs(float(action[4])) > 0.20:
-                self._halfflip_roll_executed[car.id] = True
-                reward += self.weight * 0.30 * min(1.0, abs(float(action[4])))
+            if not self._halfflip_cancel_executed.get(car.id, False):
+                up_z = float(car.get_up_vector()[2])
+                ang_vel = car.ang_vel if hasattr(car, "ang_vel") and car.ang_vel is not None else np.zeros(3, dtype=np.float32)
+                pitch_rate = abs(float(np.dot(ang_vel, right_vec)))
+                if up_z < 0.20 and pitch_rate < 2.5:
+                    self._halfflip_cancel_executed[car.id] = True
+                    reward += self.weight * 0.35 * max(0.0, 1.0 - (pitch_rate / 2.5))
 
         if is_executing_dodge:
             is_open_field = bool(dist > 650.0)
@@ -1637,9 +1635,8 @@ class AirRollRecoveryReward(BaseReward):
         # ── 1. Active 3D Disorientation Recovery (Roll & Yaw) ────────────────
         # Only active when the car was genuinely knocked off-axis, inverted, or executed a flip turnaround
         is_recovering = bool(self._was_disoriented.get(car.id, False))
-        pitch_input = float(action[2])
         roll_input = float(action[4])
-        is_active_halfflip_cancel = bool(air_ticks <= 18 and (pitch_input > 0.3 or abs(roll_input) > 0.25))
+        is_active_halfflip_cancel = bool(air_ticks <= 18 and self._halfflip_cancel_executed.get(car.id, False))
 
         ang_vel = car.ang_vel if hasattr(car, "ang_vel") and car.ang_vel is not None else np.zeros(3, dtype=np.float32)
         # Roll rate: rotation around the car's longitudinal (forward) axis
@@ -1686,19 +1683,24 @@ class AirRollRecoveryReward(BaseReward):
                 total_reward += yaw_rec
                 self._airborne_recovery_total[car.id] = self._airborne_recovery_total.get(car.id, 0.0) + yaw_rec
 
-            # 1d. Dedicated Half-Flip Flip-Cancel & Air-Roll Bonus Budget
-            # Has its own independent budget (0.60) so passive delta_up cannot starve the active cancel!
+            # 1d. Dedicated Half-Flip Flip-Cancel & Air-Roll Bonus Budget (Pure Outcome-Driven Angular Kinematics)
             cancel_spent = self._halfflip_cancel_total.get(car.id, 0.0)
             cancel_budget = max(0.0, 0.80 - cancel_spent)
-            if air_ticks <= 18 and up_z < 0.50 and speed_horiz > 200.0:
+            is_halfflip_flight = bool(self._takeoff_heading.get(car.id, 1.0) < -0.20)
+            if is_halfflip_flight and air_ticks <= 18 and up_z < 0.50 and speed_horiz > 200.0:
                 step_cancel_reward = 0.0
-                if pitch_input > 0.25:
-                    c_rew = min(cancel_budget, (pitch_input * 0.40) * urgency)
+                pitch_rate = abs(float(np.dot(ang_vel, car.get_right_vector())))
+                roll_rate_mag = abs(roll_rate)
+                # Physical flip-cancel: pitch tumble arrested while inverted
+                if not self._halfflip_cancel_executed.get(car.id, False) and pitch_rate < 2.5:
+                    self._halfflip_cancel_executed[car.id] = True
+                    c_rew = min(cancel_budget, (0.40 * max(0.0, 1.0 - pitch_rate / 2.5)) * urgency)
                     step_cancel_reward += c_rew
                     cancel_budget = max(0.0, cancel_budget - c_rew)
-                    self._halfflip_cancel_executed[car.id] = True
-                if abs(roll_input) > 0.20:
-                    r_rew = min(cancel_budget, (abs(roll_input) * 0.40) * urgency)
+                # Physical roll-upright: rolling around forward vector toward wheels down
+                if delta_up > 0.0 or roll_rate_mag > 0.8:
+                    roll_metric = min(1.0, max(delta_up / 0.05, roll_rate_mag / 3.0))
+                    r_rew = min(cancel_budget, (0.40 * roll_metric) * urgency)
                     step_cancel_reward += r_rew
                     cancel_budget = max(0.0, cancel_budget - r_rew)
                 total_reward += step_cancel_reward
