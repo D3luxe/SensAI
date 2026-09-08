@@ -346,8 +346,9 @@ class PlayerToBallVelocityReward(BaseReward):
     - Deceleration / Braking Incentive: Rewards braking (throttle < 0) when closing dangerously fast on a slow ball from behind.
     - Wrong-Side & Own-Goal Guard: Suppresses velocity matching and pursuit rewards when driving behind the ball towards own net, and eliminates distance-delta cliffs when peeling away.
     """
-    def __init__(self, weight: float = 0.6):
+    def __init__(self, weight: float = 0.6, boost_pathing_threshold: float = 50.0):
         super().__init__(weight)
+        self.boost_pathing_threshold = float(boost_pathing_threshold)
         self._prev_dist: Dict[int, float] = {}
         self._prev_touches: Dict[int, int] = {}
         self._prev_car_touches: Dict[int, int] = {}
@@ -524,6 +525,45 @@ class PlayerToBallVelocityReward(BaseReward):
         # Inside strike zone (< 450 uu): Paces approach so car doesn't blindly barrel past ball
         strike_pacing = min(1.0, max(0.20, (eff_dist - 150.0) / 300.0))
         delta_dist = raw_delta_dist * strike_pacing
+
+        # Kinematic TTI-Detour Pathing Gate with Continuous Boost Urgency Gradient:
+        # When low on boost and pathing through an active pad along the travel corridor,
+        # relax the negative distance-delta penalty if the detour adds minimal arrival time
+        # and the bot has ample time cushion over the opponent.
+        thresh = getattr(self, "boost_pathing_threshold", 50.0)
+        urgency = max(0.0, 1.0 - (float(car.boost) / max(1.0, thresh))) if thresh > 0.0 else 0.0
+
+        if urgency > 0.0 and not is_kickoff and raw_delta_dist < 0.0 and eff_dist > 600.0:
+            is_threat, threat_intensity, _ = arena.get_shot_threat(car.team) if hasattr(arena, "get_shot_threat") else (False, 0.0, 0.0)
+            if threat_intensity < 0.40:
+                car_xy = car.pos[:2]
+                ball_xy = arena.ball.pos[:2]
+                all_pad_pos = getattr(arena, "_all_pad_pos_2d", None)
+                all_pad_act = getattr(arena, "_all_pad_active", None)
+                if all_pad_pos is not None and all_pad_act is not None and np.any(all_pad_act):
+                    active_poses = all_pad_pos[all_pad_act]
+                    d_cp = np.linalg.norm(active_poses - car_xy, axis=1)
+                    close_mask = d_cp < 2500.0
+                    if np.any(close_mask):
+                        close_poses = active_poses[close_mask]
+                        d_close_cp = d_cp[close_mask]
+                        d_close_pb = np.linalg.norm(ball_xy - close_poses, axis=1)
+                        d_direct = float(np.linalg.norm(ball_xy - car_xy))
+                        excess_dist = (d_close_cp + d_close_pb) - d_direct
+                        min_excess = float(np.min(excess_dist))
+
+                        car_speed_h = max(1000.0, float(np.linalg.norm(car.vel[:2])))
+                        delta_t_detour = min_excess / car_speed_h
+                        max_detour_budget = 0.45 * urgency
+
+                        threats = compute_opponent_threats(car, arena)
+                        opp_arr = threats[0].arrival_time if threats else 999.0
+                        self_arr, _, _ = compute_trajectory_arrival_time(car.pos, car.vel, arena.ball.pos, arena.ball.vel)
+                        time_cushion = opp_arr - self_arr
+
+                        if delta_t_detour <= max_detour_budget and (time_cushion > delta_t_detour or opp_arr > 1.8):
+                            penalty_relief = urgency * 0.85
+                            delta_dist = delta_dist * (1.0 - penalty_relief)
 
         # Wall-Crawling & Wall Pursuit Dynamics:
         # 1. When ball has bounced away from the wall into the infield (lateral separation), heavily dampen wall driving.
@@ -2003,7 +2043,8 @@ class CombinedReward:
                 weight=weights.get("ball_to_goal_weight", 1.5)
             ),
             "player_to_ball": PlayerToBallVelocityReward(
-                weight=weights.get("player_to_ball_weight", 0.6)
+                weight=weights.get("player_to_ball_weight", 0.6),
+                boost_pathing_threshold=weights.get("boost_pathing_threshold", 50.0)
             ),
             "jump_bridge": JumpBridgeReward(
                 weight=weights.get("jump_bridge_weight", 0.35)
@@ -2043,6 +2084,8 @@ class CombinedReward:
 
         if "player_to_ball_weight" in new_weights and "player_to_ball" in self.rewards:
             self.rewards["player_to_ball"].weight = float(new_weights["player_to_ball_weight"])
+        if "boost_pathing_threshold" in new_weights and "player_to_ball" in self.rewards:
+            self.rewards["player_to_ball"].boost_pathing_threshold = float(new_weights["boost_pathing_threshold"])
 
         if "powerslide_weight" in new_weights and "powerslide" in self.rewards:
             self.rewards["powerslide"].weight = float(new_weights["powerslide_weight"])

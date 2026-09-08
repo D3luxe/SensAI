@@ -1405,6 +1405,7 @@ def create_ui():
                             with gr.Row():
                                 boost_gain_slider = gr.Slider(0.0, 2.0, value=float(rew_cfg.get("boost_gain_weight", 0.6)), step=0.05, label="Boost Gain (Sqrt)")
                                 boost_lose_slider = gr.Slider(0.0, 2.0, value=float(rew_cfg.get("boost_lose_weight", 0.3)), step=0.05, label="Boost Waste")
+                                boost_pathing_slider = gr.Slider(0.0, 100.0, value=float(rew_cfg.get("boost_pathing_threshold", 50.0)), step=5.0, label="Low Boost Pathing Ceiling")
                             apply_live_rewards_btn = gr.Button("⚡ Apply Live Rewards", variant="primary")
                             live_rewards_msg = gr.Markdown("")
                             gr.Markdown("<span style='color: #94a3b8; font-size: 0.88em;'>💡 For high aerials, jump bridges, air-roll recoveries, and custom scenario probabilities, visit the <b>🎛️ Rewards & Curriculum</b> tab.</span>")
@@ -2178,7 +2179,7 @@ def create_ui():
         )
 
         # Quick Live Rewards (Tab 1)
-        def on_apply_quick_rewards(g_w, c_w, sv_w, b2g_w, p2b_w, tch_w, bg_w, bl_w):
+        def on_apply_quick_rewards(g_w, c_w, sv_w, b2g_w, p2b_w, tch_w, bg_w, bl_w, bp_th):
             rewards = {
                 "goal_weight": float(g_w),
                 "concede_weight": float(c_w),
@@ -2187,7 +2188,8 @@ def create_ui():
                 "player_to_ball_weight": float(p2b_w),
                 "touch_weight": float(tch_w),
                 "boost_gain_weight": float(bg_w),
-                "boost_lose_weight": float(bl_w)
+                "boost_lose_weight": float(bl_w),
+                "boost_pathing_threshold": float(bp_th)
             }
             mgr.update_live_config({"rewards": rewards})
             try:
@@ -2205,7 +2207,7 @@ def create_ui():
             inputs=[
                 goal_slider, concede_slider, save_slider,
                 ball_to_goal_slider, player_to_ball_slider, touch_slider,
-                boost_gain_slider, boost_lose_slider
+                boost_gain_slider, boost_lose_slider, boost_pathing_slider
             ],
             outputs=[live_rewards_msg]
         )

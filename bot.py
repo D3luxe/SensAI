@@ -297,6 +297,7 @@ class SenseiRLBot(BaseAgent):
                     self._bg_pad_indices = np.array([i for i, p in enumerate(self.boost_pads) if p.is_big], dtype=int)
                     self._small_pad_pos_3d = np.array([self.boost_pads[i].pos for i in self._sm_pad_indices], dtype=np.float32)
                     self._big_pad_pos_3d = np.array([self.boost_pads[i].pos for i in self._bg_pad_indices], dtype=np.float32)
+                    self._all_pad_pos_2d = np.array([p.pos[:2] for p in self.boost_pads], dtype=np.float32)
 
                     if game_boosts is not None and boost_pad_mapping is not None:
                         for std_idx, packet_idx in enumerate(boost_pad_mapping):
@@ -306,6 +307,7 @@ class SenseiRLBot(BaseAgent):
 
                     self._small_pad_active = np.array([self.boost_pads[i].is_active for i in self._sm_pad_indices], dtype=bool)
                     self._big_pad_active = np.array([self.boost_pads[i].is_active for i in self._bg_pad_indices], dtype=bool)
+                    self._all_pad_active = np.array([p.is_active for p in self.boost_pads], dtype=bool)
 
                 def get_predicted_ball_pos(self, slice_idx: int = 60) -> np.ndarray:
                     if self._pred_struct is not None and getattr(self._pred_struct, "num_slices", 0) > 0:

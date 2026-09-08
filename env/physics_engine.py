@@ -84,32 +84,51 @@ class BoostPad:
 
     @classmethod
     def create_standard_pads(cls) -> List[BoostPad]:
-        pads = []
-        # Big pads (corners & mid-sides)
-        big_coords = [
-            (3072.0, 4096.0),
-            (-3072.0, 4096.0),
-            (3584.0, 0.0),
-            (-3584.0, 0.0),
-            (3072.0, -4096.0),
-            (-3072.0, -4096.0),
+        """
+        Canonical 34 Rocket League Soccar Boost Pads in exact RocketSim 1-to-1 order.
+        Big pads at indices [3, 4, 15, 18, 29, 30].
+        Small pads at all other 28 indices.
+        """
+        canonical_pads = [
+            (    0.0, -4240.0, 70.0, False),  # 0
+            (-1792.0, -4184.0, 70.0, False),  # 1
+            ( 1792.0, -4184.0, 70.0, False),  # 2
+            (-3072.0, -4096.0, 73.0, True),   # 3: Blue Defending Left
+            ( 3072.0, -4096.0, 73.0, True),   # 4: Blue Defending Right
+            ( -940.0, -3308.0, 70.0, False),  # 5
+            (  940.0, -3308.0, 70.0, False),  # 6
+            (    0.0, -2816.0, 70.0, False),  # 7
+            (-3584.0, -2484.0, 70.0, False),  # 8
+            ( 3584.0, -2484.0, 70.0, False),  # 9
+            (-1788.0, -2300.0, 70.0, False),  # 10
+            ( 1788.0, -2300.0, 70.0, False),  # 11
+            (-2048.0, -1036.0, 70.0, False),  # 12
+            (    0.0, -1024.0, 70.0, False),  # 13
+            ( 2048.0, -1036.0, 70.0, False),  # 14
+            (-3584.0,     0.0, 73.0, True),   # 15: Midfield Left
+            (-1024.0,     0.0, 70.0, False),  # 16
+            ( 1024.0,     0.0, 70.0, False),  # 17
+            ( 3584.0,     0.0, 73.0, True),   # 18: Midfield Right
+            (-2048.0,  1036.0, 70.0, False),  # 19
+            (    0.0,  1024.0, 70.0, False),  # 20
+            ( 2048.0,  1036.0, 70.0, False),  # 21
+            (-1788.0,  2300.0, 70.0, False),  # 22
+            ( 1788.0,  2300.0, 70.0, False),  # 23
+            (-3584.0,  2484.0, 70.0, False),  # 24
+            ( 3584.0,  2484.0, 70.0, False),  # 25
+            (    0.0,  2816.0, 70.0, False),  # 26
+            ( -940.0,  3308.0, 70.0, False),  # 27
+            (  940.0,  3308.0, 70.0, False),  # 28
+            (-3072.0,  4096.0, 73.0, True),   # 29: Orange Defending Right / Blue Attacking Left
+            ( 3072.0,  4096.0, 73.0, True),   # 30: Orange Defending Left / Blue Attacking Right
+            (-1792.0,  4184.0, 70.0, False),  # 31
+            ( 1792.0,  4184.0, 70.0, False),  # 32
+            (    0.0,  4240.0, 70.0, False),  # 33
         ]
-        for x, y in big_coords:
-            pads.append(cls(pos=np.array([x, y, 73.0], dtype=np.float32), is_big=True))
-
-        # Standard small pads distributed across field
-        small_coords = [
-            (0.0, -4240.0), (-1792.0, -4184.0), (1792.0, -4184.0),
-            (-940.0, -3308.0), (940.0, -3308.0), (0.0, -2816.0),
-            (-1792.0, -2484.0), (1792.0, -2484.0), (-3584.0, -2484.0), (3584.0, -2484.0),
-            (0.0, -1024.0), (-1024.0, 0.0), (1024.0, 0.0), (0.0, 1024.0),
-            (-3584.0, 2484.0), (3584.0, 2484.0), (-1792.0, 2484.0), (1792.0, 2484.0),
-            (0.0, 2816.0), (-940.0, 3308.0), (940.0, 3308.0),
-            (0.0, 4240.0), (-1792.0, 4184.0), (1792.0, 4184.0),
+        return [
+            cls(pos=np.array([x, y, z], dtype=np.float32), is_big=is_big)
+            for x, y, z, is_big in canonical_pads
         ]
-        for x, y in small_coords:
-            pads.append(cls(pos=np.array([x, y, 73.0], dtype=np.float32), is_big=False))
-        return pads
 
 
 @dataclass
@@ -256,6 +275,8 @@ class RocketSimArena:
         self._big_pad_pos_3d = np.array([self.boost_pads[i].pos for i in self._bg_pad_indices], dtype=np.float32)
         self._small_pad_active = np.array([self.boost_pads[i].is_active for i in self._sm_pad_indices], dtype=bool)
         self._big_pad_active = np.array([self.boost_pads[i].is_active for i in self._bg_pad_indices], dtype=bool)
+        self._all_pad_pos_2d = np.array([p.pos[:2] for p in self.boost_pads], dtype=np.float32)
+        self._all_pad_active = np.array([p.is_active for p in self.boost_pads], dtype=bool)
 
         self._init_cars()
         from env.state_setters import WeightedScenarioSetter
@@ -484,6 +505,9 @@ class RocketSimArena:
                 self._small_pad_active[idx] = self.boost_pads[pad_i].is_active
             for idx, pad_i in enumerate(self._bg_pad_indices):
                 self._big_pad_active[idx] = self.boost_pads[pad_i].is_active
+        if hasattr(self, "_all_pad_active"):
+            for idx, pad in enumerate(self.boost_pads):
+                self._all_pad_active[idx] = pad.is_active
 
     def step(self, actions: List[np.ndarray], dt: float = 1.0 / 15.0, bot_mask: Optional[List[bool]] = None) -> Tuple[bool, Optional[int]]:
         """

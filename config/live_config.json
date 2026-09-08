@@ -1,5 +1,5 @@
 {
-  "updated_at": 1788885039.8300962,
+  "updated_at": 1788892445.1539726,
   "learning_rate": 0.0003,
   "ent_coef": 0.012,
   "clip_range": 0.2,
@@ -26,7 +26,8 @@
     "powerslide_weight": 0.2,
     "touch_weight": 1.5,
     "boost_gain_weight": 1.35,
-    "boost_lose_weight": 0.55
+    "boost_lose_weight": 0.55,
+    "boost_pathing_threshold": 50.0
   },
   "scenarios": {
     "kickoff_prob": 0.05,
