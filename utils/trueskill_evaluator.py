@@ -511,10 +511,12 @@ class TrueSkillEvaluator:
 
         return pd.DataFrame(rows)
 
-    def render_leaderboard_plot(self) -> plt.Figure:
+    def render_leaderboard_plot(self, max_models: int = 25) -> plt.Figure:
         """
         Generates a clean, dark-themed horizontal bar chart showing TrueSkill ratings
         with ±2σ (95% confidence interval) error bars.
+        Caps display to top-performing models (and anchors) to ensure readability
+        and prevent exceeding browser/WebP 16,383px height constraints.
         """
         if not self.ratings:
             fig, ax = plt.subplots(figsize=(8, 4), dpi=100)
@@ -525,31 +527,41 @@ class TrueSkillEvaluator:
             ax.axis("off")
             return fig
 
-        # Sort ascending for horizontal bar chart (highest at top)
+        # Sort descending first to select the top models
         records = [
             r for r in self.ratings.values()
             if "latest_model" not in r.path.lower() and "latest_model" not in r.name.lower()
         ]
         records.sort(
-            key=lambda r: (r.conservative_rating, r.mu),
+            key=lambda r: (r.conservative_rating, r.win_rate, r.mu),
+            reverse=True
+        )
+
+        # Select top models and ensure active anchors are included
+        top_candidates = records[:max_models]
+        anchors = [r for r in records if r.is_anchor and r not in top_candidates]
+        selected_records = top_candidates + anchors
+
+        # Sort ascending for horizontal bar chart (highest at top)
+        selected_records.sort(
+            key=lambda r: (r.conservative_rating, r.win_rate, r.mu),
             reverse=False
         )
 
-        names = [r.name for r in records]
-        mus = [r.mu for r in records]
+        names = [r.name for r in selected_records]
+        mus = [r.mu for r in selected_records]
         # 2 * sigma error bars represent the 95% Bayesian confidence interval
-        sigmas = [2.0 * r.sigma for r in records]
-        conservative = [r.conservative_rating for r in records]
+        sigmas = [2.0 * r.sigma for r in selected_records]
 
-        fig_height = max(4.5, 0.55 * len(records))
+        fig_height = min(14.0, max(4.5, 0.42 * len(selected_records)))
         fig, ax = plt.subplots(figsize=(10, fig_height), dpi=100)
         fig.patch.set_facecolor("#1a202c")
         ax.set_facecolor("#2d3748")
 
-        y_pos = np.arange(len(records))
+        y_pos = np.arange(len(selected_records))
 
         # Color gradient: top models blue/cyan, baseline/heuristic orange
-        colors = ["#4299e1" if not r.is_anchor else "#ed8936" for r in records]
+        colors = ["#4299e1" if not r.is_anchor else "#ed8936" for r in selected_records]
 
         bars = ax.barh(y_pos, mus, xerr=sigmas, height=0.55, color=colors,
                        alpha=0.85, edgecolor="#bee3f8", capsize=4, error_kw={"ecolor": "#cbd5e0", "linewidth": 1.5})
@@ -565,10 +577,11 @@ class TrueSkillEvaluator:
         ax.axvline(25.0, color="#ecc94b", linestyle="--", linewidth=1.2, alpha=0.7, label="Baseline Starting μ (25.0)")
 
         ax.set_xlabel("TrueSkill Rating (μ ± 2σ Confidence Interval)", color="#e2e8f0", fontsize=11, fontweight="bold")
-        ax.set_title("SensAI TrueSkill Leaderboard (Bayesian Skill Ratings)", color="white", fontsize=13, fontweight="bold", pad=12)
+        title_suffix = f"(Top {len(selected_records)} Standings)" if len(records) > max_models else ""
+        ax.set_title(f"SensAI TrueSkill Leaderboard {title_suffix}", color="white", fontsize=13, fontweight="bold", pad=12)
 
         # Value annotations
-        for idx, r in enumerate(records):
+        for idx, r in enumerate(selected_records):
             text = f" μ={r.mu:.1f} (score: {r.conservative_rating:.1f}) [{r.wins}W-{r.losses}L]"
             ax.annotate(text, (r.mu + 2.0 * r.sigma + 0.5, idx),
                         color="#bee3f8", fontsize=8, va="center", ha="left")

@@ -178,8 +178,46 @@ class LeagueManager:
             })
         return details
 
+    def get_elite_pool_details(self) -> List[Dict[str, Any]]:
+        """Returns structured metadata for active Elite Pool models for UI display."""
+        details = []
+        for rank, path in enumerate(self.elite_pool, start=1):
+            norm_p = self._normalize_path(path)
+            rec = self.evaluator.ratings.get(norm_p) or self.evaluator.ratings.get(path)
+            name = get_model_display_name(norm_p)
+            is_king = (norm_p == self.king_of_the_hill or path == self.king_of_the_hill)
+            if rec:
+                details.append({
+                    "rank": rank,
+                    "name": name,
+                    "path": norm_p,
+                    "mu": round(rec.mu, 2),
+                    "sigma": round(rec.sigma, 2),
+                    "conservative_score": round(rec.conservative_rating, 2),
+                    "win_rate": round(rec.win_rate, 1),
+                    "record": f"{rec.wins}W-{rec.losses}L-{rec.draws}D",
+                    "matches_played": rec.matches_played,
+                    "is_anchor": rec.is_anchor,
+                    "is_king": is_king
+                })
+            else:
+                details.append({
+                    "rank": rank,
+                    "name": name,
+                    "path": norm_p,
+                    "mu": 25.0,
+                    "sigma": 8.33,
+                    "conservative_score": 0.0,
+                    "win_rate": 0.0,
+                    "record": "0W-0L-0D",
+                    "matches_played": 0,
+                    "is_anchor": True,
+                    "is_king": is_king
+                })
+        return details
+
     def save_league_state(self, path: Optional[str] = None):
-        """Atomically saves contender queue, consecutive losses, and sports ticker event history."""
+        """Atomically saves contender queue, elite pool, consecutive losses, and sports ticker event history."""
         target_path = path or self.league_state_path
         os.makedirs(os.path.dirname(os.path.abspath(target_path)), exist_ok=True)
         tmp_path = target_path + ".tmp"
@@ -188,6 +226,8 @@ class LeagueManager:
             "version": "1.0",
             "last_updated": datetime.datetime.now().isoformat(),
             "king_of_the_hill": self.king_of_the_hill,
+            "elite_pool": self.elite_pool,
+            "elite_pool_details": self.get_elite_pool_details(),
             "contender_queue": self.contender_queue,
             "contender_consecutive_losses": self.contender_consecutive_losses,
             "event_history": self.event_history[-30:],
@@ -206,7 +246,7 @@ class LeagueManager:
                     pass
 
     def load_league_state(self, path: Optional[str] = None):
-        """Loads contender queue, consecutive losses, and event history safely."""
+        """Loads contender queue, elite pool, consecutive losses, and event history safely."""
         target_path = path or self.league_state_path
         if not os.path.exists(target_path):
             return
@@ -216,6 +256,11 @@ class LeagueManager:
             loaded_queue = data.get("contender_queue", [])
             self.contender_queue = [
                 p for p in loaded_queue
+                if p == "heuristic" or os.path.exists(p)
+            ]
+            loaded_elite = data.get("elite_pool", [])
+            self.elite_pool = [
+                p for p in loaded_elite
                 if p == "heuristic" or os.path.exists(p)
             ]
             self.contender_consecutive_losses = data.get("contender_consecutive_losses", {})

@@ -40,7 +40,7 @@ from utils.scenario_manager import (
     simulate_custom_scenario,
     DEFAULT_CUSTOM_SCENARIOS
 )
-from utils.trueskill_evaluator import TrueSkillEvaluator
+from utils.trueskill_evaluator import TrueSkillEvaluator, get_model_display_name
 
 
 def load_yaml_config(path: str = "config/default_config.yaml") -> dict:
@@ -465,6 +465,109 @@ button.primary-btn {
     font-weight: 700;
     color: #f8fafc;
 }
+
+/* Elite Pool Styles */
+.elite-pool-container {
+    background: linear-gradient(135deg, rgba(15, 23, 42, 0.85) 0%, rgba(30, 41, 59, 0.7) 100%);
+    border: 1px solid #334155;
+    border-radius: 8px;
+    padding: 12px 18px;
+    margin-bottom: 10px;
+    box-shadow: 0 4px 14px rgba(0, 0, 0, 0.25);
+}
+
+.elite-pool-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    margin-bottom: 10px;
+    flex-wrap: wrap;
+    gap: 8px;
+}
+
+.elite-cards-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+    gap: 10px;
+}
+
+.elite-card {
+    background: rgba(10, 15, 30, 0.75);
+    border: 1px solid #38bdf8;
+    border-radius: 8px;
+    padding: 10px 14px;
+    box-shadow: 0 3px 10px rgba(0, 0, 0, 0.25);
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    transition: transform 0.15s ease, border-color 0.2s ease;
+}
+
+.elite-card:hover {
+    transform: translateY(-2px);
+    box-shadow: 0 6px 16px rgba(0, 0, 0, 0.4);
+}
+
+.elite-card-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+}
+
+.elite-rank-pill {
+    background: rgba(30, 41, 59, 0.9);
+    border: 1px solid #475569;
+    color: #94a3b8;
+    font-size: 0.75em;
+    font-weight: 800;
+    padding: 2px 6px;
+    border-radius: 4px;
+}
+
+.elite-model-name {
+    font-size: 0.92em;
+    font-weight: 800;
+    color: #f1f5f9;
+}
+
+.elite-tag {
+    font-size: 0.72em;
+    font-weight: 800;
+    padding: 2px 7px;
+    border-radius: 9999px;
+    letter-spacing: 0.4px;
+    text-transform: uppercase;
+}
+
+.elite-tag-king {
+    background: rgba(234, 179, 8, 0.2);
+    color: #facc15;
+    border: 1px solid rgba(234, 179, 8, 0.5);
+}
+
+.elite-tag-sparrer {
+    background: rgba(56, 189, 248, 0.15);
+    color: #38bdf8;
+    border: 1px solid rgba(56, 189, 248, 0.4);
+}
+
+.elite-tag-anchor {
+    background: rgba(100, 116, 139, 0.2);
+    color: #cbd5e1;
+    border: 1px solid rgba(100, 116, 139, 0.4);
+}
+
+.elite-stats-grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 4px;
+    font-size: 0.8em;
+    color: #cbd5e1;
+    background: rgba(15, 23, 42, 0.5);
+    padding: 6px 8px;
+    border-radius: 6px;
+    border: 1px solid rgba(51, 65, 85, 0.3);
+}
 """
 
 
@@ -642,18 +745,55 @@ def build_full_diagnostic_export() -> tuple[str, str]:
     return overview_md, export_text
 
 
-def get_cockpit_leaderboard_df(evaluator: TrueSkillEvaluator, max_rows: int = 15) -> pd.DataFrame:
+def load_league_state_safely(path: str = "logs/league_state.json") -> Dict[str, Any]:
+    """Safely loads league promotion and sports ticker state from disk without crashing on lock contention."""
+    if not os.path.exists(path):
+        return {}
+    for _ in range(3):
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except (PermissionError, json.JSONDecodeError):
+            time.sleep(0.05)
+        except Exception:
+            break
+    return {}
+
+
+def get_cockpit_leaderboard_df(
+    evaluator: TrueSkillEvaluator,
+    max_rows: int = 15,
+    league_state: Optional[Dict[str, Any]] = None
+) -> pd.DataFrame:
     """
     Returns a formatted DataFrame of top-performing checkpoints and models
     ranked by conservative TrueSkill rating (mu - 3*sigma).
-    Highlights checkpoint iterations cleanly.
+    Highlights checkpoint iterations and active League Status (King, Elite Sparrer, In Gauntlet, Anchor, Archived).
     """
     df = evaluator.get_leaderboard_dataframe()
     if df.empty:
         return pd.DataFrame(columns=[
-            "Rank", "Iteration / Model", "Rating (μ)", "Uncertainty (σ)",
+            "Rank", "Iteration / Model", "Status", "Rating (μ)", "Uncertainty (σ)",
             "Conservative Score", "Win Rate", "Record (W-L-D)", "Goal Diff", "Matches"
         ])
+
+    state = league_state if league_state is not None else load_league_state_safely()
+    active_king = state.get("king_of_the_hill", "")
+    elite_pool = [str(p).replace("\\", "/").lower() for p in state.get("elite_pool", [])]
+    contenders = [str(p).replace("\\", "/").lower() for p in state.get("contender_queue", [])]
+
+    # Dynamic fallback for elite pool if file was empty or newly generated
+    if not elite_pool and evaluator and hasattr(evaluator, "ratings"):
+        valid = []
+        for key, rec in evaluator.ratings.items():
+            if "latest_model" in key.lower():
+                continue
+            if rec.is_anchor or key == "heuristic" or os.path.exists(rec.path):
+                valid.append((key.replace("\\", "/").lower(), rec.conservative_rating, rec.win_rate, rec.mu))
+        valid.sort(key=lambda x: (x[1], x[2], x[3]), reverse=True)
+        elite_pool = [x[0] for x in valid[:10]]
+
+    norm_king = str(active_king).replace("\\", "/").lower()
 
     rename_dict = {}
     for col in df.columns:
@@ -664,6 +804,36 @@ def get_cockpit_leaderboard_df(evaluator: TrueSkillEvaluator, max_rows: int = 15
         elif col == "Model":
             rename_dict[col] = "Iteration / Model"
     df = df.rename(columns=rename_dict)
+
+    def determine_status(raw_name: str) -> str:
+        name_str = str(raw_name)
+        matched_rec = None
+        for key, r in evaluator.ratings.items():
+            if r.name.lower() == name_str.lower() or key.lower() == name_str.lower():
+                matched_rec = r
+                break
+
+        path_str = matched_rec.path.replace("\\", "/").lower() if matched_rec else name_str.replace("\\", "/").lower()
+        low_name = name_str.lower()
+
+        if norm_king and (path_str == norm_king or low_name in norm_king or norm_king in path_str):
+            return "👑 King"
+
+        for ep in elite_pool:
+            if path_str == ep or low_name in ep or ep in path_str:
+                return "🛡️ Elite Pool"
+
+        for cq in contenders:
+            if path_str == cq or low_name in cq or cq in path_str:
+                return "⚔️ In Gauntlet"
+
+        if matched_rec and matched_rec.is_anchor:
+            return "⚓ Anchor"
+
+        if matched_rec and not os.path.exists(matched_rec.path):
+            return "📦 Archived"
+
+        return "Standby"
 
     def format_iteration_label(name: str) -> str:
         name_str = str(name)
@@ -679,24 +849,17 @@ def get_cockpit_leaderboard_df(evaluator: TrueSkillEvaluator, max_rows: int = 15
         return name_str
 
     if "Iteration / Model" in df.columns:
+        df["Status"] = df["Iteration / Model"].apply(determine_status)
         df["Iteration / Model"] = df["Iteration / Model"].apply(format_iteration_label)
 
+        cols = list(df.columns)
+        if "Status" in cols and "Iteration / Model" in cols:
+            cols.remove("Status")
+            idx = cols.index("Iteration / Model")
+            cols.insert(idx + 1, "Status")
+            df = df[cols]
+
     return df.head(max_rows)
-
-
-def load_league_state_safely(path: str = "logs/league_state.json") -> Dict[str, Any]:
-    """Safely loads league promotion and sports ticker state from disk without crashing on lock contention."""
-    if not os.path.exists(path):
-        return {}
-    for _ in range(3):
-        try:
-            with open(path, "r", encoding="utf-8") as f:
-                return json.load(f)
-        except (PermissionError, json.JSONDecodeError):
-            time.sleep(0.05)
-        except Exception:
-            break
-    return {}
 
 
 def build_cockpit_leaderboard_summary_html(evaluator: TrueSkillEvaluator, league_state: Optional[Dict[str, Any]] = None) -> str:
@@ -965,7 +1128,104 @@ def build_league_wire_and_queue_html(evaluator: TrueSkillEvaluator, league_state
     </div>
     """
 
-    return ticker_html + queue_html
+    # --- PART 3: ACTIVE ELITE SPARRING POOL ---
+    elite_pool_items = state.get("elite_pool_details", [])
+    if not elite_pool_items:
+        elite_paths = state.get("elite_pool", [])
+        if not elite_paths and evaluator and hasattr(evaluator, "ratings"):
+            valid_m = []
+            for k, r in evaluator.ratings.items():
+                if "latest_model" in k.lower():
+                    continue
+                if r.is_anchor or k == "heuristic" or os.path.exists(r.path):
+                    valid_m.append((k, r))
+            valid_m.sort(key=lambda x: (x[1].conservative_rating, x[1].win_rate, x[1].mu), reverse=True)
+            elite_paths = [x[0] for x in valid_m[:10]]
+
+        for rank, p in enumerate(elite_paths, start=1):
+            r = evaluator.ratings.get(p) if evaluator and hasattr(evaluator, "ratings") else None
+            is_k = (p == state.get("king_of_the_hill"))
+            name = get_model_display_name(p)
+            if r:
+                elite_pool_items.append({
+                    "rank": rank,
+                    "name": name,
+                    "mu": round(r.mu, 2),
+                    "sigma": round(r.sigma, 2),
+                    "conservative_score": round(r.conservative_rating, 2),
+                    "win_rate": round(r.win_rate, 1),
+                    "record": f"{r.wins}W-{r.losses}L-{r.draws}D",
+                    "matches_played": r.matches_played,
+                    "is_anchor": r.is_anchor,
+                    "is_king": is_k
+                })
+            else:
+                elite_pool_items.append({
+                    "rank": rank,
+                    "name": name,
+                    "mu": 25.0,
+                    "sigma": 8.33,
+                    "conservative_score": 0.0,
+                    "win_rate": 0.0,
+                    "record": "0W-0L-0D",
+                    "matches_played": 0,
+                    "is_anchor": True,
+                    "is_king": is_k
+                })
+
+    if elite_pool_items:
+        elite_cards = []
+        for m in elite_pool_items:
+            is_king = m.get("is_king", False)
+            is_anchor = m.get("is_anchor", False)
+            border_color = "#eab308" if is_king else ("#38bdf8" if not is_anchor else "#64748b")
+            tag_text = "👑 Reigning King" if is_king else ("⚓ Baseline Anchor" if is_anchor else "🛡️ Elite Sparrer")
+            tag_class = "elite-tag-king" if is_king else ("elite-tag-anchor" if is_anchor else "elite-tag-sparrer")
+            rank_num = m.get("rank", 1)
+
+            card = f"""
+            <div class="elite-card" style="border-color: {border_color};">
+                <div class="elite-card-header">
+                    <div style="display: flex; align-items: center; gap: 8px;">
+                        <span class="elite-rank-pill">#{rank_num}</span>
+                        <span class="elite-model-name">{m['name']}</span>
+                    </div>
+                    <span class="elite-tag {tag_class}">{tag_text}</span>
+                </div>
+                <div class="elite-stats-grid">
+                    <div>Score (μ-3σ): <b style="color: #a855f7;">{m.get('conservative_score', 0.0):.2f}</b></div>
+                    <div>Rating: <span class="contender-stat-val">μ={m.get('mu', 25.0):.2f}</span></div>
+                    <div>Win Rate: <b style="color: #4ade80;">{m.get('win_rate', 0.0):.1f}%</b></div>
+                    <div>Uncertainty: <span class="contender-stat-val">σ=±{m.get('sigma', 8.33):.2f}</span></div>
+                </div>
+                <div style="display: flex; justify-content: space-between; align-items: center; font-size: 0.8em; border-top: 1px solid rgba(51, 65, 85, 0.4); padding-top: 5px; color: #94a3b8;">
+                    <span>Record: <b style="color: #cbd5e1;">{m.get('record', '0W-0L-0D')}</b></span>
+                    <span>Matches: <b style="color: #f1f5f9;">{m.get('matches_played', 0)}</b></span>
+                </div>
+            </div>
+            """
+            elite_cards.append(card)
+        elite_grid = f'<div class="elite-cards-grid">{"".join(elite_cards)}</div>'
+    else:
+        elite_grid = """
+        <div style="background: rgba(10, 15, 30, 0.5); border: 1px dashed #334155; border-radius: 8px; padding: 14px 20px; text-align: center; color: #94a3b8; font-size: 0.9em;">
+            <span>🛡️ <b>Elite Pool Initializing:</b> Models will populate as checkpoints are graded and saved.</span>
+        </div>
+        """
+
+    elite_html = f"""
+    <div class="elite-pool-container">
+        <div class="elite-pool-header">
+            <span class="queue-title">🛡️ Active Elite Sparring Pool (Stratified Self-Play Roster)</span>
+            <div style="font-size: 0.84em; color: #94a3b8;">
+                <b style="color: #38bdf8;">{len(elite_pool_items)} Active Bots</b> (25% King Opponents | 25% Elite Pool Opponents | 50% Self-Play)
+            </div>
+        </div>
+        {elite_grid}
+    </div>
+    """
+
+    return ticker_html + queue_html + elite_html
 
 
 def create_ui():
