@@ -210,6 +210,91 @@ class TestLeagueManager(unittest.TestCase):
         self.assertEqual(res_dem["status"], "demoted")
         self.assertNotIn(norm_dem, self.league.contender_queue)
 
+    def test_league_state_persistence_and_events(self):
+        """Verify events are properly recorded in event_history and saved/loaded to league_state.json."""
+        # 1. Trigger admission
+        c1 = os.path.join(self.test_dir, "checkpoint_iter_300.pt")
+        shutil.copyfile(self.dummy_ckpt_path, c1)
+        norm_c1 = self.league._normalize_path(c1)
+        r1 = self.evaluator.get_or_create_rating(norm_c1)
+        r1.mu = 27.5
+        r1.win_rate = 60.0
+        self.league._admit_contender(norm_c1)
+
+        self.assertGreaterEqual(len(self.league.event_history), 1)
+        latest_event = self.league.event_history[-1]
+        self.assertEqual(latest_event["type"], "admission")
+
+        # 2. Check persistence on disk
+        state_file = self.league.league_state_path
+        self.assertTrue(os.path.exists(state_file))
+
+        # 3. Test get_contender_queue_details
+        details = self.league.get_contender_queue_details()
+        self.assertEqual(len(details), len(self.league.contender_queue))
+        self.assertIn("progress_pct", details[0])
+        self.assertIn("status", details[0])
+
+        # 4. Test loading into a new manager instance
+        new_league = LeagueManager(
+            evaluator=self.evaluator,
+            leaderboard_path=self.leaderboard_path,
+            config={"league_state_path": state_file}
+        )
+        self.assertEqual(len(new_league.contender_queue), len(self.league.contender_queue))
+        self.assertGreaterEqual(len(new_league.event_history), 1)
+
+    def test_ui_league_wire_and_queue_rendering(self):
+        """Verify UI functions render valid HTML with both populated and empty states."""
+        from ui.app import build_league_wire_and_queue_html, load_league_state_safely
+
+        # Render with empty evaluator
+        empty_html = build_league_wire_and_queue_html(self.evaluator, league_state={})
+        self.assertIn("sports-ticker-container", empty_html)
+        self.assertIn("Live League Wire", empty_html)
+        self.assertIn("promotion-queue-container", empty_html)
+
+        # Render with active state
+        mock_state = {
+            "event_history": [
+                {
+                    "timestamp": "2026-09-07T22:30:00",
+                    "type": "promotion",
+                    "model": "Iteration 100020",
+                    "detail": "Graduated Gauntlet with Score 25.99"
+                },
+                {
+                    "timestamp": "2026-09-07T22:35:00",
+                    "type": "demotion",
+                    "model": "Iteration 98200",
+                    "detail": "Loss streak knockout"
+                }
+            ],
+            "contenders": [
+                {
+                    "name": "Iteration 101940",
+                    "path": "checkpoints/checkpoint_iter_101940.pt",
+                    "mu": 31.94,
+                    "sigma": 2.29,
+                    "conservative_score": 25.06,
+                    "matches_played": 8,
+                    "target_matches": 16,
+                    "progress_pct": 50.0,
+                    "win_rate": 62.5,
+                    "record": "10W-4L-2D",
+                    "consecutive_losses": 0,
+                    "max_consecutive_losses": 4,
+                    "status": "In Elimination Window"
+                }
+            ]
+        }
+        populated_html = build_league_wire_and_queue_html(self.evaluator, league_state=mock_state)
+        self.assertIn("PROMOTED", populated_html)
+        self.assertIn("DEMOTED", populated_html)
+        self.assertIn("Iteration 101940", populated_html)
+        self.assertIn("50.0%", populated_html)
+
+
 
 class TestStratifiedVectorizedEnv(unittest.TestCase):
     def test_stratified_opponents_and_learner_mask(self):

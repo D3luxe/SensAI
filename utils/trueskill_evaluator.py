@@ -578,11 +578,18 @@ class TrueSkillEvaluator:
         return fig
 
     def reset_leaderboard(self):
-        """Wipes all ratings and history."""
+        """Wipes all ratings, match history, and league promotion state."""
         self.ratings.clear()
         self.match_history.clear()
         if os.path.exists(self.leaderboard_path):
             try:
                 os.remove(self.leaderboard_path)
+            except Exception:
+                pass
+        # Clean up corresponding league_state.json if it exists
+        league_state_file = os.path.join(os.path.dirname(self.leaderboard_path), "league_state.json")
+        if os.path.exists(league_state_file):
+            try:
+                os.remove(league_state_file)
             except Exception:
                 pass

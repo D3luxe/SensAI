@@ -7,6 +7,8 @@ elite pool curation, and stratified vectorized environment distribution (Option 
 from __future__ import annotations
 import os
 import random
+import json
+import datetime
 from typing import Dict, Any, List, Optional, Set, Tuple
 
 from utils.trueskill_evaluator import (
@@ -43,6 +45,14 @@ class LeagueManager:
         # Evaluator
         self.evaluator = evaluator or TrueSkillEvaluator(leaderboard_path=leaderboard_path)
 
+        # League State Persistence Path
+        default_state_path = (
+            os.path.join(os.path.dirname(leaderboard_path), "league_state.json")
+            if leaderboard_path != DEFAULT_LEADERBOARD_PATH
+            else "logs/league_state.json"
+        )
+        self.league_state_path = self.config.get("league_state_path", default_state_path)
+
         # Anchors
         default_anchors = [
             "checkpoints/pretrained_baseline.pt",
@@ -62,15 +72,18 @@ class LeagueManager:
         self.max_active_contenders = int(self.config.get("max_active_contenders", 3))
         self.contender_eval_matches_per_step = int(self.config.get("contender_eval_matches_per_step", 2))
 
-        # Gauntlet State
+        # Gauntlet State & Sports Ticker Event History
         self.contender_queue: List[str] = []
         self.contender_consecutive_losses: Dict[str, int] = {}
+        self.event_history: List[Dict[str, Any]] = []
 
         # League state
         self.king_of_the_hill: Optional[str] = None
+        self.previous_king_of_the_hill: Optional[str] = None
         self.elite_pool: List[str] = []
         self._temporal_cycle_idx: int = 0
 
+        self.load_league_state()
         self._init_anchors()
         self.refresh_pool()
 
@@ -108,12 +121,118 @@ class LeagueManager:
             r = self.evaluator.get_or_create_rating("heuristic", is_anchor=True)
             r.is_anchor = True
 
+    def _record_event(
+        self,
+        event_type: str,
+        model_name: str,
+        detail: str,
+        extra: Optional[Dict[str, Any]] = None
+    ):
+        """Records an event to the sports ticker transaction history (capped at 30 items)."""
+        event = {
+            "timestamp": datetime.datetime.now().isoformat(),
+            "type": event_type,  # 'promotion', 'demotion', 'admission', 'preemption', 'coronation'
+            "model": model_name,
+            "detail": detail,
+            **(extra or {})
+        }
+        self.event_history.append(event)
+        if len(self.event_history) > 30:
+            self.event_history = self.event_history[-30:]
+        self.save_league_state()
+
+    def get_contender_queue_details(self) -> List[Dict[str, Any]]:
+        """Provides rich metadata for each active contender in queue for the UI."""
+        details = []
+        for path in self.contender_queue:
+            rec = self.evaluator.ratings.get(path)
+            if not rec:
+                continue
+            consec_losses = self.contender_consecutive_losses.get(path, 0)
+            progress_pct = min(100.0, round((rec.matches_played / max(1, self.target_eval_matches)) * 100.0, 1))
+
+            # Status determination
+            if rec.matches_played == 0:
+                status = "Awaiting First Match"
+            elif consec_losses >= self.max_consecutive_losses - 1:
+                status = "⚠️ Knockout Danger"
+            elif rec.matches_played >= self.grace_period_matches:
+                status = "Elimination Window Active"
+            else:
+                status = "Grace Period Active"
+
+            details.append({
+                "name": rec.name,
+                "path": path,
+                "mu": round(rec.mu, 2),
+                "sigma": round(rec.sigma, 2),
+                "conservative_score": round(rec.conservative_rating, 2),
+                "matches_played": rec.matches_played,
+                "target_matches": self.target_eval_matches,
+                "progress_pct": progress_pct,
+                "win_rate": round(rec.win_rate, 1),
+                "record": f"{rec.wins}W-{rec.losses}L-{rec.draws}D",
+                "consecutive_losses": consec_losses,
+                "max_consecutive_losses": self.max_consecutive_losses,
+                "status": status
+            })
+        return details
+
+    def save_league_state(self, path: Optional[str] = None):
+        """Atomically saves contender queue, consecutive losses, and sports ticker event history."""
+        target_path = path or self.league_state_path
+        os.makedirs(os.path.dirname(os.path.abspath(target_path)), exist_ok=True)
+        tmp_path = target_path + ".tmp"
+
+        payload = {
+            "version": "1.0",
+            "last_updated": datetime.datetime.now().isoformat(),
+            "king_of_the_hill": self.king_of_the_hill,
+            "contender_queue": self.contender_queue,
+            "contender_consecutive_losses": self.contender_consecutive_losses,
+            "event_history": self.event_history[-30:],
+            "contenders": self.get_contender_queue_details()
+        }
+        try:
+            with open(tmp_path, "w", encoding="utf-8") as f:
+                json.dump(payload, f, indent=2)
+            os.replace(tmp_path, target_path)
+        except Exception as e:
+            print(f"[League Manager] Warning: Could not save league state to {target_path}: {e}")
+            if os.path.exists(tmp_path):
+                try:
+                    os.remove(tmp_path)
+                except Exception:
+                    pass
+
+    def load_league_state(self, path: Optional[str] = None):
+        """Loads contender queue, consecutive losses, and event history safely."""
+        target_path = path or self.league_state_path
+        if not os.path.exists(target_path):
+            return
+        try:
+            with open(target_path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            loaded_queue = data.get("contender_queue", [])
+            self.contender_queue = [
+                p for p in loaded_queue
+                if p == "heuristic" or os.path.exists(p)
+            ]
+            self.contender_consecutive_losses = data.get("contender_consecutive_losses", {})
+            self.event_history = data.get("event_history", [])[-30:]
+            self.previous_king_of_the_hill = data.get("king_of_the_hill", None)
+        except Exception as e:
+            print(f"[League Manager] Warning: Could not load league state from {target_path}: {e}")
+
     def refresh_pool(self):
         """
         Scans current ratings, filters out deleted models, and identifies:
         1. King of the Hill (highest conservative score: mu - 3*sigma)
         2. Elite Pool (top max_pool_size models)
+        Detects coronation events when a new King ascends.
         """
+        old_king = self.king_of_the_hill
+
         valid_models: List[Tuple[str, float, ModelRating]] = []
 
         for key, rec in self.evaluator.ratings.items():
@@ -145,6 +264,19 @@ class LeagueManager:
         else:
             self.king_of_the_hill = valid_models[0][0]
 
+        # Check coronation (King handoff)
+        if old_king and self.king_of_the_hill and old_king != self.king_of_the_hill:
+            old_name = get_model_display_name(old_king)
+            new_name = get_model_display_name(self.king_of_the_hill)
+            new_rec = self.evaluator.ratings.get(self.king_of_the_hill)
+            new_score = f"{new_rec.conservative_rating:.2f}" if new_rec else "N/A"
+            self._record_event(
+                event_type="coronation",
+                model_name=new_name,
+                detail=f"Dethroned '{old_name}' to claim King of the Hill (Score: {new_score})",
+                extra={"old_king": old_name, "new_king": new_name}
+            )
+
         # Populate elite pool with top models (mix of checkpoints and anchors)
         pool_paths = []
         for path, _, _ in valid_models:
@@ -168,6 +300,12 @@ class LeagueManager:
             self.contender_queue.append(ckpt_path)
             self.contender_consecutive_losses[ckpt_path] = 0
             print(f"[League Manager] [Gauntlet Admission] Admitted '{rec.name}' to Contender Queue (mu={rec.mu:.2f}, WR={rec.win_rate:.1f}%)")
+            self._record_event(
+                event_type="admission",
+                model_name=rec.name,
+                detail=f"Admitted to Gauntlet Contender Queue (μ={rec.mu:.2f}, WR={rec.win_rate:.1f}%)",
+                extra={"mu": rec.mu, "win_rate": rec.win_rate}
+            )
         else:
             # Check preemption: replace the lowest mu contender if new contender has higher mu
             contender_ratings = [(p, self.evaluator.ratings.get(p)) for p in self.contender_queue]
@@ -180,6 +318,12 @@ class LeagueManager:
                     self.contender_queue.append(ckpt_path)
                     self.contender_consecutive_losses[ckpt_path] = 0
                     print(f"[League Manager] [Gauntlet Preemption] '{rec.name}' (mu={rec.mu:.2f}) replaced '{lowest_rec.name}' (mu={lowest_rec.mu:.2f}) in Gauntlet Queue")
+                    self._record_event(
+                        event_type="preemption",
+                        model_name=rec.name,
+                        detail=f"Replaced '{lowest_rec.name}' in Gauntlet Queue (μ={rec.mu:.2f} > {lowest_rec.mu:.2f})",
+                        extra={"admitted": rec.name, "bumped": lowest_rec.name, "mu": rec.mu}
+                    )
 
     def step_contender_gauntlet(self, device: str = "cpu") -> Optional[Dict[str, Any]]:
         """
@@ -260,6 +404,12 @@ class LeagueManager:
             self.contender_queue.remove(contender_path)
             self.contender_consecutive_losses.pop(contender_path, None)
             self.refresh_pool()
+            self._record_event(
+                event_type="promotion",
+                model_name=rec.name,
+                detail=f"Graduated Gauntlet to Elite Pool! (Score: {rec.conservative_rating:.2f}, WR: {rec.win_rate:.1f}% in {rec.matches_played} matches)",
+                extra={"score": rec.conservative_rating, "matches": rec.matches_played, "win_rate": rec.win_rate}
+            )
             return {"status": "graduated", "model": rec.name, "score": rec.conservative_rating}
 
         # 2. Check Demotion (Only after grace period matches)
@@ -281,10 +431,17 @@ class LeagueManager:
             self.contender_queue.remove(contender_path)
             self.contender_consecutive_losses.pop(contender_path, None)
             self.refresh_pool()
+            self._record_event(
+                event_type="demotion",
+                model_name=rec.name,
+                detail=f"Evicted from Gauntlet: {demote_reason}",
+                extra={"reason": demote_reason, "matches": rec.matches_played}
+            )
             return {"status": "demoted", "model": rec.name, "reason": demote_reason}
 
         print(f"[League Manager] [Gauntlet Progress] '{rec.name}' now at {rec.matches_played}/{self.target_eval_matches} matches (mu={rec.mu:.2f}, sigma={rec.sigma:.2f}, Score={rec.conservative_rating:.2f})")
         self.refresh_pool()
+        self.save_league_state()
         return {"status": "progress", "model": rec.name, "matches": rec.matches_played, "score": rec.conservative_rating}
 
     def grade_checkpoint(self, checkpoint_path: str, device: str = "cpu") -> ModelRating:
@@ -464,5 +621,8 @@ class LeagueManager:
             "king_mu": round(king_rec.mu, 2) if king_rec else 25.0,
             "king_sigma": round(king_rec.sigma, 2) if king_rec else 8.33,
             "elite_pool_size": len(self.elite_pool),
-            "protected_checkpoints_count": len(self.get_protected_checkpoint_paths())
+            "protected_checkpoints_count": len(self.get_protected_checkpoint_paths()),
+            "contender_queue_count": len(self.contender_queue),
+            "contenders": self.get_contender_queue_details(),
+            "recent_events": self.event_history[-5:]
         }

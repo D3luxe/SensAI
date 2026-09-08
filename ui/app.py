@@ -8,6 +8,7 @@ import os
 import sys
 import glob
 import time
+import datetime
 import math
 import re
 import json
@@ -214,6 +215,255 @@ button.primary-btn {
 
 .gradio-slider {
     padding: 4px 6px !important;
+}
+
+/* Sports Ticker & Promotion Queue Styles */
+.sports-ticker-container {
+    background: #090d16;
+    border: 1px solid #1e293b;
+    border-left: 4px solid #38bdf8;
+    border-radius: 8px;
+    padding: 10px 16px;
+    margin-bottom: 8px;
+    box-shadow: 0 4px 14px rgba(0, 0, 0, 0.35);
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+}
+
+.ticker-bar-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    flex-wrap: wrap;
+    gap: 8px;
+    padding-bottom: 6px;
+    border-bottom: 1px solid rgba(51, 65, 85, 0.4);
+}
+
+.ticker-live-pill {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    background: rgba(14, 165, 233, 0.15);
+    color: #38bdf8;
+    border: 1px solid rgba(56, 189, 248, 0.4);
+    padding: 3px 10px;
+    border-radius: 9999px;
+    font-size: 0.78em;
+    font-weight: 800;
+    letter-spacing: 0.8px;
+    text-transform: uppercase;
+}
+
+.ticker-live-dot {
+    display: inline-block;
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    background: #38bdf8;
+    box-shadow: 0 0 8px #38bdf8;
+    animation: ticker-pulse 1.8s infinite;
+}
+
+@keyframes ticker-pulse {
+    0%, 100% { opacity: 1; transform: scale(1); }
+    50% { opacity: 0.4; transform: scale(0.85); }
+}
+
+.ticker-events-row {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    overflow-x: auto;
+    padding: 2px 0;
+    white-space: nowrap;
+}
+
+.ticker-events-row::-webkit-scrollbar {
+    height: 4px;
+}
+.ticker-events-row::-webkit-scrollbar-thumb {
+    background: #334155;
+    border-radius: 4px;
+}
+
+.ticker-event-pill {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    background: rgba(15, 23, 42, 0.85);
+    border: 1px solid #334155;
+    border-radius: 6px;
+    padding: 5px 12px;
+    font-size: 0.84em;
+    color: #cbd5e1;
+    box-shadow: 0 2px 6px rgba(0,0,0,0.25);
+    flex-shrink: 0;
+}
+
+.ticker-badge-promotion {
+    background: rgba(34, 197, 94, 0.2);
+    color: #4ade80;
+    border: 1px solid rgba(34, 197, 94, 0.5);
+    padding: 2px 7px;
+    border-radius: 4px;
+    font-weight: 800;
+    font-size: 0.78em;
+    letter-spacing: 0.5px;
+}
+
+.ticker-badge-demotion {
+    background: rgba(244, 63, 94, 0.2);
+    color: #fb7185;
+    border: 1px solid rgba(244, 63, 94, 0.5);
+    padding: 2px 7px;
+    border-radius: 4px;
+    font-weight: 800;
+    font-size: 0.78em;
+    letter-spacing: 0.5px;
+}
+
+.ticker-badge-coronation {
+    background: rgba(234, 179, 8, 0.2);
+    color: #facc15;
+    border: 1px solid rgba(234, 179, 8, 0.5);
+    padding: 2px 7px;
+    border-radius: 4px;
+    font-weight: 800;
+    font-size: 0.78em;
+    letter-spacing: 0.5px;
+}
+
+.ticker-badge-admission {
+    background: rgba(56, 189, 248, 0.2);
+    color: #38bdf8;
+    border: 1px solid rgba(56, 189, 248, 0.5);
+    padding: 2px 7px;
+    border-radius: 4px;
+    font-weight: 800;
+    font-size: 0.78em;
+    letter-spacing: 0.5px;
+}
+
+.ticker-badge-preemption {
+    background: rgba(168, 85, 247, 0.2);
+    color: #c084fc;
+    border: 1px solid rgba(168, 85, 247, 0.5);
+    padding: 2px 7px;
+    border-radius: 4px;
+    font-weight: 800;
+    font-size: 0.78em;
+    letter-spacing: 0.5px;
+}
+
+/* Gauntlet Promotion Queue Styles */
+.promotion-queue-container {
+    background: linear-gradient(135deg, rgba(15, 23, 42, 0.85) 0%, rgba(30, 41, 59, 0.7) 100%);
+    border: 1px solid #334155;
+    border-radius: 8px;
+    padding: 12px 18px;
+    margin-bottom: 10px;
+    box-shadow: 0 4px 14px rgba(0,0,0,0.25);
+}
+
+.promotion-queue-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    margin-bottom: 10px;
+    flex-wrap: wrap;
+    gap: 8px;
+}
+
+.queue-title {
+    color: #f1f5f9;
+    font-weight: 800;
+    font-size: 0.95em;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    letter-spacing: 0.3px;
+}
+
+.queue-cards-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+    gap: 12px;
+}
+
+.contender-card {
+    background: rgba(10, 15, 30, 0.75);
+    border: 1px solid #3b82f6;
+    border-radius: 8px;
+    padding: 12px 14px;
+    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.3);
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+}
+
+.contender-card-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+}
+
+.contender-name {
+    font-size: 0.98em;
+    font-weight: 800;
+    color: #38bdf8;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+}
+
+.contender-status-tag {
+    font-size: 0.75em;
+    font-weight: 700;
+    padding: 2px 8px;
+    border-radius: 9999px;
+    border: 1px solid #334155;
+    background: rgba(15, 23, 42, 0.8);
+    color: #94a3b8;
+}
+
+.contender-status-danger {
+    border-color: #f43f5e !important;
+    background: rgba(244, 63, 94, 0.2) !important;
+    color: #fb7185 !important;
+}
+
+.contender-prog-track {
+    background: #1e293b;
+    border-radius: 9999px;
+    height: 7px;
+    width: 100%;
+    overflow: hidden;
+}
+
+.contender-prog-fill {
+    background: linear-gradient(90deg, #38bdf8 0%, #4ade80 100%);
+    height: 100%;
+    border-radius: 9999px;
+    transition: width 0.3s ease;
+}
+
+.contender-stats-grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 6px;
+    font-size: 0.82em;
+    color: #cbd5e1;
+    background: rgba(15, 23, 42, 0.5);
+    padding: 6px 10px;
+    border-radius: 6px;
+    border: 1px solid rgba(51, 65, 85, 0.3);
+}
+
+.contender-stat-val {
+    font-weight: 700;
+    color: #f8fafc;
 }
 """
 
@@ -520,6 +770,184 @@ def build_cockpit_leaderboard_summary_html(evaluator: TrueSkillEvaluator) -> str
     """
 
 
+def load_league_state_safely(path: str = "logs/league_state.json") -> Dict[str, Any]:
+    """Safely loads league promotion and sports ticker state from disk without crashing on lock contention."""
+    if not os.path.exists(path):
+        return {}
+    for _ in range(3):
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except (PermissionError, json.JSONDecodeError):
+            time.sleep(0.05)
+        except Exception:
+            break
+    return {}
+
+
+def build_league_wire_and_queue_html(evaluator: TrueSkillEvaluator, league_state: Optional[Dict[str, Any]] = None) -> str:
+    """
+    Renders the live sports ticker ('League Wire') and active Gauntlet Promotion Queue board.
+    Shows promotions, demotions, preemption, and King of the Hill coronations.
+    """
+    state = league_state if league_state is not None else load_league_state_safely()
+    events = state.get("event_history", [])
+    contenders = state.get("contenders", [])
+
+    # Fallback if league state file hasn't been written yet: infer potential contenders from ratings
+    if not contenders and evaluator and hasattr(evaluator, "ratings"):
+        inferred = []
+        for path, rec in evaluator.ratings.items():
+            if (
+                not rec.is_anchor
+                and path != "heuristic"
+                and "latest_model" not in path.lower()
+                and rec.matches_played < 16
+                and rec.mu >= 26.0
+                and rec.win_rate >= 50.0
+            ):
+                inferred.append({
+                    "name": rec.name,
+                    "path": path,
+                    "mu": round(rec.mu, 2),
+                    "sigma": round(rec.sigma, 2),
+                    "conservative_score": round(rec.conservative_rating, 2),
+                    "matches_played": rec.matches_played,
+                    "target_matches": 16,
+                    "progress_pct": min(100.0, round((rec.matches_played / 16.0) * 100.0, 1)),
+                    "win_rate": round(rec.win_rate, 1),
+                    "record": f"{rec.wins}W-{rec.losses}L-{rec.draws}D",
+                    "consecutive_losses": 0,
+                    "max_consecutive_losses": 4,
+                    "status": "Contender in Trial"
+                })
+        if inferred:
+            contenders = inferred[:3]
+
+    # --- PART 1: SPORTS TICKER (LEAGUE WIRE) ---
+    recent_events = list(reversed(events[-6:]))  # Newest first
+    if recent_events:
+        event_pills = []
+        for ev in recent_events:
+            ev_type = ev.get("type", "event").lower()
+            model = ev.get("model", "Model")
+            detail = ev.get("detail", "")
+            ts = ev.get("timestamp", "")
+            time_str = ""
+            if ts:
+                try:
+                    dt = datetime.datetime.fromisoformat(ts)
+                    time_str = dt.strftime("%H:%M:%S")
+                except Exception:
+                    time_str = ""
+
+            if ev_type == "promotion":
+                badge = '<span class="ticker-badge-promotion">🏆 PROMOTED</span>'
+            elif ev_type == "demotion":
+                badge = '<span class="ticker-badge-demotion">🔻 DEMOTED</span>'
+            elif ev_type == "coronation":
+                badge = '<span class="ticker-badge-coronation">👑 NEW KING</span>'
+            elif ev_type == "admission":
+                badge = '<span class="ticker-badge-admission">⚔️ IN QUEUE</span>'
+            elif ev_type == "preemption":
+                badge = '<span class="ticker-badge-preemption">🔄 PREEMPT</span>'
+            else:
+                badge = '<span class="ticker-badge-admission">⚡ UPDATE</span>'
+
+            pill = f"""
+            <div class="ticker-event-pill">
+                {badge}
+                <b style="color: #f1f5f9;">{model}</b>
+                <span style="color: #94a3b8; font-size: 0.95em;">{detail}</span>
+                {f'<span style="color: #64748b; font-size: 0.85em; font-family: monospace;">[{time_str}]</span>' if time_str else ''}
+            </div>
+            """
+            event_pills.append(pill)
+        events_html = "".join(event_pills)
+    else:
+        events_html = """
+        <div style="color: #94a3b8; font-size: 0.88em; padding: 4px 6px;">
+            ⚡ <b>League Wire Standby:</b> Checkpoints qualify for Gauntlet trials at μ ≥ 26.0 and Win Rate ≥ 50%. Promotions, demotions, and King coronations will broadcast here live.
+        </div>
+        """
+
+    ticker_html = f"""
+    <div class="sports-ticker-container">
+        <div class="ticker-bar-header">
+            <div class="ticker-live-pill">
+                <span class="ticker-live-dot"></span>
+                <span>Live League Wire</span>
+            </div>
+            <span style="color: #64748b; font-size: 0.78em; text-transform: uppercase; letter-spacing: 0.5px;">Real-Time Promotion & Demotion Feed</span>
+        </div>
+        <div class="ticker-events-row">
+            {events_html}
+        </div>
+    </div>
+    """
+
+    # --- PART 2: PROMOTION QUEUE (GAUNTLET TRIALS BOARD) ---
+    if contenders:
+        cards = []
+        for c in contenders:
+            danger_class = " contender-status-danger" if "danger" in c.get("status", "").lower() or c.get("consecutive_losses", 0) >= 3 else ""
+            consec = c.get("consecutive_losses", 0)
+            max_consec = c.get("max_consecutive_losses", 4)
+            loss_color = "#4ade80" if consec == 0 else ("#facc15" if consec < 3 else "#fb7185")
+
+            card = f"""
+            <div class="contender-card">
+                <div class="contender-card-header">
+                    <span class="contender-name">⚡ {c['name']}</span>
+                    <span class="contender-status-tag{danger_class}">{c.get('status', 'In Trial')}</span>
+                </div>
+                <div>
+                    <div style="display: flex; justify-content: space-between; font-size: 0.82em; color: #94a3b8; margin-bottom: 4px;">
+                        <span>Trial Progress</span>
+                        <b style="color: #38bdf8;">{c.get('matches_played', 0)} / {c.get('target_matches', 16)} Games ({c.get('progress_pct', 0.0)}%)</b>
+                    </div>
+                    <div class="contender-prog-track">
+                        <div class="contender-prog-fill" style="width: {c.get('progress_pct', 0.0)}%;"></div>
+                    </div>
+                </div>
+                <div class="contender-stats-grid">
+                    <div>Rating: <span class="contender-stat-val">μ={c.get('mu', 25.0):.2f}</span></div>
+                    <div>Uncertainty: <span class="contender-stat-val">σ=±{c.get('sigma', 8.33):.2f}</span></div>
+                    <div>Score (μ-3σ): <span class="contender-stat-val" style="color: #a855f7;">{c.get('conservative_score', 0.0):.2f}</span></div>
+                    <div>Win Rate: <span class="contender-stat-val" style="color: #4ade80;">{c.get('win_rate', 0.0):.1f}%</span></div>
+                </div>
+                <div style="display: flex; justify-content: space-between; align-items: center; font-size: 0.82em; border-top: 1px solid rgba(51, 65, 85, 0.4); padding-top: 6px;">
+                    <span style="color: #cbd5e1;">Record: <b style="color: #f1f5f9;">{c.get('record', '0W-0L-0D')}</b></span>
+                    <span style="color: #94a3b8;">Loss Streak: <b style="color: {loss_color};">{consec} / {max_consec}</b></span>
+                </div>
+            </div>
+            """
+            cards.append(card)
+        queue_grid = f'<div class="queue-cards-grid">{"".join(cards)}</div>'
+        active_count_str = f'<span style="color: #38bdf8; font-weight: 700;">{len(contenders)} Active Contenders</span>'
+    else:
+        queue_grid = """
+        <div style="background: rgba(10, 15, 30, 0.5); border: 1px dashed #334155; border-radius: 8px; padding: 14px 20px; text-align: center; color: #94a3b8; font-size: 0.9em;">
+            <span>💤 <b>Gauntlet Promotion Queue Clear</b> — All qualified checkpoints evaluated. Any new checkpoint scoring μ ≥ 26.0 with Win Rate ≥ 50% will be admitted automatically.</span>
+        </div>
+        """
+        active_count_str = '<span style="color: #64748b;">Queue Idle</span>'
+
+    queue_html = f"""
+    <div class="promotion-queue-container">
+        <div class="promotion-queue-header">
+            <span class="queue-title">⚔️ Gauntlet Promotion Queue & Elimination Trials</span>
+            <div style="font-size: 0.84em; color: #94a3b8;">
+                {active_count_str} (Admission: μ ≥ 26.0, WR ≥ 50% | Target: 16 Games)
+            </div>
+        </div>
+        {queue_grid}
+    </div>
+    """
+
+    return ticker_html + queue_html
+
+
 def create_ui():
     mgr = TrainingProcessManager.get_instance()
     bc_trainer = BehavioralCloningTrainer()
@@ -742,6 +1170,7 @@ def create_ui():
                         refresh_cockpit_lb_btn = gr.Button("🔄 Refresh Standings", size="sm", scale=1)
 
                     cockpit_lb_summary = gr.HTML(build_cockpit_leaderboard_summary_html(ts_evaluator))
+                    cockpit_league_ticker = gr.HTML(build_league_wire_and_queue_html(ts_evaluator))
                     cockpit_lb_table = gr.Dataframe(
                         value=get_cockpit_leaderboard_df(ts_evaluator),
                         label="Top Performing Checkpoints & Baselines (Ranked by Conservative Score: μ - 3σ)",
@@ -2429,11 +2858,15 @@ def create_ui():
 
         def on_refresh_cockpit_leaderboard():
             ts_evaluator.load_leaderboard()
-            return build_cockpit_leaderboard_summary_html(ts_evaluator), get_cockpit_leaderboard_df(ts_evaluator)
+            return (
+                build_cockpit_leaderboard_summary_html(ts_evaluator),
+                build_league_wire_and_queue_html(ts_evaluator),
+                get_cockpit_leaderboard_df(ts_evaluator)
+            )
 
         refresh_cockpit_lb_btn.click(
             fn=on_refresh_cockpit_leaderboard,
-            outputs=[cockpit_lb_summary, cockpit_lb_table]
+            outputs=[cockpit_lb_summary, cockpit_league_ticker, cockpit_lb_table]
         )
 
         # -------------------------------------------------------------
@@ -2444,6 +2877,7 @@ def create_ui():
         _last_log_str = [""]
         _last_view_mode = ["Recent 100"]
         _last_leaderboard_mtime = [0.0]
+        _last_league_mtime = [0.0]
 
         def on_timer_tick(view_mode: str = "Recent 100"):
             status = mgr.get_status_info()
@@ -2490,21 +2924,27 @@ def create_ui():
                 _last_view_mode[0] = view_mode
                 plot_update = render_training_curves_plot(history_file=history_file, mode=mode_param)
 
-            # Smart Leaderboard Update: zero overhead if leaderboard JSON hasn't changed
+            # Smart Leaderboard Update: zero overhead if leaderboard JSON and league state haven't changed
             lb_file = "logs/trueskill_leaderboard.json"
+            league_file = "logs/league_state.json"
             curr_lb_mtime = os.path.getmtime(lb_file) if os.path.exists(lb_file) else 0.0
-            if curr_lb_mtime == _last_leaderboard_mtime[0]:
+            curr_league_mtime = os.path.getmtime(league_file) if os.path.exists(league_file) else 0.0
+
+            if curr_lb_mtime == _last_leaderboard_mtime[0] and curr_league_mtime == _last_league_mtime[0]:
                 lb_summary_update = gr.update()
+                lb_wire_update = gr.update()
                 lb_table_update = gr.update()
             else:
                 _last_leaderboard_mtime[0] = curr_lb_mtime
+                _last_league_mtime[0] = curr_league_mtime
                 ts_evaluator.load_leaderboard()
                 lb_summary_update = build_cockpit_leaderboard_summary_html(ts_evaluator)
+                lb_wire_update = build_league_wire_and_queue_html(ts_evaluator)
                 lb_table_update = get_cockpit_leaderboard_df(ts_evaluator)
 
             return (
                 card_html, start_btn_update, pause_btn_update, stop_btn_update,
-                logs_update, plot_update, lb_summary_update, lb_table_update
+                logs_update, plot_update, lb_summary_update, lb_wire_update, lb_table_update
             )
 
         def on_change_view_mode(mode_val):
@@ -2524,7 +2964,7 @@ def create_ui():
             outputs=[
                 status_card, start_btn, pause_btn, stop_btn,
                 console_output, live_metrics_plot,
-                cockpit_lb_summary, cockpit_lb_table
+                cockpit_lb_summary, cockpit_league_ticker, cockpit_lb_table
             ]
         )
 
@@ -2535,7 +2975,7 @@ def create_ui():
             outputs=[
                 status_card, start_btn, pause_btn, stop_btn,
                 console_output, live_metrics_plot,
-                cockpit_lb_summary, cockpit_lb_table
+                cockpit_lb_summary, cockpit_league_ticker, cockpit_lb_table
             ]
         )
 
