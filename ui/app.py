@@ -2078,7 +2078,7 @@ def create_ui():
                 if os.path.exists("checkpoints/latest_model.pt"):
                     candidates.append("checkpoints/latest_model.pt")
                 candidates.extend(glob.glob("checkpoints/checkpoint_iter_*.pt"))
-                candidates.extend(glob.glob("checkpoints/manual_checkpoint_step_*.pt"))
+                candidates.extend(glob.glob("checkpoints/**/*.pt", recursive=True))
                 
                 best_ckpt = None
                 best_iter = -1

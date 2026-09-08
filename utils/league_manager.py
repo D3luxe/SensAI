@@ -38,7 +38,10 @@ class LeagueManager:
         self.king_ratio = float(self.config.get("king_ratio", 0.25))
         self.pool_ratio = float(self.config.get("pool_ratio", 0.25))
         self.max_pool_size = int(self.config.get("max_pool_size", 10))
-        self.protect_top_k = int(self.config.get("protect_top_k", 5))
+        self.protect_top_k = int(self.config.get("protect_top_k", 20))
+        self.hall_of_fame_size = int(self.config.get("hall_of_fame_size", 20))
+        self.hall_of_fame_min_matches = int(self.config.get("hall_of_fame_min_matches", 16))
+        self.hall_of_fame_max_sigma = float(self.config.get("hall_of_fame_max_sigma", 2.5))
         self.eval_matches_per_grade = int(self.config.get("eval_matches_per_grade", 2))
         self.eval_max_steps = int(self.config.get("eval_max_steps", 400))
 
@@ -552,42 +555,76 @@ class LeagueManager:
 
         return rec
 
-    def get_protected_checkpoint_paths(self) -> Set[str]:
+    def get_hall_of_fame(self) -> List[ModelRating]:
         """
-        Returns a set of normalized file paths for top-K checkpoints and active
-        Gauntlet contenders that must NEVER be pruned by rolling checkpoint cleanups.
-        Guarantees that the All-Time Peak Checkpoint is permanently immune from deletion.
+        Returns the strictly bounded Top-K all-time best non-anchor checkpoints,
+        gated by sample size and confidence (matches >= min_matches, sigma <= max_sigma).
+        Anchors are excluded so that neural network checkpoints receive all K slots.
         """
-        self.refresh_pool()
-        protected = set()
-
-        # 1. Protect current King of the Hill
-        if self.king_of_the_hill and os.path.exists(self.king_of_the_hill):
-            protected.add(os.path.abspath(self.king_of_the_hill))
-
-        # 2. Protect All-Time Historical Peak Checkpoint (Hall of Fame)
         historical_ckpts = [
             r for r in self.evaluator.ratings.values()
             if not r.is_anchor and r.path != "heuristic" and "latest_model" not in r.path.lower()
         ]
-        if historical_ckpts:
-            all_time_best = max(historical_ckpts, key=lambda r: (r.conservative_rating, r.win_rate, r.mu))
-            if os.path.exists(all_time_best.path):
-                protected.add(os.path.abspath(all_time_best.path))
+        # Gate by sample size and Bayesian confidence to prevent debut flukes
+        qualified = [
+            r for r in historical_ckpts
+            if r.matches_played >= self.hall_of_fame_min_matches and r.sigma <= self.hall_of_fame_max_sigma
+        ]
+        # If fewer qualified than K, backfill with best available non-anchors
+        if len(qualified) < self.hall_of_fame_size:
+            unqualified = [r for r in historical_ckpts if r not in qualified]
+            unqualified.sort(
+                key=lambda r: (r.conservative_rating, r.win_rate, r.mu, r.matches_played),
+                reverse=True
+            )
+            qualified.extend(unqualified[:(self.hall_of_fame_size - len(qualified))])
 
-        # 3. Protect top-K models in Elite Pool
+        qualified.sort(
+            key=lambda r: (r.conservative_rating, r.win_rate, r.mu, r.matches_played),
+            reverse=True
+        )
+        return qualified[:self.hall_of_fame_size]
+
+    def get_protected_checkpoint_paths(self) -> Set[str]:
+        """
+        Returns a set of canonicalized file paths for top-K checkpoints, active
+        Gauntlet contenders, and Top-K Hall of Fame models that must NEVER be pruned.
+        Strictly bounded by K to prevent exponential disk file accumulation.
+        Uses os.path.normcase to prevent case/slash mismatch bugs on Windows.
+        """
+        self.refresh_pool()
+        protected = set()
+
+        def add_canonical(p: str):
+            if p and p != "heuristic" and os.path.exists(p):
+                abs_p = os.path.abspath(p)
+                protected.add(abs_p)
+                protected.add(os.path.normcase(abs_p))
+
+        # 1. Protect current King of the Hill
+        if self.king_of_the_hill:
+            add_canonical(self.king_of_the_hill)
+
+        # 2. Protect bounded Top-K Hall of Fame Checkpoints (Sample-size gated)
+        for hof_rec in self.get_hall_of_fame():
+            add_canonical(hof_rec.path)
+
+        # 3. Protect top models in Elite Pool (Anchors do not consume checkpoint quota)
         count = 0
         for path in self.elite_pool:
+            norm_p = self._normalize_path(path)
+            rec = self.evaluator.ratings.get(norm_p)
+            if rec and rec.is_anchor:
+                continue
             if path != "heuristic" and os.path.exists(path):
-                protected.add(os.path.abspath(path))
+                add_canonical(path)
                 count += 1
                 if count >= self.protect_top_k:
                     break
 
         # 4. Protect all active Gauntlet contenders
         for c_path in self.contender_queue:
-            if os.path.exists(c_path):
-                protected.add(os.path.abspath(c_path))
+            add_canonical(c_path)
 
         return protected
 

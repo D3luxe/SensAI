@@ -54,7 +54,7 @@ class PPOTrainer:
         self.n_epochs = int(hp.get("n_epochs", 4))
         self.total_timesteps = int(hp.get("total_timesteps", 1_000_000))
         self.checkpoint_interval = int(log_cfg.get("checkpoint_interval", hp.get("checkpoint_interval", 20)))
-        self.max_checkpoints_to_keep = int(log_cfg.get("max_checkpoints_to_keep", 5))
+        self.max_checkpoints_to_keep = int(log_cfg.get("max_checkpoints_to_keep", 30))
 
         self.num_envs = int(env_cfg.get("num_envs", 16))
         self.tick_skip = int(env_cfg.get("tick_skip", 8))
@@ -378,7 +378,7 @@ class PPOTrainer:
                 protected_paths = self.league_manager.get_protected_checkpoint_paths()
 
             for old_file in to_remove:
-                abs_old = os.path.abspath(old_file)
+                abs_old = os.path.normcase(os.path.abspath(old_file))
                 if abs_old in protected_paths:
                     continue
                 try:

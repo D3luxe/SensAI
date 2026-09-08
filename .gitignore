@@ -19,3 +19,6 @@ checkpoints/latest_model_before_alignment_*.pt
 .system_generated/
 runs/
 *.npz
+archive/
+checkpoints/manual_saves/
+checkpoints/hall_of_fame/
