@@ -72,6 +72,9 @@ class LeagueManager:
         self.max_consecutive_losses = int(self.config.get("max_consecutive_losses", 4))
         self.grace_period_matches = int(self.config.get("grace_period_matches", 6))
         self.target_eval_matches = int(self.config.get("target_eval_matches", 16))
+        self.max_contender_matches = int(self.config.get("max_contender_matches", 32))
+        self.target_eval_sigma = float(self.config.get("target_eval_sigma", 1.8))
+        self.king_challenge_frequency = int(self.config.get("king_challenge_frequency", 2))
         self.max_active_contenders = int(self.config.get("max_active_contenders", 3))
         self.contender_eval_matches_per_step = int(self.config.get("contender_eval_matches_per_step", 2))
 
@@ -85,6 +88,8 @@ class LeagueManager:
         self.previous_king_of_the_hill: Optional[str] = None
         self.elite_pool: List[str] = []
         self._temporal_cycle_idx: int = 0
+        self._pool_cycle_idx: int = 0
+        self._gauntlet_step_counter: int = 0
 
         self.load_league_state()
         self._init_anchors()
@@ -144,21 +149,48 @@ class LeagueManager:
             self.event_history = self.event_history[-30:]
         self.save_league_state()
 
+    def _compute_competitive_score(self, rec: Optional[ModelRating]) -> float:
+        """
+        Computes the effective competitive ranking score for King and Elite Pool determination.
+        - Models with < target_eval_matches (16): uses conservative lower bound mu - 3*sigma
+          to enforce debut protection and prevent unearned ascension on small-sample flukes.
+        - Established models (>= 16 matches): uses mu - 2*sigma (95% confidence lower bound)
+          to eliminate the sample-size penalty trap where incumbents with 800+ matches
+          block vastly superior challengers with 16-32 matches.
+        """
+        if not rec:
+            return 0.0
+        if rec.matches_played < self.target_eval_matches:
+            return round(rec.mu - 3.0 * rec.sigma, 2)
+        return round(rec.mu - 2.0 * rec.sigma, 2)
+
     def get_contender_queue_details(self) -> List[Dict[str, Any]]:
         """Provides rich metadata for each active contender in queue for the UI."""
         details = []
+        king_rec = self.evaluator.ratings.get(self.king_of_the_hill) if self.king_of_the_hill else None
+        king_mu = king_rec.mu if king_rec else 25.0
+
         for path in self.contender_queue:
             rec = self.evaluator.ratings.get(path)
             if not rec:
                 continue
             consec_losses = self.contender_consecutive_losses.get(path, 0)
-            progress_pct = min(100.0, round((rec.matches_played / max(1, self.target_eval_matches)) * 100.0, 1))
+
+            is_title_contender = (
+                (rec.mu >= king_mu - 1.0 or rec.win_rate >= 50.0)
+                and rec.matches_played < self.max_contender_matches
+                and rec.sigma > self.target_eval_sigma
+            )
+            target = self.max_contender_matches if (is_title_contender or rec.matches_played > self.target_eval_matches) else self.target_eval_matches
+            progress_pct = min(100.0, round((rec.matches_played / max(1, target)) * 100.0, 1))
 
             # Status determination
             if rec.matches_played == 0:
                 status = "Awaiting First Match"
             elif consec_losses >= self.max_consecutive_losses - 1:
                 status = "⚠️ Knockout Danger"
+            elif is_title_contender and rec.matches_played >= self.target_eval_matches:
+                status = "🏆 Title Bout (Extended Trial)"
             elif rec.matches_played >= self.grace_period_matches:
                 status = "Elimination Window Active"
             else:
@@ -170,8 +202,9 @@ class LeagueManager:
                 "mu": round(rec.mu, 2),
                 "sigma": round(rec.sigma, 2),
                 "conservative_score": round(rec.conservative_rating, 2),
+                "competitive_score": self._compute_competitive_score(rec),
                 "matches_played": rec.matches_played,
-                "target_matches": self.target_eval_matches,
+                "target_matches": target,
                 "progress_pct": progress_pct,
                 "win_rate": round(rec.win_rate, 1),
                 "record": f"{rec.wins}W-{rec.losses}L-{rec.draws}D",
@@ -197,6 +230,7 @@ class LeagueManager:
                     "mu": round(rec.mu, 2),
                     "sigma": round(rec.sigma, 2),
                     "conservative_score": round(rec.conservative_rating, 2),
+                    "competitive_score": self._compute_competitive_score(rec),
                     "win_rate": round(rec.win_rate, 1),
                     "record": f"{rec.wins}W-{rec.losses}L-{rec.draws}D",
                     "matches_played": rec.matches_played,
@@ -211,6 +245,7 @@ class LeagueManager:
                     "mu": 25.0,
                     "sigma": 8.33,
                     "conservative_score": 0.0,
+                    "competitive_score": 0.0,
                     "win_rate": 0.0,
                     "record": "0W-0L-0D",
                     "matches_played": 0,
@@ -275,7 +310,7 @@ class LeagueManager:
     def refresh_pool(self):
         """
         Scans current ratings, filters out deleted models, and identifies:
-        1. King of the Hill (highest conservative score: mu - 3*sigma)
+        1. King of the Hill (highest competitive score: mu - 2*sigma for established, mu - 3*sigma for debuts)
         2. Elite Pool (top max_pool_size models)
         Detects coronation events when a new King ascends.
         """
@@ -288,20 +323,21 @@ class LeagueManager:
             # Ephemeral rolling files like latest_model.pt are never eligible for King or elite pool
             if "latest_model" in norm_key.lower():
                 continue
+            comp_score = self._compute_competitive_score(rec)
             # Anchors are valid
             if rec.is_anchor or norm_key == "heuristic":
-                valid_models.append((norm_key, rec.conservative_rating, rec))
+                valid_models.append((norm_key, comp_score, rec))
             elif os.path.exists(norm_key):
-                valid_models.append((norm_key, rec.conservative_rating, rec))
+                valid_models.append((norm_key, comp_score, rec))
 
         if not valid_models:
             self.king_of_the_hill = self.active_anchors[0] if self.active_anchors else "heuristic"
             self.elite_pool = [self.king_of_the_hill]
             return
 
-        # Sort descending: highest conservative rating first, then win rate, then mu
+        # Sort descending: highest competitive score first, then conservative rating, then win rate, then mu
         valid_models.sort(
-            key=lambda item: (item[2].conservative_rating, item[2].win_rate, item[2].mu),
+            key=lambda item: (item[1], item[2].conservative_rating, item[2].win_rate, item[2].mu),
             reverse=True
         )
 
@@ -317,7 +353,7 @@ class LeagueManager:
             old_name = get_model_display_name(old_king)
             new_name = get_model_display_name(self.king_of_the_hill)
             new_rec = self.evaluator.ratings.get(self.king_of_the_hill)
-            new_score = f"{new_rec.conservative_rating:.2f}" if new_rec else "N/A"
+            new_score = f"{self._compute_competitive_score(new_rec):.2f}" if new_rec else "N/A"
             self._record_event(
                 event_type="coronation",
                 model_name=new_name,
@@ -373,16 +409,88 @@ class LeagueManager:
                         extra={"admitted": rec.name, "bumped": lowest_rec.name, "mu": rec.mu}
                     )
 
+    def step_king_title_bout(self, device: str = "cpu") -> Optional[Dict[str, Any]]:
+        """
+        Executes a 2-game head-to-head title bout between the reigning King of the Hill
+        and the top-ranked non-King challenger in the Elite Pool.
+        Ensures established elite checkpoints continue refining their TrueSkill ratings
+        and prevents stagnant, uncontested incumbent reigns.
+        """
+        if not self.enabled or not self.king_of_the_hill:
+            return None
+
+        # Clean elite pool of missing files
+        valid_challengers = [
+            p for p in self.elite_pool
+            if p != self.king_of_the_hill
+            and p != "heuristic"
+            and os.path.exists(p)
+            and not getattr(self.evaluator.ratings.get(self._normalize_path(p)), "is_anchor", False)
+        ]
+        if not valid_challengers:
+            return None
+
+        # Pick top challenger by competitive score
+        challenger_path = max(
+            valid_challengers,
+            key=lambda p: self._compute_competitive_score(
+                self.evaluator.ratings.get(self._normalize_path(p))
+                or ModelRating(name=p, path=p)
+            )
+        )
+        norm_challenger = self._normalize_path(challenger_path)
+        norm_king = self._normalize_path(self.king_of_the_hill)
+        c_rec = self.evaluator.ratings.get(norm_challenger)
+        k_rec = self.evaluator.ratings.get(norm_king)
+        if not c_rec or not k_rec:
+            return None
+
+        print(f"[League Manager] [King Title Bout] '{c_rec.name}' (Score: {self._compute_competitive_score(c_rec):.2f}) challenging King '{k_rec.name}' in 2-game title match...")
+        try:
+            self.evaluator.evaluate_pairing(
+                model_a_path=norm_challenger,
+                model_b_path=norm_king,
+                matches_per_pair=2,
+                max_steps=self.eval_max_steps,
+                enable_overtime=True,
+                device=device
+            )
+        except Exception as e:
+            print(f"[League Manager] Warning: Title bout error {norm_challenger} vs {norm_king}: {e}")
+            return None
+
+        old_king = self.king_of_the_hill
+        self.refresh_pool()
+        self.save_league_state()
+
+        if self.king_of_the_hill != old_king:
+            print(f"[League Manager] [King Title Bout] Coronation! '{get_model_display_name(self.king_of_the_hill)}' dethroned '{get_model_display_name(old_king)}'!")
+            return {"status": "coronation", "new_king": self.king_of_the_hill, "old_king": old_king}
+        return {"status": "defended", "king": self.king_of_the_hill, "challenger": norm_challenger}
+
     def step_contender_gauntlet(self, device: str = "cpu") -> Optional[Dict[str, Any]]:
         """
         Advances the Gauntlet promotion/demotion trials by running matches for the top active contender.
         Evaluates early demotion (after grace period) and graduation (once target matches reached).
+        Also coordinates periodic King Title Bouts against top Elite Pool challengers.
         """
-        if not self.enabled or not self.contender_queue:
+        if not self.enabled:
             return None
+
+        self._gauntlet_step_counter += 1
 
         # Clean queue of any non-existent files
         self.contender_queue = [p for p in self.contender_queue if os.path.exists(p)]
+
+        # If contender queue is empty, run an Elite King Title Bout directly!
+        if not self.contender_queue:
+            return self.step_king_title_bout(device=device)
+
+        # If contender queue has items, periodically (every king_challenge_frequency steps) run a title bout
+        if self._gauntlet_step_counter % self.king_challenge_frequency == 0:
+            self.step_king_title_bout(device=device)
+
+        # Re-check queue in case title bout altered state or queue is empty
         if not self.contender_queue:
             return None
 
@@ -446,19 +554,35 @@ class LeagueManager:
 
         consec_losses = self.contender_consecutive_losses.get(contender_path, 0)
 
+        king_rec = self.evaluator.ratings.get(self.king_of_the_hill) if self.king_of_the_hill else None
+        king_mu = king_rec.mu if king_rec else 25.0
+
+        is_title_contender = (
+            (rec.mu >= king_mu - 1.0 or rec.win_rate >= 50.0)
+            and rec.matches_played < self.max_contender_matches
+            and rec.sigma > self.target_eval_sigma
+        )
+
         # 1. Check Graduation (if qualified by skill and matches)
-        if (rec.matches_played >= self.target_eval_matches or rec.sigma <= 2.0) and rec.mu >= self.min_contender_mu and rec.win_rate >= self.min_contender_win_rate:
-            print(f"[League Manager] [Gauntlet Graduation] '{rec.name}' graduated with established rating: mu={rec.mu:.2f}, sigma={rec.sigma:.2f}, Score={rec.conservative_rating:.2f} over {rec.matches_played} matches!")
+        should_graduate = False
+        if rec.mu >= self.min_contender_mu and rec.win_rate >= self.min_contender_win_rate:
+            if rec.matches_played >= self.max_contender_matches or rec.sigma <= self.target_eval_sigma:
+                should_graduate = True
+            elif rec.matches_played >= self.target_eval_matches and not is_title_contender:
+                should_graduate = True
+
+        if should_graduate:
+            print(f"[League Manager] [Gauntlet Graduation] '{rec.name}' graduated with established rating: mu={rec.mu:.2f}, sigma={rec.sigma:.2f}, Score={self._compute_competitive_score(rec):.2f} over {rec.matches_played} matches!")
             self.contender_queue.remove(contender_path)
             self.contender_consecutive_losses.pop(contender_path, None)
             self.refresh_pool()
             self._record_event(
                 event_type="promotion",
                 model_name=rec.name,
-                detail=f"Graduated Gauntlet to Elite Pool! (Score: {rec.conservative_rating:.2f}, WR: {rec.win_rate:.1f}% in {rec.matches_played} matches)",
-                extra={"score": rec.conservative_rating, "matches": rec.matches_played, "win_rate": rec.win_rate}
+                detail=f"Graduated Gauntlet to Elite Pool! (Score: {self._compute_competitive_score(rec):.2f}, WR: {rec.win_rate:.1f}% in {rec.matches_played} matches)",
+                extra={"score": self._compute_competitive_score(rec), "matches": rec.matches_played, "win_rate": rec.win_rate}
             )
-            return {"status": "graduated", "model": rec.name, "score": rec.conservative_rating}
+            return {"status": "graduated", "model": rec.name, "score": self._compute_competitive_score(rec)}
 
         # 2. Check Demotion (Only after grace period matches)
         should_demote = False
@@ -487,10 +611,11 @@ class LeagueManager:
             )
             return {"status": "demoted", "model": rec.name, "reason": demote_reason}
 
-        print(f"[League Manager] [Gauntlet Progress] '{rec.name}' now at {rec.matches_played}/{self.target_eval_matches} matches (mu={rec.mu:.2f}, sigma={rec.sigma:.2f}, Score={rec.conservative_rating:.2f})")
+        target = self.max_contender_matches if is_title_contender else self.target_eval_matches
+        print(f"[League Manager] [Gauntlet Progress] '{rec.name}' now at {rec.matches_played}/{target} matches (mu={rec.mu:.2f}, sigma={rec.sigma:.2f}, Comp Score={self._compute_competitive_score(rec):.2f})")
         self.refresh_pool()
         self.save_league_state()
-        return {"status": "progress", "model": rec.name, "matches": rec.matches_played, "score": rec.conservative_rating}
+        return {"status": "progress", "model": rec.name, "matches": rec.matches_played, "score": self._compute_competitive_score(rec)}
 
     def grade_checkpoint(self, checkpoint_path: str, device: str = "cpu") -> ModelRating:
         """
@@ -695,13 +820,14 @@ class LeagueManager:
         king_bot = self.king_of_the_hill or (self.active_anchors[0] if self.active_anchors else "heuristic")
         assignments.extend([king_bot] * n_king)
 
-        # 3. Tier 3: Historical Diversity Pool (sampled from elite pool and anchors)
+        # 3. Tier 3: Historical Diversity Pool (round-robin rotation through elite pool and anchors)
         candidate_pool = list(dict.fromkeys(self.elite_pool + self.active_anchors))
         if not candidate_pool:
             candidate_pool = ["heuristic"]
 
         for _ in range(n_pool):
-            choice = random.choice(candidate_pool)
+            choice = candidate_pool[self._pool_cycle_idx % len(candidate_pool)]
+            self._pool_cycle_idx = (self._pool_cycle_idx + 1) % len(candidate_pool)
             assignments.append(choice)
 
         return assignments

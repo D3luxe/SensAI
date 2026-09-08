@@ -294,6 +294,87 @@ class TestLeagueManager(unittest.TestCase):
         self.assertIn("Iteration 101940", populated_html)
         self.assertIn("50.0%", populated_html)
 
+    def test_title_bout_extended_trial(self):
+        """Verify high-mu contenders are granted extended trial up to max_contender_matches."""
+        c_title = os.path.join(self.test_dir, "checkpoint_iter_400.pt")
+        shutil.copyfile(self.dummy_ckpt_path, c_title)
+        norm_title = self.league._normalize_path(c_title)
+        r = self.evaluator.get_or_create_rating(norm_title)
+        r.mu = 32.0  # High skill
+        r.matches_played = 16  # Hit standard target
+        r.sigma = 2.4  # Still above target_eval_sigma (1.8)
+        r.wins = 25  # Ample win padding so headless eval test matches don't breach floor
+        r.losses = 2
+        r.update_conservative()
+
+        self.league.contender_queue = [norm_title]
+        details = self.league.get_contender_queue_details()
+        self.assertEqual(len(details), 1)
+        self.assertEqual(details[0]["target_matches"], 32)
+        self.assertIn("Title Bout", details[0]["status"])
+
+        # Stepping should progress instead of prematurely graduating
+        res = self.league.step_contender_gauntlet()
+        self.assertIsNotNone(res)
+        self.assertEqual(res.get("status"), "progress")
+        self.assertIn(norm_title, self.league.contender_queue)
+
+        # Now simulate reaching max_contender_matches (32) with sufficient wins
+        r.matches_played = 30
+        r.wins = 25
+        r.losses = 5
+        r.update_conservative()
+        res_grad = self.league.step_contender_gauntlet()
+        self.assertIsNotNone(res_grad)
+        self.assertEqual(res_grad.get("status"), "graduated")
+        self.assertNotIn(norm_title, self.league.contender_queue)
+
+    def test_king_title_bout_coronation(self):
+        """Verify King title bout runs and crowns a superior challenger."""
+        c_king = os.path.join(self.test_dir, "checkpoint_iter_500.pt")
+        shutil.copyfile(self.dummy_ckpt_path, c_king)
+        norm_king = self.league._normalize_path(c_king)
+        rk = self.evaluator.get_or_create_rating(norm_king)
+        rk.mu = 26.0
+        rk.sigma = 0.9
+        rk.matches_played = 500
+        rk.update_conservative()
+
+        c_challenger = os.path.join(self.test_dir, "checkpoint_iter_520.pt")
+        shutil.copyfile(self.dummy_ckpt_path, c_challenger)
+        norm_chal = self.league._normalize_path(c_challenger)
+        rc = self.evaluator.get_or_create_rating(norm_chal)
+        rc.mu = 34.0
+        rc.sigma = 2.0
+        rc.matches_played = 20
+        rc.update_conservative()
+
+        self.league.refresh_pool()
+        # Challenger should be crowned King via competitive score
+        self.assertEqual(self.league.king_of_the_hill, norm_chal)
+
+        # Direct title bout execution
+        bout_res = self.league.step_king_title_bout()
+        self.assertIsNotNone(bout_res)
+        self.assertIn(bout_res.get("status"), ["coronation", "defended"])
+
+    def test_round_robin_stratified_distribution(self):
+        """Verify stratified distribution rotates evenly through pool candidates without skipping."""
+        # 4 envs with 50% SP, 25% King, 25% Pool -> 1 pool slot per call (the last slot)
+        self.league.refresh_pool()
+        candidate_pool = list(dict.fromkeys(self.league.elite_pool + self.league.active_anchors))
+        self.assertGreater(len(candidate_pool), 0)
+
+        seen = []
+        for _ in range(len(candidate_pool) * 2):
+            dist = self.league.get_stratified_distribution(4)
+            pool_slot = dist[-1]  # The pool assignment
+            seen.append(pool_slot)
+
+        expected = [candidate_pool[i % len(candidate_pool)] for i in range(len(candidate_pool) * 2)]
+        self.assertEqual(seen, expected)
+
+
 
 
 class TestStratifiedVectorizedEnv(unittest.TestCase):

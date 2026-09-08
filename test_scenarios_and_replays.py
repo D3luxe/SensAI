@@ -3,6 +3,7 @@ Unit and Integration Tests for RLGym-Tools State Setters and Replay Ingestion En
 """
 
 import os
+import math
 import unittest
 import numpy as np
 import RocketSim as rsim
@@ -11,7 +12,8 @@ from utils.replay_parser import ReplayParser
 from env.state_setters import (
     KickoffSetter, AerialScenarioSetter, WallPlaySetter,
     GoalieSaveSetter, ReplayStateSetter, WeightedScenarioSetter,
-    CustomScenarioSetter
+    CustomScenarioSetter, WallBounceReboundSetter,
+    DribbleFlickScenarioSetter, TurnaroundRecoverySetter
 )
 from utils.scenario_manager import (
     ScenarioManager,
@@ -98,7 +100,10 @@ class TestScenariosAndReplays(unittest.TestCase):
             ("Wall", WallPlaySetter()),
             ("Goalie", GoalieSaveSetter()),
             ("Replay", ReplayStateSetter()),
-            ("Custom", CustomScenarioSetter())
+            ("Custom", CustomScenarioSetter()),
+            ("Rebound", WallBounceReboundSetter()),
+            ("Dribble", DribbleFlickScenarioSetter()),
+            ("Turnaround", TurnaroundRecoverySetter())
         ]
 
         for name, setter in setters:
@@ -290,6 +295,146 @@ class TestScenariosAndReplays(unittest.TestCase):
         batch_acts = InverseDynamicsSolver.batch_extract_actions(c_pos_seq, c_vel_seq, c_rot_seq, c_bst_seq)
         self.assertEqual(batch_acts.shape, (1, 8))
         self.assertGreater(batch_acts[0, 0], 0.5)
+
+    def test_aerial_scenario_setter_physics_guarantees(self):
+        """Verify AerialScenarioSetter mathematically guarantees hang time >= 1.75s, ceiling clearance, and aligned heading."""
+        setter = AerialScenarioSetter()
+        arena = rsim.Arena(rsim.GameMode.SOCCAR)
+        arena.add_car(rsim.Team.BLUE)
+        arena.add_car(rsim.Team.ORANGE)
+
+        for sample_idx in range(300):
+            setter.reset(arena, num_players=2)
+            bs = arena.ball.get_state()
+            z0 = float(bs.pos.z)
+            vz0 = float(bs.vel.z)
+
+            # Quadratic formula to find t when z(t) = 250: 325*t^2 - vz0*t - (z0 - 250) = 0
+            disc = vz0 ** 2 + 4.0 * 325.0 * (z0 - 250.0)
+            self.assertGreaterEqual(disc, 0.0, f"Sample {sample_idx}: Ball should be above 250 Z initially")
+            t_hang = (vz0 + math.sqrt(disc)) / 650.0
+
+            self.assertGreaterEqual(
+                t_hang, 1.75,
+                f"Sample {sample_idx}: Hang time {t_hang:.2f}s is below 1.75s minimum (z0={z0:.1f}, vz0={vz0:.1f})"
+            )
+
+            # Apex check: apex height must be < 1750 uu (well below 1951 uu ceiling barrier)
+            z_apex = z0 + (max(0.0, vz0) ** 2) / 1300.0
+            self.assertLess(
+                z_apex, 1750.0,
+                f"Sample {sample_idx}: Apex {z_apex:.1f} uu exceeds ceiling clearance threshold (z0={z0:.1f}, vz0={vz0:.1f})"
+            )
+
+            # Attacking car speed and heading alignment check (target team car has forward velocity)
+            attacking_cars = [c for c in arena.get_cars() if math.hypot(c.get_state().vel.x, c.get_state().vel.y) > 100.0]
+            self.assertGreater(len(attacking_cars), 0, f"Sample {sample_idx}: No attacking car found with forward velocity")
+
+            for car in attacking_cars:
+                cs = car.get_state()
+                car_speed = math.hypot(cs.vel.x, cs.vel.y)
+                self.assertGreaterEqual(car_speed, 700.0, f"Sample {sample_idx}: Attacking car speed too low ({car_speed})")
+
+                # Check velocity angle matches forward yaw
+                vel_yaw = math.atan2(cs.vel.y, cs.vel.x)
+                fwd_x = cs.rot_mat[0][0]
+                fwd_y = cs.rot_mat[0][1]
+                body_yaw = math.atan2(fwd_y, fwd_x)
+                angle_diff = abs(math.atan2(math.sin(vel_yaw - body_yaw), math.cos(vel_yaw - body_yaw)))
+                self.assertLess(angle_diff, 1e-3, f"Sample {sample_idx}: Car velocity not aligned with yaw ({angle_diff:.4f} rad)")
+
+    def test_wall_bounce_rebound_guarantees(self):
+        """Verify WallBounceReboundSetter reaches wall/backboard/ceiling cleanly without premature turf bounces."""
+        setter = WallBounceReboundSetter()
+        arena = rsim.Arena(rsim.GameMode.SOCCAR)
+        arena.add_car(rsim.Team.BLUE)
+        arena.add_car(rsim.Team.ORANGE)
+
+        for sample_idx in range(300):
+            setter.reset(arena, num_players=2)
+            bs = arena.ball.get_state()
+            z0 = float(bs.pos.z)
+            vz0 = float(bs.vel.z)
+
+            # Time to hit turf (Z = 93.15): 325*t^2 - vz0*t - (z0 - 93.15) = 0
+            disc = vz0 ** 2 + 4.0 * 325.0 * (z0 - 93.15)
+            t_floor = (vz0 + math.sqrt(max(0.0, disc))) / 650.0
+
+            # Ball must stay airborne for at least 0.70s to complete its intended flight to the surface
+            self.assertGreater(
+                t_floor, 0.70,
+                f"Sample {sample_idx}: Ball drops to floor too quickly ({t_floor:.2f}s, z0={z0:.1f}, vz0={vz0:.1f})"
+            )
+
+            # Backboard shots must have positive vz or high initial z so they impact above the 643 uu crossbar
+            if abs(bs.vel.y) > 800.0 and abs(bs.pos.y) > 1500.0:
+                t_backboard = abs((5027.0 - abs(bs.pos.y)) / bs.vel.y)
+                if t_backboard <= 1.4:
+                    z_at_backboard = z0 + vz0 * t_backboard - 0.5 * 650.0 * (t_backboard ** 2)
+                    self.assertGreater(
+                        z_at_backboard, 600.0,
+                        f"Sample {sample_idx}: Backboard shot hits below crossbar at Z={z_at_backboard:.1f}"
+                    )
+
+    def test_wall_play_on_ground_contact(self):
+        """Verify that WallPlaySetter with spawn_on_wall=True yields is_on_ground=True on tick 1."""
+        setter = WallPlaySetter()
+        arena = rsim.Arena(rsim.GameMode.SOCCAR)
+        car_blue = arena.add_car(rsim.Team.BLUE)
+        car_orange = arena.add_car(rsim.Team.ORANGE)
+
+        wall_spawns_tested = 0
+        for _ in range(100):
+            setter.reset(arena, num_players=2)
+            for car in arena.get_cars():
+                cs = car.get_state()
+                # Check if spawned on wall (abs(X) > 4000)
+                if abs(cs.pos.x) > 4000.0:
+                    arena.step(1)
+                    cs_after = car.get_state()
+                    self.assertTrue(
+                        cs_after.is_on_ground,
+                        f"Car at X={cs.pos.x:.1f} failed to maintain on_ground contact after step 1"
+                    )
+                    wall_spawns_tested += 1
+
+        self.assertGreater(wall_spawns_tested, 10, "Should have tested at least 10 wall spawns")
+
+    def test_multi_car_no_overlap(self):
+        """Verify that in 2v2 (4 players) and 3v3 (6 players), teammates never spawn overlapping."""
+        setters = [
+            AerialScenarioSetter(),
+            WallPlaySetter(),
+            GoalieSaveSetter(),
+            WallBounceReboundSetter(),
+            DribbleFlickScenarioSetter(),
+            TurnaroundRecoverySetter()
+        ]
+
+        for num_players in [4, 6]:
+            arena = rsim.Arena(rsim.GameMode.SOCCAR)
+            for p in range(num_players):
+                team = rsim.Team.BLUE if (p % 2 == 0) else rsim.Team.ORANGE
+                arena.add_car(team)
+
+            for setter in setters:
+                setter_name = setter.__class__.__name__
+                for _ in range(25):
+                    setter.reset(arena, num_players)
+                    cars = arena.get_cars()
+
+                    # Check pairwise distance between teammates on Team Blue (even indices) and Team Orange (odd indices)
+                    for team_parity in [0, 1]:
+                        team_cars = [cars[idx] for idx in range(num_players) if idx % 2 == team_parity]
+                        for a in range(len(team_cars)):
+                            for b in range(a + 1, len(team_cars)):
+                                pa = team_cars[a].get_state().pos
+                                pb = team_cars[b].get_state().pos
+                                dist = math.sqrt((pa.x - pb.x)**2 + (pa.y - pb.y)**2 + (pa.z - pb.z)**2)
+                                self.assertGreater(
+                                    dist, 200.0,
+                                    f"{setter_name} ({num_players}p): Teammate overlap detected! Cars {a} and {b} distance={dist:.1f} uu"
+                                )
 
 
 if __name__ == "__main__":

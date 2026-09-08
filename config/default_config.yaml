@@ -5,6 +5,8 @@ environment:
   tick_skip: 8
 hyperparameters:
   batch_size: 8192
+  bc_decay_steps: 500000000
+  bc_regularization_weight: 0.02
   clip_range: 0.2
   ent_coef: 0.012
   gae_lambda: 0.95
@@ -42,7 +44,6 @@ rewards:
   ball_to_goal_weight: 1.5
   boost_gain_weight: 1.35
   boost_lose_weight: 0.55
-  boost_pathing_threshold: 50.0
   concede_weight: -30.0
   goal_weight: 30.0
   jump_bridge_weight: 0.5
@@ -51,12 +52,12 @@ rewards:
   save_weight: 12.0
   touch_weight: 1.5
 scenarios:
-  aerial_prob: 0.08
-  custom_prob: 0.08
-  dribble_flick_prob: 0.07
-  kickoff_prob: 0.05
-  replay_prob: 0.52
-  save_prob: 0.04
-  turnaround_prob: 0.04
-  wall_prob: 0.04
-  wall_rebound_prob: 0.08
+  aerial_prob: 0.24
+  custom_prob: 0.07
+  dribble_flick_prob: 0.06
+  kickoff_prob: 0.08
+  replay_prob: 0.39
+  save_prob: 0.03
+  turnaround_prob: 0.03
+  wall_prob: 0.03
+  wall_rebound_prob: 0.07
