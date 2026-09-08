@@ -469,10 +469,10 @@ class SenseiRLBot(BaseAgent):
 
             # Ground Jump Gating:
             # 1. Flip Cooldown: Require recovery ticks on wheels after a dodge before jumping again.
-            # 2. Hard Turning: When steering hard on turf (abs(act[1]) > 0.35), steer on wheels instead of tumbling.
-            # 3. Supersonic: When already at supersonic speed on the ground, do not dodge for speed.
+            # 2. Low-Speed Hard Turning: Suppress jump when sharply steering at low speeds (<350 uu/s) to prevent turf tumbling.
+            is_low_speed_hard_steer = bool(car_speed_total < 350.0 and abs(act[1]) > 0.60)
             if is_on_ground:
-                if self.dodge_cooldown > 0 or abs(act[1]) > 0.35 or is_supersonic:
+                if self.dodge_cooldown > 0 or is_low_speed_hard_steer:
                     want_jump = False
                 controller.jump = bool(want_jump and substep_tick <= 3)
             else:

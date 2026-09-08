@@ -552,14 +552,16 @@ class PlayerToBallVelocityReward(BaseReward):
 
         fwd_vec = car.get_forward_vector()
         right_vec = car.get_right_vector()
+        up_vec = car.get_up_vector()
         local_x = float(np.dot(car_to_ball[:2], fwd_vec[:2]))
         local_y = float(np.dot(car_to_ball[:2], right_vec[:2]))
+        local_z = float(np.dot(arena.ball.pos - car.pos, up_vec))
         is_roof_carry = bool(
             car.on_ground and
-            curr_dist < 195.0 and
-            118.0 <= ball_z <= 225.0 and
-            abs(local_x) < 80.0 and
-            abs(local_y) < 60.0
+            curr_dist < 210.0 and
+            110.0 <= local_z <= 170.0 and
+            -30.0 <= local_x <= 65.0 and
+            abs(local_y) < 50.0
         )
         is_ground_pushing = bool(raw_ball_dist < 180.0 and ball_z < 130.0 and car.on_ground)
 
@@ -589,7 +591,7 @@ class PlayerToBallVelocityReward(BaseReward):
 
             # 3a. Forward Strike-Zone Velocity Matching & Arrival Pacing
             if fwd_alignment > 0.2 and not (is_wrong_side and car_vy_defend > 100.0):
-                if not is_ground_pushing and effective_ball_speed > 250.0 and effective_car_speed > 200.0:
+                if not is_ground_pushing and not is_roof_carry and effective_ball_speed > 250.0 and effective_car_speed > 200.0:
                     vel_matching_bonus = 0.30 * max(0.0, 1.0 - (effective_rel_speed / 700.0))
 
                 # Kinetic Arrival Velocity Pacing Envelope:
@@ -682,8 +684,8 @@ class PlayerToBallVelocityReward(BaseReward):
             if not (is_wrong_side and car_vy_defend > 100.0):
                 fwd_speed_to_ball = max(0.0, float(np.dot(car.vel, unit_to_ball)))
                 eff_ball_spd = float(np.linalg.norm(arena.ball.vel[:2])) if car.on_ground else float(np.linalg.norm(arena.ball.vel))
-                # Prevent nose-push farming when merely rolling behind ball at matching speed:
-                if is_ground_pushing and fwd_speed_to_ball <= eff_ball_spd + 50.0:
+                # Prevent nose-push and roof-carry overdriving when already in control:
+                if (is_ground_pushing and fwd_speed_to_ball <= eff_ball_spd + 50.0) or is_roof_carry:
                     vel_toward_ball = 0.0
                 else:
                     speed_taper = min(1.0, max(0.35, (eff_dist - 180.0) / 320.0))
@@ -788,7 +790,16 @@ class PlayerToBallVelocityReward(BaseReward):
                 # Only reward carrying the ball when advancing downfield toward the opponent net
                 if car_to_goal_vel > 50.0:
                     goal_progress = min(1.0, max(0.2, car_to_goal_vel / 1400.0))
-                    center_score = max(0.0, 1.0 - (abs(local_x) / 80.0 * 0.5 + abs(local_y) / 60.0 * 0.5))
+                    # Grace Positioning Pocket (Multi-Flick Setup Architecture):
+                    # In Rocket League, diverse flicks require specific pocket positions:
+                    # - Front-flip flick: hood (+20 to +30 uu)
+                    # - 45-degree flick: diagonal (+10 to +25 uu, y +/- 15 to 25 uu)
+                    # - Side flick: lateral (0 to +15 uu, y +/- 20 to 35 uu)
+                    # - Backflip / scoop: rear (-22 to +10 uu, y ~ 0)
+                    # Plateaus at 1.0 throughout the entire active flick setup zone:
+                    excess_x = max(0.0, -22.0 - local_x, local_x - 32.0)
+                    excess_y = max(0.0, abs(local_y) - 25.0)
+                    center_score = max(0.0, 1.0 - (excess_x / 25.0 * 0.5 + excess_y / 25.0 * 0.5))
 
                     # Velcro Settling Bonus: dampening vertical ball bounce on roof for stable flicks
                     rel_vz = abs(float(arena.ball.vel[2] - car.vel[2]))
@@ -798,7 +809,16 @@ class PlayerToBallVelocityReward(BaseReward):
                     rel_horiz_speed = float(np.linalg.norm(car.vel[:2] - arena.ball.vel[:2]))
                     sync_bonus = 0.25 * max(0.0, 1.0 - (rel_horiz_speed / 250.0))
 
-                    roof_carry_reward = 0.40 * center_score * goal_progress + velcro_bonus + sync_bonus
+                    # Tactical Red-Zone / Contested Challenge Carry Taper:
+                    # When carrying the ball deep into the attacking third (within 1800 uu of net) while a defender
+                    # is stationed in net or closing in, taper continuous carry reward to encourage shooting/flicking
+                    # rather than rolling the ball directly into the goalkeeper.
+                    dist_to_target_net = abs(target_goal_y - arena.ball.pos[1])
+                    if dist_to_target_net < 1800.0 and (opp_tti < 1.5 or any(abs(c.pos[1] - target_goal_y) < 1200.0 for c in arena.cars if c.team != car.team and not c.demoed)):
+                        carry_taper = max(0.35, dist_to_target_net / 1800.0)
+                        roof_carry_reward = (0.40 * center_score * goal_progress + velcro_bonus + sync_bonus) * carry_taper
+                    else:
+                        roof_carry_reward = 0.40 * center_score * goal_progress + velcro_bonus + sync_bonus
 
         total_reward = self.weight * (
             delta_dist + vel_toward_ball + vel_matching_bonus + pacing_penalty + dribble_boost_penalty +
@@ -1148,8 +1168,10 @@ class JumpBridgeReward(BaseReward):
             car_boost = float(car.boost)
 
             # 1a. Close-Quarters Strike Liftoff, 50/50 Challenge, and Flick Pop Setup:
+            up_vec = car.get_up_vector()
+            local_z = float(np.dot(car_to_ball, up_vec))
             is_contested_5050 = bool(dist <= 450.0 and is_opponent_challenging and ball_z < 220.0 and car.pos[2] < 150.0)
-            is_flick_liftoff = bool(dist <= 260.0 and 115.0 <= ball_z <= 280.0 and car.pos[2] < 150.0 and abs(local_x) < 90.0 and abs(local_y) < 70.0)
+            is_flick_liftoff = bool(dist <= 260.0 and 110.0 <= local_z <= 175.0 and car.pos[2] < 150.0 and -30.0 <= local_x <= 65.0 and abs(local_y) < 55.0)
             is_strike_liftoff = bool(dist <= 650.0 and ball_z < 320.0 and car.pos[2] < 150.0 and forward_alignment > 0.20 and takeoff_closing_vel > 150.0 and pitch_input >= -0.10)
 
             if is_contested_5050 or is_flick_liftoff or is_strike_liftoff:
@@ -1227,7 +1249,9 @@ class JumpBridgeReward(BaseReward):
         else:
             dodge_align = 0.0
 
-        is_flick_active = bool(self._flick_window_active.get(car.id, False) or (dist < 260.0 and 115.0 <= ball_z <= 320.0 and abs(local_x) < 100.0 and abs(local_y) < 80.0))
+        up_vec = car.get_up_vector()
+        local_z = float(np.dot(car_to_ball, up_vec))
+        is_flick_active = bool(self._flick_window_active.get(car.id, False) or (dist < 260.0 and 110.0 <= local_z <= 220.0 and -35.0 <= local_x <= 75.0 and abs(local_y) < 65.0))
 
         is_5050_backflip = bool(
             is_executing_dodge and pitch_input < -0.20 and dist <= 450.0 and is_opponent_challenging
@@ -1306,10 +1330,22 @@ class JumpBridgeReward(BaseReward):
             exit_speed_goal = float(np.dot(arena.ball.vel, unit_to_goal))
             delta_v_goal = float(np.dot(arena.ball.vel - prev_b_vel, unit_to_goal))
 
-            if exit_speed_goal > 650.0 and delta_v_goal > 150.0:
+            if exit_speed_goal > 600.0 and delta_v_goal > 100.0:
                 # Genuine explosive flick on target net!
-                flick_power = min(3.0, (exit_speed_goal / 600.0) + (delta_v_goal / 500.0))
-                reward += self.weight * 1.5 * flick_power
+                flick_power = min(3.5, (exit_speed_goal / 600.0) + (delta_v_goal / 400.0))
+
+                # Tactical Opponent TTI & Shooting-Zone Multiplier:
+                # When an opponent is actively challenging or stationed in net, flicking past them earns a tactical outplay bonus
+                tactical_mult = 1.0
+                if is_opponent_challenging:
+                    tactical_mult = 1.50
+                elif threats and threats[0].arrival_time < 1.20:
+                    tactical_mult = 1.40
+                elif abs(target_goal_y - arena.ball.pos[1]) < 2800.0:
+                    # In attacking third (shooting range against goalkeeper)
+                    tactical_mult = 1.25
+
+                reward += self.weight * 3.5 * flick_power * tactical_mult
                 self._flick_window_active[car.id] = False
 
         self._prev_ball_vel[car.id] = arena.ball.vel.copy()

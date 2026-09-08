@@ -59,3 +59,4 @@ scenarios:
   turnaround_prob: 0.04
   wall_prob: 0.04
   wall_rebound_prob: 0.04
+  dribble_flick_prob: 0.08
