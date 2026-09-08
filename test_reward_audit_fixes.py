@@ -1230,6 +1230,118 @@ class TestRewardAuditFixes(unittest.TestCase):
 
         self.assertGreater(r, 0.20, f"Low-speed forward traversal flip within approach range should be rewarded, got {r}")
 
+    def test_ball_radius_goal_post_and_crossbar_clearance(self):
+        """Test that ball radius clearance correctly awards 1.6x on-target bonus only for clean shots inside effective opening."""
+        from env.rewards import EFFECTIVE_GOAL_HALF_WIDTH, EFFECTIVE_GOAL_HEIGHT
+        rew = BallToGoalVelocityReward(weight=1.5)
+        car = CarState(id=0, team=0, pos=np.array([0.0, 3000.0, 17.0], dtype=np.float32),
+                       rot=np.array([0.0, math.pi / 2, 0.0], dtype=np.float32))
+
+        # 1. Clean on-target shot (X=700 < EFFECTIVE_GOAL_HALF_WIDTH=801.5, Z=200 < EFFECTIVE_GOAL_HEIGHT=551.5)
+        self.arena.ball.pos = np.array([700.0, 3200.0, 200.0], dtype=np.float32)
+        self.arena.ball.vel = np.array([0.0, 1400.0, 0.0], dtype=np.float32)
+        r_clean = rew.get_reward(car, self.arena, np.zeros(8, dtype=np.float32), False, None)
+
+        # 2. Post-clanging shot (X=850: inside GOAL_HALF_WIDTH=892.755, but outside EFFECTIVE_GOAL_HALF_WIDTH=801.5)
+        self.arena.ball.pos = np.array([850.0, 3200.0, 200.0], dtype=np.float32)
+        self.arena.ball.vel = np.array([0.0, 1400.0, 0.0], dtype=np.float32)
+        r_post = rew.get_reward(car, self.arena, np.zeros(8, dtype=np.float32), False, None)
+
+        self.assertGreater(r_clean, r_post,
+                           f"Clean shot inside posts ({r_clean}) must out-reward post-clanger ({r_post})!")
+
+        # 3. Rolling ball on turf (Z=93.15, Vz=0) directly into center net
+        self.arena.ball.pos = np.array([0.0, 3200.0, 93.15], dtype=np.float32)
+        self.arena.ball.vel = np.array([0.0, 1400.0, 0.0], dtype=np.float32)
+        r_roll = rew.get_reward(car, self.arena, np.zeros(8, dtype=np.float32), False, None)
+        self.assertGreater(r_roll, 0.50,
+                           f"Rolling shot on ground into net opening must receive full on-target reward! got {r_roll}")
+
+        # 4. Crossbar clanging shot (Z=600 > EFFECTIVE_GOAL_HEIGHT=551.5, but < GOAL_HEIGHT=642.775)
+        self.arena.ball.pos = np.array([0.0, 4500.0, 600.0], dtype=np.float32)
+        self.arena.ball.vel = np.array([0.0, 1400.0, 0.0], dtype=np.float32)
+        r_crossbar = rew.get_reward(car, self.arena, np.zeros(8, dtype=np.float32), False, None)
+        self.assertLess(r_crossbar, r_roll,
+                        f"Shot clanging off crossbar ({r_crossbar}) must be less than clean shot ({r_roll})!")
+
+    def test_trajectory_tti_defending_net_recoverable_vs_unrecoverable(self):
+        """Test trajectory-aware TTI allows safe corner resets and recoverable back-touches while penalizing unrecoverable own goals."""
+        touch_rew = TouchBallReward(weight=1.2)
+        car = CarState(id=0, team=0, pos=np.array([0.0, -2000.0, 17.0], dtype=np.float32),
+                       vel=np.array([0.0, -300.0, 0.0], dtype=np.float32),
+                       rot=np.array([0.0, -math.pi / 2, 0.0], dtype=np.float32), on_ground=True, ball_touches=1)
+
+        # 1. Safe corner reset: ball hit toward defensive corner (X=2500, heading toward Y=-5120)
+        self.arena.ball.pos = np.array([2500.0, -2000.0, 93.15], dtype=np.float32)
+        self.arena.ball.vel = np.array([0.0, -800.0, 0.0], dtype=np.float32)
+        self.arena.cars = [car]
+        touch_rew.reset(self.arena)
+        touch_rew._prev_touches[car.id] = 0
+        r_corner = touch_rew.get_reward(car, self.arena, np.zeros(8, dtype=np.float32), False, None)
+        self.assertGreaterEqual(r_corner, 0.0,
+                                f"Hitting ball toward defensive corner must NOT be penalized as an own goal! got {r_corner}")
+
+        # 2. Soft recoverable back-touch: ball rolling slowly toward net, car right with it (t_car < t_net)
+        self.arena.ball.pos = np.array([0.0, -2000.0, 93.15], dtype=np.float32)
+        self.arena.ball.vel = np.array([0.0, -200.0, 0.0], dtype=np.float32)
+        touch_rew.reset(self.arena)
+        touch_rew._prev_touches[car.id] = 0
+        r_soft_back = touch_rew.get_reward(car, self.arena, np.zeros(8, dtype=np.float32), False, None)
+        self.assertGreaterEqual(r_soft_back, 0.0,
+                                f"Soft recoverable back-touch must NOT receive own-goal penalty! got {r_soft_back}")
+
+        # 3. Unrecoverable blast on own net: ball blasted at 2200 uu/s toward net opening, car trailing far behind
+        car_trailing = CarState(id=0, team=0, pos=np.array([0.0, -1000.0, 17.0], dtype=np.float32),
+                                vel=np.array([0.0, 0.0, 0.0], dtype=np.float32),
+                                rot=np.array([0.0, -math.pi / 2, 0.0], dtype=np.float32), on_ground=True, ball_touches=1)
+        self.arena.ball.pos = np.array([0.0, -3500.0, 93.15], dtype=np.float32)
+        self.arena.ball.vel = np.array([0.0, -2200.0, 0.0], dtype=np.float32)
+        self.arena.cars = [car_trailing]
+        touch_rew.reset(self.arena)
+        touch_rew._prev_touches[car_trailing.id] = 0
+        r_unrec = touch_rew.get_reward(car_trailing, self.arena, np.zeros(8, dtype=np.float32), False, None)
+        self.assertLess(r_unrec, -0.40,
+                        f"Unrecoverable shot blasted toward own net must receive strict penalty! got {r_unrec}")
+
+        # 4. Reverse own-net push in PlayerToBallVelocityReward: car facing forward (+Y), reversing into ball toward own net
+        p2b_rew = PlayerToBallVelocityReward(weight=1.0)
+        car_rev_push = CarState(id=0, team=0, pos=np.array([0.0, -3800.0, 17.0], dtype=np.float32),
+                                vel=np.array([0.0, -400.0, 0.0], dtype=np.float32),
+                                rot=np.array([0.0, math.pi / 2, 0.0], dtype=np.float32), on_ground=True)
+        self.arena.ball.pos = np.array([0.0, -3900.0, 93.15], dtype=np.float32)
+        self.arena.ball.vel = np.array([0.0, -400.0, 0.0], dtype=np.float32)
+        self.arena.cars = [car_rev_push]
+        p2b_rew.reset(self.arena)
+        p2b_rew._prev_dist[car_rev_push.id] = 120.0
+        r_rev_push = p2b_rew.get_reward(car_rev_push, self.arena, np.zeros(8, dtype=np.float32), False, None)
+        self.assertLess(r_rev_push, 0.0,
+                        f"Reversing into ball toward own net in red zone must be penalized! got {r_rev_push}")
+
+    def test_ground_reverse_creeping_damped_and_yaw_turnaround(self):
+        """Test ground reverse creeping receives damped distance progress while angular yaw turnaround is rewarded."""
+        p2b_rew = PlayerToBallVelocityReward(weight=1.0)
+        car_ground_creep = CarState(id=0, team=0, pos=np.array([0.0, 0.0, 17.0], dtype=np.float32),
+                                    vel=np.array([0.0, -500.0, 0.0], dtype=np.float32),
+                                    rot=np.array([0.0, math.pi / 2, 0.0], dtype=np.float32), on_ground=True)
+        self.arena.ball.pos = np.array([0.0, -1000.0, 93.15], dtype=np.float32)
+        self.arena.ball.vel = np.zeros(3, dtype=np.float32)
+        self.arena.cars = [car_ground_creep]
+        p2b_rew.reset(self.arena)
+        p2b_rew._prev_dist[car_ground_creep.id] = 1050.0
+        r_creep = p2b_rew.get_reward(car_ground_creep, self.arena, np.zeros(8, dtype=np.float32), False, None)
+
+        # Angular turnaround: car rotating at 1.8 rad/s to face ball behind it
+        car_turning = CarState(id=0, team=0, pos=np.array([0.0, 0.0, 17.0], dtype=np.float32),
+                               vel=np.array([100.0, 0.0, 0.0], dtype=np.float32),
+                               rot=np.array([0.0, math.pi / 2, 0.0], dtype=np.float32),
+                               ang_vel=np.array([0.0, 0.0, 1.8], dtype=np.float32), on_ground=True)
+        p2b_rew.reset(self.arena)
+        p2b_rew._prev_dist[car_turning.id] = 1000.0
+        r_turn = p2b_rew.get_reward(car_turning, self.arena, np.zeros(8, dtype=np.float32), False, None)
+
+        self.assertGreater(r_turn, r_creep,
+                           f"Physical yaw turnaround ({r_turn}) must beat ground reverse creeping ({r_creep})!")
+
 
 if __name__ == "__main__":
     unittest.main()

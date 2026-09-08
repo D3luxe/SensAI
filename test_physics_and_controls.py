@@ -1024,22 +1024,33 @@ class TestPhysicsAndControls(unittest.TestCase):
                 self.ball, self.cars = ball, cars
                 self.boost_pads = BoostPad.create_standard_pads()
 
-        # 1. Car on goal side facing defending goal (-Y), ball behind it at -2800 (+Y).
-        # Car reversing backwards toward ball at 600 uu/s (+Y).
+        # 1. Airborne Half-Flip vs Ground Reverse Creep:
+        # Ball behind car at -2800 (+Y).
         ball_behind = BallState(pos=np.array([0, -2800, 93], dtype=np.float32), vel=np.array([0, 0, 0], dtype=np.float32))
-        car_rev_to_ball = CarState(id=0, team=0, pos=np.array([0, -3200, 17], dtype=np.float32),
-                                   vel=np.array([0, 600, 0], dtype=np.float32),
-                                   rot=np.array([0, -math.pi / 2, 0], dtype=np.float32), on_ground=True)
+
+        # A. Airborne half-flip flight (on_ground=False) moving backwards toward ball at 600 uu/s (+Y)
+        car_air_halfflip = CarState(id=0, team=0, pos=np.array([0, -3200, 65], dtype=np.float32),
+                                    vel=np.array([0, 600, 0], dtype=np.float32),
+                                    rot=np.array([0, -math.pi / 2, 0], dtype=np.float32), on_ground=False)
 
         p2b_rev = PlayerToBallVelocityReward(weight=1.0)
-        p2b_rev.reset(MockArena(ball_behind, [car_rev_to_ball]))
-        # Previous distance was 450, now at 400 (closing distance in reverse)
+        p2b_rev.reset(MockArena(ball_behind, [car_air_halfflip]))
         p2b_rev._prev_dist[0] = 450.0
 
         act_neu = np.zeros(8, dtype=np.float32)
-        rew_rev_closure = p2b_rev.get_reward(car_rev_to_ball, MockArena(ball_behind, [car_rev_to_ball]), act_neu, False, None)
-        self.assertGreater(rew_rev_closure, 0.05,
-                           f"Reversing toward ball behind car must earn positive distance closure and velocity! got {rew_rev_closure}")
+        rew_air_hf = p2b_rev.get_reward(car_air_halfflip, MockArena(ball_behind, [car_air_halfflip]), act_neu, False, None)
+        self.assertGreater(rew_air_hf, 0.05,
+                           f"Airborne half-flip flight toward ball must earn full distance closure and velocity! got {rew_air_hf}")
+
+        # B. Ground reverse creep (on_ground=True): distance progress is damped (0.2x) to prevent rigid reverse creeping
+        car_ground_rev = CarState(id=0, team=0, pos=np.array([0, -3200, 17], dtype=np.float32),
+                                  vel=np.array([0, 600, 0], dtype=np.float32),
+                                  rot=np.array([0, -math.pi / 2, 0], dtype=np.float32), on_ground=True)
+        p2b_rev.reset(MockArena(ball_behind, [car_ground_rev]))
+        p2b_rev._prev_dist[0] = 450.0
+        rew_ground_creep = p2b_rev.get_reward(car_ground_rev, MockArena(ball_behind, [car_ground_rev]), act_neu, False, None)
+        self.assertLess(rew_ground_creep, rew_air_hf,
+                        f"Airborne half-flip flight must strongly beat ground reverse creeping! hf={rew_air_hf} creep={rew_ground_creep}")
 
         # 2. Car facing +Y, ball ahead at -2000. Car reversing AWAY from ball in front at -600 uu/s.
         ball_ahead = BallState(pos=np.array([0, -2000, 93], dtype=np.float32), vel=np.array([0, 0, 0], dtype=np.float32))

@@ -230,9 +230,13 @@ class ReplayStateSetter(BaseStateSetter):
         if sample is None:
             return False
 
-        # Set ball state
+        # Set ball state with arena boundary safety clamp (avoiding net depth post-goal)
+        bp = sample["ball_pos"]
+        bx = float(np.clip(bp[0], -4000.0, 4000.0))
+        by = float(np.clip(bp[1], -5050.0, 5050.0))
+        bz = float(np.clip(bp[2], 93.0, 2000.0))
         bs = rsim_arena.ball.get_state()
-        bs.pos = rsim.Vec(*sample["ball_pos"])
+        bs.pos = rsim.Vec(bx, by, bz)
         bs.vel = rsim.Vec(*sample["ball_vel"])
         bs.ang_vel = rsim.Vec(0, 0, 0)
         rsim_arena.ball.set_state(bs)
