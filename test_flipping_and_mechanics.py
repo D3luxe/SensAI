@@ -244,6 +244,99 @@ class TestFlippingAndMechanics(unittest.TestCase):
         ctrl = bot.get_output(packet)
         self.assertFalse(ctrl.jump, "Jump must be suppressed when turning sharply at low speed to prevent tumbling!")
 
+    def test_neutral_double_jump_0_boost_rewarded(self):
+        """Guarantees that a neutral double jump with 0 boost under an elevated ball receives vertical impulse reward."""
+        bridge = JumpBridgeReward(weight=1.0)
+        bridge.reset(self.arena)
+
+        car = self.arena.cars[0]
+        car.team = 0
+        car.boost = 0.0
+        car.on_ground = False
+        car.pos = np.array([0.0, 0.0, 80.0], dtype=np.float32)
+        car.vel = np.array([0.0, 600.0, 350.0], dtype=np.float32)
+        car.rot_mat = np.array([[0, 1, 0], [-1, 0, 0], [0, 0, 1]], dtype=np.float32)
+        car.has_double_jumped = True
+        self.arena.ball.pos = np.array([0.0, 600.0, 450.0], dtype=np.float32)
+
+        bridge._prev_on_ground[car.id] = False
+        bridge._prev_has_double_jumped[car.id] = False
+
+        # Neutral stick inputs
+        act = np.zeros(8, dtype=np.float32)
+        rew = bridge.get_reward(car, self.arena, act, False, None)
+        self.assertGreater(rew, 0.40, f"Neutral double jump under elevated ball with 0 boost must award vertical climb bonus, got {rew}")
+
+    def test_fast_aerial_pitch_up_not_penalized_as_backflip(self):
+        """Guarantees that pulling pitch back to aim nose up under a high aerial ball is NOT penalized as a forward backflip."""
+        bridge = JumpBridgeReward(weight=1.0)
+        bridge.reset(self.arena)
+
+        car = self.arena.cars[0]
+        car.team = 0
+        car.on_ground = False
+        car.has_flip = False
+        car.pos = np.array([0.0, -500.0, 100.0], dtype=np.float32)
+        car.vel = np.array([0.0, 800.0, 200.0], dtype=np.float32)
+        # Nose tilted up towards high ball
+        car.rot_mat = np.array([[0, 0.8, 0.6], [-1, 0, 0], [0, -0.6, 0.8]], dtype=np.float32)
+        self.arena.ball.pos = np.array([0.0, 800.0, 650.0], dtype=np.float32)
+
+        bridge._prev_on_ground[car.id] = False
+        bridge._prev_has_flip[car.id] = True  # Second jump executed
+
+        # Pitch back input to tilt up
+        act = np.zeros(8, dtype=np.float32)
+        act[2] = -0.50
+        rew = bridge.get_reward(car, self.arena, act, False, None)
+        self.assertGreaterEqual(rew, 0.0, f"Pitching nose up under elevated ball must NOT receive -0.80 backflip penalty, got {rew}")
+
+    def test_dodge_strike_outcome_bounty(self):
+        """Guarantees that striking the ball during or after a flip awards the Dodge Strike outcome bounty."""
+        bridge = JumpBridgeReward(weight=1.0)
+        bridge.reset(self.arena)
+
+        car = self.arena.cars[0]
+        car.team = 0
+        car.on_ground = False
+        car.has_flip = False
+        car.just_dodged = True
+        car.ball_touches = 1
+        car.pos = np.array([0.0, 1000.0, 60.0], dtype=np.float32)
+        car.vel = np.array([0.0, 1200.0, 50.0], dtype=np.float32)
+        car.rot_mat = np.array([[0, 1, 0], [-1, 0, 0], [0, 0, 1]], dtype=np.float32)
+
+        self.arena.ball.pos = np.array([0.0, 1100.0, 80.0], dtype=np.float32)
+        self.arena.ball.vel = np.array([0.0, 1400.0, 200.0], dtype=np.float32)
+
+        bridge._prev_touches[car.id] = 0
+        bridge._prev_ball_vel[car.id] = np.array([0.0, 200.0, 0.0], dtype=np.float32)
+        bridge._prev_has_flip[car.id] = True
+
+        act = np.zeros(8, dtype=np.float32)
+        rew = bridge.get_reward(car, self.arena, act, False, None)
+        self.assertGreater(rew, 0.80, f"Impacting ball with a dodge towards opponent net must award dodge strike bounty, got {rew}")
+
+    def test_0_boost_reachable_ball_takeoff_rewarded(self):
+        """Guarantees that taking off towards a reachable elevated ball (Z <= 500) with 0 boost is rewarded without penalty."""
+        bridge = JumpBridgeReward(weight=1.0)
+        bridge.reset(self.arena)
+
+        car = self.arena.cars[0]
+        car.team = 0
+        car.boost = 0.0
+        car.on_ground = False
+        car.pos = np.array([0.0, 0.0, 25.0], dtype=np.float32)
+        car.vel = np.array([0.0, 600.0, 250.0], dtype=np.float32)
+        car.rot_mat = np.array([[0, 1, 0], [-1, 0, 0], [0, 0, 1]], dtype=np.float32)
+        self.arena.ball.pos = np.array([0.0, 400.0, 320.0], dtype=np.float32)
+
+        bridge._prev_on_ground[car.id] = True  # Just lifted off
+
+        act = np.zeros(8, dtype=np.float32)
+        rew = bridge.get_reward(car, self.arena, act, False, None)
+        self.assertGreater(rew, 0.50, f"Liftoff towards reachable ball with 0 boost must award positive takeoff bonus, got {rew}")
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -129,11 +129,13 @@ class AerialScenarioSetter(BaseStateSetter):
 class WallPlaySetter(BaseStateSetter):
     """
     Spawns ball rolling along arena sidewalls or bouncing high off backboard.
+    Generates balanced distribution between ground-to-wall ramp approaches and on-wall tracking.
     """
     def reset(self, rsim_arena: Any, num_players: int) -> None:
         side = random.choice([-1.0, 1.0])  # Left or Right Wall
         target_team = random.choice([0, 1])
         sign = 1.0 if target_team == 0 else -1.0
+        spawn_on_wall = random.random() < 0.50
 
         # Ball climbing sidewall
         bx = side * (ARENA_EXTENT_X - 120.0)
@@ -152,12 +154,25 @@ class WallPlaySetter(BaseStateSetter):
             team = i % 2
 
             if team == target_team:
-                cx = side * random.uniform(2500, 3600)
-                cy = by - sign * random.uniform(600, 1400)
-                cs.pos = rsim.Vec(cx, cy, 17.0)
-                yaw = math.atan2(by - cy, bx - cx)
-                cs.rot_mat = rsim.Angle(pitch=0.0, yaw=yaw, roll=0.0).as_rot_mat()
-                cs.vel = rsim.Vec(math.cos(yaw) * 1000, math.sin(yaw) * 1000, 0)
+                if spawn_on_wall:
+                    # Spawn already driving on the sidewall tracking the ball
+                    cx = side * (ARENA_EXTENT_X - 60.0)
+                    cy = by - sign * random.uniform(400, 1000)
+                    cz = min(1100.0, max(250.0, bz - random.uniform(100.0, 300.0)))
+                    cs.pos = rsim.Vec(cx, cy, cz)
+                    wall_yaw = (math.pi / 2) if sign > 0 else (-math.pi / 2)
+                    wall_roll = (math.pi / 2) if (side * sign) > 0 else (-math.pi / 2)
+                    wall_pitch = random.uniform(0.0, 0.20)
+                    cs.rot_mat = rsim.Angle(pitch=wall_pitch, yaw=wall_yaw, roll=wall_roll).as_rot_mat()
+                    car_speed = random.uniform(800, 1400)
+                    cs.vel = rsim.Vec(0.0, sign * car_speed * math.cos(wall_pitch), car_speed * math.sin(wall_pitch))
+                else:
+                    cx = side * random.uniform(2500, 3600)
+                    cy = by - sign * random.uniform(600, 1400)
+                    cs.pos = rsim.Vec(cx, cy, 17.0)
+                    yaw = math.atan2(by - cy, bx - cx)
+                    cs.rot_mat = rsim.Angle(pitch=0.0, yaw=yaw, roll=0.0).as_rot_mat()
+                    cs.vel = rsim.Vec(math.cos(yaw) * 1000, math.sin(yaw) * 1000, 0)
             else:
                 cs.pos = rsim.Vec(0, sign * 4200, 17.0)
                 cs.rot_mat = rsim.Angle(pitch=0.0, yaw=-sign * math.pi/2, roll=0.0).as_rot_mat()

@@ -136,6 +136,7 @@ class CarState:
     on_ground: bool = True
     has_jump: bool = True
     has_flip: bool = True
+    has_double_jumped: bool = False
     is_jumping: bool = False
     jump_timer: float = 0.0
     air_timer: float = 0.0
@@ -463,6 +464,7 @@ class RocketSimArena:
             car.on_ground = bool(c_state.is_on_ground)
             car.has_jump = bool(not c_state.has_jumped or c_state.is_on_ground)
             car.has_flip = bool(not c_state.has_flipped and not c_state.has_double_jumped and not c_state.is_on_ground)
+            car.has_double_jumped = bool(c_state.has_double_jumped)
             car.just_dodged = bool(c_state.is_flipping or c_state.has_flipped)
             car.is_supersonic = bool(c_state.is_supersonic)
             car.demoed = bool(c_state.is_demoed)
@@ -748,6 +750,7 @@ class RocketSimArena:
             if car.on_ground:
                 car.has_jump = True
                 car.has_flip = True
+                car.has_double_jumped = False
                 car.air_timer = 0.0
 
                 # Ground driving
@@ -809,6 +812,10 @@ class RocketSimArena:
                             car.vel += dodge_dir * CAR_DODGE_IMPULSE
                             car.rot[0] += fwd_input * 1.5
                             car.rot[2] += side_input * 1.5
+                    else:
+                        car.has_flip = False
+                        car.has_double_jumped = True
+                        car.vel[2] += CAR_JUMP_INITIAL_VEL
 
             car.prev_jump = jump
 

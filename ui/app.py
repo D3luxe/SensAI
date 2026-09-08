@@ -684,7 +684,22 @@ def get_cockpit_leaderboard_df(evaluator: TrueSkillEvaluator, max_rows: int = 15
     return df.head(max_rows)
 
 
-def build_cockpit_leaderboard_summary_html(evaluator: TrueSkillEvaluator) -> str:
+def load_league_state_safely(path: str = "logs/league_state.json") -> Dict[str, Any]:
+    """Safely loads league promotion and sports ticker state from disk without crashing on lock contention."""
+    if not os.path.exists(path):
+        return {}
+    for _ in range(3):
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except (PermissionError, json.JSONDecodeError):
+            time.sleep(0.05)
+        except Exception:
+            break
+    return {}
+
+
+def build_cockpit_leaderboard_summary_html(evaluator: TrueSkillEvaluator, league_state: Optional[Dict[str, Any]] = None) -> str:
     """Builds a sleek cyber-styled summary badge card for the Live Cockpit leaderboard."""
     ratings = [
         r for r in evaluator.ratings.values()
@@ -697,8 +712,28 @@ def build_cockpit_leaderboard_summary_html(evaluator: TrueSkillEvaluator) -> str
         </div>
         """
 
+    state = league_state if league_state is not None else load_league_state_safely()
+    active_king_path = state.get("king_of_the_hill")
+
     sorted_ratings = sorted(ratings, key=lambda r: (r.conservative_rating, r.win_rate, r.mu), reverse=True)
-    king = sorted_ratings[0]
+
+    # Resolve reigning King: check active King designated by LeagueManager, then fallback to top active model on disk
+    king = None
+    if active_king_path:
+        norm_target = active_king_path.replace("\\", "/").lower()
+        for r in ratings:
+            if r.path.replace("\\", "/").lower() == norm_target or r.name.lower() in norm_target:
+                king = r
+                break
+
+    if king is None:
+        for r in sorted_ratings:
+            if r.is_anchor or r.name == "heuristic" or os.path.exists(r.path):
+                king = r
+                break
+
+    if king is None:
+        king = sorted_ratings[0]
 
     ckpts = [r for r in sorted_ratings if not r.is_anchor and ("checkpoint_iter" in r.path.lower() or "checkpoint_iter" in r.name.lower())]
     best_ckpt = ckpts[0] if ckpts else None
@@ -768,21 +803,6 @@ def build_cockpit_leaderboard_summary_html(evaluator: TrueSkillEvaluator) -> str
         </div>
     </div>
     """
-
-
-def load_league_state_safely(path: str = "logs/league_state.json") -> Dict[str, Any]:
-    """Safely loads league promotion and sports ticker state from disk without crashing on lock contention."""
-    if not os.path.exists(path):
-        return {}
-    for _ in range(3):
-        try:
-            with open(path, "r", encoding="utf-8") as f:
-                return json.load(f)
-        except (PermissionError, json.JSONDecodeError):
-            time.sleep(0.05)
-        except Exception:
-            break
-    return {}
 
 
 def build_league_wire_and_queue_html(evaluator: TrueSkillEvaluator, league_state: Optional[Dict[str, Any]] = None) -> str:

@@ -511,13 +511,26 @@ class LeagueManager:
         """
         Returns a set of normalized file paths for top-K checkpoints and active
         Gauntlet contenders that must NEVER be pruned by rolling checkpoint cleanups.
+        Guarantees that the All-Time Peak Checkpoint is permanently immune from deletion.
         """
         self.refresh_pool()
         protected = set()
 
+        # 1. Protect current King of the Hill
         if self.king_of_the_hill and os.path.exists(self.king_of_the_hill):
             protected.add(os.path.abspath(self.king_of_the_hill))
 
+        # 2. Protect All-Time Historical Peak Checkpoint (Hall of Fame)
+        historical_ckpts = [
+            r for r in self.evaluator.ratings.values()
+            if not r.is_anchor and r.path != "heuristic" and "latest_model" not in r.path.lower()
+        ]
+        if historical_ckpts:
+            all_time_best = max(historical_ckpts, key=lambda r: (r.conservative_rating, r.win_rate, r.mu))
+            if os.path.exists(all_time_best.path):
+                protected.add(os.path.abspath(all_time_best.path))
+
+        # 3. Protect top-K models in Elite Pool
         count = 0
         for path in self.elite_pool:
             if path != "heuristic" and os.path.exists(path):
@@ -526,7 +539,7 @@ class LeagueManager:
                 if count >= self.protect_top_k:
                     break
 
-        # Protect all active Gauntlet contenders from rolling disk cleanup
+        # 4. Protect all active Gauntlet contenders
         for c_path in self.contender_queue:
             if os.path.exists(c_path):
                 protected.add(os.path.abspath(c_path))
