@@ -166,7 +166,8 @@ class CarState:
     demoed: bool = False
     demo_timer: float = 0.0
     prev_jump: bool = False
-    just_dodged: bool = False
+    just_dodged: bool = False   # EDGE: True only on the step the dodge impulse fires
+    is_dodging: bool = False    # LEVEL: True for the duration of the flip animation
     rot_mat: Optional[np.ndarray] = None  # 3x3 orthonormal basis: [forward, right, up]
 
     def get_forward_vector(self) -> np.ndarray:
@@ -488,7 +489,11 @@ class RocketSimArena:
             car.has_jump = bool(not c_state.has_jumped or c_state.is_on_ground)
             car.has_flip = bool(not c_state.has_flipped and not c_state.has_double_jumped and not c_state.is_on_ground)
             car.has_double_jumped = bool(c_state.has_double_jumped)
-            car.just_dodged = bool(c_state.is_flipping or c_state.has_flipped)
+            was_dodging = bool(getattr(car, "is_dodging", False))
+            car.is_dodging = bool(c_state.is_flipping)
+            # Edge, not level: has_flipped stays True until touchdown, so the previous
+            # definition kept "just dodged" asserted for the entire remaining flight.
+            car.just_dodged = bool(car.is_dodging and not was_dodging)
             car.is_supersonic = bool(c_state.is_supersonic)
             car.demoed = bool(c_state.is_demoed)
 
@@ -779,6 +784,7 @@ class RocketSimArena:
 
             # Reset per-step action events
             car.just_dodged = False
+            car.is_dodging = bool(car.air_timer < 0.65 and not car.has_flip and not car.on_ground)
 
             if car.on_ground:
                 car.has_jump = True
@@ -836,6 +842,7 @@ class RocketSimArena:
                     if abs(fwd_input) > 0.2 or abs(side_input) > 0.2:
                         car.has_flip = False
                         car.just_dodged = True
+                        car.is_dodging = True
                         fwd = car.get_forward_vector()
                         right = car.get_right_vector()
                         dodge_dir = fwd * fwd_input + right * side_input
