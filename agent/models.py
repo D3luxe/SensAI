@@ -96,6 +96,20 @@ class ActorCritic(nn.Module):
             # 5 Continuous Analog Axes: Throttle (0), Steer (1), Pitch (2), Yaw (3), Roll (4)
             self.actor_mean = layer_init(nn.Linear(prev_dim, 5), std=0.01)
             self.actor_log_std = nn.Parameter(torch.full((1, 5), -1.5))
+            # Per-channel exploration ceiling on log_std.
+            # Pitch/Yaw/Roll are masked off while grounded, so they only collect policy
+            # gradient on the airborne minority of steps, while the entropy bonus pushes
+            # them upward on every one of those steps. Sharing the ground ceiling (-0.7)
+            # lets them ratchet to sigma ~0.50, i.e. a quarter of the full analog range
+            # resampled into every aerial tick, which drowns out the learned mean and makes
+            # a controlled aerial impossible to execute or therefore to reinforce.
+            # The trainer anneals the rotational entry down via set_rot_log_std_ceiling().
+            # Persistent so the annealed ceiling survives reload in training, evaluation and
+            # the in-game bot alike, rather than silently reverting to the ground default.
+            self.log_std_min = -2.5
+            self.log_std_ceiling_ground = -0.7
+            self.log_std_ceiling_rot = -0.7
+            self.register_buffer("log_std_max", torch.full((1, 5), -0.7), persistent=True)
             # 3 Binary Discrete Bernoulli Buttons: Jump (5), Boost (6), Handbrake (7)
             self.actor_binary = layer_init(nn.Linear(prev_dim, 3), std=0.01)
         else:
@@ -112,6 +126,33 @@ class ActorCritic(nn.Module):
             prev_dim = hidden
         critic_layers.append(layer_init(nn.Linear(prev_dim, 1), std=1.0))
         self.critic = nn.Sequential(*critic_layers)
+
+    def clamped_log_std(self) -> torch.Tensor:
+        """
+        actor_log_std bounded below by a global floor and above by the per-channel
+        log_std_max ceiling. Gradient behaviour matches the previous torch.clamp: it flows
+        while the parameter is inside the band and is cut once it reaches the ceiling.
+        """
+        floored = torch.clamp(self.actor_log_std, min=self.log_std_min)
+        # torch.where rather than torch.minimum: minimum splits gradient evenly on exact
+        # ties, and the parameter sits exactly at the ceiling for the whole anneal, which
+        # would halve the gradient on the very channels the anneal is meant to free up.
+        # This matches torch.clamp -- full gradient at the boundary, none above it.
+        return torch.where(floored > self.log_std_max, self.log_std_max.expand_as(floored), floored)
+
+    def set_rot_log_std_ceiling(self, ceiling: float) -> float:
+        """
+        Set the exploration ceiling for the rotational axes (Pitch 2, Yaw 3, Roll 4).
+        Never raised above the ground ceiling, never pushed below the global floor. The
+        live parameter is pulled down with it so the change takes effect immediately
+        rather than waiting for the optimizer to walk it down.
+        """
+        c = float(min(self.log_std_ceiling_ground, max(self.log_std_min, float(ceiling))))
+        self.log_std_ceiling_rot = c
+        with torch.no_grad():
+            self.log_std_max[0, 2:5] = c
+            self.actor_log_std.data[0, 2:5].clamp_(max=c)
+        return c
 
     def debias_symmetric_actions(self):
         """
@@ -138,10 +179,16 @@ class ActorCritic(nn.Module):
                     # Recover from underflow or parameter drift
                     if torch.isnan(self.actor_log_std).any() or (self.actor_log_std.abs() < 1e-6).any() or (self.actor_log_std > -0.5).any():
                         self.actor_log_std.data.fill_(-1.1)
+                        self.actor_log_std.data[0, 2:5].clamp_(max=float(self.log_std_ceiling_rot))
                     else:
-                        self.actor_log_std.data.clamp_(min=-2.2, max=-0.7)
-                    # Guarantee healthy exploration on Pitch (index 2) to discover forward/diagonal/flick dodges
-                    self.actor_log_std.data[0, 2] = max(-1.0, float(self.actor_log_std.data[0, 2]))
+                        self.actor_log_std.data.clamp_(min=-2.2)
+                        self.actor_log_std.data.clamp_(max=self.log_std_max.to(self.actor_log_std.device))
+                    # Guarantee healthy exploration on Pitch (index 2) to discover forward/diagonal/flick dodges.
+                    # The floor tracks the rotational ceiling: a fixed -1.0 sat *above* an annealed
+                    # ceiling and snapped trained pitch noise back up on every checkpoint reload,
+                    # silently undoing the anneal with nothing in the logs to show for it.
+                    pitch_floor = min(-1.0, float(self.log_std_ceiling_rot) - 0.3)
+                    self.actor_log_std.data[0, 2] = max(pitch_floor, float(self.actor_log_std.data[0, 2]))
 
                 # Desaturate actor_mean weights if they exceeded linear analog range
                 weight_norm = self.actor_mean.weight.data.norm(dim=1, keepdim=True)
@@ -172,7 +219,19 @@ class ActorCritic(nn.Module):
                     new_sd['actor_log_std'] = v[:, :5]
                 else:
                     new_sd[k] = v
-            return super().load_state_dict(new_sd, strict=strict)
+            state_dict = new_sd
+
+        # Checkpoints predating the per-channel exploration ceiling carry no log_std_max.
+        # Seed it from the current buffer so strict loads still succeed, then adopt whatever
+        # ceiling the checkpoint was actually trained under.
+        if self.continuous_actions and hasattr(self, "log_std_max"):
+            if "log_std_max" not in state_dict:
+                state_dict = dict(state_dict)
+                state_dict["log_std_max"] = self.log_std_max.detach().clone()
+            result = super().load_state_dict(state_dict, strict=strict)
+            self.log_std_ceiling_rot = float(self.log_std_max[0, 2:5].min())
+            self.log_std_ceiling_ground = float(self.log_std_max[0, :2].max())
+            return result
         return super().load_state_dict(state_dict, strict=strict)
 
     def get_value(self, obs: torch.Tensor) -> torch.Tensor:
@@ -208,7 +267,7 @@ class ActorCritic(nn.Module):
                 action_mean = torch.tanh(self.actor_mean(features))
                 bin_logits = self.actor_binary(features)
 
-            clamped_log_std = torch.clamp(self.actor_log_std, min=-2.5, max=-0.7)
+            clamped_log_std = self.clamped_log_std()
             action_std = torch.exp(clamped_log_std).expand_as(action_mean)
 
             should_mask = self.use_action_masking if apply_masking is None else apply_masking
@@ -387,7 +446,7 @@ class ActorCritic(nn.Module):
                     thresh = self.bin_thresh_logits.to(masked_bin_logits.device)
                     act_bin = (masked_bin_logits > thresh).float() * 2.0 - 1.0
                 else:
-                    clamped_log_std = torch.clamp(self.actor_log_std, min=-2.5, max=-0.7)
+                    clamped_log_std = self.clamped_log_std()
                     action_std = torch.exp(clamped_log_std).expand_as(action_mean)
                     s01 = action_std[..., :2]
                     s234 = torch.where(grd, torch.full_like(action_std[..., 2:5], 1e-4), action_std[..., 2:5])
@@ -406,7 +465,7 @@ class ActorCritic(nn.Module):
                     act_bin = (bin_logits > thresh).float() * 2.0 - 1.0
                     return torch.cat([action_mean, act_bin], dim=-1)
                 else:
-                    clamped_log_std = torch.clamp(self.actor_log_std, min=-2.5, max=-0.7)
+                    clamped_log_std = self.clamped_log_std()
                     action_std = torch.exp(clamped_log_std).expand_as(action_mean)
                     dist_cont = Normal(action_mean, action_std)
                     dist_bin = Bernoulli(logits=bin_logits)

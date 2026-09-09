@@ -17,6 +17,8 @@ hyperparameters:
   learning_rate: 0.0003
   mini_batch_size: 1024
   n_epochs: 2
+  rot_log_std_anneal_iters: 4000
+  rot_log_std_ceiling_final: -1.4
 league:
   enabled: true
   eval_matches_per_grade: 2
