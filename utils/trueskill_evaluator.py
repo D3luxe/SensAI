@@ -109,7 +109,24 @@ DEFAULT_LEADERBOARD_PATH = "logs/trueskill_leaderboard.json"
 
 # Ranking gate. Sigma decides whether a rating may be ranked at all; mu decides where.
 DEFAULT_ELIGIBILITY_SIGMA = 1.5
-DEFAULT_MIN_RANKED_MATCHES = 16
+DEFAULT_MIN_RANKED_MATCHES = 24
+
+# Match-length defaults, chosen from measurement rather than intuition (n=102 per arm,
+# pinned near-peer pairings, decisive results per minute of compute):
+#
+#   reg 400 / ot 200 fixed    53.9% draws   1.33 s/game   20.7/min   baseline
+#   reg 400 / ot 600 random   28.4% draws   1.69 s/game   25.5/min   +23%
+#   reg 600 / ot 600 random   16.7% draws   1.92 s/game   26.1/min   +26%
+#   reg 600 / ot 200 fixed    51.0% draws   1.73 s/game   17.0/min   -18%
+#
+# The fourth arm isolates the surprise: longer regulation on its own does essentially
+# nothing for draws (51.0% vs 53.9%) while costing 30% more per game. The overtime
+# change does all the work. Regulation 600 is then chosen for validity, not throughput
+# -- it matches the 600-step training horizon, so the policy is graded on the horizon
+# it was optimised for, and it is throughput-neutral once overtime is fixed.
+DEFAULT_EVAL_MAX_STEPS = 600
+DEFAULT_OT_STEPS = 600
+DEFAULT_OT_RANDOM_KICKOFF = True
 
 # TrueSkill Global Configuration
 # draw_probability is calibrated to the rate actually observed in headless evaluation
@@ -229,9 +246,10 @@ def get_model_display_name(model_spec: str) -> str:
 def simulate_headless_match(
     blue_bot: BaseOpponent,
     orange_bot: BaseOpponent,
-    max_steps: int = 400,
+    max_steps: int = DEFAULT_EVAL_MAX_STEPS,
     enable_overtime: bool = True,
-    max_ot_steps: int = 200,
+    max_ot_steps: int = DEFAULT_OT_STEPS,
+    ot_random_kickoff: bool = DEFAULT_OT_RANDOM_KICKOFF,
     dt: float = 1.0 / 15.0
 ) -> Dict[str, Any]:
     """
@@ -266,9 +284,19 @@ def simulate_headless_match(
             arena.reset(random_kickoff=True)
 
     # 2. Sudden-Death Golden Goal Overtime (if tied)
+    #
+    # The kickoff is randomised by default. A fixed centre kickoff puts two similar
+    # policies in a symmetric standoff that neither can break, so overtime resolved
+    # almost nothing; a random kickoff sometimes hands one side a genuine advantage,
+    # which is what a tiebreaker is for. Measured on near-peer pairings, this plus the
+    # longer cap took the draw rate from 53.9% to 16.7%.
+    #
+    # Overtime is also the cheap place to spend time: it is charged only on matches
+    # that are actually level and stops the instant someone scores, whereas regulation
+    # time is charged on every match including the already-decided ones.
     if enable_overtime and blue_goals == orange_goals:
         went_to_overtime = True
-        arena.reset(random_kickoff=False)
+        arena.reset(random_kickoff=ot_random_kickoff)
         for ot_step in range(max_ot_steps):
             ot_steps_taken = ot_step + 1
             act0 = blue_bot.get_action(arena.cars[0], arena)
@@ -312,7 +340,16 @@ class TrueSkillEvaluator:
     min_ranked_matches: int = DEFAULT_MIN_RANKED_MATCHES
 
     def is_rank_eligible(self, rec: ModelRating) -> bool:
-        """Whether a rating has converged enough to be ranked on raw mu against peers."""
+        """
+        Whether a rating has converged enough to be ranked on raw mu against peers.
+
+        Anchors are always eligible. Their mu is declared by ANCHOR_CALIBRATION and their
+        sigma is pinned, so there is nothing to converge; holding them to a match count
+        they can never satisfy would sort a calibrated reference below every checkpoint
+        that cleared the gate.
+        """
+        if rec.is_anchor:
+            return True
         return rec.sigma <= self.eligibility_sigma and rec.matches_played >= self.min_ranked_matches
 
     def ranking_key(self, rec: ModelRating) -> Tuple[int, float, float]:
@@ -421,8 +458,10 @@ class TrueSkillEvaluator:
         model_a_path: str,
         model_b_path: str,
         matches_per_pair: int = 2,
-        max_steps: int = 400,
+        max_steps: int = DEFAULT_EVAL_MAX_STEPS,
         enable_overtime: bool = True,
+        max_ot_steps: int = DEFAULT_OT_STEPS,
+        ot_random_kickoff: bool = DEFAULT_OT_RANDOM_KICKOFF,
         device: str = "cpu"
     ) -> List[Dict[str, Any]]:
         """
@@ -458,7 +497,9 @@ class TrueSkillEvaluator:
                 blue_bot=blue_bot,
                 orange_bot=orange_bot,
                 max_steps=max_steps,
-                enable_overtime=enable_overtime
+                enable_overtime=enable_overtime,
+                max_ot_steps=max_ot_steps,
+                ot_random_kickoff=ot_random_kickoff
             )
 
             # Update scores
@@ -517,8 +558,10 @@ class TrueSkillEvaluator:
         self,
         model_paths: List[str],
         matches_per_pair: int = 2,
-        max_steps: int = 400,
+        max_steps: int = DEFAULT_EVAL_MAX_STEPS,
         enable_overtime: bool = True,
+        max_ot_steps: int = DEFAULT_OT_STEPS,
+        ot_random_kickoff: bool = DEFAULT_OT_RANDOM_KICKOFF,
         device: str = "cpu",
         progress_callback: Optional[Callable[[int, int, str], None]] = None
     ) -> Generator[Dict[str, Any], None, None]:
@@ -552,6 +595,8 @@ class TrueSkillEvaluator:
                 matches_per_pair=matches_per_pair,
                 max_steps=max_steps,
                 enable_overtime=enable_overtime,
+                max_ot_steps=max_ot_steps,
+                ot_random_kickoff=ot_random_kickoff,
                 device=device
             )
 

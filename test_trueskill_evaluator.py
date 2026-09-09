@@ -83,5 +83,67 @@ class TestTrueSkillEvaluator(unittest.TestCase):
         self.assertGreater(os.path.getsize(out_path), 1000)
 
 
+class TestMatchLengthSettings(unittest.TestCase):
+    """
+    Overtime settings are plumbed through and configurable.
+
+    These were hardcoded defaults inside simulate_headless_match that evaluate_pairing
+    never passed, so the league could not change them at all. The values now in place
+    were chosen from measurement (n=102 per arm, near-peer pairings): reg 600 / OT 600
+    with a random kickoff gave 16.7% draws against the old reg 400 / OT 200 fixed at
+    53.9%, at equal decisive-results-per-second.
+    """
+
+    def test_defaults_match_the_measured_configuration(self):
+        from utils.trueskill_evaluator import (
+            DEFAULT_EVAL_MAX_STEPS, DEFAULT_OT_STEPS, DEFAULT_OT_RANDOM_KICKOFF
+        )
+        self.assertEqual(DEFAULT_EVAL_MAX_STEPS, 600)
+        self.assertEqual(DEFAULT_OT_STEPS, 600)
+        self.assertTrue(DEFAULT_OT_RANDOM_KICKOFF)
+
+    def test_overtime_settings_are_plumbed_through(self):
+        """evaluate_pairing and run_tournament must forward both overtime arguments."""
+        import inspect
+        from utils.trueskill_evaluator import (
+            TrueSkillEvaluator, simulate_headless_match
+        )
+        for fn in (simulate_headless_match,
+                   TrueSkillEvaluator.evaluate_pairing,
+                   TrueSkillEvaluator.run_tournament):
+            params = inspect.signature(fn).parameters
+            self.assertIn("max_ot_steps", params, f"{fn.__name__} drops max_ot_steps")
+            self.assertIn("ot_random_kickoff", params, f"{fn.__name__} drops ot_random_kickoff")
+
+    def test_league_manager_forwards_its_configured_overtime(self):
+        """A configured overtime reaches evaluate_pairing rather than being ignored."""
+        import tempfile, os
+        from unittest import mock
+        from utils.league_manager import LeagueManager
+
+        tmp = tempfile.mkdtemp(prefix="sensai_test_ot_")
+        league = LeagueManager(
+            config={
+                "anchors": ["heuristic"],
+                "eval_max_steps": 321,
+                "eval_ot_steps": 654,
+                "eval_ot_random_kickoff": False,
+            },
+            leaderboard_path=os.path.join(tmp, "lb.json"),
+        )
+        self.assertEqual(league.eval_ot_steps, 654)
+        self.assertFalse(league.eval_ot_random_kickoff)
+
+        with mock.patch.object(league.evaluator, "evaluate_pairing", return_value=[]) as ep:
+            league.evaluator.get_or_create_rating("heuristic", is_anchor=True)
+            league.king_of_the_hill = "heuristic"
+            league.step_king_title_bout()
+
+        for call in ep.call_args_list:
+            self.assertEqual(call.kwargs.get("max_steps"), 321)
+            self.assertEqual(call.kwargs.get("max_ot_steps"), 654)
+            self.assertIs(call.kwargs.get("ot_random_kickoff"), False)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -1064,7 +1064,7 @@ def _build_gauntlet_trials(state: Dict[str, Any], evaluator: TrueSkillEvaluator)
                 <div>
                     <div style="display:flex; justify-content:space-between; font-size:0.79em; color:#7c8ba1; margin-bottom:4px;">
                         <span>Trial progress</span>
-                        <b style="color:#38bdf8;">{c.get('matches_played', 0)} / {c.get('target_matches', 16)} games</b>
+                        <b style="color:#38bdf8;">{c.get('matches_played', 0)} / {c.get('target_matches', 24)} games</b>
                     </div>
                     <div class="lb-prog-track"><div class="lb-prog-fill" style="width: {pct}%;"></div></div>
                 </div>
