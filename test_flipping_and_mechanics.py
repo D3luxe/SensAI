@@ -138,19 +138,19 @@ class TestFlippingAndMechanics(unittest.TestCase):
 
     def test_open_field_standstill_flip_unrewarded(self):
         """Guarantees that open-field traversal flips require speed > 350 uu/s to prevent flipping in place."""
-        bridge = JumpBridgeReward(weight=1.0)
-        bridge.reset(self.arena)
-
         car = self.arena.cars[0]
         car.on_ground = False
         car.has_flip = False
-        bridge._prev_has_flip[car.id] = True # Dodge event
         # Ball is far away downfield (open field: dist > 650)
         self.arena.ball.pos = np.array([0.0, 2500.0, 93.0], dtype=np.float32)
         car.pos = np.array([0.0, 0.0, 40.0], dtype=np.float32)
         # Car is nearly stationary: speed = 50 uu/s (< 350 uu/s)
         car.vel = np.array([0.0, 50.0, 0.0], dtype=np.float32)
         car.rot_mat = np.array([[0, 1, 0], [-1, 0, 0], [0, 0, 1]], dtype=np.float32)
+
+        bridge = JumpBridgeReward(weight=1.0)
+        bridge.reset(self.arena)
+        bridge._prev_has_flip[car.id] = True # Dodge event
 
         # Attempt front flip from dead stop
         act_flip = np.array([1.0, 0.0, 1.0, 0.0, 0.0, 1.0, 0.0, 0.0], dtype=np.float32)

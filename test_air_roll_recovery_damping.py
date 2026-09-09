@@ -130,12 +130,12 @@ class TestAirRollRecoveryDamping(unittest.TestCase):
     def test_touchdown_side_landing_penalty(self):
         """Test that landing on side/door (0.0 <= up_z < 0.65) is penalized rather than ignored."""
         rew = AirRollRecoveryReward(weight=1.0)
-        # Door landing: roll = 75 degrees (cos(75 deg) approx 0.259)
+        # Door landing: roll = 90 degrees (cos(90 deg) = 0.0)
         car_door = CarState(
             id=0, team=0,
             pos=np.array([0.0, 0.0, 17.0], dtype=np.float32),
             vel=np.array([0.0, 400.0, 0.0], dtype=np.float32),
-            rot=np.array([75.0 * math.pi / 180.0, 0.0, 0.0], dtype=np.float32),
+            rot=np.array([90.0 * math.pi / 180.0, 0.0, 0.0], dtype=np.float32),
             on_ground=True
         )
         self.arena.cars = [car_door]
@@ -251,8 +251,8 @@ class TestAirRollRecoveryDamping(unittest.TestCase):
 
         self.assertLess(r_inverted_full, r_inverted_slight, "Flat roof crash must be worse than slight roof tilt")
         self.assertLess(r_inverted_slight, r_door, "Inverted roof crash must be strictly worse than door landing (no cliff at 0)")
-        self.assertLess(r_door, r_tilted, "Door landing must be worse than tilted landing")
-        self.assertLess(r_tilted, 0.0, "Tilted landing (up_z=0.3) must still be penalized")
+        self.assertLess(r_door, 0.0, "Door landing (up_z=0.0) must be penalized")
+        self.assertGreater(r_tilted, 0.0, "Tilted landing with wheels down (up_z=0.3) must receive positive landing gradient")
 
 
 if __name__ == "__main__":

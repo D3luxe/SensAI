@@ -409,11 +409,18 @@ class PlayerToBallVelocityReward(BaseReward):
         self._was_in_strike_zone: Dict[int, bool] = {}
 
     def _calc_dist(self, car_pos: np.ndarray, ball_pos: np.ndarray) -> float:
-        # If BOTH car and ball are near pitch floor (car Z < 200, ball Z < 300), evaluate horizontal (X, Y) distance
+        # If BOTH car and ball are near pitch floor (car Z < 150, ball Z < 300), evaluate horizontal (X, Y) distance
         # so low ground flips / wavedashes do not incur an artificial vertical distance penalty.
-        # If car is elevated on the wall or in the air (Z >= 200), strictly evaluate full 3D distance.
-        if ball_pos[2] < 300.0 and car_pos[2] < 200.0:
-            return float(np.linalg.norm(ball_pos[:2] - car_pos[:2]))
+        # Smoothly blend between 2D and 3D distance between car Z=150 and Z=350 to avoid metric cliffs.
+        if ball_pos[2] < 300.0:
+            d2 = float(np.linalg.norm(ball_pos[:2] - car_pos[:2]))
+            if car_pos[2] <= 150.0:
+                return d2
+            d3 = float(np.linalg.norm(ball_pos - car_pos))
+            if car_pos[2] >= 350.0:
+                return d3
+            alpha = (float(car_pos[2]) - 150.0) / 200.0
+            return float((1.0 - alpha) * d2 + alpha * d3)
         return float(np.linalg.norm(ball_pos - car_pos))
 
     def _get_target_pos(self, car_pos: np.ndarray, arena: RocketSimArena, is_kickoff: bool) -> np.ndarray:
@@ -720,7 +727,7 @@ class PlayerToBallVelocityReward(BaseReward):
                 # Pure outcome-driven penalty avoidance: overspeeding incurs pacing_penalty,
                 # decelerating to desired speed brings penalty to 0.0. No positive per-tick hovering bounties.
                 # Strictly for grounded open-field dribble pacing (exempt on walls where climbing momentum is required).
-                if car.on_ground and not is_roof_carry and not is_ground_pushing and not is_on_wall and not is_ball_on_wall and ball_z < 250.0:
+                if car.on_ground and not is_roof_carry and not is_ground_pushing and not is_on_wall and not is_ball_on_wall and (ball_z < 250.0 or (ball_z < 500.0 and arena.ball.vel[2] < -100.0)):
                     safe_speed_margin = max(150.0, (min(curr_dist, 500.0) / 500.0) * 650.0)
                     desired_speed = effective_ball_speed + safe_speed_margin
 
@@ -1335,7 +1342,7 @@ class JumpBridgeReward(BaseReward):
             local_z = float(np.dot(car_to_ball, up_vec))
             is_contested_5050 = bool(dist <= 450.0 and is_opponent_challenging and ball_z < 220.0 and car.pos[2] < 150.0)
             is_flick_liftoff = bool(dist <= 260.0 and 110.0 <= local_z <= 175.0 and car.pos[2] < 150.0 and -30.0 <= local_x <= 65.0 and abs(local_y) < 55.0)
-            is_strike_liftoff = bool(dist <= 750.0 and ball_z < 450.0 and car.pos[2] < 150.0 and forward_alignment > 0.15 and pitch_input >= -0.15)
+            is_strike_liftoff = bool(dist <= 750.0 and ball_z < 450.0 and car.pos[2] < 150.0 and forward_alignment > 0.15 and takeoff_closing_vel > -50.0)
 
             if is_contested_5050 or is_flick_liftoff or is_strike_liftoff:
                 if is_contested_5050:
@@ -1373,7 +1380,7 @@ class JumpBridgeReward(BaseReward):
 
             # 1d. Open-field ground traversal & downfield sprint (dist > 650 uu, ball grounded)
             elif not is_aerial_ball and not is_on_wall_zone and dist > 650.0 and forward_alignment > 0.40:
-                if car_fwd_speed > 400.0 and pitch_input >= -0.10:
+                if car_fwd_speed > 400.0:
                     is_kickoff = bool(abs(arena.ball.pos[0]) < 50.0 and abs(arena.ball.pos[1]) < 50.0 and arena.ball.pos[2] < 120.0)
                     liftoff_mult = 1.30 if is_kickoff else 0.80
                     reward += self.weight * liftoff_mult * forward_alignment
@@ -1402,42 +1409,62 @@ class JumpBridgeReward(BaseReward):
             self._flick_window_active[car.id] = False
 
         # ── 3. Airborne Dodge / Flip & Traversal Impulse ──────────────────────
+        dodge_delta_v = car.vel - prev_vel
+        dodge_delta_v_mag = float(np.linalg.norm(dodge_delta_v[:2]))
+
         dodge_dir_local = np.array([
             1.0 if pitch_input > 0.25 else (-1.0 if pitch_input < -0.25 else 0.0),
             1.0 if yaw_input > 0.25 else (-1.0 if yaw_input < -0.25 else 0.0),
             0.0
         ], dtype=np.float32)
         dodge_norm = float(np.linalg.norm(dodge_dir_local))
-        if dodge_norm > 1e-4:
-            dodge_impulse_world = (dodge_dir_local[0] * fwd_vec + dodge_dir_local[1] * right_vec) / dodge_norm
-            dodge_align = float(np.dot(dodge_impulse_world[:2], tactical_dir[:2]))
+
+        if dodge_delta_v_mag > 80.0:
+            dodge_impulse_world = dodge_delta_v[:2] / max(1e-4, dodge_delta_v_mag)
+            dodge_align = float(np.dot(dodge_impulse_world, tactical_dir[:2]))
+        elif dodge_norm > 1e-4:
+            dodge_impulse_world_full = (dodge_dir_local[0] * fwd_vec[:2] + dodge_dir_local[1] * right_vec[:2]) / dodge_norm
+            dodge_align = float(np.dot(dodge_impulse_world_full, tactical_dir[:2]))
         else:
             dodge_align = 0.0
 
         up_vec = car.get_up_vector()
         local_z = float(np.dot(car_to_ball, up_vec))
-        is_flick_active = bool(self._flick_window_active.get(car.id, False) or (dist < 260.0 and 110.0 <= local_z <= 220.0 and -35.0 <= local_x <= 75.0 and abs(local_y) < 65.0))
+        is_flick_active = bool(self._flick_window_active.get(car.id, False) or (dist < 320.0 and 90.0 <= local_z <= 240.0 and -45.0 <= local_x <= 85.0 and abs(local_y) < 75.0))
+
+        nose_align_ball = float(np.dot(fwd_vec[:2], unit_to_ball[:2]))
+        nose_align_tactical = float(np.dot(fwd_vec[:2], tactical_dir[:2]))
+
+        dodge_car_fwd_align = (float(np.dot(dodge_delta_v[:2], fwd_vec[:2])) / dodge_delta_v_mag) if dodge_delta_v_mag > 80.0 else 0.0
+        is_dodge_backward = bool(pitch_input < -0.20 or (dodge_delta_v_mag > 80.0 and dodge_car_fwd_align < -0.30))
 
         # Fast aerial pitch-up recognition: tilting nose up under elevated ball is an aerial attempt, not bad backflip
         is_fast_aerial_attempt = bool(
-            is_executing_dodge and pitch_input < -0.15 
-            and ball_z > 300.0 and (ball_z > car.pos[2] + 80.0)
+            is_executing_dodge and is_dodge_backward
+            and ball_z > 250.0 and (ball_z > car.pos[2] + 60.0)
             and forward_alignment > 0.10 and car.pos[2] > 25.0
         )
         is_5050_backflip = bool(
-            is_executing_dodge and pitch_input < -0.20 and dist <= 450.0 and is_opponent_challenging
-            and car_fwd_speed < 200.0 and forward_alignment < 0.20
+            is_executing_dodge and is_dodge_backward and dist <= 450.0 and is_opponent_challenging
+            and car_fwd_speed < 200.0 and nose_align_ball < 0.20
         )
-        is_uncontested_dribble_backflip = bool(is_executing_dodge and pitch_input < -0.20 and dist <= 450.0 and not is_opponent_challenging and not is_flick_active and forward_alignment < -0.20)
-        is_halfflip_candidate = bool(is_executing_dodge and pitch_input < -0.20 and forward_alignment < -0.20 and (dist > 450.0 or is_wrong_side))
+        is_halfflip_candidate = bool(
+            is_executing_dodge and (is_dodge_backward or (dodge_align > 0.15 and nose_align_tactical < -0.20))
+            and nose_align_tactical < -0.20 and (dist > 450.0 or is_wrong_side)
+        )
+        is_uncontested_dribble_backflip = bool(
+            is_executing_dodge and is_dodge_backward and dist <= 450.0
+            and not is_opponent_challenging and not is_flick_active and nose_align_ball < -0.20
+            and not is_halfflip_candidate
+        )
         is_forward_backflip = bool(
-            is_executing_dodge and pitch_input < -0.20 
+            is_executing_dodge and is_dodge_backward
             and not is_5050_backflip and not is_flick_active and not is_halfflip_candidate 
             and not is_fast_aerial_attempt
-            and (car_fwd_speed > 100.0 or forward_alignment > 0.15)
+            and (car_fwd_speed > 100.0 or nose_align_tactical > 0.15)
         )
 
-        if is_executing_dodge and pitch_input < -0.20:
+        if is_executing_dodge and (is_dodge_backward or is_halfflip_candidate):
             if is_5050_backflip:
                 self._challenge_jump_active[car.id] = True
             elif is_flick_active or is_fast_aerial_attempt:
@@ -1464,30 +1491,32 @@ class JumpBridgeReward(BaseReward):
             has_traversal_speed = bool(car_speed_horiz > 350.0)
             is_bad_backflip = bool(is_forward_backflip or is_uncontested_dribble_backflip)
 
-            is_forward_flip = bool(pitch_input > 0.25)
-            is_diagonal_flip = bool(pitch_input > 0.15 and abs(yaw_input) > 0.15)
-            is_forward_or_diagonal = bool((is_forward_flip or is_diagonal_flip) and forward_alignment > 0.30)
+            is_forward_flip = bool(pitch_input > 0.25 or (dodge_delta_v_mag > 80.0 and dodge_align > 0.35))
+            is_diagonal_flip = bool((pitch_input > 0.15 and abs(yaw_input) > 0.15) or (dodge_delta_v_mag > 80.0 and 0.20 < abs(float(np.dot(dodge_delta_v[:2] / max(1e-4, dodge_delta_v_mag), right_vec[:2]))) < 0.85))
+            is_forward_or_diagonal = bool((is_forward_flip or is_diagonal_flip) and (forward_alignment > 0.30 or nose_align_tactical > 0.30))
 
-            if stick_deflection >= 0.25 and dodge_align > 0.20 and not is_bad_backflip:
+            effective_deflection = max(stick_deflection, min(1.0, dodge_delta_v_mag / 500.0))
+            if (effective_deflection >= 0.25 or dodge_delta_v_mag > 80.0) and dodge_align > 0.20 and not is_bad_backflip:
                 if (not is_open_field) or has_traversal_speed:
                     # Traversal flip lock-in horizon check:
-                    # When chasing downfield, ensure the ball lead is large enough that the 0.65s flip animation does not overshoot
+                    # When chasing downfield, ensure the ball lead is large enough that the 0.65s flip animation does not overshoot.
+                    # Exempt when retreating on defense (is_wrong_side) so defensive recovery flips to gain speed are never tapered!
                     ball_flee_vel = float(np.dot(arena.ball.vel, unit_to_ball))
                     is_chasing_downfield = bool(car_fwd_speed > 250.0 and car_fwd_speed > ball_flee_vel + 100.0)
                     flip_horizon = (car_fwd_speed + 450.0) * 0.65
                     effective_ball_dist = dist + max(0.0, ball_flee_vel) * 0.65
 
                     overshoot_taper = 1.0
-                    if is_chasing_downfield and dist < 750.0 and not is_flick_active:
+                    if not is_wrong_side and is_chasing_downfield and dist < 750.0 and not is_flick_active:
                         if effective_ball_dist < flip_horizon - 100.0:
                             overshoot_taper = max(0.0, (effective_ball_dist - 200.0) / max(1.0, flip_horizon - 300.0))
 
-                    reward += self.weight * dodge_align * (0.5 + 0.3 * stick_deflection) * overshoot_taper
+                    reward += self.weight * dodge_align * (0.5 + 0.3 * effective_deflection) * overshoot_taper
 
                     if is_forward_or_diagonal:
                         speed_progression = min(1.0, max(0.2, car_fwd_speed / 1800.0))
                         diag_bonus = 0.50 if is_diagonal_flip else 0.25
-                        reward += self.weight * (0.8 * speed_progression + diag_bonus) * forward_alignment * overshoot_taper
+                        reward += self.weight * (0.8 * speed_progression + diag_bonus) * max(forward_alignment, nose_align_tactical) * overshoot_taper
 
                     is_kickoff = bool(abs(arena.ball.pos[0]) < 50.0 and abs(arena.ball.pos[1]) < 50.0 and arena.ball.pos[2] < 120.0 and float(np.linalg.norm(arena.ball.vel)) < 100.0)
                     if is_kickoff and dist > 800.0 and (is_forward_flip or is_diagonal_flip):
@@ -1552,7 +1581,8 @@ class JumpBridgeReward(BaseReward):
         if (not prev_ground and car.on_ground) and self._halfflip_in_progress.get(car.id, False):
             up = car.get_up_vector()
             up_z = float(up[2])
-            if up_z > 0.60 and forward_alignment > 0.20:
+            nose_align_target = float(np.dot(car.get_forward_vector()[:2], tactical_dir[:2]))
+            if up_z > 0.60 and (forward_alignment > 0.20 or nose_align_target > 0.20):
                 reward += self.weight * 1.80
             else:
                 reward -= self.weight * 0.80
@@ -1691,7 +1721,8 @@ class BoostReward(BaseReward):
                     if is_active_dodge:
                         car_fwd_proj = float(np.dot(fwd_vec, car.vel))
                         is_thruster_braking = bool(car_fwd_proj < -100.0)
-                        is_thruster_ground_smash = bool(fwd_vec[2] < -0.40 and car.pos[2] < 250.0)
+                        horiz_speed = float(np.linalg.norm(car.vel[:2]))
+                        is_thruster_ground_smash = bool(fwd_vec[2] < -0.40 and car.pos[2] < 250.0 and horiz_speed < 800.0)
                         if is_thruster_braking or is_thruster_ground_smash:
                             loss_rew -= 0.30
                     else:
@@ -1957,7 +1988,10 @@ class AirRollRecoveryReward(BaseReward):
         # Aerial engagement check (protects steep climbing & inverted flight during aerials / air dribbles / flip resets)
         unit_to_ball = car_to_ball / max(1e-4, dist_to_ball)
         fwd_align_to_ball = float(np.dot(car.get_forward_vector(), unit_to_ball))
-        is_aerial_engagement = bool(ball_z > 350.0 and (dist_to_ball < 450.0 or (fwd_align_to_ball > 0.35 and dist_to_ball < 1500.0)))
+        is_aerial_engagement = bool(
+            (ball_z > 350.0 and (dist_to_ball < 450.0 or (fwd_align_to_ball > 0.35 and dist_to_ball < 1500.0))) or
+            (not car.on_ground and dist_to_ball < 400.0)
+        )
 
         total_reward = 0.0
 
@@ -2052,16 +2086,18 @@ class AirRollRecoveryReward(BaseReward):
                 # Multi-Surface Landing Evaluator:
                 # Evaluate alignment against floor normal [0,0,1] and nearest wall normal
                 floor_align = up_z
-                wall_align = 0.0
                 if car_z > 150.0 or abs(car.pos[0]) > 3500.0 or abs(car.pos[1]) > 4500.0:
                     is_near_side = bool(abs(car.pos[0]) > 3400.0)
                     is_near_back = bool(abs(car.pos[1]) > 4400.0)
                     wall_nx = -math.copysign(1.0, car.pos[0]) if is_near_side else 0.0
                     wall_ny = -math.copysign(1.0, car.pos[1]) if is_near_back else 0.0
                     wall_align = float(up[0] * wall_nx + up[1] * wall_ny)
-                best_landing_align = max(floor_align, wall_align)
+                    best_landing_align = max(floor_align, wall_align)
+                else:
+                    best_landing_align = floor_align
 
-                if best_landing_align > 0.70:
+                if best_landing_align > 0.0:
+                    # Positive continuous landing gradient for any wheels-down landing
                     total_reward += (best_landing_align * 0.5)
                     # Touchdown spin penalty: landing with high rotational speed causes the car to bounce onto its roof
                     if total_ang_speed > 1.5:
@@ -2072,13 +2108,12 @@ class AirRollRecoveryReward(BaseReward):
                         # 180° Turnaround Half-Flip Completion Bonus:
                         if self._halfflip_cancel_executed.get(car.id, False) and curr_heading > 0.60 and speed_horiz > 400.0 and self._takeoff_heading.get(car.id, 1.0) < -0.20:
                             total_reward += 1.50
-                elif best_landing_align < 0.50 and not is_active_halfflip_cancel:
+                elif not is_active_halfflip_cancel:
+                    # best_landing_align <= 0.0: Door or roof crash
+                    # At best_landing_align = 0.0 (flat on door): -0.15 * urgency
+                    # Scales strictly monotonically to -0.40 * urgency at best_landing_align = -1.0 (inverted roof)
                     urgency = min(1.0, max(0.4, (800.0 - car_z) / 600.0))
-                    # Continuous monotonic penalty: from 0.0 at best_landing_align=0.50, to -0.40 at 0.0 (door), to -0.50 at -1.0 (inverted roof)
-                    if best_landing_align >= 0.0:
-                        door_crash = -0.40 * (1.0 - best_landing_align / 0.50)
-                    else:
-                        door_crash = -0.40 + (best_landing_align * 0.10)
+                    door_crash = -0.15 + (best_landing_align * 0.25)
                     total_reward += door_crash * urgency
 
                 # Consume disorientation so touchdown reward only fires once per landing
