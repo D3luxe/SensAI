@@ -38,6 +38,12 @@ class LeagueManager:
         self.king_ratio = float(self.config.get("king_ratio", 0.25))
         self.pool_ratio = float(self.config.get("pool_ratio", 0.25))
         self.max_pool_size = int(self.config.get("max_pool_size", 10))
+        # Environments per distinct pool opponent within one refresh. Every distinct model
+        # in the pool costs its own forward pass per rollout step, so spreading the pool
+        # one-env-thin turns the pool tier into a pile of batch-size-1 inferences. Grouping
+        # keeps the same long-run opponent diversity (the pool cycle advances each refresh)
+        # at a fraction of the inference overhead.
+        self.pool_group_size = max(1, int(self.config.get("pool_group_size", 4)))
         self.protect_top_k = int(self.config.get("protect_top_k", 20))
         self.hall_of_fame_size = int(self.config.get("hall_of_fame_size", 20))
         self.hall_of_fame_min_matches = int(self.config.get("hall_of_fame_min_matches", 16))
@@ -825,10 +831,17 @@ class LeagueManager:
         if not candidate_pool:
             candidate_pool = ["heuristic"]
 
-        for _ in range(n_pool):
+        # Contiguous runs of `pool_group_size` envs per model, rather than one env each:
+        # batches the opponent forward passes and keeps each subprocess env worker facing
+        # only a couple of distinct models. The cycle index still advances, so successive
+        # refreshes walk the whole pool.
+        assigned = 0
+        while assigned < n_pool:
             choice = candidate_pool[self._pool_cycle_idx % len(candidate_pool)]
             self._pool_cycle_idx = (self._pool_cycle_idx + 1) % len(candidate_pool)
-            assignments.append(choice)
+            run = min(self.pool_group_size, n_pool - assigned)
+            assignments.extend([choice] * run)
+            assigned += run
 
         return assignments
 

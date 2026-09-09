@@ -4,6 +4,7 @@ environment:
   game_mode: 1v1
   max_episode_steps: 600
   num_envs: 64
+  num_env_workers: 16
   tick_skip: 8
 hyperparameters:
   batch_size: 8192

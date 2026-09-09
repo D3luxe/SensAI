@@ -290,60 +290,14 @@ class VectorizedRocketEnv:
         self._heuristic_envs: List[int] = []
         self._build_opponent_groups()
 
-        # Multi-threaded worker engine for parallel environment stepping (default 1 for zero-overhead in-memory execution)
-        import threading
-        if num_workers is None:
-            num_workers = 1
-        self.num_workers = max(1, min(num_workers, num_envs))
-
-
-        if self.num_workers > 1:
-            self.chunk_size = (num_envs + self.num_workers - 1) // self.num_workers
-            self.chunks = []
-            for w in range(self.num_workers):
-                start = w * self.chunk_size
-                end = min(num_envs, start + self.chunk_size)
-                if start < end:
-                    self.chunks.append((start, end))
-            self.num_workers = len(self.chunks)
-
-            self.step_events = [threading.Event() for _ in range(self.num_workers)]
-            self.done_events = [threading.Event() for _ in range(self.num_workers)]
-            self.stop_flag = False
-            self.worker_threads = []
-            self._actions_ref = None
-            self._worker_infos = [[] for _ in range(self.num_workers)]
-
-            for w_idx, (start, end) in enumerate(self.chunks):
-                t = threading.Thread(target=self._worker_loop, args=(w_idx, start, end), daemon=True)
-                t.start()
-                self.worker_threads.append(t)
-        else:
-            self.chunks = [(0, num_envs)]
-            self.worker_threads = []
-
-    def _worker_loop(self, w_idx: int, start: int, end: int):
-        while True:
-            self.step_events[w_idx].wait()
-            if self.stop_flag:
-                break
-            self.step_events[w_idx].clear()
-
-            chunk_infos = []
-            for i in range(start, end):
-                _, _, dones, info = self.envs[i].step(
-                    self._actions_ref[i],
-                    out_obs=self._obs_buffer[i],
-                    out_rews=self._rew_buffer[i],
-                    opponent_action=self._batched_opp_actions[i]
-                )
-                self._done_buffer[i] = dones
-                if dones[0]:
-                    self._opponent_prev_actions[i].fill(0.0)
-                chunk_infos.append(info)
-
-            self._worker_infos[w_idx] = chunk_infos
-            self.done_events[w_idx].set()
+        # Environment stepping is single-threaded by design. The reward and observation
+        # code is pure Python, so worker *threads* only add GIL contention: measured at
+        # 64 envs, 12 threads ran the same rollout 2.2x slower than one. Process-level
+        # parallelism lives in env/subproc_vec_env.py instead; `num_workers` is accepted
+        # and ignored here so both vector envs share a constructor signature.
+        self.num_workers = 1
+        self.chunks = [(0, num_envs)]
+        self.worker_threads = []
 
     def _build_opponent_groups(self):
         """Pre-groups environment indices by opponent model type for zero-overhead batched execution."""
@@ -478,47 +432,27 @@ class VectorizedRocketEnv:
     def step(self, actions: np.ndarray) -> Tuple[np.ndarray, np.ndarray, np.ndarray, List[Dict[str, Any]]]:
         """
         actions shape: (num_envs, num_players, act_dim)
-        Parallel step updating pre-allocated internal numpy buffers across persistent worker threads.
+        Steps every environment in turn, updating the pre-allocated numpy buffers in place.
         """
         self._batch_evaluate_opponents()
 
-        if self.num_workers > 1:
-            self._actions_ref = actions
-            for w in range(self.num_workers):
-                self.done_events[w].clear()
-                self.step_events[w].set()
-
-            for w in range(self.num_workers):
-                self.done_events[w].wait()
-
-            all_infos = []
-            for w in range(self.num_workers):
-                all_infos.extend(self._worker_infos[w])
-
-            return (
-                self._obs_buffer,
-                self._rew_buffer,
-                self._done_buffer,
-                all_infos
+        all_infos = []
+        for i, env in enumerate(self.envs):
+            _, _, dones, info = env.step(
+                actions[i],
+                out_obs=self._obs_buffer[i],
+                out_rews=self._rew_buffer[i],
+                opponent_action=self._batched_opp_actions[i]
             )
-        else:
-            all_infos = []
-            for i, env in enumerate(self.envs):
-                _, _, dones, info = env.step(
-                    actions[i],
-                    out_obs=self._obs_buffer[i],
-                    out_rews=self._rew_buffer[i],
-                    opponent_action=self._batched_opp_actions[i]
-                )
-                self._done_buffer[i] = dones
-                if dones[0]:
-                    self._opponent_prev_actions[i].fill(0.0)
-                all_infos.append(info)
+            self._done_buffer[i] = dones
+            if dones[0]:
+                self._opponent_prev_actions[i].fill(0.0)
+            all_infos.append(info)
 
-            return (
-                self._obs_buffer,
-                self._rew_buffer,
-                self._done_buffer,
-                all_infos
-            )
+        return (
+            self._obs_buffer,
+            self._rew_buffer,
+            self._done_buffer,
+            all_infos
+        )
 
