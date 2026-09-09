@@ -41,7 +41,8 @@ from env.actions import DiscreteActionParser, ContinuousActionParser
 from env.physics_engine import (
     CarState, BallState, BoostPad,
     ARENA_EXTENT_X, ARENA_EXTENT_Y, ARENA_HEIGHT_Z,
-    CAR_MAX_SPEED, BALL_MAX_SPEED, GOAL_HEIGHT
+    CAR_MAX_SPEED, BALL_MAX_SPEED, GOAL_HALF_WIDTH, GOAL_HEIGHT,
+    EFFECTIVE_GOAL_HALF_WIDTH, EFFECTIVE_GOAL_HEIGHT, BALL_RADIUS
 )
 
 
@@ -332,8 +333,11 @@ class SenseiRLBot(BaseAgent):
                         for i in range(num):
                             loc = self._pred_struct.slices[i].physics.location
                             if (team == 0 and loc.y <= -5120.0) or (team == 1 and loc.y >= 5120.0):
-                                if abs(loc.x) < 950.0 and 0.0 < loc.z < 680.0:
-                                    threat_intensity = max(0.1, 1.0 - (i / 120.0))
+                                is_clean_entry = bool(abs(loc.x) <= EFFECTIVE_GOAL_HALF_WIDTH and BALL_RADIUS <= loc.z <= EFFECTIVE_GOAL_HEIGHT)
+                                is_grazing_entry = bool(not is_clean_entry and abs(loc.x) <= GOAL_HALF_WIDTH and BALL_RADIUS <= loc.z <= GOAL_HEIGHT)
+                                if is_clean_entry or is_grazing_entry:
+                                    raw_intensity = max(0.1, 1.0 - (i / 120.0))
+                                    threat_intensity = raw_intensity if is_clean_entry else (raw_intensity * 0.45)
                                     entry_z_norm = min(1.0, max(0.0, loc.z / GOAL_HEIGHT))
                                     return True, threat_intensity, entry_z_norm
 
@@ -343,8 +347,11 @@ class SenseiRLBot(BaseAgent):
                         if 0.05 < dt < 3.0:
                             pred_x = self.ball.pos[0] + self.ball.vel[0] * dt
                             pred_z = self.ball.pos[2] + self.ball.vel[2] * dt + 0.5 * (-650.0) * (dt ** 2)
-                            if abs(pred_x) < 950.0 and 0.0 < pred_z < 680.0:
-                                threat_intensity = max(0.1, 1.0 - (dt / 3.0))
+                            is_clean_entry = bool(abs(pred_x) <= EFFECTIVE_GOAL_HALF_WIDTH and BALL_RADIUS <= pred_z <= EFFECTIVE_GOAL_HEIGHT)
+                            is_grazing_entry = bool(not is_clean_entry and abs(pred_x) <= GOAL_HALF_WIDTH and BALL_RADIUS <= pred_z <= GOAL_HEIGHT)
+                            if is_clean_entry or is_grazing_entry:
+                                raw_intensity = max(0.1, 1.0 - (dt / 3.0))
+                                threat_intensity = raw_intensity if is_clean_entry else (raw_intensity * 0.45)
                                 entry_z_norm = min(1.0, max(0.0, pred_z / GOAL_HEIGHT))
                                 return True, threat_intensity, entry_z_norm
 

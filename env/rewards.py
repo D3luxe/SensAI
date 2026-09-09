@@ -81,6 +81,59 @@ def compute_car_arrival_time(
     return arrival
 
 
+def compute_effective_alignment(
+    car: CarState,
+    target_dir: np.ndarray,
+    min_speed: float = 150.0
+) -> float:
+    """
+    Computes effective alignment toward target_dir.
+    Evaluates max(nose_alignment, vel_alignment) when traveling or airborne,
+    so that flips, dodges, and flicks (where nose pitches 360 degrees) do not
+    suffer false negative alignment penalties while momentum is heading to target.
+
+    Safeguards:
+      1. Stationary liftoffs: If horizontal velocity is low (< min_speed), pure vertical liftoff
+         does not count as traveling toward the target (evaluates true nose heading).
+      2. On ground: lateral tire slip > 100 uu/s gates velocity alignment to prevent drift farming.
+      3. Sustained high aerial flight without dodge (Z > 350, not dodging): requires nose alignment for boost thrusters.
+    """
+    fwd_vec = car.get_forward_vector()
+    fwd_align = float(np.dot(fwd_vec, target_dir))
+    car_horiz_speed = float(np.linalg.norm(car.vel[:2]))
+    car_speed = float(np.linalg.norm(car.vel))
+
+    # If car has no horizontal travel momentum, vertical jumping doesn't make it travel to target
+    if car_horiz_speed <= min_speed and car.pos[2] < 200.0:
+        return fwd_align
+
+    if car_speed <= min_speed:
+        return fwd_align
+
+    vel_dir = car.vel / max(1e-4, car_speed)
+    vel_align = float(np.dot(vel_dir, target_dir))
+
+    if not car.on_ground:
+        # If in active dodge/flip or low flight: evaluate max to decouple 360 pitch rotation
+        is_flipping = bool(car.just_dodged or getattr(car, "is_dodging", False) or (not car.has_flip and car.pos[2] < 350.0))
+        if is_flipping:
+            return max(fwd_align, vel_align)
+        # Sustained high aerial flight: blend toward nose alignment for thruster propulsion
+        if car.pos[2] > 350.0:
+            return 0.70 * fwd_align + 0.30 * max(0.0, vel_align)
+        return max(fwd_align, vel_align)
+    else:
+        # On ground: verify wheels are not in uncontrolled lateral slide (drift farming guard)
+        right_vec = car.get_right_vector()
+        lateral_slip = abs(float(np.dot(car.vel[:2], right_vec[:2])))
+        if lateral_slip > 100.0:
+            slip_penalty = min(1.0, (lateral_slip - 100.0) / 300.0)
+            gated_vel_align = vel_align * (1.0 - 0.75 * slip_penalty)
+            return max(fwd_align, gated_vel_align)
+        return max(fwd_align, vel_align)
+
+
+
 def compute_opponent_threats(
     car: CarState,
     arena: RocketSimArena,
@@ -305,27 +358,28 @@ class BallToGoalVelocityReward(BaseReward):
             # Ballistic trajectory with physical floor boundary clamp (z >= BALL_RADIUS for rolling shots)
             z_impact = max(BALL_RADIUS, arena.ball.pos[2] + arena.ball.vel[2] * dt + 0.5 * (-650.0) * (dt ** 2))
             is_crossbar_miss = bool(z_impact > EFFECTIVE_GOAL_HEIGHT)
+            is_backboard_hit = bool(z_impact > GOAL_HEIGHT)
             if abs(x_impact) <= EFFECTIVE_GOAL_HALF_WIDTH and not is_crossbar_miss:
                 # Shot is cleanly on target into the net opening without hitting post or bar!
                 on_target_mult = 1.6
-            elif abs(x_impact) <= GOAL_HALF_WIDTH and z_impact <= GOAL_HEIGHT:
+            elif abs(x_impact) <= GOAL_HALF_WIDTH and not is_backboard_hit:
                 # Near-post / crossbar grazing shot: inside post center but outer sphere contacts post/bar
                 # Smoothly attenuate from 1.0 down to 0.8 instead of awarding clean 1.6x goal bonus
                 post_miss_x = max(0.0, abs(x_impact) - EFFECTIVE_GOAL_HALF_WIDTH) / max(1e-4, BALL_RADIUS)
                 bar_miss_z = max(0.0, z_impact - EFFECTIVE_GOAL_HEIGHT) / max(1e-4, BALL_RADIUS)
                 graze_factor = min(1.0, max(post_miss_x, bar_miss_z))
                 on_target_mult = 1.0 - 0.20 * graze_factor
-            elif ball_y_forward > 1000.0:
-                # Ball is in attacking half and heading wide into the backwall/corner or high over crossbar
-                # Strictly eliminate progression reward so the bot cannot farm pushing wide
-                miss_dist = max(abs(x_impact) - EFFECTIVE_GOAL_HALF_WIDTH, (z_impact - EFFECTIVE_GOAL_HEIGHT) if is_crossbar_miss else 0.0)
-                if miss_dist > 400.0:
+            elif is_backboard_hit or ball_y_forward > 1000.0:
+                # High over crossbar into backboard or wide into corner:
+                # Strictly zero on-target shot bonus! Backboard rebounds are not goals.
+                if is_backboard_hit or (ball_y_forward > 500.0 and abs(x_impact) > GOAL_HALF_WIDTH + 100.0):
                     on_target_mult = 0.0
                 else:
-                    on_target_mult = max(0.0, 1.0 - (miss_dist / 400.0))
+                    miss_dist = max(abs(x_impact) - EFFECTIVE_GOAL_HALF_WIDTH, z_impact - EFFECTIVE_GOAL_HEIGHT)
+                    on_target_mult = max(0.0, 1.0 - (miss_dist / 300.0))
             elif (abs(x_impact) > EFFECTIVE_GOAL_HALF_WIDTH * 1.3 or is_crossbar_miss) and ball_y_forward > 0.0:
                 # Midfield wide/high trajectory dampening
-                miss_val = max(abs(x_impact) - EFFECTIVE_GOAL_HALF_WIDTH, (z_impact - EFFECTIVE_GOAL_HEIGHT) if is_crossbar_miss else 0.0)
+                miss_val = max(abs(x_impact) - EFFECTIVE_GOAL_HALF_WIDTH, z_impact - EFFECTIVE_GOAL_HEIGHT)
                 miss_factor = min(1.0, miss_val / 1500.0)
                 on_target_mult = max(0.20, 1.0 - (0.80 * miss_factor))
 
@@ -448,7 +502,7 @@ class PlayerToBallVelocityReward(BaseReward):
         car_to_ball = target_pos - car.pos
         dist_3d = float(np.linalg.norm(car_to_ball))
         unit_to_ball = car_to_ball / max(1e-4, dist_3d)
-        fwd_alignment = float(np.dot(car.get_forward_vector(), unit_to_ball))
+        fwd_alignment = compute_effective_alignment(car, unit_to_ball)
 
         # Defensive coordinate context
         defend_goal_y = -ARENA_EXTENT_Y if car.team == 0 else ARENA_EXTENT_Y
@@ -475,34 +529,18 @@ class PlayerToBallVelocityReward(BaseReward):
         is_in_goal_mouth = bool(abs(arena.ball.pos[0]) < 900.0 and ball_z < 650.0)
         is_ball_on_sidewall = bool(abs(arena.ball.pos[0]) > 3650.0 and ball_z > 140.0)
         is_ball_on_backboard = bool(abs(arena.ball.pos[1]) > 4700.0 and ball_z > 140.0 and not is_in_goal_mouth)
-        is_ball_on_wall = bool(is_ball_on_sidewall or is_ball_on_backboard)
+        is_ball_on_curve = bool((abs(arena.ball.pos[0]) > 3350.0 or abs(arena.ball.pos[1]) > 4350.0) and not is_in_goal_mouth and ball_z > 80.0)
+        is_ball_on_wall = bool(is_ball_on_sidewall or is_ball_on_backboard or is_ball_on_curve)
         # Elevated aerial is strictly an open-air floating ball infield away from arena walls
         is_elevated_aerial = bool(ball_z > 350.0 and not is_ball_on_wall)
 
         is_on_ceiling = bool((car.pos[2] > 1750.0 and car.on_ground) or car.pos[2] > 1900.0)
-        is_on_wall = bool((abs(car.pos[0]) > 3450.0 or abs(car.pos[1]) > 4450.0) and car.pos[2] > 200.0 and car.on_ground)
+        up_tilt = abs(float(car.rot_mat[2, 2])) if hasattr(car, "rot_mat") and car.rot_mat is not None else 1.0
+        is_on_wall_curve = bool((abs(car.pos[0]) > 3300.0 or abs(car.pos[1]) > 4300.0) and car.on_ground and (car.pos[2] > 55.0 or up_tilt < 0.92))
+        is_on_wall = bool(((abs(car.pos[0]) > 3450.0 or abs(car.pos[1]) > 4450.0) and car.pos[2] > 200.0 and car.on_ground) or is_on_wall_curve)
 
         horiz_ball_dist = float(np.linalg.norm(arena.ball.pos[:2] - car.pos[:2]))
         eff_dist = min(curr_dist, horiz_ball_dist) if (car.on_ground and ball_z < 650.0) else curr_dist
-
-        # 1. Anti-Overshoot Penalty & Strike Zone Tracking
-        overshoot_penalty = 0.0
-        in_strike = (raw_ball_dist < 400.0) or (car.on_ground and horiz_ball_dist < 380.0 and ball_z < 650.0)
-        was_strike = self._was_in_strike_zone.get(car.id, False)
-        self._was_in_strike_zone[car.id] = in_strike
-
-        opp_touched = any(
-            c.ball_touches > self._prev_car_touches.get(c.id, c.ball_touches)
-            for c in arena.cars if c.team != car.team
-        )
-        self._prev_car_touches = {c.id: c.ball_touches for c in arena.cars}
-
-        car_fwd_spd = float(np.dot(car.vel, car.get_forward_vector())) if not car.on_ground else float(np.dot(car.vel[:2], car.get_forward_vector()[:2]))
-        if was_strike and not in_strike and car.ball_touches == prev_t and fwd_alignment < -0.15 and not opp_touched and car_fwd_spd > 150.0:
-            # Car was in the strike zone and flew past the ball without touching it!
-            # Heavy penalty (-0.40), escalated if overshooting at supersonic speeds
-            car_spd = float(np.linalg.norm(car.vel))
-            overshoot_penalty = -0.40 if car_spd < 1800.0 else -0.60
 
         # Ceiling Exploit Prevention:
         # If car is riding the ceiling and the ball is below it, eliminate distance closure rewards
@@ -515,10 +553,34 @@ class PlayerToBallVelocityReward(BaseReward):
         else:
             raw_delta_dist = (prev_dist - curr_dist) / 2000.0
 
+        opp_touched = any(
+            c.ball_touches > self._prev_car_touches.get(c.id, c.ball_touches)
+            for c in arena.cars if c.team != car.team
+        )
+        self._prev_car_touches = {c.id: c.ball_touches for c in arena.cars}
+
         # When an opponent touches/clears the ball away, distance increased due to the opponent's strike;
         # clamp the delta so the bot is not penalized with an artificial distance penalty cliff for an external hit.
         if opp_touched and raw_delta_dist < 0.0:
             raw_delta_dist = max(-0.08, raw_delta_dist)
+
+        # 1. Anti-Overshoot Penalty & Strike Zone Tracking
+        overshoot_penalty = 0.0
+        in_strike = (raw_ball_dist < 400.0) or (car.on_ground and horiz_ball_dist < 380.0 and ball_z < 650.0)
+        was_strike = self._was_in_strike_zone.get(car.id, False)
+        self._was_in_strike_zone[car.id] = in_strike
+
+        car_fwd_spd = float(np.dot(car.vel, car.get_forward_vector())) if not car.on_ground else float(np.dot(car.vel[:2], car.get_forward_vector()[:2]))
+        is_active_flip = bool(car.just_dodged or getattr(car, "is_dodging", False) or (not car.on_ground and not car.has_flip))
+        car_vel_toward_ball = float(np.dot(car.vel, unit_to_ball))
+        if was_strike and not in_strike and car.ball_touches == prev_t and not opp_touched and car_fwd_spd > 150.0:
+            if not is_active_flip and fwd_alignment < -0.15:
+                # Ground / non-flip overshoot where car drove away
+                car_spd = float(np.linalg.norm(car.vel))
+                overshoot_penalty = -0.40 if car_spd < 1800.0 else -0.60
+            elif is_active_flip and car_vel_toward_ball < -100.0 and raw_delta_dist < -0.05:
+                # Body momentum actually sailing away after flip without touching
+                overshoot_penalty = -0.30
 
         # 2. Distance Delta with Strike Zone Pacing
         # Downfield (> 450 uu): 100% distance closure rewarded
@@ -625,6 +687,15 @@ class PlayerToBallVelocityReward(BaseReward):
         threats = compute_opponent_threats(car, arena)
         opp_tti = threats[0].arrival_time if threats else 999.0
         delta_t = opp_tti - self_tti  # > 0: bot arrives first
+
+        is_opponent_challenging = False
+        if threats:
+            most_urgent = threats[0]
+            is_opponent_challenging = bool(
+                most_urgent.dist <= 650.0 or
+                (most_urgent.closing_speed > 100.0 and most_urgent.arrival_time < 0.85) or
+                (abs(delta_t) < 0.30 and self_tti < 0.60)
+            )
 
         in_strike_zone = (raw_ball_dist < 500.0) or (car.on_ground and horiz_ball_dist < 500.0 and ball_z < 650.0)
         if in_strike_zone:
@@ -835,45 +906,62 @@ class PlayerToBallVelocityReward(BaseReward):
                     steer_factor = max(0.5, steer_mag) if steer_mag > 0.20 else min(1.0, yaw_rate / 2.0)
                     turnaround_reward += +0.20 * rot_mult * steer_factor
 
+            # D. Defensive Low 50/50 Challenge Block:
+            # In the defensive box when an opponent is actively challenging:
+            # Staying on wheels with a low ball in front of the bumper (local_z < 95, 10 < local_x < 150, |local_y| < 65),
+            # with the car nose squared up toward the incoming challenger, acts as a solid physical 50/50 block.
+            dist_to_defend_net = abs(arena.ball.pos[1] - defend_goal_y)
+            is_in_defensive_box = bool(dist_to_defend_net < 1800.0 and abs(arena.ball.pos[0]) < 1400.0)
+            if is_in_defensive_box and is_opponent_challenging and threats:
+                opp = threats[0].opp
+                car_to_opp = opp.pos - car.pos
+                d_opp = float(np.linalg.norm(car_to_opp))
+                unit_to_opp = (car_to_opp / max(1e-4, d_opp)) if d_opp > 1e-4 else fwd_vec
+                facing_opp = float(np.dot(fwd_vec, unit_to_opp))
+                is_low_5050_posture = bool(local_z < 95.0 and 10.0 <= local_x <= 150.0 and abs(local_y) < 65.0 and facing_opp > 0.20)
+                if is_low_5050_posture:
+                    turnaround_reward += 0.50 * facing_opp
+
             # C. Roof Dribble Carry & Velcro Settling (Seer/Nexto Architecture):
             if is_roof_carry:
-                target_goal_y = ARENA_EXTENT_Y if car.team == 0 else -ARENA_EXTENT_Y
-                target_goal_dir = np.array([0.0, 1.0 if car.team == 0 else -1.0, 0.0], dtype=np.float32)
-                car_to_goal_vel = float(np.dot(car.vel[:2], target_goal_dir[:2]))
-
-                # Anti-Circling Goal Projection (Seer/Nexto Guard):
-                # Only reward carrying the ball when advancing downfield toward the opponent net
-                if car_to_goal_vel > 50.0:
-                    goal_progress = min(1.0, max(0.2, car_to_goal_vel / 1400.0))
-                    # Grace Positioning Pocket (Multi-Flick Setup Architecture):
-                    # In Rocket League, diverse flicks require specific pocket positions:
-                    # - Front-flip flick: hood (+20 to +30 uu)
-                    # - 45-degree flick: diagonal (+10 to +25 uu, y +/- 15 to 25 uu)
-                    # - Side flick: lateral (0 to +15 uu, y +/- 20 to 35 uu)
-                    # - Backflip / scoop: rear (-22 to +10 uu, y ~ 0)
-                    # Plateaus at 1.0 throughout the entire active flick setup zone:
-                    excess_x = max(0.0, -22.0 - local_x, local_x - 32.0)
-                    excess_y = max(0.0, abs(local_y) - 25.0)
-                    center_score = max(0.0, 1.0 - (excess_x / 25.0 * 0.5 + excess_y / 25.0 * 0.5))
-
-                    # Velcro Settling Bonus: dampening vertical ball bounce on roof for stable flicks
-                    rel_vz = abs(float(arena.ball.vel[2] - car.vel[2]))
-                    velcro_bonus = 0.25 * max(0.0, 1.0 - (rel_vz / 120.0))
-
-                    # Velocity Synchronization
-                    rel_horiz_speed = float(np.linalg.norm(car.vel[:2] - arena.ball.vel[:2]))
-                    sync_bonus = 0.25 * max(0.0, 1.0 - (rel_horiz_speed / 250.0))
-
-                    # Tactical Red-Zone / Contested Challenge Carry Taper:
-                    # When carrying the ball deep into the attacking third (within 1800 uu of net) while a defender
-                    # is stationed in net or closing in, taper continuous carry reward to encourage shooting/flicking
-                    # rather than rolling the ball directly into the goalkeeper.
-                    dist_to_target_net = abs(target_goal_y - arena.ball.pos[1])
-                    if dist_to_target_net < 1800.0 and (opp_tti < 1.5 or any(abs(c.pos[1] - target_goal_y) < 1200.0 for c in arena.cars if c.team != car.team and not c.demoed)):
-                        carry_taper = max(0.35, dist_to_target_net / 1800.0)
-                        roof_carry_reward = (0.40 * center_score * goal_progress + velcro_bonus + sync_bonus) * carry_taper
+                # Dunk Hazard & Defensive Contested Carry Gate:
+                if is_in_defensive_box and is_opponent_challenging:
+                    is_moving_across_net = abs(car.vel[0]) > 180.0
+                    if is_moving_across_net:
+                        roof_carry_reward = -0.40  # Dunk hazard penalty!
                     else:
-                        roof_carry_reward = 0.40 * center_score * goal_progress + velcro_bonus + sync_bonus
+                        roof_carry_reward = 0.0   # Taper carry to zero; must challenge/clear
+                else:
+                    target_goal_y = ARENA_EXTENT_Y if car.team == 0 else -ARENA_EXTENT_Y
+                    target_goal_dir = np.array([0.0, 1.0 if car.team == 0 else -1.0, 0.0], dtype=np.float32)
+                    car_to_goal_vel = float(np.dot(car.vel[:2], target_goal_dir[:2]))
+
+                    # Anti-Circling Goal Projection (Seer/Nexto Guard):
+                    # Only reward carrying the ball when advancing downfield toward the opponent net
+                    if car_to_goal_vel > 50.0:
+                        goal_progress = min(1.0, max(0.2, car_to_goal_vel / 1400.0))
+                        # Grace Positioning Pocket (Multi-Flick Setup Architecture):
+                        # Plateaus at 1.0 throughout the entire active flick setup zone:
+                        excess_x = max(0.0, -22.0 - local_x, local_x - 32.0)
+                        excess_y = max(0.0, abs(local_y) - 25.0)
+                        center_score = max(0.0, 1.0 - (excess_x / 25.0 * 0.5 + excess_y / 25.0 * 0.5))
+
+                        # Velcro Settling Bonus: dampening vertical ball bounce on roof for stable flicks
+                        rel_vz = abs(float(arena.ball.vel[2] - car.vel[2]))
+                        velcro_bonus = 0.25 * max(0.0, 1.0 - (rel_vz / 120.0))
+
+                        # Velocity Synchronization
+                        rel_horiz_speed = float(np.linalg.norm(car.vel[:2] - arena.ball.vel[:2]))
+                        sync_bonus = 0.25 * max(0.0, 1.0 - (rel_horiz_speed / 250.0))
+
+                        dist_to_target_net = abs(target_goal_y - arena.ball.pos[1])
+                        gutter_taper = 0.40 if ((is_on_wall_curve or is_ball_on_curve) and dist_to_target_net < 3600.0) else 1.0
+
+                        if dist_to_target_net < 1800.0 and (opp_tti < 1.5 or any(abs(c.pos[1] - target_goal_y) < 1200.0 for c in arena.cars if c.team != car.team and not c.demoed)):
+                            carry_taper = max(0.35, dist_to_target_net / 1800.0)
+                            roof_carry_reward = (0.40 * center_score * goal_progress + velcro_bonus + sync_bonus) * carry_taper * gutter_taper
+                        else:
+                            roof_carry_reward = (0.40 * center_score * goal_progress + velcro_bonus + sync_bonus) * gutter_taper
 
         total_reward = self.weight * (
             delta_dist + vel_toward_ball + vel_matching_bonus + pacing_penalty + dribble_boost_penalty +
@@ -989,10 +1077,11 @@ class TouchBallReward(BaseReward):
                     x_impact = arena.ball.pos[0] + arena.ball.vel[0] * dt
                     z_impact = max(BALL_RADIUS, arena.ball.pos[2] + arena.ball.vel[2] * dt + 0.5 * (-650.0) * (dt ** 2))
                     is_crossbar_miss = bool(z_impact > EFFECTIVE_GOAL_HEIGHT)
+                    is_backboard_hit = bool(z_impact > GOAL_HEIGHT)
                     if abs(x_impact) <= EFFECTIVE_GOAL_HALF_WIDTH and not is_crossbar_miss:
                         # Direct shot on target into the net opening!
                         goal_alignment = max(goal_alignment, 0.7) + 0.35
-                    elif abs(x_impact) <= GOAL_HALF_WIDTH and z_impact <= GOAL_HEIGHT:
+                    elif abs(x_impact) <= GOAL_HALF_WIDTH and not is_backboard_hit:
                         # Near-post / crossbar grazing shot: moderate alignment without clean goal bonus
                         goal_alignment = max(goal_alignment, 0.45)
 
@@ -1175,7 +1264,7 @@ class JumpBridgeReward(BaseReward):
         car_to_ball = arena.ball.pos - car.pos
         dist = float(np.linalg.norm(car_to_ball))
         unit_to_ball = car_to_ball / max(1e-4, dist)
-        forward_alignment = float(np.dot(car.get_forward_vector(), unit_to_ball))
+        forward_alignment = compute_effective_alignment(car, unit_to_ball)
         takeoff_closing_vel = float(np.dot(car.vel, unit_to_ball))
         ball_z = float(arena.ball.pos[2])
 
@@ -1237,6 +1326,7 @@ class JumpBridgeReward(BaseReward):
         # ── 1. Takeoff Transition (Ground -> Air) ─────────────────────────────
         if prev_ground and not car.on_ground and car.vel[2] > 80.0:
             is_on_wall_zone = bool(abs(car.pos[0]) > 3400.0 or abs(car.pos[1]) > 4400.0)
+            is_on_wall_curve = bool((abs(car.pos[0]) > 3300.0 or abs(car.pos[1]) > 4300.0) and car.pos[2] > 60.0)
             is_aerial_ball = bool(ball_z > 200.0)
             car_boost = float(car.boost)
 
@@ -1260,7 +1350,7 @@ class JumpBridgeReward(BaseReward):
                 reward += self.weight * bonus_scale
 
             # 1b. Wall Takeoff / Air Dribble Pop / Wall Bang Setup
-            elif is_on_wall_zone and car.pos[2] > 200.0 and (takeoff_closing_vel > 150.0 or forward_alignment > 0.15):
+            elif (is_on_wall_zone or is_on_wall_curve) and (takeoff_closing_vel > 150.0 or forward_alignment > 0.15 or car.vel[2] > 250.0):
                 if dist <= 450.0:
                     reward += self.weight * max(0.2, forward_alignment) * 2.5
                 elif car_boost >= 30.0:
@@ -1380,12 +1470,24 @@ class JumpBridgeReward(BaseReward):
 
             if stick_deflection >= 0.25 and dodge_align > 0.20 and not is_bad_backflip:
                 if (not is_open_field) or has_traversal_speed:
-                    reward += self.weight * dodge_align * (0.5 + 0.3 * stick_deflection)
+                    # Traversal flip lock-in horizon check:
+                    # When chasing downfield, ensure the ball lead is large enough that the 0.65s flip animation does not overshoot
+                    ball_flee_vel = float(np.dot(arena.ball.vel, unit_to_ball))
+                    is_chasing_downfield = bool(car_fwd_speed > 250.0 and car_fwd_speed > ball_flee_vel + 100.0)
+                    flip_horizon = (car_fwd_speed + 450.0) * 0.65
+                    effective_ball_dist = dist + max(0.0, ball_flee_vel) * 0.65
+
+                    overshoot_taper = 1.0
+                    if is_chasing_downfield and dist < 750.0 and not is_flick_active:
+                        if effective_ball_dist < flip_horizon - 100.0:
+                            overshoot_taper = max(0.0, (effective_ball_dist - 200.0) / max(1.0, flip_horizon - 300.0))
+
+                    reward += self.weight * dodge_align * (0.5 + 0.3 * stick_deflection) * overshoot_taper
 
                     if is_forward_or_diagonal:
                         speed_progression = min(1.0, max(0.2, car_fwd_speed / 1800.0))
                         diag_bonus = 0.50 if is_diagonal_flip else 0.25
-                        reward += self.weight * (0.8 * speed_progression + diag_bonus) * forward_alignment
+                        reward += self.weight * (0.8 * speed_progression + diag_bonus) * forward_alignment * overshoot_taper
 
                     is_kickoff = bool(abs(arena.ball.pos[0]) < 50.0 and abs(arena.ball.pos[1]) < 50.0 and arena.ball.pos[2] < 120.0 and float(np.linalg.norm(arena.ball.vel)) < 100.0)
                     if is_kickoff and dist > 800.0 and (is_forward_flip or is_diagonal_flip):
@@ -1581,15 +1683,25 @@ class BoostReward(BaseReward):
 
                 # Airborne off-trajectory boost waste penalty:
                 # Burning boost while airborne when car's 3D momentum is moving away from or past the ball
-                # (Exempt during active flip-cancels and half-flip recoveries)
                 elif not car.on_ground and action[6] > 0.0:
-                    is_recovering_halfflip = bool(car.just_dodged or (float(action[2]) > 0.4 and abs(float(action[4])) > 0.2))
-                    if dist_to_ball > 250.0 and not is_recovering_halfflip:
-                        unit_to_ball = car_to_ball / dist_to_ball
-                        closing_vel = float(np.dot(car.vel, unit_to_ball))
-                        fwd_align = float(np.dot(fwd_vec, unit_to_ball))
-                        if closing_vel < -100.0 or (closing_vel < 100.0 and fwd_align < 0.20):
-                            loss_rew -= 0.30 * min(1.0, max(0.2, -closing_vel / 1000.0 if closing_vel < 0 else 0.5))
+                    is_active_dodge = bool(car.just_dodged or getattr(car, "is_dodging", False))
+                    # Physical thruster-momentum penalty during flips:
+                    # Thrusters apply force along nose. Penalize if nose points backward against momentum
+                    # or steeply down into the pitch (slamming car into turf).
+                    if is_active_dodge:
+                        car_fwd_proj = float(np.dot(fwd_vec, car.vel))
+                        is_thruster_braking = bool(car_fwd_proj < -100.0)
+                        is_thruster_ground_smash = bool(fwd_vec[2] < -0.40 and car.pos[2] < 250.0)
+                        if is_thruster_braking or is_thruster_ground_smash:
+                            loss_rew -= 0.30
+                    else:
+                        is_recovering_halfflip = bool(float(action[2]) > 0.4 and abs(float(action[4])) > 0.2)
+                        if dist_to_ball > 250.0 and not is_recovering_halfflip:
+                            unit_to_ball = car_to_ball / dist_to_ball
+                            closing_vel = float(np.dot(car.vel, unit_to_ball))
+                            eff_align = compute_effective_alignment(car, unit_to_ball)
+                            if closing_vel < -100.0 or (closing_vel < 100.0 and eff_align < 0.20):
+                                loss_rew -= 0.30 * min(1.0, max(0.2, -closing_vel / 1000.0 if closing_vel < 0 else 0.5))
 
             return loss_rew
         else:

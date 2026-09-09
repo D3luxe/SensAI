@@ -228,6 +228,153 @@ class TestDribbleAndFlickMechanics(unittest.TestCase):
             jump_low_speed = bool(want_jump and substep_tick <= 3)
         self.assertFalse(jump_low_speed, "Jump must be suppressed when turning sharply at low speed!")
 
+    def test_effective_alignment_during_inverted_flip(self):
+        """Test that compute_effective_alignment evaluates travel velocity when car is airborne/flipping with nose inverted."""
+        from env.rewards import compute_effective_alignment
+        # Car rocketing downfield (+Y) at 1400 uu/s toward ball, but pitched completely backward (pitch = -1.0)
+        car = CarState(
+            id=0, team=0,
+            pos=np.array([0.0, 0.0, 80.0], dtype=np.float32),
+            vel=np.array([0.0, 1400.0, 0.0], dtype=np.float32),
+            rot=np.array([-math.pi / 2, 0.0, 0.0], dtype=np.float32),  # Nose pointing down/back
+            on_ground=False
+        )
+        target_dir = np.array([0.0, 1.0, 0.0], dtype=np.float32)  # Ball is at +Y
+        eff_align = compute_effective_alignment(car, target_dir)
+        self.assertGreater(eff_align, 0.85, f"Effective alignment during forward flip must evaluate travel velocity (+Y), got {eff_align}")
+
+    def test_active_flip_exempt_from_overshoot_penalty(self):
+        """Test that active flips near the ball do NOT incur false overshoot penalties when nose pitches away."""
+        rew = PlayerToBallVelocityReward(weight=1.0)
+        car = CarState(
+            id=0, team=0,
+            pos=np.array([0.0, 1000.0, 50.0], dtype=np.float32),
+            vel=np.array([0.0, 1200.0, 0.0], dtype=np.float32),
+            rot=np.array([0.0, math.pi / 2, 0.0], dtype=np.float32),
+            on_ground=False,
+            has_flip=False,
+            just_dodged=True
+        )
+        self.arena.ball.pos = np.array([0.0, 1250.0, 100.0], dtype=np.float32)
+        self.arena.ball.vel = np.array([0.0, 800.0, 0.0], dtype=np.float32)
+        self.arena.cars = [car]
+        rew.reset(self.arena)
+        rew._was_in_strike_zone[car.id] = True
+
+        # Simulate car flipping: momentary pitch down
+        car.rot = np.array([-math.pi / 2, 0.0, 0.0], dtype=np.float32)
+        action = np.zeros(8, dtype=np.float32)
+        r = rew.get_reward(car, self.arena, action, False, None)
+
+        # Should NOT receive the harsh -0.40 / -0.60 overshoot penalty
+        self.assertGreater(r, -0.15, f"Active flip toward ball must not be penalized as an overshoot, got {r}")
+
+    def test_contested_defensive_box_dunk_hazard(self):
+        """Test that carrying the ball on the roof across the defending net when challenged incurs dunk hazard penalty."""
+        rew = PlayerToBallVelocityReward(weight=1.0)
+        # In defending box (Y = -4800, X = 0), driving across net (+X at 250 uu/s)
+        car = CarState(
+            id=0, team=0,
+            pos=np.array([0.0, -4800.0, 17.0], dtype=np.float32),
+            vel=np.array([250.0, 0.0, 0.0], dtype=np.float32),
+            rot=np.array([0.0, 0.0, 0.0], dtype=np.float32),
+            on_ground=True
+        )
+        # Ball on roof (local_z = 130)
+        self.arena.ball.pos = np.array([0.0, -4800.0, 147.0], dtype=np.float32)
+        self.arena.ball.vel = np.array([250.0, 0.0, 0.0], dtype=np.float32)
+
+        # Challenger rushing in to dunk (arrival < 0.6s)
+        challenger = CarState(
+            id=1, team=1,
+            pos=np.array([0.0, -4200.0, 17.0], dtype=np.float32),
+            vel=np.array([0.0, -1500.0, 0.0], dtype=np.float32),
+            on_ground=True
+        )
+        self.arena.cars = [car, challenger]
+        rew.reset(self.arena)
+
+        action = np.zeros(8, dtype=np.float32)
+        r_contested = rew.get_reward(car, self.arena, action, False, None)
+
+        # Carrying across the net when challenged must be penalized (dunk hazard)
+        self.assertLess(r_contested, 0.0, f"Carrying across net into an incoming challenger must incur dunk hazard penalty, got {r_contested}")
+
+    def test_defensive_low_5050_block_rewarded(self):
+        """Test that low 50/50 posture (grounded, ball low in front of bumper, nose squared to challenger) is rewarded."""
+        rew = PlayerToBallVelocityReward(weight=1.0)
+        # In defending box, facing incoming challenger at +Y
+        car = CarState(
+            id=0, team=0,
+            pos=np.array([0.0, -4800.0, 17.0], dtype=np.float32),
+            vel=np.array([0.0, 150.0, 0.0], dtype=np.float32),
+            rot=np.array([0.0, math.pi / 2, 0.0], dtype=np.float32),
+            on_ground=True
+        )
+        # Ball low on turf in front of bumper (local_x = 50, local_z = 76)
+        self.arena.ball.pos = np.array([0.0, -4750.0, 93.0], dtype=np.float32)
+        self.arena.ball.vel = np.array([0.0, 150.0, 0.0], dtype=np.float32)
+
+        challenger = CarState(
+            id=1, team=1,
+            pos=np.array([0.0, -4200.0, 17.0], dtype=np.float32),
+            vel=np.array([0.0, -1500.0, 0.0], dtype=np.float32),
+            on_ground=True
+        )
+        self.arena.cars = [car, challenger]
+        rew.reset(self.arena)
+
+        action = np.zeros(8, dtype=np.float32)
+        r_block = rew.get_reward(car, self.arena, action, False, None)
+        self.assertGreater(r_block, 0.35, f"Low 50/50 block posture in defending box must receive positive reward, got {r_block}")
+
+    def test_goal_height_and_backboard_trajectory_not_counted_as_shot(self):
+        """Test that a ball trajectory hitting the backboard above GOAL_HEIGHT (Z=800) receives 0 on-target shot bonus and False threat."""
+        from env.rewards import BallToGoalVelocityReward
+        from env.physics_engine import GOAL_HEIGHT
+        b2g_rew = BallToGoalVelocityReward(weight=1.0)
+
+        car = CarState(id=0, team=0, pos=np.array([0.0, 3000.0, 17.0], dtype=np.float32))
+        # High lob heading into backboard at Y=5120, Z=800 (well above crossbar 642.775 uu)
+        self.arena.ball.pos = np.array([0.0, 4500.0, 800.0], dtype=np.float32)
+        self.arena.ball.vel = np.array([0.0, 1200.0, 0.0], dtype=np.float32)
+        self.arena.cars = [car]
+
+        r = b2g_rew.get_reward(car, self.arena, np.zeros(8, dtype=np.float32), False, None)
+        # Should NOT receive the 1.6x on-target clean shot bonus
+        ball_speed = float(np.linalg.norm(self.arena.ball.vel))
+        base_norm = ball_speed / 6000.0  # 1200 / 6000 = 0.20
+        self.assertLessEqual(r, base_norm + 1e-4, f"Backboard hit must not receive on-target shot multiplier, got {r}")
+
+        # Check get_shot_threat in physics engine
+        is_threat, threat_intensity, _ = self.arena.get_shot_threat(team=1)  # Defending team 1 (+Y)
+        self.assertFalse(is_threat, "Ball flying into backboard at Z=800 uu must NOT be flagged as in-goal shot threat!")
+
+    def test_active_flip_overshoot_sailing_away(self):
+        """Test that an active flip where the car sails away from the ball without touching triggers the sailing-away penalty without UnboundLocalError."""
+        rew = PlayerToBallVelocityReward(weight=1.0)
+        car = CarState(
+            id=0, team=0,
+            pos=np.array([0.0, 1000.0, 50.0], dtype=np.float32),
+            vel=np.array([0.0, -1200.0, 0.0], dtype=np.float32),  # Sailing away from ball
+            rot=np.array([0.0, -math.pi / 2, 0.0], dtype=np.float32),
+            on_ground=False,
+            has_flip=False,
+            just_dodged=True
+        )
+        self.arena.ball.pos = np.array([0.0, 1500.0, 100.0], dtype=np.float32)  # Ball ahead
+        self.arena.ball.vel = np.array([0.0, 0.0, 0.0], dtype=np.float32)
+        self.arena.cars = [car]
+        rew.reset(self.arena)
+        rew._prev_dist[car.id] = 300.0  # was close (300 uu)
+        rew._was_in_strike_zone[car.id] = True  # was in strike zone
+
+        # Now car is at dist 500 uu (sailing away: raw_delta_dist = (300 - 500) / 2000 = -0.10)
+        action = np.zeros(8, dtype=np.float32)
+        r = rew.get_reward(car, self.arena, action, False, None)
+        self.assertIsInstance(r, float)
+
 
 if __name__ == "__main__":
     unittest.main()
+

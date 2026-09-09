@@ -37,6 +37,8 @@ GOAL_HEIGHT = 642.775            # GOAL_HEIGHT
 GOAL_DEPTH = 880.0               # BACK_NET_Y - BACK_WALL_Y
 
 BALL_RADIUS = 91.25              # BALL_RADIUS
+EFFECTIVE_GOAL_HALF_WIDTH = GOAL_HALF_WIDTH - BALL_RADIUS  # 801.505 uu (clean clearance inside posts)
+EFFECTIVE_GOAL_HEIGHT = GOAL_HEIGHT - BALL_RADIUS          # 551.525 uu (clean clearance below crossbar)
 BALL_MAX_SPEED = 6000.0          # BALL_MAX_SPEED
 BALL_RESTITUTION = 0.6
 BALL_DRAG = 0.03
@@ -687,8 +689,12 @@ class RocketSimArena:
                     for i, s in enumerate(preds):
                         pos = s.pos
                         if (team == 0 and pos.y <= -5120.0) or (team == 1 and pos.y >= 5120.0):
-                            if abs(pos.x) < 950.0 and 0.0 < pos.z < 680.0:
-                                threat_intensity = max(0.1, 1.0 - (i / 120.0))
+                            # Clean goal opening clearance inside posts and below crossbar
+                            is_clean_entry = bool(abs(pos.x) <= EFFECTIVE_GOAL_HALF_WIDTH and BALL_RADIUS <= pos.z <= EFFECTIVE_GOAL_HEIGHT)
+                            is_grazing_entry = bool(not is_clean_entry and abs(pos.x) <= GOAL_HALF_WIDTH and BALL_RADIUS <= pos.z <= GOAL_HEIGHT)
+                            if is_clean_entry or is_grazing_entry:
+                                raw_intensity = max(0.1, 1.0 - (i / 120.0))
+                                threat_intensity = raw_intensity if is_clean_entry else (raw_intensity * 0.45)
                                 entry_z_norm = min(1.0, max(0.0, pos.z / GOAL_HEIGHT))
                                 res = (True, threat_intensity, entry_z_norm)
                                 if hasattr(self, "_cached_threat"):
@@ -704,8 +710,11 @@ class RocketSimArena:
             if 0.05 < dt < 3.0:
                 pred_x = self.ball.pos[0] + self.ball.vel[0] * dt
                 pred_z = self.ball.pos[2] + self.ball.vel[2] * dt + 0.5 * (-650.0) * (dt ** 2)
-                if abs(pred_x) < 950.0 and 0.0 < pred_z < 680.0:
-                    threat_intensity = max(0.1, 1.0 - (dt / 3.0))
+                is_clean_entry = bool(abs(pred_x) <= EFFECTIVE_GOAL_HALF_WIDTH and BALL_RADIUS <= pred_z <= EFFECTIVE_GOAL_HEIGHT)
+                is_grazing_entry = bool(not is_clean_entry and abs(pred_x) <= GOAL_HALF_WIDTH and BALL_RADIUS <= pred_z <= GOAL_HEIGHT)
+                if is_clean_entry or is_grazing_entry:
+                    raw_intensity = max(0.1, 1.0 - (dt / 3.0))
+                    threat_intensity = raw_intensity if is_clean_entry else (raw_intensity * 0.45)
                     entry_z_norm = min(1.0, max(0.0, pred_z / GOAL_HEIGHT))
                     res = (True, threat_intensity, entry_z_norm)
                     if hasattr(self, "_cached_threat"):
