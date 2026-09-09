@@ -96,6 +96,58 @@ class BaselineChaser(BaseOpponent):
 
 _CHECKPOINT_MODEL_CACHE: Dict[Tuple[str, str], Tuple[float, Any, bool]] = {}
 
+# TorchScript opponents (Necto / Nexto) are re-instantiated constantly: every league
+# stratification refresh, every TrueSkill matchup and every gauntlet trial builds fresh
+# bots. Loading nexto-model.pt costs ~39ms, and create_opponent_bot used to pay it twice
+# (once to probe the file format, once for real), so a burst of league activity turned
+# into dozens of redundant disk loads and a wall of console output. Cache the loaded
+# module by path, device and mtime; bots keep their own per-instance action state, and
+# the module itself is read-only in eval mode.
+_TORCHSCRIPT_MODEL_CACHE: Dict[Tuple[str, str], Tuple[float, Any, bool, Any]] = {}
+_TORCHSCRIPT_CACHE_LIMIT = 24
+
+
+def _load_torchscript_cached(model_path: str, device: Any) -> Tuple[Any, bool, Any]:
+    """
+    Returns (module, is_nexto, nexto_action_table) for a TorchScript opponent.
+
+    Raises whatever torch.jit.load raises when the file is not TorchScript, which is how
+    create_opponent_bot distinguishes Necto/Nexto models from ActorCritic checkpoints.
+    """
+    norm_path = os.path.normpath(model_path).replace("\\", "/")
+    cache_key = (norm_path, str(device))
+    curr_mtime = os.path.getmtime(model_path) if os.path.exists(model_path) else 0.0
+
+    cached = _TORCHSCRIPT_MODEL_CACHE.get(cache_key)
+    if cached is not None and cached[0] == curr_mtime:
+        return cached[1], cached[2], cached[3]
+
+    model = torch.jit.load(model_path, map_location=device)
+    model.eval()
+
+    # Nexto carries an embedded 90x8 action lookup table in net.output's constants.
+    is_nexto = False
+    action_table = None
+    if hasattr(model, "net") and hasattr(model.net, "output"):
+        out_mod = model.net.output
+        if hasattr(out_mod, "code_with_constants"):
+            try:
+                _, consts = out_mod.code_with_constants
+                c0 = getattr(consts, "c0", None)
+                if c0 is not None and isinstance(c0, torch.Tensor) and c0.shape[-1] == 8:
+                    is_nexto = True
+                    action_table = c0.cpu().float()
+            except Exception:
+                is_nexto = False
+
+    if len(_TORCHSCRIPT_MODEL_CACHE) >= _TORCHSCRIPT_CACHE_LIMIT:
+        _TORCHSCRIPT_MODEL_CACHE.pop(next(iter(_TORCHSCRIPT_MODEL_CACHE)))
+    _TORCHSCRIPT_MODEL_CACHE[cache_key] = (curr_mtime, model, is_nexto, action_table)
+
+    bot_name = "Nexto" if is_nexto else "Necto / TorchScript"
+    print(f"[Opponent Bot] Successfully loaded {bot_name} opponent: {os.path.basename(model_path)}")
+    return model, is_nexto, action_table
+
 
 class CheckpointOpponentBot(BaseOpponent):
     """
@@ -281,24 +333,9 @@ class NectoNextoOpponentBot(BaseOpponent):
 
     def _load_torchscript(self):
         try:
-            self.model = torch.jit.load(self.model_path, map_location=self.device)
-            self.model.eval()
-
-            # Check if Nexto (has embedded 90x8 lookup table in net.output constants)
-            if hasattr(self.model, "net") and hasattr(self.model.net, "output"):
-                out_mod = self.model.net.output
-                if hasattr(out_mod, "code_with_constants"):
-                    try:
-                        _, consts = out_mod.code_with_constants
-                        c0 = getattr(consts, "c0", None)
-                        if c0 is not None and isinstance(c0, torch.Tensor) and c0.shape[-1] == 8:
-                            self.is_nexto = True
-                            self.nexto_action_table = c0.cpu().float()
-                    except Exception:
-                        self.is_nexto = False
-
-            bot_name = "Nexto" if self.is_nexto else "Necto / TorchScript"
-            print(f"[Opponent Bot] Successfully loaded {bot_name} opponent: {os.path.basename(self.model_path)}")
+            self.model, self.is_nexto, self.nexto_action_table = _load_torchscript_cached(
+                self.model_path, self.device
+            )
         except Exception as e:
             print(f"[Opponent Bot] Error loading TorchScript model {self.model_path}: {e}")
             self.model = None
@@ -596,11 +633,12 @@ def create_opponent_bot(
             print(f"[Opponent Bot] Path '{bot_type_or_path}' not found on disk. Falling back to BaselineChaser.")
             return BaselineChaser(continuous_actions=continuous_actions)
 
-    # Check whether file is a TorchScript model or ActorCritic dict
+    # Check whether file is a TorchScript model or ActorCritic dict.
+    # The probe goes through the cache, so a successful probe is the same load the
+    # bot then reuses rather than a second trip to disk.
     try:
-        # First test if TorchScript
         try:
-            ts_mod = torch.jit.load(clean_path, map_location="cpu")
+            _load_torchscript_cached(clean_path, torch.device(device))
             return NectoNextoOpponentBot(model_path=clean_path, device=device)
         except Exception:
             pass
