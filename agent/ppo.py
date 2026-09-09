@@ -76,6 +76,12 @@ class PPOTrainer:
         self.ent_coef = float(hp.get("ent_coef", 0.01))
         self.vf_coef = float(hp.get("vf_coef", 0.5))
         self.max_grad_norm = float(hp.get("max_grad_norm", 0.5))
+        # Rotational (Pitch/Yaw/Roll) exploration ceiling anneal. See ActorCritic.log_std_max.
+        self.rot_log_std_ceiling_final = float(hp.get("rot_log_std_ceiling_final", -1.4))
+        self.rot_log_std_anneal_iters = int(hp.get("rot_log_std_anneal_iters", 4000))
+        self._rot_anneal_start_iter = None
+        self._rot_anneal_start_ceiling = None
+        self._rot_ceiling_last_logged = None
         self.batch_size = int(hp.get("batch_size", 2048))
         self.mini_batch_size = int(hp.get("mini_batch_size", 256))
         self.n_epochs = int(hp.get("n_epochs", 4))
@@ -282,6 +288,41 @@ class PPOTrainer:
         except Exception as e:
             print(f"[PPO Trainer] Warning: Could not initialize BC dataset: {e}")
 
+    def _step_rot_log_std_anneal(self):
+        """
+        Walk the Pitch/Yaw/Roll exploration ceiling from wherever the policy currently sits
+        down to rot_log_std_ceiling_final over rot_log_std_anneal_iters iterations.
+
+        These axes are masked while grounded, so they see policy gradient on only the
+        airborne fraction of steps while the entropy bonus pushes on all of them. That
+        asymmetry parks them at the ceiling, and at the ground ceiling of -0.7 that is
+        sigma ~0.50 of analog noise on every aerial tick. Stepping the ceiling down
+        gradually lets the already-trained mean actually be executed without yanking the
+        action distribution out from under the value function in one iteration.
+        """
+        agent = self.agent
+        if not self.continuous_actions or not hasattr(agent, "set_rot_log_std_ceiling"):
+            return
+
+        if self._rot_anneal_start_iter is None:
+            self._rot_anneal_start_iter = self.iteration
+            self._rot_anneal_start_ceiling = float(agent.log_std_ceiling_rot)
+
+        start_c = float(self._rot_anneal_start_ceiling)
+        final_c = float(self.rot_log_std_ceiling_final)
+        span = max(1, int(self.rot_log_std_anneal_iters))
+        progress = min(1.0, max(0.0, (self.iteration - self._rot_anneal_start_iter) / span))
+        target = start_c + (final_c - start_c) * progress
+
+        applied = agent.set_rot_log_std_ceiling(target)
+        moved = self._rot_ceiling_last_logged is None or abs(applied - self._rot_ceiling_last_logged) >= 0.05
+        finished = progress >= 1.0 and self._rot_ceiling_last_logged != applied
+        if moved or finished:
+            sigma = float(math.exp(applied))
+            print(f"[PPO Trainer] Rotational exploration ceiling: log_std {applied:.3f} (sigma {sigma:.3f}) "
+                  f"| anneal {progress * 100.0:.0f}% toward {final_c:.2f}")
+            self._rot_ceiling_last_logged = applied
+
     def check_live_config(self):
         """
         Dynamically reload hyperparameters and reward weights from live_config.json.
@@ -308,6 +349,15 @@ class PPOTrainer:
                     self.ent_coef = float(live["ent_coef"])
                 if "clip_range" in live:
                     self.clip_range = float(live["clip_range"])
+                if "rot_log_std_ceiling_final" in live:
+                    target = float(live["rot_log_std_ceiling_final"])
+                    if target != self.rot_log_std_ceiling_final:
+                        self.rot_log_std_ceiling_final = target
+                        # Re-anchor so a retarget anneals from where the policy is now
+                        self._rot_anneal_start_iter = None
+                        print(f"[Live Config] Rotational log_std ceiling target updated to: {target}")
+                if "rot_log_std_anneal_iters" in live:
+                    self.rot_log_std_anneal_iters = int(live["rot_log_std_anneal_iters"])
 
                 # Update Behavioral Cloning (BC) replay regularization
                 if "bc_regularization_weight" in live:
@@ -415,6 +465,8 @@ class PPOTrainer:
             "continuous_actions": self.continuous_actions,
             "use_layer_norm": self.use_layer_norm,
             "activation": self.activation,
+            "rot_anneal_start_iter": self._rot_anneal_start_iter,
+            "rot_anneal_start_ceiling": self._rot_anneal_start_ceiling,
         }
         # Atomic save on Windows: write to .tmp file then replace with retry to avoid file lock conflict (Error 1224)
         tmp_path = path + f".tmp.{os.getpid()}"
@@ -513,6 +565,8 @@ class PPOTrainer:
             self.agent.load_state_dict(model_state)
             self.iteration = checkpoint.get("iteration", 0)
             self.global_step = checkpoint.get("global_step", 0)
+            self._rot_anneal_start_iter = checkpoint.get("rot_anneal_start_iter")
+            self._rot_anneal_start_ceiling = checkpoint.get("rot_anneal_start_ceiling")
             self.agent.debias_symmetric_actions()
             print(f"[PPO Trainer] Successfully migrated weights to new dimensions (Obs: {self.obs_dim}, Act: {self.act_dim}) from {path} (Iter: {self.iteration})")
             return
@@ -525,6 +579,8 @@ class PPOTrainer:
                 pass
         self.iteration = checkpoint.get("iteration", 0)
         self.global_step = checkpoint.get("global_step", 0)
+        self._rot_anneal_start_iter = checkpoint.get("rot_anneal_start_iter")
+        self._rot_anneal_start_ceiling = checkpoint.get("rot_anneal_start_ceiling")
         self.agent.debias_symmetric_actions()
 
         # Sanitize any legacy subnormal floating-point numbers in weights and optimizer states
@@ -576,6 +632,7 @@ class PPOTrainer:
 
             # 1. Dynamic live parameter check
             self.check_live_config()
+            self._step_rot_log_std_anneal()
 
             # Install any league update produced by a finished background grading job
             self._apply_pending_league_update()
