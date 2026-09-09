@@ -21,6 +21,33 @@ from agent.models import ActorCritic
 from utils.league_manager import LeagueManager
 
 
+def _league_grade_entry(ckpt_path: str, league_cfg: Dict[str, Any], project_root: str):
+    """
+    Child-process entry point for TrueSkill grading.
+
+    Rebuilds a LeagueManager from disk (its constructor loads the leaderboard and league
+    state), grades the checkpoint, advances one gauntlet trial, and exits. Both files are
+    written atomically via os.replace, so the parent can keep reading them meanwhile.
+    """
+    import sys
+    if project_root and project_root not in sys.path:
+        sys.path.insert(0, project_root)
+    os.environ.setdefault("OMP_NUM_THREADS", "1")
+    os.environ.setdefault("MKL_NUM_THREADS", "1")
+    try:
+        torch.set_num_threads(1)
+    except Exception:
+        pass
+
+    from utils.league_manager import LeagueManager
+    try:
+        lm = LeagueManager(config=league_cfg)
+        lm.grade_checkpoint(ckpt_path, device="cpu")
+        lm.step_contender_gauntlet(device="cpu")
+    except Exception as e:
+        print(f"[League Grading] Failed for {ckpt_path}: {e}")
+
+
 class PPOTrainer:
     def __init__(
         self,
@@ -183,50 +210,62 @@ class PPOTrainer:
         self.iteration = 0
         self.last_live_config_mtime = 0.0
 
-        # Background league grading handoff
-        import threading
-        self._league_lock = threading.Lock()
-        self._league_thread = None
-        self._pending_strat: Optional[list] = None
+        # Background league grading handoff (see _submit_league_grading)
+        self._league_proc = None
+
+    def _league_job_running(self) -> bool:
+        return self._league_proc is not None and self._league_proc.is_alive()
 
     def _submit_league_grading(self, ckpt_path: str):
         """
-        Grades a freshly saved checkpoint on a background thread.
+        Grades a freshly saved checkpoint in a separate process.
 
-        The main loop spends most of its time waiting on the environment worker
-        processes, so this evaluation work fills otherwise idle time instead of
-        stalling the rollout. Only one grading job runs at a time; if the previous
-        one has not finished by the next checkpoint interval, this one is skipped.
+        Grading plays full evaluation matches, which is pure-Python environment code.
+        Running it on a background *thread* traded a hard stall for sustained GIL
+        contention with the training loop, costing about 30% of throughput for as long
+        as the job ran. A separate process shares no interpreter lock and lands on one
+        of the cores the env workers are not using. Only one job runs at a time.
         """
-        import threading
+        import multiprocessing as mp
 
-        if self._league_thread is not None and self._league_thread.is_alive():
+        if self._league_job_running():
             print("[PPO Trainer] League grading still in flight; skipping this interval.")
             return
 
-        def _job():
-            try:
-                with self._league_lock:
-                    self.league_manager.grade_checkpoint(ckpt_path, device="cpu")
-                    # Advance Gauntlet trials for top contenders
-                    self.league_manager.step_contender_gauntlet(device="cpu")
-                    # Retention runs here so it cannot delete a file mid-evaluation.
-                    self.cleanup_old_checkpoints(max_to_keep=self.max_checkpoints_to_keep)
-                    self._pending_strat = self.league_manager.get_stratified_distribution(self.num_envs)
-            except Exception as e:
-                print(f"[PPO Trainer] League grading failed: {e}")
-
-        self._league_thread = threading.Thread(target=_job, daemon=True)
-        self._league_thread.start()
+        ctx = mp.get_context("spawn")
+        self._league_proc = ctx.Process(
+            target=_league_grade_entry,
+            args=(ckpt_path, self.config.get("league", {}),
+                  os.path.dirname(os.path.dirname(os.path.abspath(__file__)))),
+            daemon=True,
+        )
+        self._league_proc.start()
 
     def _apply_pending_league_update(self):
-        """Installs opponent assignments produced by a finished background grading job."""
-        strat = self._pending_strat
-        if strat is None:
+        """
+        Picks up the results of a finished grading process.
+
+        The child persists ratings and league state to disk, so the parent re-reads
+        those files rather than shipping objects back across the process boundary.
+        """
+        proc = self._league_proc
+        if proc is None or proc.is_alive():
             return
-        self._pending_strat = None
-        self.env.set_stratified_opponents(strat)
-        print("[PPO Trainer] Applied refreshed league stratification from background grading.")
+        self._league_proc = None
+        proc.join(timeout=5.0)
+
+        try:
+            self.league_manager.evaluator.load_leaderboard()
+            self.league_manager.load_league_state()
+            self.league_manager.refresh_pool()
+            # Retention runs now, not during grading, so it cannot delete a checkpoint
+            # while the child is playing matches against it.
+            self.cleanup_old_checkpoints(max_to_keep=self.max_checkpoints_to_keep)
+            strat = self.league_manager.get_stratified_distribution(self.num_envs)
+            self.env.set_stratified_opponents(strat)
+            print("[PPO Trainer] Applied refreshed league stratification from background grading.")
+        except Exception as e:
+            print(f"[PPO Trainer] Could not apply league grading results: {e}")
 
     def _ensure_bc_dataset(self):
         if self._bc_dataset_loaded:
@@ -542,15 +581,14 @@ class PPOTrainer:
             self._apply_pending_league_update()
 
             # Dynamic Stratified League Rotation (Resample Pool Opponents every 5 iterations).
-            # Skipped rather than blocked while a grading job holds the league lock: the
-            # rotation is opportunistic and the next iteration will retry.
-            if hasattr(self, "league_manager") and self.league_manager.enabled and self.iteration % 5 == 0:
-                if self._league_lock.acquire(blocking=False):
-                    try:
-                        strat_assignments = self.league_manager.get_stratified_distribution(self.num_envs)
-                    finally:
-                        self._league_lock.release()
-                    self.env.set_stratified_opponents(strat_assignments)
+            # Skipped while a grading child owns the league files: computing a distribution
+            # refreshes the pool, which can record a coronation event and write league
+            # state, racing the child's own write. The rotation is opportunistic, and the
+            # results of grading bring a fresh distribution with them anyway.
+            if (hasattr(self, "league_manager") and self.league_manager.enabled
+                    and self.iteration % 5 == 0 and not self._league_job_running()):
+                strat_assignments = self.league_manager.get_stratified_distribution(self.num_envs)
+                self.env.set_stratified_opponents(strat_assignments)
 
             iter_start_time = time.time()
             episode_rewards_list = []
@@ -797,13 +835,7 @@ class PPOTrainer:
 
             # Add League Manager telemetry
             if hasattr(self, "league_manager") and self.league_manager:
-                # Read only when no background grading job is mutating league state,
-                # so telemetry never iterates a list that is being rewritten underneath it.
-                if self._league_lock.acquire(blocking=False):
-                    try:
-                        metrics_payload["league"] = self.league_manager.get_telemetry()
-                    finally:
-                        self._league_lock.release()
+                metrics_payload["league"] = self.league_manager.get_telemetry()
 
             metrics_file = os.path.join(self.log_dir, "metrics.json")
             with open(metrics_file, "w") as f:
