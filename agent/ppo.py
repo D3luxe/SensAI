@@ -101,7 +101,11 @@ class PPOTrainer:
         # Initialize Vectorized Environment
         self.baseline_opponent_ratio = float(env_cfg.get("baseline_opponent_ratio", 0.25))
         self.baseline_opponent_type = str(env_cfg.get("baseline_opponent_type", "heuristic"))
-        self.env = VectorizedRocketEnv(
+
+        # Rollout collection is pure-Python bound and cannot be threaded past the GIL,
+        # so distribute environments across worker processes when asked.
+        self.num_env_workers = int(env_cfg.get("num_env_workers", 1))
+        env_kwargs = dict(
             num_envs=self.num_envs,
             game_mode=self.game_mode,
             tick_skip=self.tick_skip,
@@ -112,6 +116,11 @@ class PPOTrainer:
             baseline_opponent_ratio=self.baseline_opponent_ratio,
             baseline_opponent_type=self.baseline_opponent_type
         )
+        if self.num_env_workers > 1:
+            from env.subproc_vec_env import SubprocVectorizedRocketEnv
+            self.env = SubprocVectorizedRocketEnv(num_workers=self.num_env_workers, **env_kwargs)
+        else:
+            self.env = VectorizedRocketEnv(**env_kwargs)
 
         # Initialize League Manager (Stratified Vectorized League Self-Play)
         league_cfg = self.config.get("league", {})
@@ -173,6 +182,51 @@ class PPOTrainer:
         self.global_step = 0
         self.iteration = 0
         self.last_live_config_mtime = 0.0
+
+        # Background league grading handoff
+        import threading
+        self._league_lock = threading.Lock()
+        self._league_thread = None
+        self._pending_strat: Optional[list] = None
+
+    def _submit_league_grading(self, ckpt_path: str):
+        """
+        Grades a freshly saved checkpoint on a background thread.
+
+        The main loop spends most of its time waiting on the environment worker
+        processes, so this evaluation work fills otherwise idle time instead of
+        stalling the rollout. Only one grading job runs at a time; if the previous
+        one has not finished by the next checkpoint interval, this one is skipped.
+        """
+        import threading
+
+        if self._league_thread is not None and self._league_thread.is_alive():
+            print("[PPO Trainer] League grading still in flight; skipping this interval.")
+            return
+
+        def _job():
+            try:
+                with self._league_lock:
+                    self.league_manager.grade_checkpoint(ckpt_path, device="cpu")
+                    # Advance Gauntlet trials for top contenders
+                    self.league_manager.step_contender_gauntlet(device="cpu")
+                    # Retention runs here so it cannot delete a file mid-evaluation.
+                    self.cleanup_old_checkpoints(max_to_keep=self.max_checkpoints_to_keep)
+                    self._pending_strat = self.league_manager.get_stratified_distribution(self.num_envs)
+            except Exception as e:
+                print(f"[PPO Trainer] League grading failed: {e}")
+
+        self._league_thread = threading.Thread(target=_job, daemon=True)
+        self._league_thread.start()
+
+    def _apply_pending_league_update(self):
+        """Installs opponent assignments produced by a finished background grading job."""
+        strat = self._pending_strat
+        if strat is None:
+            return
+        self._pending_strat = None
+        self.env.set_stratified_opponents(strat)
+        print("[PPO Trainer] Applied refreshed league stratification from background grading.")
 
     def _ensure_bc_dataset(self):
         if self._bc_dataset_loaded:
@@ -484,10 +538,19 @@ class PPOTrainer:
             # 1. Dynamic live parameter check
             self.check_live_config()
 
-            # Dynamic Stratified League Rotation (Resample Pool Opponents every 5 iterations)
+            # Install any league update produced by a finished background grading job
+            self._apply_pending_league_update()
+
+            # Dynamic Stratified League Rotation (Resample Pool Opponents every 5 iterations).
+            # Skipped rather than blocked while a grading job holds the league lock: the
+            # rotation is opportunistic and the next iteration will retry.
             if hasattr(self, "league_manager") and self.league_manager.enabled and self.iteration % 5 == 0:
-                strat_assignments = self.league_manager.get_stratified_distribution(self.num_envs)
-                self.env.set_stratified_opponents(strat_assignments)
+                if self._league_lock.acquire(blocking=False):
+                    try:
+                        strat_assignments = self.league_manager.get_stratified_distribution(self.num_envs)
+                    finally:
+                        self._league_lock.release()
+                    self.env.set_stratified_opponents(strat_assignments)
 
             iter_start_time = time.time()
             episode_rewards_list = []
@@ -734,7 +797,13 @@ class PPOTrainer:
 
             # Add League Manager telemetry
             if hasattr(self, "league_manager") and self.league_manager:
-                metrics_payload["league"] = self.league_manager.get_telemetry()
+                # Read only when no background grading job is mutating league state,
+                # so telemetry never iterates a list that is being rewritten underneath it.
+                if self._league_lock.acquire(blocking=False):
+                    try:
+                        metrics_payload["league"] = self.league_manager.get_telemetry()
+                    finally:
+                        self._league_lock.release()
 
             metrics_file = os.path.join(self.log_dir, "metrics.json")
             with open(metrics_file, "w") as f:
@@ -772,16 +841,14 @@ class PPOTrainer:
                 self.save_checkpoint(ckpt_path)
                 self.save_checkpoint(latest_path)
 
-                # Automated TrueSkill Bayesian Grading & League Promotion
+                # Automated TrueSkill Bayesian Grading & League Promotion.
+                # Grading plays several full evaluation matches and used to block the
+                # training loop for seconds at a time; it now runs on a background thread
+                # and its results are picked up at the top of a later iteration.
                 if hasattr(self, "league_manager") and self.league_manager.enabled:
-                    self.league_manager.grade_checkpoint(ckpt_path, device="cpu")
-                    # Advance Gauntlet trials for top contenders
-                    self.league_manager.step_contender_gauntlet(device="cpu")
-                    # Update league environment stratification with new ratings
-                    strat_assignments = self.league_manager.get_stratified_distribution(self.num_envs)
-                    self.env.set_stratified_opponents(strat_assignments)
-
-                self.cleanup_old_checkpoints(max_to_keep=self.max_checkpoints_to_keep)
+                    self._submit_league_grading(ckpt_path)
+                else:
+                    self.cleanup_old_checkpoints(max_to_keep=self.max_checkpoints_to_keep)
                 print(f"[PPO Trainer] Saved checkpoint to {ckpt_path} (Preserving latest {self.max_checkpoints_to_keep} + protected TrueSkill checkpoints)")
 
         if self.writer:

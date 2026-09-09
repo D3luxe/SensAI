@@ -71,6 +71,21 @@ CAR_WIDTH = 84.19941
 CAR_HEIGHT = 36.15907
 
 
+
+def _clip(x, lo: float, hi: float) -> float:
+    """Scalar clamp.
+
+    np.clip on a scalar costs about 1.6us of dispatch against 0.03us for two
+    comparisons, and this runs on every parsed action of every car every step.
+    """
+    x = float(x)
+    if x < lo:
+        return float(lo)
+    if x > hi:
+        return float(hi)
+    return x
+
+
 @dataclass
 class BoostPad:
     pos: np.ndarray
@@ -570,8 +585,8 @@ class RocketSimArena:
                             stick_mag = math.hypot(pitch_val, yaw_val)
                             if stick_mag > 0.08:
                                 scale = max(1.0, 0.90 / stick_mag)
-                                pitch_val = float(np.clip(pitch_val * scale, -1.0, 1.0))
-                                yaw_val = float(np.clip(yaw_val * scale, -1.0, 1.0))
+                                pitch_val = _clip(pitch_val * scale, -1.0, 1.0)
+                                yaw_val = _clip(yaw_val * scale, -1.0, 1.0)
 
                     hnd_val = bool(act[7] > 0.0 and is_on_gnd)
                     r_car.set_controls(rsim.CarControls(
@@ -627,40 +642,55 @@ class RocketSimArena:
 
         if pred_pos is None:
             # Multi-substep pure-Python simulation for accurate multi-bounce trajectory across 1.5s+
+            #
+            # Held in plain Python floats rather than 3-element numpy arrays: this loop runs up to
+            # 90 sequential substeps per environment step and is one of the hottest paths in the
+            # rollout, where per-op numpy dispatch overhead dwarfs the arithmetic itself. Python
+            # floats are IEEE doubles, so the result is identical to the previous float64 arrays.
             dt_total = slice_idx / 120.0
             substeps = max(1, int(round(dt_total * 60.0)))
             s_dt = dt_total / substeps
-            p = self.ball.pos.copy().astype(np.float64)
-            v = self.ball.vel.copy().astype(np.float64)
+            bp = self.ball.pos
+            bv = self.ball.vel
+            px, py, pz = float(bp[0]), float(bp[1]), float(bp[2])
+            vx, vy, vz = float(bv[0]), float(bv[1]), float(bv[2])
             g = GRAVITY
             restitution = BALL_RESTITUTION
             b_rad = BALL_RADIUS
+            ceil_z = ARENA_HEIGHT_Z - b_rad
+            limit_x = ARENA_EXTENT_X - b_rad
+            limit_y = ARENA_EXTENT_Y - b_rad
+            g_dt = g * s_dt
 
             for _ in range(substeps):
-                v[2] += g * s_dt
-                p += v * s_dt
+                vz += g_dt
+                px += vx * s_dt
+                py += vy * s_dt
+                pz += vz * s_dt
                 # Floor bounce
-                if p[2] < b_rad:
-                    p[2] = b_rad + (b_rad - p[2]) * restitution
-                    v[2] = -v[2] * restitution
+                if pz < b_rad:
+                    pz = b_rad + (b_rad - pz) * restitution
+                    vz = -vz * restitution
                 # Ceiling bounce
-                elif p[2] > ARENA_HEIGHT_Z - b_rad:
-                    p[2] = (ARENA_HEIGHT_Z - b_rad) - (p[2] - (ARENA_HEIGHT_Z - b_rad)) * restitution
-                    v[2] = -v[2] * restitution
+                elif pz > ceil_z:
+                    pz = ceil_z - (pz - ceil_z) * restitution
+                    vz = -vz * restitution
                 # Side wall bounces (X = +/- 4096)
-                if abs(p[0]) > ARENA_EXTENT_X - b_rad:
-                    sign_x = 1.0 if p[0] > 0 else -1.0
-                    limit_x = ARENA_EXTENT_X - b_rad
-                    p[0] = sign_x * (limit_x - (abs(p[0]) - limit_x) * restitution)
-                    v[0] = -v[0] * restitution
+                if px > limit_x:
+                    px = limit_x - (px - limit_x) * restitution
+                    vx = -vx * restitution
+                elif px < -limit_x:
+                    px = -(limit_x - (-px - limit_x) * restitution)
+                    vx = -vx * restitution
                 # Back wall bounces (Y = +/- 5120)
-                if abs(p[1]) > ARENA_EXTENT_Y - b_rad:
-                    sign_y = 1.0 if p[1] > 0 else -1.0
-                    limit_y = ARENA_EXTENT_Y - b_rad
-                    p[1] = sign_y * (limit_y - (abs(p[1]) - limit_y) * restitution)
-                    v[1] = -v[1] * restitution
+                if py > limit_y:
+                    py = limit_y - (py - limit_y) * restitution
+                    vy = -vy * restitution
+                elif py < -limit_y:
+                    py = -(limit_y - (-py - limit_y) * restitution)
+                    vy = -vy * restitution
 
-            pred_pos = p.astype(np.float32)
+            pred_pos = np.array((px, py, pz), dtype=np.float32)
 
         if not hasattr(self, "_cached_pred_slices"):
             self._cached_pred_slices = {}
@@ -763,11 +793,11 @@ class RocketSimArena:
                 continue
 
             act = actions[i] if i < len(actions) else np.zeros(8, dtype=np.float32)
-            throttle = float(np.clip(act[0], -1.0, 1.0))
-            steer = float(np.clip(act[1], -1.0, 1.0))
-            pitch = float(np.clip(act[2], -1.0, 1.0))
-            yaw = float(np.clip(act[3], -1.0, 1.0))
-            roll = float(np.clip(act[4], -1.0, 1.0))
+            throttle = _clip(act[0], -1.0, 1.0)
+            steer = _clip(act[1], -1.0, 1.0)
+            pitch = _clip(act[2], -1.0, 1.0)
+            yaw = _clip(act[3], -1.0, 1.0)
+            roll = _clip(act[4], -1.0, 1.0)
             jump = bool(act[5] > 0.33)
             boost = bool(act[6] > 0.0 and car.boost > 0.0)
             handbrake = bool(act[7] > 0.2 and abs(steer) > 0.15 and car.on_ground)

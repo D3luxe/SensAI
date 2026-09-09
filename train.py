@@ -66,6 +66,11 @@ def main():
         print("\n[Trainer] Training interrupted by user. Saving final checkpoint...")
         trainer.save_checkpoint("checkpoints/interrupted_checkpoint.pt")
         print("[Trainer] Checkpoint saved. Exiting.")
+    finally:
+        # Environment workers are separate processes; shut them down explicitly.
+        close = getattr(trainer.env, "close", None)
+        if close is not None:
+            close()
 
 
 if __name__ == "__main__":
