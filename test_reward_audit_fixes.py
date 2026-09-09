@@ -120,7 +120,7 @@ class TestRewardAuditFixes(unittest.TestCase):
             on_ground=False
         )
         self.arena.ball.pos = np.array([0.0, 2000.0, 93.0], dtype=np.float32)
-        rew._prev_up_z[car.id] = 1.0
+        rew._prev_surface_align[car.id] = 1.0
         rew._prev_heading[car.id] = 1.0
         rew._airborne_ticks[car.id] = 5
         rew._was_disoriented[car.id] = False

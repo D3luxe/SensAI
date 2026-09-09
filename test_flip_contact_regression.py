@@ -272,7 +272,7 @@ class TestFlipContactRegression(unittest.TestCase):
             rec._was_disoriented[car.id] = True
             rec._disoriented_this_flight[car.id] = True
             rec._prev_on_ground[car.id] = False
-            rec._prev_up_z[car.id] = 0.0
+            rec._prev_surface_align[car.id] = 0.0
             return rec.get_reward(car, arena, np.zeros(8, dtype=np.float32), False, None)
 
         near = landing_reward(200.0)    # inside a ball engagement

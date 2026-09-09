@@ -35,7 +35,7 @@ class TestAirRollRecoveryDamping(unittest.TestCase):
         rew.reset(self.arena)
 
         rew._was_disoriented[car.id] = True
-        rew._prev_up_z[car.id] = 0.88  # prev_up_z < 0.90 entering flat attitude
+        rew._prev_surface_align[car.id] = 0.88  # prev surface align < 0.90 entering flat attitude
         rew._prev_on_ground[car.id] = False
 
         action = np.zeros(8, dtype=np.float32)
@@ -58,7 +58,7 @@ class TestAirRollRecoveryDamping(unittest.TestCase):
         rew.reset(self.arena)
 
         rew._was_disoriented[car.id] = True
-        rew._prev_up_z[car.id] = 0.92  # prev_up_z >= 0.90 so delta_up reward is shut off
+        rew._prev_surface_align[car.id] = 0.92  # prev surface align >= 0.90 so delta_up reward is shut off
         rew._prev_on_ground[car.id] = False
 
         action = np.zeros(8, dtype=np.float32)
@@ -109,7 +109,7 @@ class TestAirRollRecoveryDamping(unittest.TestCase):
         # Case A: Upright but spinning rapidly (roll_rate = 3.5 rad/s)
         car.ang_vel = np.array([0.0, 3.5, 0.0], dtype=np.float32)  # forward is +Y, so ang_vel[1] is roll rate
         rew._was_disoriented[car.id] = True
-        rew._prev_up_z[car.id] = 0.95
+        rew._prev_surface_align[car.id] = 0.95
         rew._prev_heading[car.id] = 0.95
         action = np.zeros(8, dtype=np.float32)
 
@@ -210,7 +210,7 @@ class TestAirRollRecoveryDamping(unittest.TestCase):
         rew.reset(self.arena)
 
         rew._was_disoriented[car.id] = True
-        rew._prev_up_z[car.id] = 0.95  # prev_up_z >= 0.90 so Section 1a (delta_up) does not fire
+        rew._prev_surface_align[car.id] = 0.95  # prev surface align >= 0.90 so Section 1a (delta_up) does not fire
         rew._prev_on_ground[car.id] = False
 
         action = np.zeros(8, dtype=np.float32)

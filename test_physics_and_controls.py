@@ -713,7 +713,7 @@ class TestPhysicsAndControls(unittest.TestCase):
                                rot=np.array([0, 0, 0], dtype=np.float32), on_ground=False)
         rew_fn._airborne_ticks[0] = 4
         rew_fn._was_disoriented[0] = True
-        rew_fn._prev_up_z[0] = 0.5
+        rew_fn._prev_surface_align[0] = 0.5
         r_upright = rew_fn.get_reward(car_upright, MockArena(ball, [car_upright]), np.zeros(8), False, None)
         self.assertGreater(r_upright, 0.0, "Upright recovering car must receive positive recovery reward!")
 
@@ -723,7 +723,7 @@ class TestPhysicsAndControls(unittest.TestCase):
                                 rot=np.array([0, 0, math.pi], dtype=np.float32), on_ground=False)
         rew_fn._airborne_ticks[0] = 4
         rew_fn._was_disoriented[0] = True
-        rew_fn._prev_up_z[0] = -1.0
+        rew_fn._prev_surface_align[0] = -1.0
         r_inverted = rew_fn.get_reward(car_inverted, MockArena(ball, [car_inverted]), np.zeros(8), False, None)
         self.assertLess(r_inverted, 0.0, "Inverted descending car must receive penalty for upside-down descent!")
 
@@ -1001,7 +1001,7 @@ class TestPhysicsAndControls(unittest.TestCase):
                                 rot=np.array([0.0, math.pi / 2, math.pi], dtype=np.float32), on_ground=False)
         air_roll_rew._airborne_ticks = {0: 8}
         air_roll_rew._was_disoriented = {0: True}
-        air_roll_rew._prev_up_z = {0: -1.0}
+        air_roll_rew._prev_surface_align = {0: -1.0}
         air_roll_rew._prev_heading = {0: 1.0}
 
         # Active flip-cancel action (pitch = +1.0, roll = +1.0)

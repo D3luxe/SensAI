@@ -91,7 +91,7 @@ class TestFlippingAndMechanics(unittest.TestCase):
         car.rot_mat = np.array([[0, 1, 0], [-1, 0, 0], [0, 0, 1]], dtype=np.float32)
         recovery._airborne_ticks[car.id] = 15
         recovery._was_disoriented[car.id] = True
-        recovery._prev_up_z[car.id] = 1.0
+        recovery._prev_surface_align[car.id] = 1.0
         recovery._prev_heading[car.id] = -1.0
 
         # Landing backwards with reverse throttle
@@ -116,7 +116,7 @@ class TestFlippingAndMechanics(unittest.TestCase):
         car.rot_mat = np.array([[0, 1, 0], [1, 0, 0], [0, 0, -1]], dtype=np.float32)
         recovery._airborne_ticks[car.id] = 8
         recovery._was_disoriented[car.id] = True
-        recovery._prev_up_z[car.id] = -0.8
+        recovery._prev_surface_align[car.id] = -0.8
         recovery._prev_heading[car.id] = -0.5
 
         # Active Flip-Cancel (act[2] = +1.0) + Air-Roll (act[4] = +1.0)
