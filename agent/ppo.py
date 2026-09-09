@@ -13,7 +13,7 @@ import numpy as np
 import torch
 import torch.nn as nn
 import torch.optim as optim
-from typing import Dict, Any, Optional
+from typing import Dict, Any, Optional, List, Set
 
 from env.rocket_env import VectorizedRocketEnv
 from env.observations import OBS_MIRROR_MASK_NP, ACT_MIRROR_MASK_NP
@@ -80,8 +80,19 @@ class PPOTrainer:
         self.mini_batch_size = int(hp.get("mini_batch_size", 256))
         self.n_epochs = int(hp.get("n_epochs", 4))
         self.total_timesteps = int(hp.get("total_timesteps", 1_000_000))
-        self.checkpoint_interval = int(log_cfg.get("checkpoint_interval", hp.get("checkpoint_interval", 20)))
-        self.max_checkpoints_to_keep = int(log_cfg.get("max_checkpoints_to_keep", 30))
+        # Crash-recovery autosave: rewrites latest_model.pt in place. Cheap, frequent,
+        # and never creates a new file, so it does not feed the league.
+        self.autosave_interval = max(1, int(log_cfg.get("autosave_interval", 20)))
+        # League population: how often a new numbered checkpoint is minted and graded.
+        # Two checkpoints a few iterations apart are near-identical networks that noisy
+        # evaluation cannot separate, so this is deliberately much coarser than autosave.
+        self.checkpoint_interval = int(log_cfg.get("checkpoint_interval", hp.get("checkpoint_interval", 200)))
+        # Permanent historical spine: one checkpoint every `archive_stride` iterations is
+        # retained forever, so old eras survive regardless of current ranking. 0 disables.
+        self.archive_stride = max(0, int(log_cfg.get("archive_stride", 5000)))
+        # Legacy recency cap. Retention is now the union of the provisional/ranked/archive
+        # tiers; this is only consulted when no league manager is attached.
+        self.max_checkpoints_to_keep = int(log_cfg.get("max_checkpoints_to_keep", 50))
 
         self.num_envs = int(env_cfg.get("num_envs", 16))
         self.tick_skip = int(env_cfg.get("tick_skip", 8))
@@ -441,44 +452,86 @@ class PPOTrainer:
                 except Exception:
                     pass
 
+    def _archive_checkpoint_paths(self, ckpts: List[str]) -> Set[str]:
+        """
+        The permanent historical spine: the earliest surviving checkpoint in each
+        `archive_stride`-wide iteration bucket. Bucketing rather than exact-multiple
+        matching means the spine survives even when the checkpoint interval does not
+        divide the stride, or when the interval is changed mid-run.
+        """
+        if self.archive_stride <= 0:
+            return set()
+        best: Dict[int, tuple] = {}
+        for path in ckpts:
+            it = self._checkpoint_iteration(path)
+            if it is None:
+                continue
+            bucket = int(it) // self.archive_stride
+            if bucket not in best or it < best[bucket][0]:
+                best[bucket] = (it, path)
+        return {p for _, p in best.values()}
+
+    @staticmethod
+    def _checkpoint_iteration(file_path: str) -> Optional[int]:
+        """Parses the iteration number out of a checkpoint_iter_*.pt filename."""
+        try:
+            fname = os.path.basename(file_path)
+            return int(fname.replace("checkpoint_iter_", "").replace(".pt", ""))
+        except Exception:
+            return None
+
     def cleanup_old_checkpoints(self, max_to_keep: Optional[int] = None):
         """
-        Keeps only the latest `max_to_keep` numbered checkpoints (checkpoint_iter_*.pt)
-        and deletes older numbered checkpoints. Never touches latest_model.pt or manual saves.
-        """
-        limit = max_to_keep if max_to_keep is not None else self.max_checkpoints_to_keep
-        if limit <= 0:
-            return
+        Prunes numbered checkpoints down to the union of three retention tiers:
 
+        1. Provisional / ranked / contender  - supplied by the league manager, which knows
+           which checkpoints are still being measured and which currently rank.
+        2. Archive - one checkpoint per `archive_stride` iterations, kept forever.
+        3. Recency - the newest `max_to_keep`, used only as a backstop when no league
+           manager is attached (the league tier already covers un-graded arrivals).
+
+        Never touches latest_model.pt or manually named saves.
+        """
         import glob
         pattern = os.path.join(self.save_dir, "checkpoint_iter_*.pt")
         ckpts = glob.glob(pattern)
-        if len(ckpts) > limit:
-            def get_ckpt_iteration(file_path: str):
-                try:
-                    fname = os.path.basename(file_path)
-                    num_str = fname.replace("checkpoint_iter_", "").replace(".pt", "")
-                    return int(num_str)
-                except Exception:
-                    return os.path.getmtime(file_path)
+        if not ckpts:
+            return
 
-            sorted_ckpts = sorted(ckpts, key=get_ckpt_iteration, reverse=True)
-            to_remove = sorted_ckpts[limit:]
+        keep: Set[str] = set()
 
-            # Query protected high-TrueSkill checkpoints from league manager
-            protected_paths = set()
-            if hasattr(self, "league_manager") and self.league_manager:
-                protected_paths = self.league_manager.get_protected_checkpoint_paths()
+        def mark(path: str):
+            abs_p = os.path.abspath(path)
+            keep.add(abs_p)
+            keep.add(os.path.normcase(abs_p))
 
-            for old_file in to_remove:
-                abs_old = os.path.normcase(os.path.abspath(old_file))
-                if abs_old in protected_paths:
-                    continue
-                try:
-                    os.remove(old_file)
-                    print(f"[PPO Trainer] Rolling Cleanup: Removed old checkpoint {os.path.basename(old_file)}")
-                except Exception as e:
-                    print(f"[PPO Trainer] Warning: Could not delete old checkpoint {old_file}: {e}")
+        league = getattr(self, "league_manager", None)
+        if league:
+            # Already canonicalized (abspath + normcase) by the league manager.
+            keep |= league.get_protected_checkpoint_paths()
+        else:
+            limit = max_to_keep if max_to_keep is not None else self.max_checkpoints_to_keep
+            if limit <= 0:
+                return
+            newest = sorted(
+                ckpts,
+                key=lambda p: (self._checkpoint_iteration(p) is None, self._checkpoint_iteration(p) or os.path.getmtime(p)),
+                reverse=True
+            )[:limit]
+            for path in newest:
+                mark(path)
+
+        for path in self._archive_checkpoint_paths(ckpts):
+            mark(path)
+
+        for old_file in ckpts:
+            if os.path.normcase(os.path.abspath(old_file)) in keep:
+                continue
+            try:
+                os.remove(old_file)
+                print(f"[PPO Trainer] Rolling Cleanup: Removed old checkpoint {os.path.basename(old_file)}")
+            except Exception as e:
+                print(f"[PPO Trainer] Warning: Could not delete old checkpoint {old_file}: {e}")
 
     def load_checkpoint(self, path: str):
         if not os.path.exists(path):
@@ -866,12 +919,14 @@ class PPOTrainer:
                 f"SPS: {sps}"
             )
 
-            # Auto-save checkpoints with rolling retention & TrueSkill auto-grading
+            # Crash-recovery autosave. Overwrites one file, mints nothing, grades nothing.
+            if self.iteration % self.autosave_interval == 0:
+                self.save_checkpoint(os.path.join(self.save_dir, "latest_model.pt"))
+
+            # League checkpoint: a new numbered file that enters the rating population.
             if self.iteration % self.checkpoint_interval == 0:
                 ckpt_path = os.path.join(self.save_dir, f"checkpoint_iter_{self.iteration}.pt")
-                latest_path = os.path.join(self.save_dir, "latest_model.pt")
                 self.save_checkpoint(ckpt_path)
-                self.save_checkpoint(latest_path)
 
                 # Automated TrueSkill Bayesian Grading & League Promotion.
                 # Grading plays several full evaluation matches and used to block the
@@ -881,7 +936,7 @@ class PPOTrainer:
                     self._submit_league_grading(ckpt_path)
                 else:
                     self.cleanup_old_checkpoints(max_to_keep=self.max_checkpoints_to_keep)
-                print(f"[PPO Trainer] Saved checkpoint to {ckpt_path} (Preserving latest {self.max_checkpoints_to_keep} + protected TrueSkill checkpoints)")
+                print(f"[PPO Trainer] Saved checkpoint to {ckpt_path} (retaining provisional + ranked + archive tiers)")
 
         if self.writer:
             self.writer.close()

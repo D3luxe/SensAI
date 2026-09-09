@@ -5,6 +5,7 @@ elite pool curation, and stratified vectorized environment distribution (Option 
 """
 
 from __future__ import annotations
+import re
 import os
 import random
 import json
@@ -63,8 +64,11 @@ class LeagueManager:
         self.league_state_path = self.config.get("league_state_path", default_state_path)
 
         # Anchors
+        # The BC pretrained baseline is deliberately NOT an anchor. At 46W-4536L it is
+        # beaten trivially by every checkpoint, so games against it carry almost no
+        # information while consuming half of each debut's evaluation budget. It remains
+        # available as a manual regression tripwire, just not as a rating reference.
         default_anchors = [
-            "checkpoints/pretrained_baseline.pt",
             "checkpoints/necto-model.pt",
             "checkpoints/nexto-model.pt",
             "heuristic"
@@ -74,7 +78,11 @@ class LeagueManager:
 
         # Gauntlet Contender Queue Configuration
         self.min_contender_mu = float(self.config.get("min_contender_mu", 25.5))
-        self.min_contender_win_rate = float(self.config.get("min_contender_win_rate", 45.0))
+        # Points rate (draw = half a win), not raw win rate. See ModelRating.points_rate.
+        self.min_contender_points_rate = float(self.config.get(
+            "min_contender_points_rate",
+            self.config.get("min_contender_win_rate", 45.0)
+        ))
         self.max_consecutive_losses = int(self.config.get("max_consecutive_losses", 4))
         self.grace_period_matches = int(self.config.get("grace_period_matches", 6))
         self.target_eval_matches = int(self.config.get("target_eval_matches", 16))
@@ -83,6 +91,12 @@ class LeagueManager:
         self.king_challenge_frequency = int(self.config.get("king_challenge_frequency", 2))
         self.max_active_contenders = int(self.config.get("max_active_contenders", 3))
         self.contender_eval_matches_per_step = int(self.config.get("contender_eval_matches_per_step", 2))
+        # Retention: a newly minted checkpoint must survive on disk long enough for the
+        # evaluator to reach it. Without this tier a recency window can delete a
+        # checkpoint before it is ever measured, which silently biases the league toward
+        # whatever happened to be graded first.
+        self.max_provisional = int(self.config.get("max_provisional", 30))
+        self.eligibility_sigma = float(self.config.get("eligibility_sigma", 1.5))
 
         # Gauntlet State & Sports Ticker Event History
         self.contender_queue: List[str] = []
@@ -96,6 +110,11 @@ class LeagueManager:
         self._temporal_cycle_idx: int = 0
         self._pool_cycle_idx: int = 0
         self._gauntlet_step_counter: int = 0
+
+        # Keep the standings table and the King/Elite Pool selection on one gate, so the
+        # leaderboard the user reads cannot rank models differently from the league.
+        self.evaluator.eligibility_sigma = self.eligibility_sigma
+        self.evaluator.min_ranked_matches = self.target_eval_matches
 
         self.load_league_state()
         self._init_anchors()
@@ -155,6 +174,33 @@ class LeagueManager:
             self.event_history = self.event_history[-30:]
         self.save_league_state()
 
+    def _is_rank_eligible(self, rec: Optional[ModelRating]) -> bool:
+        """
+        Whether a model's rating has converged enough to be ranked against its peers.
+
+        A single scalar cannot both protect against small-sample flukes and rank
+        established models: mu - k*sigma does the first job by permanently penalising the
+        second. Splitting them, sigma becomes a gate and mu becomes the ranking, so an
+        incumbent's extra few hundred matches stop buying it rank.
+        """
+        if not rec:
+            return False
+        return rec.sigma <= self.eligibility_sigma and rec.matches_played >= self.target_eval_matches
+
+    def _ranking_key(self, rec: Optional[ModelRating]) -> Tuple[int, float, float]:
+        """
+        Sort key for King and Elite Pool selection, descending.
+
+        Eligible models always outrank provisional ones and are ordered by raw mu.
+        Provisional models fall back to the conservative lower bound, which keeps an
+        untested debut from vaulting to the top on four lucky games.
+        """
+        if not rec:
+            return (0, -1e9, -1e9)
+        if self._is_rank_eligible(rec):
+            return (1, rec.mu, rec.points_rate)
+        return (0, self._compute_competitive_score(rec), rec.points_rate)
+
     def _compute_competitive_score(self, rec: Optional[ModelRating]) -> float:
         """
         Computes the effective competitive ranking score for King and Elite Pool determination.
@@ -183,7 +229,7 @@ class LeagueManager:
             consec_losses = self.contender_consecutive_losses.get(path, 0)
 
             is_title_contender = (
-                (rec.mu >= king_mu - 1.0 or rec.win_rate >= 50.0)
+                (rec.mu >= king_mu - 1.0 or rec.points_rate >= 50.0)
                 and rec.matches_played < self.max_contender_matches
                 and rec.sigma > self.target_eval_sigma
             )
@@ -213,6 +259,7 @@ class LeagueManager:
                 "target_matches": target,
                 "progress_pct": progress_pct,
                 "win_rate": round(rec.win_rate, 1),
+                "points_rate": rec.points_rate,
                 "record": f"{rec.wins}W-{rec.losses}L-{rec.draws}D",
                 "consecutive_losses": consec_losses,
                 "max_consecutive_losses": self.max_consecutive_losses,
@@ -238,6 +285,8 @@ class LeagueManager:
                     "conservative_score": round(rec.conservative_rating, 2),
                     "competitive_score": self._compute_competitive_score(rec),
                     "win_rate": round(rec.win_rate, 1),
+                    "points_rate": rec.points_rate,
+                "points_rate": rec.points_rate,
                     "record": f"{rec.wins}W-{rec.losses}L-{rec.draws}D",
                     "matches_played": rec.matches_played,
                     "is_anchor": rec.is_anchor,
@@ -341,9 +390,10 @@ class LeagueManager:
             self.elite_pool = [self.king_of_the_hill]
             return
 
-        # Sort descending: highest competitive score first, then conservative rating, then win rate, then mu
+        # Sort descending: rank-eligible models first (ordered by raw mu), provisional
+        # models after (ordered by their conservative lower bound).
         valid_models.sort(
-            key=lambda item: (item[1], item[2].conservative_rating, item[2].win_rate, item[2].mu),
+            key=lambda item: (self._ranking_key(item[2]), item[2].matches_played),
             reverse=True
         )
 
@@ -377,6 +427,29 @@ class LeagueManager:
 
         self.elite_pool = pool_paths
 
+    def _nearest_anchor(self, rec: Optional[ModelRating], exclude: str = "") -> Optional[str]:
+        """
+        Returns the active anchor whose calibrated mu sits closest to `rec`'s.
+
+        With the ladder spanning heuristic (15) to Nexto (38), picking a fixed anchor
+        means most contenders are graded against a reference far from their own level,
+        where the outcome is a foregone conclusion and the rating update is negligible.
+        """
+        target_mu = rec.mu if rec else 25.0
+        best, best_gap = None, None
+        for cand in self.active_anchors:
+            norm_c = self._normalize_path(cand)
+            if norm_c == exclude:
+                continue
+            if not (os.path.exists(norm_c) or norm_c == "heuristic"):
+                continue
+            anchor_rec = self.evaluator.ratings.get(norm_c)
+            anchor_mu = anchor_rec.mu if anchor_rec else 25.0
+            gap = abs(anchor_mu - target_mu)
+            if best_gap is None or gap < best_gap:
+                best, best_gap = norm_c, gap
+        return best
+
     def _admit_contender(self, ckpt_path: str):
         """Admits or preempts into the active Gauntlet contender queue based on raw skill (mu)."""
         if ckpt_path in self.contender_queue:
@@ -389,31 +462,42 @@ class LeagueManager:
         if len(self.contender_queue) < self.max_active_contenders:
             self.contender_queue.append(ckpt_path)
             self.contender_consecutive_losses[ckpt_path] = 0
-            print(f"[League Manager] [Gauntlet Admission] Admitted '{rec.name}' to Contender Queue (mu={rec.mu:.2f}, WR={rec.win_rate:.1f}%)")
+            print(f"[League Manager] [Gauntlet Admission] Admitted '{rec.name}' to Contender Queue (mu={rec.mu:.2f}, sigma={rec.sigma:.2f}, Pts={rec.points_rate:.1f}%)")
             self._record_event(
                 event_type="admission",
                 model_name=rec.name,
-                detail=f"Admitted to Gauntlet Contender Queue (μ={rec.mu:.2f}, WR={rec.win_rate:.1f}%)",
-                extra={"mu": rec.mu, "win_rate": rec.win_rate}
+                detail=f"Admitted to Gauntlet Contender Queue (μ={rec.mu:.2f}, σ={rec.sigma:.2f}, Pts={rec.points_rate:.1f}%)",
+                extra={"mu": rec.mu, "sigma": rec.sigma, "points_rate": rec.points_rate}
             )
         else:
-            # Check preemption: replace the lowest mu contender if new contender has higher mu
+            # Preemption. The queue is full, so admitting this checkpoint means evicting
+            # one that is already part-way through its trial.
+            #
+            # Comparing on mu made this pathological: mu is most inflated exactly when a
+            # rating is least trustworthy, so a checkpoint fresh off four games routinely
+            # showed mu 32+ and evicted a contender twelve games deep that had regressed
+            # toward its true value. The queue thrashed and essentially nobody completed a
+            # trial. Evict on *convergence* instead: the contender closest to being
+            # rank-eligible has the least left to gain from the remaining budget, and a
+            # newcomer only displaces it if the newcomer is itself less measured.
             contender_ratings = [(p, self.evaluator.ratings.get(p)) for p in self.contender_queue]
             valid_contenders = [c for c in contender_ratings if c[1] is not None]
             if valid_contenders:
-                lowest_path, lowest_rec = min(valid_contenders, key=lambda c: c[1].mu)
-                if rec.mu > lowest_rec.mu:
-                    self.contender_queue.remove(lowest_path)
-                    self.contender_consecutive_losses.pop(lowest_path, None)
+                most_settled_path, most_settled_rec = min(valid_contenders, key=lambda c: c[1].sigma)
+                if rec.sigma > most_settled_rec.sigma and self._is_rank_eligible(most_settled_rec):
+                    self.contender_queue.remove(most_settled_path)
+                    self.contender_consecutive_losses.pop(most_settled_path, None)
                     self.contender_queue.append(ckpt_path)
                     self.contender_consecutive_losses[ckpt_path] = 0
-                    print(f"[League Manager] [Gauntlet Preemption] '{rec.name}' (mu={rec.mu:.2f}) replaced '{lowest_rec.name}' (mu={lowest_rec.mu:.2f}) in Gauntlet Queue")
+                    print(f"[League Manager] [Gauntlet Preemption] '{rec.name}' (sigma={rec.sigma:.2f}) replaced settled '{most_settled_rec.name}' (sigma={most_settled_rec.sigma:.2f}) in Gauntlet Queue")
                     self._record_event(
                         event_type="preemption",
                         model_name=rec.name,
-                        detail=f"Replaced '{lowest_rec.name}' in Gauntlet Queue (μ={rec.mu:.2f} > {lowest_rec.mu:.2f})",
-                        extra={"admitted": rec.name, "bumped": lowest_rec.name, "mu": rec.mu}
+                        detail=f"Replaced converged '{most_settled_rec.name}' in Gauntlet Queue (σ={rec.sigma:.2f} > {most_settled_rec.sigma:.2f})",
+                        extra={"admitted": rec.name, "bumped": most_settled_rec.name, "sigma": rec.sigma}
                     )
+                else:
+                    print(f"[League Manager] [Gauntlet] Queue full of un-converged contenders; '{rec.name}' not admitted this round.")
 
     def step_king_title_bout(self, device: str = "cpu") -> Optional[Dict[str, Any]]:
         """
@@ -436,10 +520,11 @@ class LeagueManager:
         if not valid_challengers:
             return None
 
-        # Pick top challenger by competitive score
+        # Pick top challenger by the same rule that decides the pool, so the title bout
+        # and the ranking cannot disagree about who the best challenger is.
         challenger_path = max(
             valid_challengers,
-            key=lambda p: self._compute_competitive_score(
+            key=lambda p: self._ranking_key(
                 self.evaluator.ratings.get(self._normalize_path(p))
                 or ModelRating(name=p, path=p)
             )
@@ -500,23 +585,25 @@ class LeagueManager:
         if not self.contender_queue:
             return None
 
-        # Pick contender with highest raw skill (mu)
+        # Pick the contender we know least about, not the one that currently looks best.
+        # Scheduling by mu spends the budget re-confirming a leader while the genuinely
+        # unmeasured sit idle; scheduling by sigma maximises information per match and is
+        # what lets a contender actually converge to rank-eligibility.
         contender_path = max(
             self.contender_queue,
-            key=lambda p: getattr(self.evaluator.ratings.get(p), "mu", 0.0)
+            key=lambda p: getattr(self.evaluator.ratings.get(p), "sigma", 0.0)
         )
         rec = self.evaluator.ratings.get(contender_path)
         if not rec:
             self.contender_queue.remove(contender_path)
             return None
 
-        # Standardized Gauntlet pairing: 1 match vs reference anchor, 1 match vs King
-        ref_anchor = None
-        for cand in ["checkpoints/necto-model.pt", "checkpoints/nexto-model.pt"] + self.active_anchors:
-            norm_c = self._normalize_path(cand)
-            if (os.path.exists(norm_c) or norm_c == "heuristic") and norm_c != contender_path:
-                ref_anchor = norm_c
-                break
+        # Gauntlet pairing: the nearest-strength anchor on the calibrated ladder, plus the
+        # King. Matches between mismatched players carry almost no information -- a game
+        # against a reference three ladder rungs below tells you only what you already
+        # knew -- so the anchor is chosen by proximity in mu rather than by a fixed
+        # preference order.
+        ref_anchor = self._nearest_anchor(rec, exclude=contender_path)
 
         opponents = []
         if ref_anchor:
@@ -564,14 +651,14 @@ class LeagueManager:
         king_mu = king_rec.mu if king_rec else 25.0
 
         is_title_contender = (
-            (rec.mu >= king_mu - 1.0 or rec.win_rate >= 50.0)
+            (rec.mu >= king_mu - 1.0 or rec.points_rate >= 50.0)
             and rec.matches_played < self.max_contender_matches
             and rec.sigma > self.target_eval_sigma
         )
 
         # 1. Check Graduation (if qualified by skill and matches)
         should_graduate = False
-        if rec.mu >= self.min_contender_mu and rec.win_rate >= self.min_contender_win_rate:
+        if rec.mu >= self.min_contender_mu and rec.points_rate >= self.min_contender_points_rate:
             if rec.matches_played >= self.max_contender_matches or rec.sigma <= self.target_eval_sigma:
                 should_graduate = True
             elif rec.matches_played >= self.target_eval_matches and not is_title_contender:
@@ -585,8 +672,8 @@ class LeagueManager:
             self._record_event(
                 event_type="promotion",
                 model_name=rec.name,
-                detail=f"Graduated Gauntlet to Elite Pool! (Score: {self._compute_competitive_score(rec):.2f}, WR: {rec.win_rate:.1f}% in {rec.matches_played} matches)",
-                extra={"score": self._compute_competitive_score(rec), "matches": rec.matches_played, "win_rate": rec.win_rate}
+                detail=f"Graduated Gauntlet to Elite Pool! (mu: {rec.mu:.2f}, Pts: {rec.points_rate:.1f}% in {rec.matches_played} matches)",
+                extra={"mu": rec.mu, "matches": rec.matches_played, "points_rate": rec.points_rate}
             )
             return {"status": "graduated", "model": rec.name, "score": self._compute_competitive_score(rec)}
 
@@ -597,9 +684,9 @@ class LeagueManager:
             if rec.mu < self.min_contender_mu:
                 should_demote = True
                 demote_reason = f"Skill floor breached (mu={rec.mu:.2f} < {self.min_contender_mu:.2f})"
-            elif rec.win_rate < self.min_contender_win_rate:
+            elif rec.points_rate < self.min_contender_points_rate:
                 should_demote = True
-                demote_reason = f"Win rate dropped below floor (WR={rec.win_rate:.1f}% < {self.min_contender_win_rate:.1f}%)"
+                demote_reason = f"Points rate dropped below floor ({rec.points_rate:.1f}% < {self.min_contender_points_rate:.1f}%)"
             elif consec_losses >= self.max_consecutive_losses:
                 should_demote = True
                 demote_reason = f"Loss streak knockout ({consec_losses} >= {self.max_consecutive_losses} consecutive losses)"
@@ -647,11 +734,12 @@ class LeagueManager:
         if self.king_of_the_hill and self.king_of_the_hill != norm_ckpt and "latest_model" not in self.king_of_the_hill.lower():
             opponents_to_test.append(self.king_of_the_hill)
 
-        # Pick best anchor not already included
-        for anc in self.active_anchors:
-            if anc != norm_ckpt and anc not in opponents_to_test and "latest_model" not in anc.lower():
-                opponents_to_test.append(anc)
-                break
+        # Nearest-strength anchor, so the debut games are actually informative. A brand
+        # new checkpoint sits at the default mu of 25.0, which puts it between the
+        # heuristic and Necto rungs of the ladder.
+        near = self._nearest_anchor(rec, exclude=norm_ckpt)
+        if near and near not in opponents_to_test:
+            opponents_to_test.append(near)
 
         # If no opponents found, test against heuristic
         if not opponents_to_test:
@@ -681,7 +769,7 @@ class LeagueManager:
 
         # Check qualification for Gauntlet Promotion Queue
         if not rec.is_anchor and norm_ckpt != "heuristic" and "latest_model" not in norm_ckpt.lower():
-            if rec.mu >= 26.0 and rec.win_rate >= 50.0:
+            if rec.mu >= 26.0 and rec.points_rate >= 50.0:
                 self._admit_contender(norm_ckpt)
 
         return rec
@@ -704,16 +792,10 @@ class LeagueManager:
         # If fewer qualified than K, backfill with best available non-anchors
         if len(qualified) < self.hall_of_fame_size:
             unqualified = [r for r in historical_ckpts if r not in qualified]
-            unqualified.sort(
-                key=lambda r: (r.conservative_rating, r.win_rate, r.mu, r.matches_played),
-                reverse=True
-            )
+            unqualified.sort(key=lambda r: (self._ranking_key(r), r.matches_played), reverse=True)
             qualified.extend(unqualified[:(self.hall_of_fame_size - len(qualified))])
 
-        qualified.sort(
-            key=lambda r: (r.conservative_rating, r.win_rate, r.mu, r.matches_played),
-            reverse=True
-        )
+        qualified.sort(key=lambda r: (self._ranking_key(r), r.matches_played), reverse=True)
         return qualified[:self.hall_of_fame_size]
 
     def get_protected_checkpoint_paths(self) -> Set[str]:
@@ -757,7 +839,32 @@ class LeagueManager:
         for c_path in self.contender_queue:
             add_canonical(c_path)
 
+        # 5. Protect the provisional tier: the newest checkpoints whose rating has not yet
+        # converged (sigma above the eligibility threshold). Bounded by max_provisional so
+        # this cannot grow without limit; a checkpoint that ages out of the window has had
+        # its chance to be measured and is free to be pruned.
+        provisional = []
+        for norm_p, rec in self.evaluator.ratings.items():
+            if rec.is_anchor or norm_p == "heuristic" or "latest_model" in norm_p.lower():
+                continue
+            if rec.sigma <= self.eligibility_sigma:
+                continue
+            it = self._checkpoint_iteration(rec.path)
+            if it is None or not os.path.exists(rec.path):
+                continue
+            provisional.append((it, rec.path))
+
+        provisional.sort(reverse=True)
+        for _, path in provisional[:self.max_provisional]:
+            add_canonical(path)
+
         return protected
+
+    @staticmethod
+    def _checkpoint_iteration(path: str) -> Optional[int]:
+        """Parses the iteration number out of a checkpoint_iter_*.pt path, or None."""
+        m = re.search(r"checkpoint_iter_(\d+)", str(path).replace("\\", "/"))
+        return int(m.group(1)) if m else None
 
     def get_stratified_distribution(
         self,

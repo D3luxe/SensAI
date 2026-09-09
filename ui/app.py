@@ -217,357 +217,297 @@ button.primary-btn {
     padding: 4px 6px !important;
 }
 
-/* Sports Ticker & Promotion Queue Styles */
-.sports-ticker-container {
-    background: #090d16;
-    border: 1px solid #1e293b;
-    border-left: 4px solid #38bdf8;
-    border-radius: 8px;
-    padding: 10px 16px;
-    margin-bottom: 8px;
-    box-shadow: 0 4px 14px rgba(0, 0, 0, 0.35);
-    display: flex;
-    flex-direction: column;
-    gap: 8px;
+/* ============================================================================
+   LEAGUE BOARD  --  King banner, Elite standings, Gauntlet ticker.
+   Animations are transform/opacity only (compositor-driven, no layout or paint
+   per frame) and every one of them is disabled under prefers-reduced-motion.
+   ========================================================================= */
+
+.league-board { display: flex; flex-direction: column; gap: 10px; margin-bottom: 10px; }
+
+.lb-panel {
+    background: linear-gradient(160deg, rgba(17, 24, 39, 0.92) 0%, rgba(9, 13, 22, 0.96) 100%);
+    border: 1px solid #1f2a3d;
+    border-radius: 10px;
+    box-shadow: 0 6px 20px rgba(0, 0, 0, 0.35);
 }
 
-.ticker-bar-header {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    flex-wrap: wrap;
-    gap: 8px;
-    padding-bottom: 6px;
-    border-bottom: 1px solid rgba(51, 65, 85, 0.4);
+.lb-panel-head {
+    display: flex; align-items: center; justify-content: space-between;
+    gap: 10px; flex-wrap: wrap;
+    padding: 9px 16px;
+    border-bottom: 1px solid rgba(51, 65, 85, 0.55);
 }
 
-.ticker-live-pill {
-    display: inline-flex;
-    align-items: center;
-    gap: 6px;
-    background: rgba(14, 165, 233, 0.15);
-    color: #38bdf8;
-    border: 1px solid rgba(56, 189, 248, 0.4);
-    padding: 3px 10px;
-    border-radius: 9999px;
-    font-size: 0.78em;
-    font-weight: 800;
-    letter-spacing: 0.8px;
-    text-transform: uppercase;
+.lb-panel-title {
+    font-size: 0.82em; font-weight: 800; letter-spacing: 1.1px;
+    text-transform: uppercase; color: #e2e8f0;
 }
 
-.ticker-live-dot {
-    display: inline-block;
-    width: 8px;
-    height: 8px;
-    border-radius: 50%;
-    background: #38bdf8;
-    box-shadow: 0 0 8px #38bdf8;
-    animation: ticker-pulse 1.8s infinite;
+.lb-panel-meta { font-size: 0.78em; color: #7c8ba1; letter-spacing: 0.3px; }
+.lb-panel-meta b { color: #38bdf8; }
+
+/* ---- King banner ---------------------------------------------------- */
+
+.lb-king {
+    position: relative; overflow: hidden;
+    display: flex; align-items: center; justify-content: space-between;
+    gap: 18px; flex-wrap: wrap;
+    padding: 16px 22px;
+    border: 1px solid rgba(234, 179, 8, 0.45);
+    border-left: 5px solid #eab308;
+    border-radius: 10px;
+    background:
+        radial-gradient(120% 180% at 0% 0%, rgba(234, 179, 8, 0.16) 0%, rgba(234, 179, 8, 0) 55%),
+        linear-gradient(160deg, rgba(24, 30, 45, 0.96) 0%, rgba(9, 13, 22, 0.98) 100%);
+    box-shadow: 0 6px 22px rgba(0, 0, 0, 0.4);
 }
 
-@keyframes ticker-pulse {
-    0%, 100% { opacity: 1; transform: scale(1); }
-    50% { opacity: 0.4; transform: scale(0.85); }
+/* Slow diagonal sheen. One transform on a pseudo-element; no repaint. */
+.lb-king::after {
+    content: ""; position: absolute; top: -60%; left: -30%;
+    width: 40%; height: 220%;
+    background: linear-gradient(100deg, rgba(255,255,255,0) 0%, rgba(255,255,255,0.05) 50%, rgba(255,255,255,0) 100%);
+    transform: translateX(-140%) rotate(8deg);
+    animation: lb-sheen 7s ease-in-out infinite;
+    pointer-events: none;
 }
 
-.ticker-events-row {
-    display: flex;
-    align-items: center;
-    gap: 10px;
-    overflow-x: auto;
-    padding: 2px 0;
+@keyframes lb-sheen {
+    0%, 72% { transform: translateX(-140%) rotate(8deg); }
+    100%    { transform: translateX(420%) rotate(8deg); }
+}
+
+.lb-king-id { display: flex; align-items: center; gap: 14px; min-width: 0; }
+
+.lb-crown {
+    font-size: 1.9em; line-height: 1;
+    filter: drop-shadow(0 0 10px rgba(234, 179, 8, 0.55));
+    animation: lb-crown-float 4.5s ease-in-out infinite;
+}
+
+@keyframes lb-crown-float {
+    0%, 100% { transform: translateY(0); }
+    50%      { transform: translateY(-3px); }
+}
+
+.lb-king-label {
+    font-size: 0.7em; font-weight: 800; letter-spacing: 1.4px;
+    text-transform: uppercase; color: #eab308;
+}
+
+.lb-king-name {
+    font-size: 1.45em; font-weight: 900; color: #f8fafc;
+    letter-spacing: -0.3px; line-height: 1.2;
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+
+.lb-king-sub { font-size: 0.8em; color: #94a3b8; margin-top: 1px; }
+
+.lb-king-stats { display: flex; gap: 26px; flex-wrap: wrap; }
+
+.lb-stat { text-align: right; }
+.lb-stat-label {
+    display: block; font-size: 0.66em; font-weight: 800; letter-spacing: 1px;
+    text-transform: uppercase; color: #64748b; margin-bottom: 2px;
+}
+.lb-stat-value { font-size: 1.3em; font-weight: 800; color: #f1f5f9; font-variant-numeric: tabular-nums; }
+.lb-stat-value.accent { color: #38bdf8; }
+.lb-stat-value.good   { color: #4ade80; }
+.lb-stat-value.warn   { color: #facc15; }
+
+/* ---- Confidence chip ------------------------------------------------ */
+
+.lb-chip {
+    display: inline-flex; align-items: center; gap: 5px;
+    font-size: 0.66em; font-weight: 800; letter-spacing: 0.8px;
+    text-transform: uppercase; padding: 2px 8px; border-radius: 9999px;
     white-space: nowrap;
 }
+.lb-chip-ranked      { background: rgba(56, 189, 248, 0.14); color: #7dd3fc; border: 1px solid rgba(56, 189, 248, 0.45); }
+.lb-chip-provisional { background: rgba(148, 163, 184, 0.12); color: #94a3b8; border: 1px solid rgba(148, 163, 184, 0.35); }
+.lb-chip-anchor      { background: rgba(168, 85, 247, 0.14); color: #c4b5fd; border: 1px solid rgba(168, 85, 247, 0.4); }
+.lb-chip-king        { background: rgba(234, 179, 8, 0.16); color: #facc15; border: 1px solid rgba(234, 179, 8, 0.5); }
 
-.ticker-events-row::-webkit-scrollbar {
-    height: 4px;
-}
-.ticker-events-row::-webkit-scrollbar-thumb {
-    background: #334155;
-    border-radius: 4px;
-}
+/* ---- Elite standings table ------------------------------------------ */
 
-.ticker-event-pill {
-    display: inline-flex;
-    align-items: center;
-    gap: 8px;
-    background: rgba(15, 23, 42, 0.85);
-    border: 1px solid #334155;
-    border-radius: 6px;
-    padding: 5px 12px;
-    font-size: 0.84em;
-    color: #cbd5e1;
-    box-shadow: 0 2px 6px rgba(0,0,0,0.25);
-    flex-shrink: 0;
-}
+.lb-standings { padding: 4px 8px 10px; }
 
-.ticker-badge-promotion {
-    background: rgba(34, 197, 94, 0.2);
-    color: #4ade80;
-    border: 1px solid rgba(34, 197, 94, 0.5);
-    padding: 2px 7px;
-    border-radius: 4px;
-    font-weight: 800;
-    font-size: 0.78em;
-    letter-spacing: 0.5px;
-}
-
-.ticker-badge-demotion {
-    background: rgba(244, 63, 94, 0.2);
-    color: #fb7185;
-    border: 1px solid rgba(244, 63, 94, 0.5);
-    padding: 2px 7px;
-    border-radius: 4px;
-    font-weight: 800;
-    font-size: 0.78em;
-    letter-spacing: 0.5px;
-}
-
-.ticker-badge-coronation {
-    background: rgba(234, 179, 8, 0.2);
-    color: #facc15;
-    border: 1px solid rgba(234, 179, 8, 0.5);
-    padding: 2px 7px;
-    border-radius: 4px;
-    font-weight: 800;
-    font-size: 0.78em;
-    letter-spacing: 0.5px;
-}
-
-.ticker-badge-admission {
-    background: rgba(56, 189, 248, 0.2);
-    color: #38bdf8;
-    border: 1px solid rgba(56, 189, 248, 0.5);
-    padding: 2px 7px;
-    border-radius: 4px;
-    font-weight: 800;
-    font-size: 0.78em;
-    letter-spacing: 0.5px;
-}
-
-.ticker-badge-preemption {
-    background: rgba(168, 85, 247, 0.2);
-    color: #c084fc;
-    border: 1px solid rgba(168, 85, 247, 0.5);
-    padding: 2px 7px;
-    border-radius: 4px;
-    font-weight: 800;
-    font-size: 0.78em;
-    letter-spacing: 0.5px;
-}
-
-/* Gauntlet Promotion Queue Styles */
-.promotion-queue-container {
-    background: linear-gradient(135deg, rgba(15, 23, 42, 0.85) 0%, rgba(30, 41, 59, 0.7) 100%);
-    border: 1px solid #334155;
-    border-radius: 8px;
-    padding: 12px 18px;
-    margin-bottom: 10px;
-    box-shadow: 0 4px 14px rgba(0,0,0,0.25);
-}
-
-.promotion-queue-header {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    margin-bottom: 10px;
-    flex-wrap: wrap;
-    gap: 8px;
-}
-
-.queue-title {
-    color: #f1f5f9;
-    font-weight: 800;
-    font-size: 0.95em;
-    display: flex;
-    align-items: center;
-    gap: 8px;
-    letter-spacing: 0.3px;
-}
-
-.queue-cards-grid {
+.lb-row {
     display: grid;
-    grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
-    gap: 12px;
+    grid-template-columns: 38px minmax(140px, 2fr) 92px 1.3fr 56px 54px 58px 116px 48px;
+    align-items: center; gap: 9px;
+    padding: 7px 10px; border-radius: 7px;
+    font-size: 0.86em; color: #cbd5e1;
+    border: 1px solid transparent;
+    transition: background-color 0.16s ease, border-color 0.16s ease;
 }
 
-.contender-card {
-    background: rgba(10, 15, 30, 0.75);
-    border: 1px solid #3b82f6;
-    border-radius: 8px;
-    padding: 12px 14px;
-    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.3);
-    display: flex;
-    flex-direction: column;
-    gap: 8px;
+.lb-row + .lb-row { margin-top: 2px; }
+.lb-row:not(.lb-row-head):hover { background: rgba(56, 189, 248, 0.06); border-color: rgba(56, 189, 248, 0.22); }
+
+.lb-row-head {
+    font-size: 0.68em; font-weight: 800; letter-spacing: 1px;
+    text-transform: uppercase; color: #64748b;
+    border-bottom: 1px solid rgba(51, 65, 85, 0.5); border-radius: 0;
+    padding-bottom: 6px; margin-bottom: 3px;
 }
 
-.contender-card-header {
-    display: flex;
-    justify-content: space-between;
-    align-items: center;
+.lb-row-king { background: rgba(234, 179, 8, 0.07); border-color: rgba(234, 179, 8, 0.32); }
+.lb-row-king:hover { background: rgba(234, 179, 8, 0.11); border-color: rgba(234, 179, 8, 0.45); }
+
+.lb-rank {
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    font-size: 0.95em; font-weight: 800; color: #64748b; font-variant-numeric: tabular-nums;
+}
+.lb-rank-top { color: #facc15; }
+
+.lb-name { font-weight: 700; color: #f1f5f9; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.lb-num  { font-variant-numeric: tabular-nums; font-weight: 700; }
+.lb-muted { color: #7c8ba1; font-variant-numeric: tabular-nums; }
+.lb-record { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 0.92em; color: #94a3b8; }
+
+/* Rating bar: width is set inline once per render, then never animated. */
+.lb-bar-track {
+    position: relative; height: 6px; border-radius: 3px;
+    background: rgba(51, 65, 85, 0.55); overflow: hidden;
+}
+.lb-bar-fill {
+    position: absolute; inset: 0 auto 0 0; border-radius: 3px;
+    background: linear-gradient(90deg, #0ea5e9 0%, #38bdf8 100%);
+    transform-origin: left center;
+    animation: lb-bar-grow 0.5s cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+.lb-bar-fill.is-king { background: linear-gradient(90deg, #ca8a04 0%, #facc15 100%); }
+.lb-bar-fill.is-provisional { background: linear-gradient(90deg, #475569 0%, #94a3b8 100%); }
+
+@keyframes lb-bar-grow { from { transform: scaleX(0); } to { transform: scaleX(1); } }
+
+/* ---- Gauntlet ticker ------------------------------------------------ */
+
+.lb-ticker { position: relative; overflow: hidden; padding: 0; }
+
+.lb-ticker-head {
+    display: flex; align-items: center; justify-content: space-between;
+    gap: 10px; flex-wrap: wrap; padding: 8px 16px;
+    border-bottom: 1px solid rgba(51, 65, 85, 0.55);
 }
 
-.contender-name {
-    font-size: 0.98em;
-    font-weight: 800;
-    color: #38bdf8;
-    display: flex;
-    align-items: center;
-    gap: 6px;
+.lb-live {
+    display: inline-flex; align-items: center; gap: 7px;
+    font-size: 0.72em; font-weight: 800; letter-spacing: 1.2px; text-transform: uppercase;
+    color: #fb7185; background: rgba(244, 63, 94, 0.1);
+    border: 1px solid rgba(244, 63, 94, 0.35); border-radius: 9999px; padding: 3px 10px;
 }
 
-.contender-status-tag {
-    font-size: 0.75em;
-    font-weight: 700;
-    padding: 2px 8px;
-    border-radius: 9999px;
-    border: 1px solid #334155;
-    background: rgba(15, 23, 42, 0.8);
-    color: #94a3b8;
+.lb-live-dot {
+    width: 7px; height: 7px; border-radius: 50%; background: #fb7185;
+    animation: lb-pulse 1.9s ease-in-out infinite;
 }
 
-.contender-status-danger {
-    border-color: #f43f5e !important;
-    background: rgba(244, 63, 94, 0.2) !important;
-    color: #fb7185 !important;
+@keyframes lb-pulse {
+    0%, 100% { opacity: 1; transform: scale(1); }
+    50%      { opacity: 0.35; transform: scale(0.78); }
 }
 
-.contender-prog-track {
-    background: #1e293b;
-    border-radius: 9999px;
-    height: 7px;
-    width: 100%;
-    overflow: hidden;
+.lb-ticker-viewport {
+    position: relative; overflow: hidden; padding: 9px 0;
+    -webkit-mask-image: linear-gradient(90deg, transparent 0, #000 44px, #000 calc(100% - 44px), transparent 100%);
+            mask-image: linear-gradient(90deg, transparent 0, #000 44px, #000 calc(100% - 44px), transparent 100%);
 }
 
-.contender-prog-fill {
-    background: linear-gradient(90deg, #38bdf8 0%, #4ade80 100%);
-    height: 100%;
-    border-radius: 9999px;
-    transition: width 0.3s ease;
+/* Two identical halves scrolled by one transform gives a seamless loop with a
+   single animated element. Duration is set inline from the item count so the
+   speed stays constant regardless of how much is on the wire. */
+.lb-ticker-track {
+    display: flex; align-items: center; gap: 10px; width: max-content;
+    animation: lb-marquee linear infinite;
+    will-change: transform;
+}
+.lb-ticker-viewport:hover .lb-ticker-track { animation-play-state: paused; }
+
+@keyframes lb-marquee { from { transform: translateX(0); } to { transform: translateX(-50%); } }
+
+.lb-tick {
+    display: inline-flex; align-items: center; gap: 8px; flex-shrink: 0;
+    background: rgba(15, 23, 42, 0.85); border: 1px solid #24324a;
+    border-radius: 8px; padding: 5px 12px; font-size: 0.83em; color: #94a3b8;
+}
+.lb-tick b { color: #f1f5f9; font-weight: 700; }
+.lb-tick-time { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 0.88em; color: #52627a; }
+
+.lb-tick-badge {
+    font-size: 0.76em; font-weight: 800; letter-spacing: 0.6px; text-transform: uppercase;
+    padding: 2px 7px; border-radius: 4px; white-space: nowrap;
+}
+.lb-badge-promotion  { background: rgba(34, 197, 94, 0.16);  color: #4ade80; border: 1px solid rgba(34, 197, 94, 0.45); }
+.lb-badge-demotion   { background: rgba(244, 63, 94, 0.16);  color: #fb7185; border: 1px solid rgba(244, 63, 94, 0.45); }
+.lb-badge-coronation { background: rgba(234, 179, 8, 0.16);  color: #facc15; border: 1px solid rgba(234, 179, 8, 0.45); }
+.lb-badge-admission  { background: rgba(56, 189, 248, 0.16); color: #7dd3fc; border: 1px solid rgba(56, 189, 248, 0.45); }
+.lb-badge-preemption { background: rgba(168, 85, 247, 0.16); color: #c4b5fd; border: 1px solid rgba(168, 85, 247, 0.45); }
+
+/* A demotion drops in and settles; a promotion or coronation lifts. Both run
+   once, on the newest few items only, so a refresh does not re-animate the
+   whole wire. */
+.lb-tick-fresh.lb-tick-down { animation: lb-drop 0.55s cubic-bezier(0.34, 1.56, 0.64, 1) both; }
+.lb-tick-fresh.lb-tick-up   { animation: lb-rise 0.55s cubic-bezier(0.34, 1.56, 0.64, 1) both; }
+.lb-tick-fresh.lb-tick-flat { animation: lb-fade 0.45s ease-out both; }
+
+@keyframes lb-drop { from { transform: translateY(-9px); opacity: 0; } to { transform: none; opacity: 1; } }
+@keyframes lb-rise { from { transform: translateY(9px);  opacity: 0; } to { transform: none; opacity: 1; } }
+@keyframes lb-fade { from { opacity: 0; } to { opacity: 1; } }
+
+/* ---- Gauntlet trial cards ------------------------------------------- */
+
+.lb-trials { display: grid; grid-template-columns: repeat(auto-fit, minmax(290px, 1fr)); gap: 10px; padding: 12px 16px; }
+
+.lb-trial {
+    background: rgba(10, 15, 30, 0.7); border: 1px solid #24324a;
+    border-radius: 9px; padding: 11px 14px;
+    display: flex; flex-direction: column; gap: 8px;
+    transition: border-color 0.18s ease, transform 0.18s ease;
+}
+.lb-trial:hover { transform: translateY(-2px); border-color: rgba(56, 189, 248, 0.45); }
+.lb-trial-danger { border-color: rgba(244, 63, 94, 0.45); }
+
+.lb-trial-top { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.lb-trial-name { font-weight: 800; color: #f1f5f9; font-size: 0.93em; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+.lb-prog-track { height: 7px; border-radius: 4px; background: rgba(51, 65, 85, 0.6); overflow: hidden; }
+.lb-prog-fill {
+    height: 100%; border-radius: 4px;
+    background: linear-gradient(90deg, #0ea5e9 0%, #4ade80 100%);
+    transform-origin: left center;
+    animation: lb-bar-grow 0.55s cubic-bezier(0.22, 1, 0.36, 1) both;
 }
 
-.contender-stats-grid {
-    display: grid;
-    grid-template-columns: 1fr 1fr;
-    gap: 6px;
-    font-size: 0.82em;
-    color: #cbd5e1;
-    background: rgba(15, 23, 42, 0.5);
-    padding: 6px 10px;
-    border-radius: 6px;
-    border: 1px solid rgba(51, 65, 85, 0.3);
+.lb-trial-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 3px 12px; font-size: 0.81em; color: #8fa0b6; }
+.lb-trial-grid b { color: #e2e8f0; font-variant-numeric: tabular-nums; }
+.lb-trial-foot {
+    display: flex; align-items: center; justify-content: space-between;
+    font-size: 0.79em; color: #7c8ba1;
+    border-top: 1px solid rgba(51, 65, 85, 0.45); padding-top: 6px;
 }
 
-.contender-stat-val {
-    font-weight: 700;
-    color: #f8fafc;
+.lb-empty {
+    padding: 16px 20px; text-align: center; color: #7c8ba1; font-size: 0.87em;
+    border: 1px dashed #2b3a52; border-radius: 8px; margin: 12px 16px;
 }
 
-/* Elite Pool Styles */
-.elite-pool-container {
-    background: linear-gradient(135deg, rgba(15, 23, 42, 0.85) 0%, rgba(30, 41, 59, 0.7) 100%);
-    border: 1px solid #334155;
-    border-radius: 8px;
-    padding: 12px 18px;
-    margin-bottom: 10px;
-    box-shadow: 0 4px 14px rgba(0, 0, 0, 0.25);
+@media (max-width: 900px) {
+    /* Drops the sigma, record and games columns; the remaining six keep their order,
+       so the header and the body rows stay aligned at every width. */
+    .lb-row { grid-template-columns: 34px minmax(110px, 2fr) 88px 1.1fr 54px 56px; }
+    .lb-row > .lb-hide-sm { display: none; }
 }
 
-.elite-pool-header {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    margin-bottom: 10px;
-    flex-wrap: wrap;
-    gap: 8px;
+@media (prefers-reduced-motion: reduce) {
+    .lb-king::after, .lb-crown, .lb-live-dot, .lb-ticker-track,
+    .lb-bar-fill, .lb-prog-fill, .lb-tick-fresh { animation: none !important; }
+    .lb-bar-fill, .lb-prog-fill { transform: none !important; }
+    .lb-trial:hover { transform: none; }
 }
 
-.elite-cards-grid {
-    display: grid;
-    grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
-    gap: 10px;
-}
-
-.elite-card {
-    background: rgba(10, 15, 30, 0.75);
-    border: 1px solid #38bdf8;
-    border-radius: 8px;
-    padding: 10px 14px;
-    box-shadow: 0 3px 10px rgba(0, 0, 0, 0.25);
-    display: flex;
-    flex-direction: column;
-    gap: 6px;
-    transition: transform 0.15s ease, border-color 0.2s ease;
-}
-
-.elite-card:hover {
-    transform: translateY(-2px);
-    box-shadow: 0 6px 16px rgba(0, 0, 0, 0.4);
-}
-
-.elite-card-header {
-    display: flex;
-    justify-content: space-between;
-    align-items: center;
-}
-
-.elite-rank-pill {
-    background: rgba(30, 41, 59, 0.9);
-    border: 1px solid #475569;
-    color: #94a3b8;
-    font-size: 0.75em;
-    font-weight: 800;
-    padding: 2px 6px;
-    border-radius: 4px;
-}
-
-.elite-model-name {
-    font-size: 0.92em;
-    font-weight: 800;
-    color: #f1f5f9;
-}
-
-.elite-tag {
-    font-size: 0.72em;
-    font-weight: 800;
-    padding: 2px 7px;
-    border-radius: 9999px;
-    letter-spacing: 0.4px;
-    text-transform: uppercase;
-}
-
-.elite-tag-king {
-    background: rgba(234, 179, 8, 0.2);
-    color: #facc15;
-    border: 1px solid rgba(234, 179, 8, 0.5);
-}
-
-.elite-tag-sparrer {
-    background: rgba(56, 189, 248, 0.15);
-    color: #38bdf8;
-    border: 1px solid rgba(56, 189, 248, 0.4);
-}
-
-.elite-tag-anchor {
-    background: rgba(100, 116, 139, 0.2);
-    color: #cbd5e1;
-    border: 1px solid rgba(100, 116, 139, 0.4);
-}
-
-.elite-stats-grid {
-    display: grid;
-    grid-template-columns: 1fr 1fr;
-    gap: 4px;
-    font-size: 0.8em;
-    color: #cbd5e1;
-    background: rgba(15, 23, 42, 0.5);
-    padding: 6px 8px;
-    border-radius: 6px;
-    border: 1px solid rgba(51, 65, 85, 0.3);
-}
 """
 
 
@@ -773,8 +713,9 @@ def get_cockpit_leaderboard_df(
     df = evaluator.get_leaderboard_dataframe()
     if df.empty:
         return pd.DataFrame(columns=[
-            "Rank", "Iteration / Model", "Status", "Rating (μ)", "Uncertainty (σ)",
-            "Conservative Score", "Win Rate", "Record (W-L-D)", "Goal Diff", "Matches"
+            "Rank", "Iteration / Model", "Status", "Confidence", "Rating (μ)",
+            "Uncertainty (σ)", "Conservative Score", "Points", "Win Rate",
+            "Record (W-L-D)", "Goal Diff", "Matches"
         ])
 
     state = league_state if league_state is not None else load_league_state_safely()
@@ -789,8 +730,8 @@ def get_cockpit_leaderboard_df(
             if "latest_model" in key.lower():
                 continue
             if rec.is_anchor or key == "heuristic" or os.path.exists(rec.path):
-                valid.append((key.replace("\\", "/").lower(), rec.conservative_rating, rec.win_rate, rec.mu))
-        valid.sort(key=lambda x: (x[1], x[2], x[3]), reverse=True)
+                valid.append((key.replace("\\", "/").lower(), evaluator.ranking_key(rec), rec.matches_played))
+        valid.sort(key=lambda x: (x[1], x[2]), reverse=True)
         elite_pool = [x[0] for x in valid[:10]]
 
     norm_king = str(active_king).replace("\\", "/").lower()
@@ -862,122 +803,212 @@ def get_cockpit_leaderboard_df(
     return df.head(max_rows)
 
 
+_LB_EVALUATOR_GATE = lambda rec: getattr(rec, "sigma", 8.33) <= 1.5
+
+
+def _lb_confidence(rec) -> tuple:
+    """(chip_html, is_ranked) describing whether a rating may be ranked on raw mu."""
+    if getattr(rec, "is_anchor", False):
+        return '<span class="lb-chip lb-chip-anchor">Anchor</span>', True
+    ranked = _LB_EVALUATOR_GATE(rec)
+    if ranked:
+        return '<span class="lb-chip lb-chip-ranked">Ranked</span>', True
+    return '<span class="lb-chip lb-chip-provisional">Provisional</span>', False
+
+
+def _lb_iteration(rec) -> int:
+    """Iteration number behind a checkpoint rating, or -1 for anchors and baselines."""
+    match = re.search(r"checkpoint_iter_(\d+)", f"{getattr(rec, 'path', '')} {getattr(rec, 'name', '')}".lower())
+    if match:
+        try:
+            return int(match.group(1))
+        except ValueError:
+            pass
+    return -1
+
+
+def _lb_short_name(rec) -> str:
+    """'Iteration 130740' for checkpoints, the display name for everything else."""
+    it = _lb_iteration(rec)
+    return f"Iteration {it}" if it >= 0 else rec.name
+
+
 def build_cockpit_leaderboard_summary_html(evaluator: TrueSkillEvaluator, league_state: Optional[Dict[str, Any]] = None) -> str:
-    """Builds a sleek cyber-styled summary badge card for the Live Cockpit leaderboard."""
+    """
+    King banner plus season totals: the headline slab of the league board.
+
+    Leads with mu and sigma rather than the conservative score, because ranking is now
+    gated on sigma and ordered by mu; showing mu - 3*sigma as the headline number would
+    describe a ranking the league no longer uses.
+    """
+    global _LB_EVALUATOR_GATE
+    _LB_EVALUATOR_GATE = evaluator.is_rank_eligible
+
     ratings = [
         r for r in evaluator.ratings.values()
         if "latest_model" not in r.path.lower() and "latest_model" not in r.name.lower()
     ]
     if not ratings:
         return """
-        <div style="background: rgba(15, 23, 42, 0.7); border: 1px solid #334155; border-radius: 8px; padding: 10px 18px; margin-bottom: 8px; font-size: 0.9em; color: #94a3b8;">
-            <span>ℹ️ No models evaluated in TrueSkill tournament yet. Checkpoints are automatically graded on save (every 20 iterations).</span>
+        <div class="lb-panel" style="padding: 14px 20px; color: #7c8ba1; font-size: 0.88em; margin-bottom: 10px;">
+            &#8505;&#65039; <b>League standby.</b> No checkpoints graded yet. Each numbered checkpoint is
+            graded automatically on save (see League Checkpoint Interval).
         </div>
         """
 
     state = league_state if league_state is not None else load_league_state_safely()
     active_king_path = state.get("king_of_the_hill")
 
-    sorted_ratings = sorted(ratings, key=lambda r: (r.conservative_rating, r.win_rate, r.mu), reverse=True)
+    sorted_ratings = sorted(ratings, key=lambda r: (evaluator.ranking_key(r), r.matches_played), reverse=True)
 
-    # Resolve reigning King: check active King designated by LeagueManager, then fallback to top active model on disk
     king = None
     if active_king_path:
-        norm_target = active_king_path.replace("\\", "/").lower()
+        norm_target = str(active_king_path).replace("\\", "/").lower()
         for r in ratings:
             if r.path.replace("\\", "/").lower() == norm_target or r.name.lower() in norm_target:
                 king = r
                 break
-
     if king is None:
         for r in sorted_ratings:
             if r.is_anchor or r.name == "heuristic" or os.path.exists(r.path):
                 king = r
                 break
-
     if king is None:
         king = sorted_ratings[0]
 
-    ckpts = [r for r in sorted_ratings if not r.is_anchor and ("checkpoint_iter" in r.path.lower() or "checkpoint_iter" in r.name.lower())]
-    best_ckpt = ckpts[0] if ckpts else None
-
-    def parse_iter(r) -> int:
-        match = re.search(r"checkpoint_iter_(\d+)", f"{r.path} {r.name}".lower())
-        if match:
-            try:
-                return int(match.group(1))
-            except ValueError:
-                pass
-        return -1
-
-    iter_ckpts = [r for r in ckpts if parse_iter(r) >= 0]
-    if iter_ckpts:
-        recent_ckpt = max(iter_ckpts, key=lambda r: parse_iter(r))
-    else:
-        recent_ckpt = max(ckpts, key=lambda r: r.last_updated) if ckpts else None
-
-    king_name = king.name
-    king_score = king.conservative_rating
+    ckpts = [r for r in sorted_ratings if not r.is_anchor and _lb_iteration(r) >= 0]
+    latest_iter = max((_lb_iteration(r) for r in ckpts), default=-1)
+    ranked_count = sum(1 for r in ratings if evaluator.is_rank_eligible(r))
     total_matches = sum(r.matches_played for r in ratings) // 2
 
-    if best_ckpt:
-        try:
-            b_iter = parse_iter(best_ckpt)
-            if b_iter >= 0:
-                best_ckpt_str = f"Iteration {b_iter} (Score: {best_ckpt.conservative_rating:.1f})"
-            else:
-                iter_id = best_ckpt.name.split("checkpoint_iter_")[-1].split(".")[0]
-                best_ckpt_str = f"Iteration {iter_id} (Score: {best_ckpt.conservative_rating:.1f})"
-        except Exception:
-            best_ckpt_str = f"{best_ckpt.name} (Score: {best_ckpt.conservative_rating:.1f})"
-    else:
-        best_ckpt_str = "Awaiting first checkpoint"
-
-    if recent_ckpt:
-        try:
-            r_iter = parse_iter(recent_ckpt)
-            if r_iter >= 0:
-                recent_ckpt_str = f"Iteration {r_iter} (Score: {recent_ckpt.conservative_rating:.1f})"
-            else:
-                iter_id = recent_ckpt.name.split("checkpoint_iter_")[-1].split(".")[0]
-                recent_ckpt_str = f"Iteration {iter_id} (Score: {recent_ckpt.conservative_rating:.1f})"
-        except Exception:
-            recent_ckpt_str = f"{recent_ckpt.name} (Score: {recent_ckpt.conservative_rating:.1f})"
-    else:
-        recent_ckpt_str = "Awaiting first checkpoint"
+    king_chip, _ = _lb_confidence(king)
+    king_iter = _lb_iteration(king)
+    king_sub = f"checkpoint_iter_{king_iter}" if king_iter >= 0 else king.path
 
     return f"""
-    <div style="background: linear-gradient(135deg, rgba(30, 41, 59, 0.85) 0%, rgba(15, 23, 42, 0.95) 100%); border: 1px solid #3b82f6; border-radius: 8px; padding: 12px 20px; margin-bottom: 10px; display: flex; justify-content: space-between; align-items: center; box-shadow: 0 4px 14px rgba(0, 0, 0, 0.25); flex-wrap: wrap; gap: 14px;">
-        <div>
-            <span style="color: #94a3b8; font-size: 0.82em; text-transform: uppercase; letter-spacing: 0.5px; font-weight: 700;">👑 Reigning King of the Hill</span>
-            <div style="font-size: 1.15em; font-weight: 800; color: #38bdf8;">{king_name} <span style="font-size: 0.85em; color: #a855f7; font-weight: 600;">(Score: {king_score:.2f})</span></div>
+    <div class="lb-king">
+        <div class="lb-king-id">
+            <span class="lb-crown">&#128081;</span>
+            <div style="min-width: 0;">
+                <div class="lb-king-label">King of the Hill</div>
+                <div class="lb-king-name">{_lb_short_name(king)} {king_chip}</div>
+                <div class="lb-king-sub">{king_sub} &middot; {king.wins}W-{king.losses}L-{king.draws}D over {king.matches_played} matches</div>
+            </div>
         </div>
-        <div style="text-align: center;">
-            <span style="color: #94a3b8; font-size: 0.82em; text-transform: uppercase; letter-spacing: 0.5px; font-weight: 700;">⚡ Peak Checkpoint Iteration</span>
-            <div style="font-size: 1.05em; font-weight: 700; color: #4ade80;">{best_ckpt_str}</div>
-        </div>
-        <div style="text-align: center;">
-            <span style="color: #94a3b8; font-size: 0.82em; text-transform: uppercase; letter-spacing: 0.5px; font-weight: 700;">🕒 Most Recent Checkpoint</span>
-            <div style="font-size: 1.05em; font-weight: 700; color: #38bdf8;">{recent_ckpt_str}</div>
-        </div>
-        <div style="text-align: right;">
-            <span style="color: #94a3b8; font-size: 0.82em; text-transform: uppercase; letter-spacing: 0.5px; font-weight: 700;">📊 Graded Roster</span>
-            <div style="font-size: 1.05em; font-weight: 700; color: #f1f5f9;">{len(ratings)} Models <span style="font-size: 0.85em; color: #94a3b8; font-weight: normal;">({total_matches} matches)</span></div>
+        <div class="lb-king-stats">
+            <div class="lb-stat">
+                <span class="lb-stat-label">Rating</span>
+                <span class="lb-stat-value warn">{king.mu:.2f}</span>
+            </div>
+            <div class="lb-stat">
+                <span class="lb-stat-label">Uncertainty</span>
+                <span class="lb-stat-value">&plusmn;{king.sigma:.2f}</span>
+            </div>
+            <div class="lb-stat">
+                <span class="lb-stat-label">Points</span>
+                <span class="lb-stat-value good">{king.points_rate:.1f}%</span>
+            </div>
+            <div class="lb-stat">
+                <span class="lb-stat-label">Latest Ckpt</span>
+                <span class="lb-stat-value accent">{latest_iter if latest_iter >= 0 else '&mdash;'}</span>
+            </div>
+            <div class="lb-stat">
+                <span class="lb-stat-label">Roster</span>
+                <span class="lb-stat-value">{ranked_count}<span style="color:#64748b; font-size:0.7em; font-weight:600;"> ranked / {len(ratings)}</span></span>
+            </div>
+            <div class="lb-stat">
+                <span class="lb-stat-label">Matches</span>
+                <span class="lb-stat-value">{total_matches:,}</span>
+            </div>
         </div>
     </div>
     """
 
 
-def build_league_wire_and_queue_html(evaluator: TrueSkillEvaluator, league_state: Optional[Dict[str, Any]] = None) -> str:
+def _build_gauntlet_ticker(state: Dict[str, Any]) -> str:
     """
-    Renders the live sports ticker ('League Wire') and active Gauntlet Promotion Queue board.
-    Shows promotions, demotions, preemption, and King of the Hill coronations.
+    The Gauntlet wire: a seamless CSS marquee of promotions, demotions, coronations,
+    admissions and preemptions.
+
+    The track holds the item list twice and is translated by exactly -50%, so the loop
+    is seamless with a single animated element and no JavaScript. Duration scales with
+    item count to hold a constant scroll speed, and the newest three events get a
+    one-shot entrance keyed to their direction: demotions drop, promotions rise.
     """
-    state = league_state if league_state is not None else load_league_state_safely()
     events = state.get("event_history", [])
+    recent = list(reversed(events[-14:]))
+
+    if not recent:
+        body = """
+        <div class="lb-ticker-viewport">
+            <div style="padding: 2px 16px; color: #7c8ba1; font-size: 0.85em;">
+                Wire is quiet. Promotions, demotions and coronations broadcast here as trials resolve.
+            </div>
+        </div>
+        """
+        return f"""
+        <div class="lb-panel lb-ticker">
+            <div class="lb-ticker-head">
+                <span class="lb-live"><span class="lb-live-dot"></span>Gauntlet Wire</span>
+                <span class="lb-panel-meta">Promotion &amp; demotion feed</span>
+            </div>
+            {body}
+        </div>
+        """
+
+    badges = {
+        "promotion":  ('<span class="lb-tick-badge lb-badge-promotion">&#127942; Promoted</span>', "lb-tick-up"),
+        "demotion":   ('<span class="lb-tick-badge lb-badge-demotion">&#128317; Demoted</span>', "lb-tick-down"),
+        "coronation": ('<span class="lb-tick-badge lb-badge-coronation">&#128081; New King</span>', "lb-tick-up"),
+        "admission":  ('<span class="lb-tick-badge lb-badge-admission">&#9876;&#65039; In Queue</span>', "lb-tick-flat"),
+        "preemption": ('<span class="lb-tick-badge lb-badge-preemption">&#128260; Preempt</span>', "lb-tick-flat"),
+    }
+
+    ticks = []
+    for idx, ev in enumerate(recent):
+        badge, direction = badges.get(
+            str(ev.get("type", "")).lower(),
+            ('<span class="lb-tick-badge lb-badge-admission">&#9889; Update</span>', "lb-tick-flat")
+        )
+        time_str = ""
+        raw_ts = ev.get("timestamp", "")
+        if raw_ts:
+            try:
+                time_str = datetime.datetime.fromisoformat(raw_ts).strftime("%H:%M:%S")
+            except Exception:
+                time_str = ""
+        # Only the newest few animate in; re-animating the whole wire on every poll
+        # would be noise, and would restart mid-scroll.
+        fresh = " lb-tick-fresh" if idx < 3 else ""
+        stamp = f'<span class="lb-tick-time">{time_str}</span>' if time_str else ""
+        ticks.append(
+            f'<div class="lb-tick{fresh} {direction}">{badge}<b>{ev.get("model", "Model")}</b>'
+            f'<span>{ev.get("detail", "")}</span>{stamp}</div>'
+        )
+
+    # ~9s of travel per item keeps the pace readable whether the wire holds 3 or 14.
+    duration = max(24, len(ticks) * 9)
+    lane = "".join(ticks)
+
+    return f"""
+    <div class="lb-panel lb-ticker">
+        <div class="lb-ticker-head">
+            <span class="lb-live"><span class="lb-live-dot"></span>Gauntlet Wire</span>
+            <span class="lb-panel-meta">Hover to pause &middot; {len(ticks)} recent events</span>
+        </div>
+        <div class="lb-ticker-viewport">
+            <div class="lb-ticker-track" style="animation-duration: {duration}s;">
+                {lane}{lane}
+            </div>
+        </div>
+    </div>
+    """
+
+
+def _build_gauntlet_trials(state: Dict[str, Any], evaluator: TrueSkillEvaluator) -> str:
+    """Active contender trial cards, keyed on convergence rather than raw win rate."""
     contenders = state.get("contenders", [])
 
-    # Fallback if league state file hasn't been written yet: infer potential contenders from ratings
     if not contenders and evaluator and hasattr(evaluator, "ratings"):
         inferred = []
         for path, rec in evaluator.ratings.items():
@@ -985,247 +1016,220 @@ def build_league_wire_and_queue_html(evaluator: TrueSkillEvaluator, league_state
                 not rec.is_anchor
                 and path != "heuristic"
                 and "latest_model" not in path.lower()
-                and rec.matches_played < 16
+                and not evaluator.is_rank_eligible(rec)
                 and rec.mu >= 26.0
-                and rec.win_rate >= 50.0
+                and rec.points_rate >= 50.0
             ):
                 inferred.append({
-                    "name": rec.name,
-                    "path": path,
-                    "mu": round(rec.mu, 2),
-                    "sigma": round(rec.sigma, 2),
+                    "name": rec.name, "path": path,
+                    "mu": round(rec.mu, 2), "sigma": round(rec.sigma, 2),
                     "conservative_score": round(rec.conservative_rating, 2),
                     "matches_played": rec.matches_played,
-                    "target_matches": 16,
-                    "progress_pct": min(100.0, round((rec.matches_played / 16.0) * 100.0, 1)),
-                    "win_rate": round(rec.win_rate, 1),
+                    "target_matches": evaluator.min_ranked_matches,
+                    "progress_pct": min(100.0, round((rec.matches_played / max(1, evaluator.min_ranked_matches)) * 100.0, 1)),
+                    "win_rate": round(rec.win_rate, 1), "points_rate": rec.points_rate,
                     "record": f"{rec.wins}W-{rec.losses}L-{rec.draws}D",
-                    "consecutive_losses": 0,
-                    "max_consecutive_losses": 4,
-                    "status": "Contender in Trial"
+                    "consecutive_losses": 0, "max_consecutive_losses": 4,
+                    "status": "In Trial",
                 })
-        if inferred:
-            contenders = inferred[:3]
+        contenders = inferred[:3]
 
-    # --- PART 1: SPORTS TICKER (LEAGUE WIRE) ---
-    recent_events = list(reversed(events[-6:]))  # Newest first
-    if recent_events:
-        event_pills = []
-        for ev in recent_events:
-            ev_type = ev.get("type", "event").lower()
-            model = ev.get("model", "Model")
-            detail = ev.get("detail", "")
-            ts = ev.get("timestamp", "")
-            time_str = ""
-            if ts:
-                try:
-                    dt = datetime.datetime.fromisoformat(ts)
-                    time_str = dt.strftime("%H:%M:%S")
-                except Exception:
-                    time_str = ""
+    gate = getattr(evaluator, "eligibility_sigma", 1.5)
 
-            if ev_type == "promotion":
-                badge = '<span class="ticker-badge-promotion">🏆 PROMOTED</span>'
-            elif ev_type == "demotion":
-                badge = '<span class="ticker-badge-demotion">🔻 DEMOTED</span>'
-            elif ev_type == "coronation":
-                badge = '<span class="ticker-badge-coronation">👑 NEW KING</span>'
-            elif ev_type == "admission":
-                badge = '<span class="ticker-badge-admission">⚔️ IN QUEUE</span>'
-            elif ev_type == "preemption":
-                badge = '<span class="ticker-badge-preemption">🔄 PREEMPT</span>'
-            else:
-                badge = '<span class="ticker-badge-admission">⚡ UPDATE</span>'
-
-            pill = f"""
-            <div class="ticker-event-pill">
-                {badge}
-                <b style="color: #f1f5f9;">{model}</b>
-                <span style="color: #94a3b8; font-size: 0.95em;">{detail}</span>
-                {f'<span style="color: #64748b; font-size: 0.85em; font-family: monospace;">[{time_str}]</span>' if time_str else ''}
-            </div>
-            """
-            event_pills.append(pill)
-        events_html = "".join(event_pills)
+    if not contenders:
+        inner = (
+            '<div class="lb-empty">&#128564; <b>No active trials.</b> '
+            'A new checkpoint entering at &mu; &ge; 26.0 with Points &ge; 50% is admitted automatically.</div>'
+        )
+        count_str = '<span class="lb-panel-meta">Queue idle</span>'
     else:
-        events_html = """
-        <div style="color: #94a3b8; font-size: 0.88em; padding: 4px 6px;">
-            ⚡ <b>League Wire Standby:</b> Checkpoints qualify for Gauntlet trials at μ ≥ 26.0 and Win Rate ≥ 50%. Promotions, demotions, and King coronations will broadcast here live.
-        </div>
-        """
-
-    ticker_html = f"""
-    <div class="sports-ticker-container">
-        <div class="ticker-bar-header">
-            <div class="ticker-live-pill">
-                <span class="ticker-live-dot"></span>
-                <span>Live League Wire</span>
-            </div>
-            <span style="color: #64748b; font-size: 0.78em; text-transform: uppercase; letter-spacing: 0.5px;">Real-Time Promotion & Demotion Feed</span>
-        </div>
-        <div class="ticker-events-row">
-            {events_html}
-        </div>
-    </div>
-    """
-
-    # --- PART 2: PROMOTION QUEUE (GAUNTLET TRIALS BOARD) ---
-    if contenders:
         cards = []
         for c in contenders:
-            danger_class = " contender-status-danger" if "danger" in c.get("status", "").lower() or c.get("consecutive_losses", 0) >= 3 else ""
             consec = c.get("consecutive_losses", 0)
             max_consec = c.get("max_consecutive_losses", 4)
-            loss_color = "#4ade80" if consec == 0 else ("#facc15" if consec < 3 else "#fb7185")
-
-            card = f"""
-            <div class="contender-card">
-                <div class="contender-card-header">
-                    <span class="contender-name">⚡ {c['name']}</span>
-                    <span class="contender-status-tag{danger_class}">{c.get('status', 'In Trial')}</span>
+            danger = " lb-trial-danger" if consec >= max(1, max_consec - 1) else ""
+            streak_color = "#4ade80" if consec == 0 else ("#facc15" if consec < max_consec - 1 else "#fb7185")
+            sigma = c.get("sigma", 8.33)
+            pts = c.get("points_rate", c.get("win_rate", 0.0))
+            # Distance to the eligibility gate is the thing that actually decides whether
+            # this contender can ever be ranked, so it is the headline on the card.
+            sigma_color = "#4ade80" if sigma <= gate else ("#facc15" if sigma <= gate * 1.6 else "#fb7185")
+            pct = c.get("progress_pct", 0.0)
+            cards.append(f"""
+            <div class="lb-trial{danger}">
+                <div class="lb-trial-top">
+                    <span class="lb-trial-name">&#9889; {c.get('name', 'Contender')}</span>
+                    <span class="lb-chip lb-chip-provisional">{c.get('status', 'In Trial')}</span>
                 </div>
                 <div>
-                    <div style="display: flex; justify-content: space-between; font-size: 0.82em; color: #94a3b8; margin-bottom: 4px;">
-                        <span>Trial Progress</span>
-                        <b style="color: #38bdf8;">{c.get('matches_played', 0)} / {c.get('target_matches', 16)} Games ({c.get('progress_pct', 0.0)}%)</b>
+                    <div style="display:flex; justify-content:space-between; font-size:0.79em; color:#7c8ba1; margin-bottom:4px;">
+                        <span>Trial progress</span>
+                        <b style="color:#38bdf8;">{c.get('matches_played', 0)} / {c.get('target_matches', 16)} games</b>
                     </div>
-                    <div class="contender-prog-track">
-                        <div class="contender-prog-fill" style="width: {c.get('progress_pct', 0.0)}%;"></div>
-                    </div>
+                    <div class="lb-prog-track"><div class="lb-prog-fill" style="width: {pct}%;"></div></div>
                 </div>
-                <div class="contender-stats-grid">
-                    <div>Rating: <span class="contender-stat-val">μ={c.get('mu', 25.0):.2f}</span></div>
-                    <div>Uncertainty: <span class="contender-stat-val">σ=±{c.get('sigma', 8.33):.2f}</span></div>
-                    <div>Score (μ-3σ): <span class="contender-stat-val" style="color: #a855f7;">{c.get('conservative_score', 0.0):.2f}</span></div>
-                    <div>Win Rate: <span class="contender-stat-val" style="color: #4ade80;">{c.get('win_rate', 0.0):.1f}%</span></div>
+                <div class="lb-trial-grid">
+                    <div>Rating <b>&mu;={c.get('mu', 25.0):.2f}</b></div>
+                    <div>Uncertainty <b style="color:{sigma_color};">&sigma;=&plusmn;{sigma:.2f}</b></div>
+                    <div>Points <b style="color:#4ade80;">{pts:.1f}%</b></div>
+                    <div>Gate <b class="lb-muted">&sigma; &le; {gate:.1f}</b></div>
                 </div>
-                <div style="display: flex; justify-content: space-between; align-items: center; font-size: 0.82em; border-top: 1px solid rgba(51, 65, 85, 0.4); padding-top: 6px;">
-                    <span style="color: #cbd5e1;">Record: <b style="color: #f1f5f9;">{c.get('record', '0W-0L-0D')}</b></span>
-                    <span style="color: #94a3b8;">Loss Streak: <b style="color: {loss_color};">{consec} / {max_consec}</b></span>
+                <div class="lb-trial-foot">
+                    <span>Record <b style="color:#cbd5e1;">{c.get('record', '0W-0L-0D')}</b></span>
+                    <span>Loss streak <b style="color:{streak_color};">{consec} / {max_consec}</b></span>
                 </div>
             </div>
-            """
-            cards.append(card)
-        queue_grid = f'<div class="queue-cards-grid">{"".join(cards)}</div>'
-        active_count_str = f'<span style="color: #38bdf8; font-weight: 700;">{len(contenders)} Active Contenders</span>'
-    else:
-        queue_grid = """
-        <div style="background: rgba(10, 15, 30, 0.5); border: 1px dashed #334155; border-radius: 8px; padding: 14px 20px; text-align: center; color: #94a3b8; font-size: 0.9em;">
-            <span>💤 <b>Gauntlet Promotion Queue Clear</b> — All qualified checkpoints evaluated. Any new checkpoint scoring μ ≥ 26.0 with Win Rate ≥ 50% will be admitted automatically.</span>
-        </div>
-        """
-        active_count_str = '<span style="color: #64748b;">Queue Idle</span>'
+            """)
+        inner = f'<div class="lb-trials">{"".join(cards)}</div>'
+        count_str = f'<span class="lb-panel-meta"><b>{len(contenders)}</b> in trial</span>'
 
-    queue_html = f"""
-    <div class="promotion-queue-container">
-        <div class="promotion-queue-header">
-            <span class="queue-title">⚔️ Gauntlet Promotion Queue & Elimination Trials</span>
-            <div style="font-size: 0.84em; color: #94a3b8;">
-                {active_count_str} (Admission: μ ≥ 26.0, WR ≥ 50% | Target: 16 Games)
-            </div>
+    return f"""
+    <div class="lb-panel">
+        <div class="lb-panel-head">
+            <span class="lb-panel-title">&#9876;&#65039; Gauntlet Trials</span>
+            {count_str}
         </div>
-        {queue_grid}
+        {inner}
     </div>
     """
 
-    # --- PART 3: ACTIVE ELITE SPARRING POOL ---
-    elite_pool_items = state.get("elite_pool_details", [])
-    if not elite_pool_items:
-        elite_paths = state.get("elite_pool", [])
-        if not elite_paths and evaluator and hasattr(evaluator, "ratings"):
-            valid_m = []
-            for k, r in evaluator.ratings.items():
-                if "latest_model" in k.lower():
+
+def _build_elite_standings(state: Dict[str, Any], evaluator: TrueSkillEvaluator) -> str:
+    """
+    The Elite Pool as a standings table rather than a card grid.
+
+    Rows are dense and aligned so ratings can be compared down a column, which is the
+    point of a standings board. The bar is scaled across the visible mu spread so small
+    real differences stay visible instead of collapsing against a 0-50 axis.
+    """
+    items = state.get("elite_pool_details", [])
+    king_path = str(state.get("king_of_the_hill", "")).replace("\\", "/").lower()
+
+    if not items:
+        paths = state.get("elite_pool", [])
+        if not paths and evaluator and hasattr(evaluator, "ratings"):
+            valid = []
+            for key, rec in evaluator.ratings.items():
+                if "latest_model" in key.lower():
                     continue
-                if r.is_anchor or k == "heuristic" or os.path.exists(r.path):
-                    valid_m.append((k, r))
-            valid_m.sort(key=lambda x: (x[1].conservative_rating, x[1].win_rate, x[1].mu), reverse=True)
-            elite_paths = [x[0] for x in valid_m[:10]]
+                if rec.is_anchor or key == "heuristic" or os.path.exists(rec.path):
+                    valid.append((key, rec))
+            valid.sort(key=lambda x: (evaluator.ranking_key(x[1]), x[1].matches_played), reverse=True)
+            paths = [x[0] for x in valid[:10]]
+        for rank, path in enumerate(paths, start=1):
+            rec = evaluator.ratings.get(path) if evaluator and hasattr(evaluator, "ratings") else None
+            if not rec:
+                continue
+            items.append({
+                "rank": rank, "name": get_model_display_name(path), "path": path,
+                "mu": round(rec.mu, 2), "sigma": round(rec.sigma, 2),
+                "conservative_score": round(rec.conservative_rating, 2),
+                "win_rate": round(rec.win_rate, 1), "points_rate": rec.points_rate,
+                "record": f"{rec.wins}W-{rec.losses}L-{rec.draws}D",
+                "matches_played": rec.matches_played,
+                "is_anchor": rec.is_anchor,
+                "is_king": str(path).replace("\\", "/").lower() == king_path,
+            })
 
-        for rank, p in enumerate(elite_paths, start=1):
-            r = evaluator.ratings.get(p) if evaluator and hasattr(evaluator, "ratings") else None
-            is_k = (p == state.get("king_of_the_hill"))
-            name = get_model_display_name(p)
-            if r:
-                elite_pool_items.append({
-                    "rank": rank,
-                    "name": name,
-                    "mu": round(r.mu, 2),
-                    "sigma": round(r.sigma, 2),
-                    "conservative_score": round(r.conservative_rating, 2),
-                    "win_rate": round(r.win_rate, 1),
-                    "record": f"{r.wins}W-{r.losses}L-{r.draws}D",
-                    "matches_played": r.matches_played,
-                    "is_anchor": r.is_anchor,
-                    "is_king": is_k
-                })
-            else:
-                elite_pool_items.append({
-                    "rank": rank,
-                    "name": name,
-                    "mu": 25.0,
-                    "sigma": 8.33,
-                    "conservative_score": 0.0,
-                    "win_rate": 0.0,
-                    "record": "0W-0L-0D",
-                    "matches_played": 0,
-                    "is_anchor": True,
-                    "is_king": is_k
-                })
-
-    if elite_pool_items:
-        elite_cards = []
-        for m in elite_pool_items:
-            is_king = m.get("is_king", False)
-            is_anchor = m.get("is_anchor", False)
-            border_color = "#eab308" if is_king else ("#38bdf8" if not is_anchor else "#64748b")
-            tag_text = "👑 Reigning King" if is_king else ("⚓ Baseline Anchor" if is_anchor else "🛡️ Elite Sparrer")
-            tag_class = "elite-tag-king" if is_king else ("elite-tag-anchor" if is_anchor else "elite-tag-sparrer")
-            rank_num = m.get("rank", 1)
-
-            card = f"""
-            <div class="elite-card" style="border-color: {border_color};">
-                <div class="elite-card-header">
-                    <div style="display: flex; align-items: center; gap: 8px;">
-                        <span class="elite-rank-pill">#{rank_num}</span>
-                        <span class="elite-model-name">{m['name']}</span>
-                    </div>
-                    <span class="elite-tag {tag_class}">{tag_text}</span>
-                </div>
-                <div class="elite-stats-grid">
-                    <div>Score (μ-3σ): <b style="color: #a855f7;">{m.get('conservative_score', 0.0):.2f}</b></div>
-                    <div>Rating: <span class="contender-stat-val">μ={m.get('mu', 25.0):.2f}</span></div>
-                    <div>Win Rate: <b style="color: #4ade80;">{m.get('win_rate', 0.0):.1f}%</b></div>
-                    <div>Uncertainty: <span class="contender-stat-val">σ=±{m.get('sigma', 8.33):.2f}</span></div>
-                </div>
-                <div style="display: flex; justify-content: space-between; align-items: center; font-size: 0.8em; border-top: 1px solid rgba(51, 65, 85, 0.4); padding-top: 5px; color: #94a3b8;">
-                    <span>Record: <b style="color: #cbd5e1;">{m.get('record', '0W-0L-0D')}</b></span>
-                    <span>Matches: <b style="color: #f1f5f9;">{m.get('matches_played', 0)}</b></span>
-                </div>
-            </div>
-            """
-            elite_cards.append(card)
-        elite_grid = f'<div class="elite-cards-grid">{"".join(elite_cards)}</div>'
-    else:
-        elite_grid = """
-        <div style="background: rgba(10, 15, 30, 0.5); border: 1px dashed #334155; border-radius: 8px; padding: 14px 20px; text-align: center; color: #94a3b8; font-size: 0.9em;">
-            <span>🛡️ <b>Elite Pool Initializing:</b> Models will populate as checkpoints are graded and saved.</span>
+    if not items:
+        return """
+        <div class="lb-panel">
+            <div class="lb-panel-head"><span class="lb-panel-title">&#128737;&#65039; Elite Pool</span></div>
+            <div class="lb-empty">&#128737;&#65039; <b>Pool initialising.</b> Models appear here as checkpoints are graded.</div>
         </div>
         """
 
-    elite_html = f"""
-    <div class="elite-pool-container">
-        <div class="elite-pool-header">
-            <span class="queue-title">🛡️ Active Elite Sparring Pool (Stratified Self-Play Roster)</span>
-            <div style="font-size: 0.84em; color: #94a3b8;">
-                <b style="color: #38bdf8;">{len(elite_pool_items)} Active Bots</b> (25% King Opponents | 25% Elite Pool Opponents | 50% Self-Play)
-            </div>
+    mus = [float(m.get("mu", 25.0)) for m in items]
+    lo, hi = min(mus), max(mus)
+    span = max(hi - lo, 1.0)  # never divide by zero when the pool has converged tightly
+
+    head = (
+        '<div class="lb-row lb-row-head">'
+        '<span>#</span><span>Model</span><span>Confidence</span><span>Rating</span>'
+        '<span>&mu;</span><span class="lb-hide-sm">&sigma;</span><span>Pts</span>'
+        '<span class="lb-hide-sm">Record</span><span class="lb-hide-sm">GP</span></div>'
+    )
+
+    rows = []
+    for m in items:
+        rec = evaluator.ratings.get(m.get("path", "")) if evaluator else None
+        is_king = bool(m.get("is_king"))
+        is_anchor = bool(m.get("is_anchor"))
+        mu = float(m.get("mu", 25.0))
+        sigma = float(m.get("sigma", 8.33))
+
+        if is_anchor:
+            chip = '<span class="lb-chip lb-chip-anchor">Anchor</span>'
+            ranked = True
+        elif rec is not None and evaluator.is_rank_eligible(rec):
+            chip = '<span class="lb-chip lb-chip-ranked">Ranked</span>'
+            ranked = True
+        elif rec is None and sigma <= getattr(evaluator, "eligibility_sigma", 1.5):
+            chip = '<span class="lb-chip lb-chip-ranked">Ranked</span>'
+            ranked = True
+        else:
+            chip = '<span class="lb-chip lb-chip-provisional">Provisional</span>'
+            ranked = False
+
+        if is_king:
+            chip = '<span class="lb-chip lb-chip-king">&#128081; King</span>'
+
+        pct = 8.0 + 92.0 * ((mu - lo) / span)
+        bar_class = "is-king" if is_king else ("" if ranked else "is-provisional")
+        rank_class = " lb-rank-top" if m.get("rank", 99) <= 3 else ""
+        row_class = " lb-row-king" if is_king else ""
+        pts = float(m.get("points_rate", m.get("win_rate", 0.0)))
+        gp = int(m.get("matches_played", 0) or 0)
+        # An anchor's mu is a declaration, not something it earned on the field, and a
+        # reference with no games would otherwise read as a bright red 0.0%.
+        if is_anchor or gp == 0:
+            pts_cell = '<span class="lb-muted">&mdash;</span>'
+            record_cell = '<span class="lb-muted">reference</span>' if is_anchor else '<span class="lb-muted">&mdash;</span>'
+        else:
+            pts_color = "#4ade80" if pts >= 50 else ("#facc15" if pts >= 40 else "#fb7185")
+            pts_cell = f'<span class="lb-num" style="color: {pts_color};">{pts:.1f}%</span>'
+            record_cell = f'<span class="lb-record">{m.get("record", "0W-0L-0D")}</span>'
+
+        rows.append(f"""
+        <div class="lb-row{row_class}">
+            <span class="lb-rank{rank_class}">{m.get('rank', '-')}</span>
+            <span class="lb-name">{m.get('name', 'Model')}</span>
+            <span>{chip}</span>
+            <span class="lb-bar-track" title="&mu;={mu:.2f} &plusmn;{sigma:.2f}">
+                <span class="lb-bar-fill {bar_class}" style="width: {pct:.1f}%;"></span>
+            </span>
+            <span class="lb-num">{mu:.2f}</span>
+            <span class="lb-muted lb-hide-sm">&plusmn;{sigma:.2f}</span>
+            {pts_cell}
+            <span class="lb-hide-sm">{record_cell}</span>
+            <span class="lb-muted lb-hide-sm">{gp if gp else '&mdash;'}</span>
         </div>
-        {elite_grid}
+        """)
+
+    return f"""
+    <div class="lb-panel">
+        <div class="lb-panel-head">
+            <span class="lb-panel-title">&#128737;&#65039; Elite Pool &middot; Sparring Roster</span>
+            <span class="lb-panel-meta">
+                <b>{len(items)}</b> active &middot; ranked by &mu; behind a &sigma; &le; {getattr(evaluator, 'eligibility_sigma', 1.5):.1f} gate
+                &middot; 50% self-play / 25% king / 25% pool
+            </span>
+        </div>
+        <div class="lb-standings">{head}{"".join(rows)}</div>
     </div>
     """
 
-    return ticker_html + queue_html + elite_html
+
+def build_league_wire_and_queue_html(evaluator: TrueSkillEvaluator, league_state: Optional[Dict[str, Any]] = None) -> str:
+    """Renders the full league board: Gauntlet wire, active trials, Elite Pool standings."""
+    state = league_state if league_state is not None else load_league_state_safely()
+    return (
+        '<div class="league-board">'
+        + _build_gauntlet_ticker(state)
+        + _build_gauntlet_trials(state, evaluator)
+        + _build_elite_standings(state, evaluator)
+        + '</div>'
+    )
 
 
 def create_ui():
@@ -1454,7 +1458,7 @@ def create_ui():
                     cockpit_league_ticker = gr.HTML(build_league_wire_and_queue_html(ts_evaluator))
                     cockpit_lb_table = gr.Dataframe(
                         value=get_cockpit_leaderboard_df(ts_evaluator),
-                        label="Top Performing Checkpoints & Baselines (Ranked by Conservative Score: μ - 3σ)",
+                        label="Full Standings — ranked by μ among rank-eligible models (σ ≤ 1.5), provisional models below",
                         interactive=False
                     )
 
@@ -1756,15 +1760,29 @@ def create_ui():
                                     label="Game Mode",
                                     info="Match format (1v1, 2v2, 3v3)."
                                 )
+                            gr.Markdown("#### 💾 Checkpointing & Retention")
                             with gr.Row():
+                                autosave_interval_input = gr.Number(
+                                    value=log_cfg.get("autosave_interval", 20), precision=0,
+                                    label="Autosave Interval (Iters)",
+                                    info="Rewrites latest_model.pt for crash recovery. Creates no new files and never enters the league."
+                                )
                                 checkpoint_interval_input = gr.Number(
-                                    value=log_cfg.get("checkpoint_interval", 20), precision=0,
-                                    label="Checkpoint Interval (Iters)"
+                                    value=log_cfg.get("checkpoint_interval", 200), precision=0,
+                                    label="League Checkpoint Interval (Iters)",
+                                    info="Mints a numbered checkpoint that gets TrueSkill-graded. Keep this coarse: checkpoints saved a few iterations apart are near-identical and evaluation cannot separate them."
                                 )
-                                max_checkpoints_input = gr.Number(
-                                    value=log_cfg.get("max_checkpoints_to_keep", 5), precision=0,
-                                    label="Max Checkpoints to Keep (Pruning)"
+                                archive_stride_input = gr.Number(
+                                    value=log_cfg.get("archive_stride", 5000), precision=0,
+                                    label="Archive Stride (Iters)",
+                                    info="One checkpoint per stride is kept permanently as a historical spine. Set 0 to disable."
                                 )
+                            gr.Markdown(
+                                "*Retention is the union of three tiers, so there is no rolling cap to tune: "
+                                "**provisional** (newest un-converged checkpoints, protected until the evaluator reaches them), "
+                                "**ranked** (King, Elite Pool, Hall of Fame, active contenders), and "
+                                "**archive** (the permanent spine above). Everything else is pruned.*"
+                            )
 
                             save_cfg_btn = gr.Button("💾 Save Configuration to YAML", variant="primary")
                             cfg_save_msg = gr.Markdown("")
@@ -2735,7 +2753,7 @@ def create_ui():
         # -------------------------------------------------------------
         # TAB 3 CONFIG & PRETRAINER HANDLERS
         # -------------------------------------------------------------
-        def on_save_yaml(lr, ent, clip, gamma, gae, bs, mbs, n_ep, n_env, t_skip, m_steps, g_mode, ckpt_int, max_ckpts):
+        def on_save_yaml(lr, ent, clip, gamma, gae, bs, mbs, n_ep, n_env, t_skip, m_steps, g_mode, autosave_int, ckpt_int, archive_str):
             base_cfg = load_yaml_config("config/default_config.yaml")
             base_cfg["hyperparameters"] = {
                 "learning_rate": float(lr),
@@ -2758,8 +2776,9 @@ def create_ui():
             base_cfg["logging"]["tensorboard"] = True
             base_cfg["logging"]["save_dir"] = "checkpoints"
             base_cfg["logging"]["log_dir"] = "logs"
-            base_cfg["logging"]["checkpoint_interval"] = int(ckpt_int)
-            base_cfg["logging"]["max_checkpoints_to_keep"] = int(max_ckpts)
+            base_cfg["logging"]["autosave_interval"] = max(1, int(autosave_int))
+            base_cfg["logging"]["checkpoint_interval"] = max(1, int(ckpt_int))
+            base_cfg["logging"]["archive_stride"] = max(0, int(archive_str))
 
             save_yaml_config(base_cfg)
             return f"✅ **Saved configuration to config/default_config.yaml**"
@@ -2770,7 +2789,7 @@ def create_ui():
                 lr_input, ent_coef_slider, clip_range_slider, gamma_slider,
                 gae_lambda_slider, batch_size_input, mini_batch_input, n_epochs_input,
                 num_envs_slider, tick_skip_slider, max_steps_input, game_mode_dropdown,
-                checkpoint_interval_input, max_checkpoints_input
+                autosave_interval_input, checkpoint_interval_input, archive_stride_input
             ],
             outputs=[cfg_save_msg]
         )

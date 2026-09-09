@@ -107,15 +107,58 @@ from env.baseline_agent import (
 
 DEFAULT_LEADERBOARD_PATH = "logs/trueskill_leaderboard.json"
 
+# Ranking gate. Sigma decides whether a rating may be ranked at all; mu decides where.
+DEFAULT_ELIGIBILITY_SIGMA = 1.5
+DEFAULT_MIN_RANKED_MATCHES = 16
+
 # TrueSkill Global Configuration
-# Rocket League 1v1 typically has low draw rates when overtime is enabled
+# draw_probability is calibrated to the rate actually observed in headless evaluation
+# (~24% of games end level even with golden-goal overtime, because two similar policies
+# frequently stall). Declaring 0.05 here made every draw a large surprise to the model,
+# which dragged mu toward the opponent and shrank sigma faster than the evidence warranted
+# -- the mechanism behind the whole veteran population collapsing into a narrow mu band.
+DEFAULT_DRAW_PROBABILITY = 0.24
+
 ts_env = trueskill.TrueSkill(
     mu=25.0,
     sigma=25.0 / 3.0,     # ~8.333
     beta=25.0 / 6.0,      # ~4.167
     tau=25.0 / 300.0,     # ~0.0833
-    draw_probability=0.05
+    draw_probability=DEFAULT_DRAW_PROBABILITY
 )
+
+# Calibrated fixed reference ladder.
+#
+# Anchors never learn, so their mu defines the scale that every checkpoint rating is
+# solved against. Pinning them all at 25.0 asserted that the BC baseline (46W-4536L) and
+# Necto (2865W-611L) are equally strong, which is false by a wide margin and made ratings
+# reached through the two paths mutually inconsistent.
+#
+# Anchor sigma is deliberately small. Information transfer in TrueSkill scales with
+# sigma_self^2 / (2*beta^2 + sigma_self^2 + sigma_opp^2); at the old sigma of 8.333 the
+# denominator was dominated by the anchor's own uncertainty, so games against a *fixed,
+# known* reference barely moved the contender's sigma. Dropping it to 0.5 cuts the games a
+# debut needs to reach the sigma<=1.5 eligibility gate from ~73 to ~23, at zero extra
+# compute. That ratio is the difference between a checkpoint that can converge inside its
+# gauntlet trial and one that never can.
+ANCHOR_CALIBRATION: Dict[str, float] = {
+    "pretrained_baseline": 12.0,   # BC init; weakest reference, kept only as a tripwire
+    "heuristic": 15.0,             # scripted ball-chaser
+    "necto": 30.0,
+    "nexto": 38.0,
+}
+ANCHOR_SIGMA = 0.5
+
+
+def get_anchor_calibration(model_spec: str) -> Optional[Tuple[float, float]]:
+    """Returns the (mu, sigma) this anchor should be pinned at, or None if not an anchor."""
+    key = os.path.basename(str(model_spec).strip().strip('"').strip("'")).lower()
+    if str(model_spec).strip().lower() in ("heuristic", "baseline", "baselinechaser"):
+        key = "heuristic"
+    for name, mu in ANCHOR_CALIBRATION.items():
+        if name in key:
+            return mu, ANCHOR_SIGMA
+    return None
 
 
 @dataclass
@@ -141,6 +184,18 @@ class ModelRating:
         self.conservative_rating = round(self.mu - 3.0 * self.sigma, 2)
         self.goal_diff = self.goals_for - self.goals_against
         self.win_rate = round((self.wins / max(1, self.matches_played)) * 100.0, 1)
+
+    @property
+    def points_rate(self) -> float:
+        """
+        Percentage of available points taken, scoring a draw as half a win.
+
+        Raw win_rate is the wrong gate for this environment: draws are ~24% of games, so
+        an undefeated 1W-0L-3D contender scores 25% on win_rate and fails a 45-50% floor
+        despite never having lost. Points rate is the standard fix and is what promotion,
+        demotion and pool tiebreaks should use.
+        """
+        return round(((self.wins + 0.5 * self.draws) / max(1, self.matches_played)) * 100.0, 1)
 
     def to_trueskill_rating(self) -> trueskill.Rating:
         return ts_env.create_rating(mu=self.mu, sigma=self.sigma)
@@ -251,6 +306,21 @@ class TrueSkillEvaluator:
     """
     Manages TrueSkill ratings, tournament matchmaking, persistence, and reporting.
     """
+    # Ranking gate, mirrored from the league config so the standings table and the
+    # LeagueManager's King/Elite Pool selection cannot disagree about who outranks whom.
+    eligibility_sigma: float = DEFAULT_ELIGIBILITY_SIGMA
+    min_ranked_matches: int = DEFAULT_MIN_RANKED_MATCHES
+
+    def is_rank_eligible(self, rec: ModelRating) -> bool:
+        """Whether a rating has converged enough to be ranked on raw mu against peers."""
+        return rec.sigma <= self.eligibility_sigma and rec.matches_played >= self.min_ranked_matches
+
+    def ranking_key(self, rec: ModelRating) -> Tuple[int, float, float]:
+        """Descending sort key: eligible models by mu, provisional ones by mu - 3*sigma."""
+        if self.is_rank_eligible(rec):
+            return (1, rec.mu, rec.points_rate)
+        return (0, rec.conservative_rating, rec.points_rate)
+
     def __init__(self, leaderboard_path: str = DEFAULT_LEADERBOARD_PATH):
         self.leaderboard_path = leaderboard_path
         self.ratings: Dict[str, ModelRating] = {}
@@ -267,17 +337,40 @@ class TrueSkillEvaluator:
             if k == norm_key or r.name == name or os.path.basename(k) == os.path.basename(norm_key):
                 return r
 
+        calib = get_anchor_calibration(norm_key) if is_anchor else None
         record = ModelRating(
             name=name,
             path=norm_key,
-            mu=25.0,
-            sigma=25.0 / 3.0,
+            mu=calib[0] if calib else 25.0,
+            sigma=calib[1] if calib else 25.0 / 3.0,
             is_anchor=is_anchor,
             last_updated=datetime.datetime.now().isoformat()
         )
         record.update_conservative()
         self.ratings[norm_key] = record
         return record
+
+    def apply_anchor_calibration(self) -> int:
+        """
+        Re-pins every anchor record to its calibrated (mu, sigma) from ANCHOR_CALIBRATION.
+
+        Anchors are fixed reference points, so their rating is a declaration rather than
+        something learned. Re-applying on every load keeps the scale stable even if an
+        older leaderboard on disk carries the uncalibrated values, and makes the ladder a
+        single source of truth that editing the table is enough to change.
+        """
+        changed = 0
+        for rec in self.ratings.values():
+            if not rec.is_anchor:
+                continue
+            calib = get_anchor_calibration(rec.path) or get_anchor_calibration(rec.name)
+            if not calib:
+                continue
+            if abs(rec.mu - calib[0]) > 1e-6 or abs(rec.sigma - calib[1]) > 1e-6:
+                rec.mu, rec.sigma = calib
+                rec.update_conservative()
+                changed += 1
+        return changed
 
     def load_leaderboard(self, path: Optional[str] = None):
         """Loads persistent ratings and match history from JSON."""
@@ -294,6 +387,7 @@ class TrueSkillEvaluator:
                 record.update_conservative()
                 self.ratings[k] = record
             self.match_history = data.get("history", [])
+            self.apply_anchor_calibration()
         except Exception as e:
             print(f"[TrueSkill] Warning: Could not load leaderboard from {target_path}: {e}")
 
@@ -477,32 +571,34 @@ class TrueSkillEvaluator:
         plus_minus = "+/-" if ascii_safe else "±"
 
         cols = [
-            "Rank", "Model", mu_col, sigma_col, "Conservative Score",
-            "Win Rate", "Record (W-L-D)", "Goal Diff", "Matches"
+            "Rank", "Model", "Confidence", mu_col, sigma_col, "Conservative Score",
+            "Points", "Win Rate", "Record (W-L-D)", "Goal Diff", "Matches"
         ]
 
         if not self.ratings:
             return pd.DataFrame(columns=cols)
 
-        # Sort by conservative rating (mu - 3*sigma) descending, then by win rate
+        # Rank-eligible models first, ordered by raw mu; provisional models after,
+        # ordered by their conservative lower bound. Sorting the table by mu - 3*sigma
+        # would contradict the LeagueManager, which no longer penalises a converged
+        # rating for the sample size that earned it.
         # Ephemeral moving files like latest_model.pt are excluded from ranked TrueSkill standings
         records = [
             r for r in self.ratings.values()
             if "latest_model" not in r.path.lower() and "latest_model" not in r.name.lower()
         ]
-        records.sort(
-            key=lambda r: (r.conservative_rating, r.win_rate, r.mu),
-            reverse=True
-        )
+        records.sort(key=lambda r: (self.ranking_key(r), r.matches_played), reverse=True)
 
         rows = []
         for rank, r in enumerate(records, start=1):
             rows.append({
                 "Rank": f"#{rank}",
                 "Model": r.name,
+                "Confidence": "Ranked" if self.is_rank_eligible(r) else "Provisional",
                 mu_col: f"{r.mu:.2f}",
                 sigma_col: f"{plus_minus}{r.sigma:.2f}",
                 "Conservative Score": f"{r.conservative_rating:.2f}",
+                "Points": f"{r.points_rate:.1f}%",
                 "Win Rate": f"{r.win_rate:.1f}%",
                 "Record (W-L-D)": f"{r.wins}-{r.losses}-{r.draws}",
                 "Goal Diff": f"{r.goal_diff:+d}",
