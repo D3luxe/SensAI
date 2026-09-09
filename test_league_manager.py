@@ -149,32 +149,61 @@ class TestLeagueManager(unittest.TestCase):
         self.assertIn(os.path.abspath(ckpt_a), protected)
 
     def test_contender_queue_preemption(self):
-        """Verify preemption replaces lowest-mu contender when queue is full."""
+        """Preemption evicts the most-converged contender, never the least-measured one."""
         self.league.max_active_contenders = 2
+        self.league.eligibility_sigma = 1.5
+        self.league.target_eval_matches = 16
+        self.league.contender_queue.clear()
+
+        # Two sitting contenders: one converged (rank-eligible), one still being measured.
+        settled = os.path.join(self.test_dir, "checkpoint_iter_100.pt")
+        unsettled = os.path.join(self.test_dir, "checkpoint_iter_120.pt")
+        newcomer = os.path.join(self.test_dir, "checkpoint_iter_140.pt")
+        specs = [(settled, 27.0, 0.9, 40), (unsettled, 26.5, 2.6, 8), (newcomer, 32.0, 3.5, 4)]
+        paths = []
+        for path, mu, sigma, matches in specs:
+            shutil.copyfile(self.dummy_ckpt_path, path)
+            rec = self.evaluator.get_or_create_rating(path)
+            rec.mu, rec.sigma, rec.matches_played = mu, sigma, matches
+            rec.wins, rec.draws = matches // 2, 0
+            rec.update_conservative()
+            paths.append(self.league._normalize_path(path))
+        norm_settled, norm_unsettled, norm_new = paths
+
+        self.league._admit_contender(norm_settled)
+        self.league._admit_contender(norm_unsettled)
+        self.assertEqual(len(self.league.contender_queue), 2)
+
+        # The newcomer displaces the converged contender, not the half-measured one.
+        # Under the old mu-based rule it would have evicted the *lowest* mu, which is the
+        # contender with the most still to learn.
+        self.league._admit_contender(norm_new)
+        self.assertEqual(len(self.league.contender_queue), 2)
+        self.assertNotIn(norm_settled, self.league.contender_queue)
+        self.assertIn(norm_unsettled, self.league.contender_queue)
+        self.assertIn(norm_new, self.league.contender_queue)
+
+    def test_preemption_refuses_when_queue_is_all_unconverged(self):
+        """A queue of un-measured contenders is left alone; the newcomer waits its turn."""
+        self.league.max_active_contenders = 2
+        self.league.eligibility_sigma = 1.5
         self.league.contender_queue.clear()
 
         paths = []
-        for i, mu in enumerate([26.5, 27.0, 28.5]):
-            p = os.path.join(self.test_dir, f"checkpoint_iter_{100 + i*20}.pt")
-            shutil.copyfile(self.dummy_ckpt_path, p)
-            r = self.evaluator.get_or_create_rating(p)
-            r.mu = mu
-            r.win_rate = 55.0
-            r.update_conservative()
-            paths.append(self.league._normalize_path(p))
+        for i, (mu, sigma, matches) in enumerate([(26.0, 2.8, 8), (26.5, 3.0, 4), (33.0, 4.0, 4)]):
+            path = os.path.join(self.test_dir, f"checkpoint_iter_{700 + i * 20}.pt")
+            shutil.copyfile(self.dummy_ckpt_path, path)
+            rec = self.evaluator.get_or_create_rating(path)
+            rec.mu, rec.sigma, rec.matches_played = mu, sigma, matches
+            rec.update_conservative()
+            paths.append(self.league._normalize_path(path))
 
         self.league._admit_contender(paths[0])
         self.league._admit_contender(paths[1])
-        self.assertEqual(len(self.league.contender_queue), 2)
-        self.assertIn(paths[0], self.league.contender_queue)
-        self.assertIn(paths[1], self.league.contender_queue)
-
-        # Higher mu (28.5) should preempt the lowest (26.5)
         self.league._admit_contender(paths[2])
+
         self.assertEqual(len(self.league.contender_queue), 2)
-        self.assertNotIn(paths[0], self.league.contender_queue)
-        self.assertIn(paths[1], self.league.contender_queue)
-        self.assertIn(paths[2], self.league.contender_queue)
+        self.assertNotIn(paths[2], self.league.contender_queue)
 
     def test_gauntlet_graduation_and_demotion(self):
         """Verify graduation when matches reach target and demotion after grace period."""
@@ -245,23 +274,23 @@ class TestLeagueManager(unittest.TestCase):
         self.assertGreaterEqual(len(new_league.event_history), 1)
 
     def test_ui_league_wire_and_queue_rendering(self):
-        """Verify UI functions render valid HTML with both populated and empty states."""
-        from ui.app import build_league_wire_and_queue_html, load_league_state_safely
+        """The league board renders in both the empty and the populated state."""
+        from ui.app import build_league_wire_and_queue_html
 
-        # Render with empty evaluator
         empty_html = build_league_wire_and_queue_html(self.evaluator, league_state={})
-        self.assertIn("sports-ticker-container", empty_html)
-        self.assertIn("Live League Wire", empty_html)
-        self.assertIn("promotion-queue-container", empty_html)
+        self.assertIn("league-board", empty_html)
+        self.assertIn("Gauntlet Wire", empty_html)
+        self.assertIn("Gauntlet Trials", empty_html)
+        self.assertIn("Elite Pool", empty_html)
 
-        # Render with active state
         mock_state = {
+            "king_of_the_hill": "checkpoints/checkpoint_iter_101940.pt",
             "event_history": [
                 {
                     "timestamp": "2026-09-07T22:30:00",
                     "type": "promotion",
                     "model": "Iteration 100020",
-                    "detail": "Graduated Gauntlet with Score 25.99"
+                    "detail": "Graduated Gauntlet to Elite Pool"
                 },
                 {
                     "timestamp": "2026-09-07T22:35:00",
@@ -280,19 +309,43 @@ class TestLeagueManager(unittest.TestCase):
                     "matches_played": 8,
                     "target_matches": 16,
                     "progress_pct": 50.0,
-                    "win_rate": 62.5,
-                    "record": "10W-4L-2D",
+                    "win_rate": 37.5,
+                    "points_rate": 62.5,
+                    "record": "3W-3L-2D",
                     "consecutive_losses": 0,
                     "max_consecutive_losses": 4,
-                    "status": "In Elimination Window"
+                    "status": "In Trial"
                 }
-            ]
+            ],
+            "elite_pool_details": [
+                {
+                    "rank": 1, "name": "Iteration 101940",
+                    "path": "checkpoints/checkpoint_iter_101940.pt",
+                    "mu": 30.10, "sigma": 0.92, "conservative_score": 27.34,
+                    "win_rate": 41.0, "points_rate": 55.0, "record": "41W-30L-29D",
+                    "matches_played": 100, "is_anchor": False, "is_king": True
+                },
+                {
+                    "rank": 2, "name": "Necto (EARL TorchScript)",
+                    "path": "checkpoints/necto-model.pt",
+                    "mu": 30.00, "sigma": 0.50, "conservative_score": 28.50,
+                    "win_rate": 0.0, "points_rate": 0.0, "record": "0W-0L-0D",
+                    "matches_played": 0, "is_anchor": True, "is_king": False
+                },
+            ],
         }
-        populated_html = build_league_wire_and_queue_html(self.evaluator, league_state=mock_state)
-        self.assertIn("PROMOTED", populated_html)
-        self.assertIn("DEMOTED", populated_html)
-        self.assertIn("Iteration 101940", populated_html)
-        self.assertIn("50.0%", populated_html)
+        populated = build_league_wire_and_queue_html(self.evaluator, league_state=mock_state)
+        self.assertIn("Promoted", populated)
+        self.assertIn("Demoted", populated)
+        self.assertIn("Iteration 101940", populated)
+        # Points rate, not raw win rate, is what the trial card reports.
+        self.assertIn("62.5%", populated)
+        self.assertNotIn("37.5%", populated)
+        # A demotion animates downward, a promotion upward.
+        self.assertIn("lb-tick-down", populated)
+        self.assertIn("lb-tick-up", populated)
+        # An anchor shows no fabricated points figure.
+        self.assertIn("reference", populated)
 
     def test_title_bout_extended_trial(self):
         """Verify high-mu contenders are granted extended trial up to max_contender_matches."""
@@ -306,6 +359,11 @@ class TestLeagueManager(unittest.TestCase):
         r.wins = 25  # Ample win padding so headless eval test matches don't breach floor
         r.losses = 2
         r.update_conservative()
+
+        # This test asserts the extended-trial *target*, not a match outcome. The trial
+        # plays four real simulated games, so a chance losing streak would otherwise trip
+        # the knockout rule and demote the contender, making the assertion a coin flip.
+        self.league.max_consecutive_losses = 99
 
         self.league.contender_queue = [norm_title]
         details = self.league.get_contender_queue_details()
@@ -349,8 +407,16 @@ class TestLeagueManager(unittest.TestCase):
         rc.matches_played = 20
         rc.update_conservative()
 
+        # Still above the eligibility sigma, so a high mu alone does not take the crown.
+        # This is the debut protection: rank is gated on convergence, not on raw skill.
         self.league.refresh_pool()
-        # Challenger should be crowned King via competitive score
+        self.assertEqual(self.league.king_of_the_hill, norm_king)
+
+        # Once its rating converges, the stronger challenger outranks the incumbent on
+        # raw mu, with no sample-size penalty for the incumbent's 500 extra matches.
+        rc.sigma = 1.1
+        rc.update_conservative()
+        self.league.refresh_pool()
         self.assertEqual(self.league.king_of_the_hill, norm_chal)
 
         # Direct title bout execution
@@ -413,6 +479,102 @@ class TestStratifiedVectorizedEnv(unittest.TestCase):
         self.assertEqual(next_obs.shape, (4, 2, vec_env.obs_dim))
         self.assertEqual(rews.shape, (4, 2))
         self.assertEqual(len(infos), 4)
+
+
+class TestCheckpointRetentionTiers(unittest.TestCase):
+    """Retention is the union of provisional / ranked / archive, with no rolling cap."""
+
+    def setUp(self):
+        self.test_dir = tempfile.mkdtemp(prefix="sensai_test_retention_")
+
+    def tearDown(self):
+        shutil.rmtree(self.test_dir, ignore_errors=True)
+
+    def _touch(self, iteration: int) -> str:
+        path = os.path.join(self.test_dir, f"checkpoint_iter_{iteration}.pt")
+        with open(path, "w") as f:
+            f.write("stub")
+        return path
+
+    def test_archive_tier_preserves_historical_spine(self):
+        """One checkpoint per archive_stride survives, however old, alongside the newest."""
+        from agent.ppo import PPOTrainer
+
+        for i in range(200, 30001, 200):
+            self._touch(i)
+        latest = os.path.join(self.test_dir, "latest_model.pt")
+        manual = os.path.join(self.test_dir, "my_manual_save.pt")
+        for p in (latest, manual):
+            with open(p, "w") as f:
+                f.write("stub")
+
+        trainer = PPOTrainer.__new__(PPOTrainer)
+        trainer.save_dir = self.test_dir
+        trainer.archive_stride = 5000
+        trainer.max_checkpoints_to_keep = 10
+        trainer.league_manager = None
+        trainer.cleanup_old_checkpoints()
+
+        kept = sorted(
+            int(f.replace("checkpoint_iter_", "").replace(".pt", ""))
+            for f in os.listdir(self.test_dir) if f.startswith("checkpoint_iter_")
+        )
+
+        # Archive spine: earliest survivor of each 5000-wide bucket.
+        for spine in (200, 5000, 10000, 15000, 20000, 25000):
+            self.assertIn(spine, kept)
+        # Recency backstop (no league manager attached).
+        self.assertIn(30000, kept)
+        # Everything outside both tiers is pruned.
+        self.assertNotIn(12000, kept)
+        # Non-numbered saves are never touched.
+        self.assertTrue(os.path.exists(latest))
+        self.assertTrue(os.path.exists(manual))
+
+    def test_provisional_tier_protects_unconverged_newcomers(self):
+        """Newest un-converged checkpoints survive until the evaluator reaches them."""
+        cwd = os.getcwd()
+        os.chdir(self.test_dir)
+        try:
+            os.makedirs("checkpoints", exist_ok=True)
+            paths = []
+            for i in range(1000, 60001, 1000):
+                path = f"checkpoints/checkpoint_iter_{i}.pt"
+                with open(path, "w") as f:
+                    f.write("stub")
+                paths.append((i, path))
+
+            league = LeagueManager(
+                config={
+                    "max_provisional": 5,
+                    "eligibility_sigma": 1.5,
+                    "anchors": ["heuristic"],
+                    "max_pool_size": 10,
+                    "protect_top_k": 20,
+                },
+                leaderboard_path=os.path.join(self.test_dir, "lb.json")
+            )
+            for idx, (_, path) in enumerate(paths):
+                rec = league.evaluator.get_or_create_rating(path)
+                converged = idx < 20
+                rec.mu = 30.0 + (idx * 0.01 if converged else 0.0)
+                rec.sigma = 0.9 if converged else 3.0
+                rec.matches_played = 100 if converged else 4
+                rec.update_conservative()
+
+            protected = league.get_protected_checkpoint_paths()
+            kept = {i for i, path in paths if os.path.normcase(os.path.abspath(path)) in protected}
+        finally:
+            os.chdir(cwd)
+
+        # The five newest un-converged checkpoints are held for measurement.
+        for i in (56000, 57000, 58000, 59000, 60000):
+            self.assertIn(i, kept)
+        # Un-converged checkpoints that aged past the window lost their chance.
+        for i in (25000, 30000, 40000, 50000):
+            self.assertNotIn(i, kept)
+        # Converged veterans are retained by the ranked tier.
+        self.assertIn(1000, kept)
 
 
 if __name__ == "__main__":
