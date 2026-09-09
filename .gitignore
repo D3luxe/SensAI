@@ -22,3 +22,6 @@ runs/
 archive/
 checkpoints/manual_saves/
 checkpoints/hall_of_fame/
+
+# graft's local graph cache — regenerable, not committed (run `graft build`).
+/graft/
