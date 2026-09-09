@@ -11,7 +11,7 @@ from typing import Dict, Any, List, Optional, Tuple
 from env.physics_engine import (
     CarState, BallState, RocketSimArena,
     CAR_MAX_SPEED, BALL_MAX_SPEED, GOAL_HALF_WIDTH, GOAL_HEIGHT, ARENA_EXTENT_X, ARENA_EXTENT_Y, ARENA_HEIGHT_Z,
-    WALL_BOUNCE_VX_THRESHOLD, WALL_BOUNCE_VY_THRESHOLD, BALL_RADIUS
+    WALL_BOUNCE_VX_THRESHOLD, WALL_BOUNCE_VY_THRESHOLD, BALL_RADIUS, GRAVITY
 )
 
 # Clean goal opening clearance thresholds accounting for physical ball sphere radius (91.25 uu)
@@ -64,6 +64,85 @@ def unit_horiz(v: np.ndarray) -> np.ndarray:
     if n < 1e-4:
         return np.zeros(2, dtype=np.float32)
     return (v[:2] / n).astype(np.float32)
+
+
+# Approximate distance from the car's centre of mass to the plane its wheels rest on.
+CAR_SURFACE_CLEARANCE = 60.0
+
+# World-space inward normal of the pitch floor.
+FLOOR_NORMAL = np.array([0.0, 0.0, 1.0], dtype=np.float32)
+
+
+def compute_landing_surface_normal(car: CarState, horizon: float = 1.4) -> np.ndarray:
+    """
+    Predicts which surface an airborne car is about to arrive at and returns that surface's
+    inward normal (the direction the car's wheels must point to land cleanly on it).
+
+    Orientation rewards that hard-code world +Z teach the car to put its wheels toward the pitch
+    floor even while it is flying at a side wall or backboard, which lands it on its door and
+    scrubs off all momentum. Rocket League surfaces are drivable in every orientation, so the
+    correct recovery target is the normal of whichever surface the car actually reaches first.
+
+    Ballistic for the floor (gravity acts on Z), linear for the walls (nothing accelerates the car
+    horizontally while coasting). Returns FLOOR_NORMAL when no wall is reached inside the horizon,
+    which keeps ordinary open-field recoveries behaving exactly as before.
+    """
+    px, py, pz = float(car.pos[0]), float(car.pos[1]), float(car.pos[2])
+    vx, vy, vz = float(car.vel[0]), float(car.vel[1]), float(car.vel[2])
+
+    # Time to the floor plane under gravity.
+    floor_z = CAR_SURFACE_CLEARANCE
+    t_floor = float("inf")
+    if pz > floor_z:
+        # Solve 0.5*g*t^2 + vz*t + (pz - floor_z) = 0 for the positive root.
+        a = 0.5 * GRAVITY
+        disc = vz * vz - 4.0 * a * (pz - floor_z)
+        if disc >= 0.0:
+            sq = math.sqrt(disc)
+            for root in ((-vz - sq) / (2.0 * a), (-vz + sq) / (2.0 * a)):
+                if 0.0 < root < t_floor:
+                    t_floor = root
+    else:
+        t_floor = 0.0
+
+    best_t = float("inf")
+    best_normal = None
+
+    limit_x = ARENA_EXTENT_X - CAR_SURFACE_CLEARANCE
+    limit_y = ARENA_EXTENT_Y - CAR_SURFACE_CLEARANCE
+
+    if vx > 1.0 and px < limit_x:
+        t = (limit_x - px) / vx
+        if t < best_t:
+            best_t, best_normal = t, np.array([-1.0, 0.0, 0.0], dtype=np.float32)
+    elif vx < -1.0 and px > -limit_x:
+        t = (-limit_x - px) / vx
+        if t < best_t:
+            best_t, best_normal = t, np.array([1.0, 0.0, 0.0], dtype=np.float32)
+
+    if vy > 1.0 and py < limit_y:
+        t = (limit_y - py) / vy
+        if t < best_t:
+            best_t, best_normal = t, np.array([0.0, -1.0, 0.0], dtype=np.float32)
+    elif vy < -1.0 and py > -limit_y:
+        t = (-limit_y - py) / vy
+        if t < best_t:
+            best_t, best_normal = t, np.array([0.0, 1.0, 0.0], dtype=np.float32)
+
+    # A car already pressed against a wall counts as arriving there now, even with little
+    # closing speed: it is on the wall surface and must stay oriented to it.
+    if abs(px) > limit_x - 60.0 and pz > 100.0:
+        w = np.array([-math.copysign(1.0, px), 0.0, 0.0], dtype=np.float32)
+        if 0.0 < best_t:
+            best_t, best_normal = 0.0, w
+    elif abs(py) > limit_y - 60.0 and pz > 100.0:
+        w = np.array([0.0, -math.copysign(1.0, py), 0.0], dtype=np.float32)
+        if 0.0 < best_t:
+            best_t, best_normal = 0.0, w
+
+    if best_normal is not None and best_t <= horizon and best_t < t_floor:
+        return best_normal
+    return FLOOR_NORMAL
 
 
 class BaseReward:
@@ -181,11 +260,114 @@ def compute_effective_alignment(
 
 
 
+# Candidate lookahead slices (ticks at 120 Hz) for the intercept solver. Coarse on purpose:
+# each rung costs an arrival-time solve, and this runs for every body every step. 60 and 180 are
+# already requested by the observation builder, so those two come back from the arena's cache.
+INTERCEPT_SLICE_LADDER = (0, 30, 60, 120, 180)
+
+# Rung used to decide whether the engine's trajectory can be trusted at all. Shared with the
+# ladder so the probe never costs an extra trajectory integration on the pure-Python fallback.
+_TRUST_PROBE_TICKS = 30
+
+
+def predictions_trustworthy(arena: RocketSimArena) -> bool:
+    """Whether the engine's ball trajectory actually describes the ball the rewards can see.
+
+    The trajectory comes from the physics backend's own ball, so any caller that writes
+    arena.ball.* directly without pushing the change down gets a prediction for a different ball
+    -- typically the one sitting at kickoff. Chasing that is worse than not predicting at all.
+
+    Compares the nearest rung against a straight-line extrapolation of the live ball. Even a full
+    reversal off a wall only deviates by twice the distance travelled, so anything beyond that
+    means the prediction is describing some other ball. Cached per step: the answer depends only
+    on the ball, while the solver runs once per body.
+    """
+    step = getattr(arena, "step_count", -1)
+    if getattr(arena, "_pred_trust_step", None) == step:
+        return arena._pred_trust
+    arena._pred_trust_step = step
+
+    trusted = True
+    probe = arena.get_predicted_ball_pos(_TRUST_PROBE_TICKS)
+    if probe is None:
+        trusted = False
+    else:
+        probe_t = _TRUST_PROBE_TICKS / 120.0
+        bp, bv = arena.ball.pos, arena.ball.vel
+        dx = float(probe[0]) - (float(bp[0]) + float(bv[0]) * probe_t)
+        dy = float(probe[1]) - (float(bp[1]) + float(bv[1]) * probe_t)
+        dz = float(probe[2]) - (float(bp[2]) + float(bv[2]) * probe_t)
+        tolerance = 2.0 * _norm3(bv) * probe_t + 300.0
+        trusted = bool(dx * dx + dy * dy + dz * dz <= tolerance * tolerance)
+
+    arena._pred_trust = trusted
+    return trusted
+
+
+def solve_intercept_point(
+    pos: np.ndarray,
+    vel: np.ndarray,
+    arena: RocketSimArena,
+    ladder: Tuple[int, ...] = INTERCEPT_SLICE_LADDER
+) -> Tuple[np.ndarray, float]:
+    """
+    Finds where along the ball's predicted trajectory a body at (pos, vel) can first meet it.
+
+    Aiming a fixed distance into the future -- 0.5s for open play, 1.5s for a detected wall
+    rebound -- is only correct when the chaser happens to need exactly that long to arrive. Every
+    other time it aims at a point the car reaches early or late, which is what makes bounce reads
+    and arrival timing look mistimed. Instead walk the trajectory outward and take the earliest
+    slice the body can actually reach, which is the definition of an intercept.
+
+    Returns (intercept_pos, intercept_time_seconds). Falls back to the furthest slice when the
+    ball outruns the body entirely, and to the live ball position when no usable prediction exists.
+    """
+    if not hasattr(arena, "get_predicted_ball_pos") or not predictions_trustworthy(arena):
+        return arena.ball.pos, 0.0
+
+    fallback_pos = arena.ball.pos
+    fallback_t = 0.0
+    for slice_ticks in ladder:
+        slice_t = slice_ticks / 120.0
+        pred = arena.ball.pos if slice_ticks == 0 else arena.get_predicted_ball_pos(slice_ticks)
+        if pred is None:
+            continue
+        fallback_pos, fallback_t = pred, slice_t
+        arrival, _, _ = compute_trajectory_arrival_time(pos, vel, pred)
+        if arrival <= slice_t:
+            # Reachable with time to spare: this is the earliest meeting point on the trajectory.
+            return pred, slice_t
+
+    # Ball outruns the chaser across the whole ladder; chase the furthest point considered.
+    return fallback_pos, fallback_t
+
+
+def cached_intercept_point(arena: RocketSimArena, body_id: int, pos: np.ndarray, vel: np.ndarray) -> Tuple[np.ndarray, float]:
+    """Per-step memo around solve_intercept_point, keyed by body id.
+
+    Several terms need the same body's intercept within one step -- the pursuit target, the
+    arrival-timing term, the boost-routing gate, and the opponent race -- and the ladder walk
+    costs a handful of arrival-time solves each. Positions and velocities are frozen for the
+    duration of a step, so one answer per body per step is exactly equivalent.
+    """
+    step = getattr(arena, "step_count", -1)
+    if getattr(arena, "_intercept_cache_step", None) != step:
+        arena._intercept_cache_step = step
+        arena._intercept_cache = {}
+    cache = arena._intercept_cache
+    hit = cache.get(body_id)
+    if hit is None:
+        hit = solve_intercept_point(pos, vel, arena)
+        cache[body_id] = hit
+    return hit
+
+
 def compute_opponent_threats(
     car: CarState,
     arena: RocketSimArena,
     target_pos: Optional[np.ndarray] = None,
-    opponents: Optional[List[CarState]] = None
+    opponents: Optional[List[CarState]] = None,
+    use_intercept: bool = False
 ) -> List[OpponentThreat]:
     """
     Computes threat arrival time for active (non-demoed) opponents relative to
@@ -197,13 +379,23 @@ def compute_opponent_threats(
     if opponents is None:
         opponents = [c for c in arena.cars if c.team != car.team and not c.demoed]
 
+    # use_intercept times each opponent to its OWN intercept point on the ball's predicted
+    # trajectory instead of to where the ball happens to be right now. Use it for genuine races
+    # ("who reaches the ball first"), where timing everyone to the live ball misreads a bouncing
+    # ball: an opponent driving to the bounce spot reads as slow and one trailing reads as fast.
+    #
+    # Leave it off for pressure heuristics ("is someone contesting me"), which are proximity
+    # questions. Those must not care that a ball the bot just flicked away at 1600 uu/s is no
+    # longer interceptable -- the challenger standing on top of the bot is still a challenger.
+    solve_per_opponent = bool(use_intercept and target_pos is None and hasattr(arena, "get_predicted_ball_pos"))
     ref_pos = arena.ball.pos if target_pos is None else target_pos
 
     threats: List[OpponentThreat] = []
     for opp in opponents:
         if opp.demoed or opp.id == car.id or opp.team == car.team:
             continue
-        arrival, dist, closing_speed = compute_trajectory_arrival_time(opp.pos, opp.vel, ref_pos)
+        opp_ref = cached_intercept_point(arena, opp.id, opp.pos, opp.vel)[0] if solve_per_opponent else ref_pos
+        arrival, dist, closing_speed = compute_trajectory_arrival_time(opp.pos, opp.vel, opp_ref)
         threats.append(OpponentThreat(opp, dist, closing_speed, arrival))
 
     threats.sort(key=lambda t: t.arrival_time)
@@ -473,10 +665,17 @@ class PlayerToBallVelocityReward(BaseReward):
     def __init__(self, weight: float = 0.6, boost_pathing_threshold: float = 50.0):
         super().__init__(weight)
         self.boost_pathing_threshold = float(boost_pathing_threshold)
+        self._prev_pos: Dict[int, np.ndarray] = {}
+        self._prev_target: Dict[int, np.ndarray] = {}
+        # Optional single-step override of the previous potential, keyed by car id and consumed
+        # on read. Empty during normal rollouts (reset() does not populate it); it exists so a
+        # caller can pin an exact distance delta without simulating two consecutive steps.
         self._prev_dist: Dict[int, float] = {}
         self._prev_touches: Dict[int, int] = {}
         self._prev_car_touches: Dict[int, int] = {}
         self._was_in_strike_zone: Dict[int, bool] = {}
+        self._prev_timing_err: Dict[int, float] = {}
+        self._reread_ticks: Dict[int, int] = {}
 
     def _calc_dist(self, car_pos: np.ndarray, ball_pos: np.ndarray) -> float:
         # If BOTH car and ball are near pitch floor (car Z < 150, ball Z < 300), evaluate horizontal (X, Y) distance
@@ -493,7 +692,7 @@ class PlayerToBallVelocityReward(BaseReward):
             return float((1.0 - alpha) * d2 + alpha * d3)
         return _norm3(ball_pos - car_pos)
 
-    def _get_target_pos(self, car_pos: np.ndarray, arena: RocketSimArena, is_kickoff: bool) -> np.ndarray:
+    def _get_target_pos(self, car_pos: np.ndarray, arena: RocketSimArena, is_kickoff: bool, car_vel: Optional[np.ndarray] = None, car_id: int = -1) -> np.ndarray:
         """
         Computes the tactical target point for distance delta and alignment.
         When the ball has significant velocity (> 300 uu/s) and has future trajectory,
@@ -507,36 +706,29 @@ class PlayerToBallVelocityReward(BaseReward):
             return target_pos
 
         ball_speed = _norm3(arena.ball.vel)
-        if ball_speed > 300.0 and hasattr(arena, "get_predicted_ball_pos"):
-            bx, by = float(arena.ball.pos[0]), float(arena.ball.pos[1])
-            bvx, bvy = float(arena.ball.vel[0]), float(arena.ball.vel[1])
+        # A near-stationary ball's intercept point is its current position, so skip the solver.
+        if ball_speed <= 150.0 or not hasattr(arena, "get_predicted_ball_pos"):
+            return target_pos
 
-            # Detect impending wall or backboard rebound:
-            # Ball moving fast toward sidewall (|vx| > 500, heading outward, |x| > 2500)
-            # or fast toward backboard (|vy| > 600, heading outward, |y| > 3500)
-            is_sidewall_bounce = (abs(bvx) > WALL_BOUNCE_VX_THRESHOLD and (bvx * bx) > 0.0 and abs(bx) > 2500.0)
-            is_backboard_bounce = (abs(bvy) > WALL_BOUNCE_VY_THRESHOLD and (bvy * by) > 0.0 and abs(by) > 3500.0)
+        chaser_vel = car_vel if car_vel is not None else np.zeros(3, dtype=np.float32)
+        pred_pos, _ = cached_intercept_point(arena, car_id, car_pos, chaser_vel)
+        if pred_pos is None:
+            return target_pos
 
-            # Use 1.5s (180 ticks) post-bounce slice for wall bounces; 0.5s (60 ticks) for standard play
-            slice_ticks = 180 if (is_sidewall_bounce or is_backboard_bounce) else 60
-            pred_pos = arena.get_predicted_ball_pos(slice_ticks)
+        # Blend on proximity alone. The solver already collapses to the live ball position when
+        # the intercept is immediate, so the old speed_factor damping only weakened correct
+        # lookahead on slower balls. Inside the strike zone we still lock to the true ball so
+        # contact geometry stays exact.
+        raw_ball_dist = self._calc_dist(car_pos, arena.ball.pos)
+        blend = min(1.0, max(0.0, (raw_ball_dist - 250.0) / 350.0))
+        blended = (1.0 - blend) * arena.ball.pos + blend * pred_pos
 
-            if pred_pos is not None:
-                raw_ball_dist = self._calc_dist(car_pos, arena.ball.pos)
-                proximity_factor = min(1.0, max(0.0, (raw_ball_dist - 250.0) / 350.0))
-                speed_factor = min(1.0, max(0.0, (ball_speed - 300.0) / 1200.0))
-                # For impending wall bounces, allow stronger blend toward the rebound point
-                max_blend = 0.85 if (is_sidewall_bounce or is_backboard_bounce) else 0.65
-                blend = max_blend * proximity_factor * speed_factor
-                blended = (1.0 - blend) * arena.ball.pos + blend * pred_pos
-
-                # Clamp within arena bounds to prevent numerical overshoot
-                target_pos = np.array([
-                    _clip(blended[0], -ARENA_EXTENT_X + 100.0, ARENA_EXTENT_X - 100.0),
-                    _clip(blended[1], -ARENA_EXTENT_Y + 100.0, ARENA_EXTENT_Y - 100.0),
-                    _clip(blended[2], 93.0, ARENA_HEIGHT_Z - 100.0)
-                ], dtype=np.float32)
-        return target_pos
+        # Clamp within arena bounds to prevent numerical overshoot
+        return np.array([
+            _clip(blended[0], -ARENA_EXTENT_X + 100.0, ARENA_EXTENT_X - 100.0),
+            _clip(blended[1], -ARENA_EXTENT_Y + 100.0, ARENA_EXTENT_Y - 100.0),
+            _clip(blended[2], 93.0, ARENA_HEIGHT_Z - 100.0)
+        ], dtype=np.float32)
 
     def reset(self, initial_state: RocketSimArena):
         is_kickoff = bool(
@@ -545,13 +737,17 @@ class PlayerToBallVelocityReward(BaseReward):
             initial_state.ball.pos[2] < 120.0 and
             _norm3(initial_state.ball.vel) < 100.0
         )
-        self._prev_dist = {
-            car.id: self._calc_dist(car.pos, self._get_target_pos(car.pos, initial_state, is_kickoff))
+        self._prev_dist = {}
+        self._prev_pos = {car.id: car.pos.copy() for car in initial_state.cars}
+        self._prev_target = {
+            car.id: np.asarray(self._get_target_pos(car.pos, initial_state, is_kickoff, car.vel, car.id), dtype=np.float32).copy()
             for car in initial_state.cars
         }
         self._prev_touches = {car.id: car.ball_touches for car in initial_state.cars}
         self._prev_car_touches = {car.id: car.ball_touches for car in initial_state.cars}
         self._was_in_strike_zone = {car.id: False for car in initial_state.cars}
+        self._prev_timing_err = {}
+        self._reread_ticks = {car.id: 0 for car in initial_state.cars}
 
     def get_reward(self, car: CarState, arena: RocketSimArena, action: np.ndarray, is_goal: bool, scoring_team: Optional[int]) -> float:
         if is_goal:
@@ -565,10 +761,45 @@ class PlayerToBallVelocityReward(BaseReward):
             _norm3(arena.ball.vel) < 100.0
         )
 
-        target_pos = self._get_target_pos(car.pos, arena, is_kickoff)
+        target_pos = self._get_target_pos(car.pos, arena, is_kickoff, car.vel, car.id)
         curr_dist = self._calc_dist(car.pos, target_pos)
-        prev_dist = self._prev_dist.get(car.id, curr_dist)
-        self._prev_dist[car.id] = curr_dist
+
+        # Stationary-potential decomposition.
+        #
+        # Storing last step's distance and differencing it against this step's makes the shaping
+        # non-stationary: the tactical target is a blend toward a predicted intercept, so it moves
+        # discontinuously whenever the ball bounces, an opponent touches it, or the blend factor
+        # crosses one of its proximity/speed ramps. That injected a free +/- delta unrelated to any
+        # action the bot took -- and the opponent-touch guard below only ever clamped the negative
+        # side, so an opponent knocking the ball toward the bot paid out.
+        #
+        # Split the delta into the two halves that produce it and hold the other endpoint fixed for
+        # each, so both are measured against a single consistent potential:
+        #   car-motion   : how much the car closed on THIS step's target
+        #   target-motion: how much the target moved relative to THIS step's car position
+        # The car half is always trustworthy. The target half is clamped to the distance the ball
+        # could physically have travelled this step, which absorbs prediction-blend jumps while
+        # preserving genuine credit/debit for a ball rolling toward or away from the bot.
+        prev_car_pos = self._prev_pos.get(car.id)
+        prev_target = self._prev_target.get(car.id)
+        self._prev_pos[car.id] = car.pos.copy()
+        self._prev_target[car.id] = np.asarray(target_pos, dtype=np.float32).copy()
+
+        if car.id in self._prev_dist:
+            prev_dist = float(self._prev_dist.pop(car.id))
+        elif prev_car_pos is None or prev_target is None:
+            prev_dist = curr_dist
+        else:
+            car_motion_delta = self._calc_dist(prev_car_pos, target_pos) - curr_dist
+            target_motion_delta = self._calc_dist(car.pos, prev_target) - curr_dist
+
+            step_dt = float(getattr(arena, "last_step_dt", 8.0 / 120.0))
+            # Generous budget: ball speed plus a floor for a near-stationary ball that is
+            # nonetheless about to be struck. Anything beyond this is a target discontinuity.
+            ball_travel_budget = _norm3(arena.ball.vel) * step_dt + 60.0
+            target_motion_delta = _clip(target_motion_delta, -ball_travel_budget, ball_travel_budget)
+
+            prev_dist = curr_dist + car_motion_delta + target_motion_delta
 
         prev_t = self._prev_touches.get(car.id, car.ball_touches)
         self._prev_touches[car.id] = car.ball_touches
@@ -606,7 +837,14 @@ class PlayerToBallVelocityReward(BaseReward):
         is_in_goal_mouth = bool(abs(arena.ball.pos[0]) < 900.0 and ball_z < 650.0)
         is_ball_on_sidewall = bool(abs(arena.ball.pos[0]) > 3650.0 and ball_z > 140.0)
         is_ball_on_backboard = bool(abs(arena.ball.pos[1]) > 4700.0 and ball_z > 140.0 and not is_in_goal_mouth)
-        is_ball_on_curve = bool((abs(arena.ball.pos[0]) > 3350.0 or abs(arena.ball.pos[1]) > 4350.0) and not is_in_goal_mouth and ball_z > 80.0)
+        # Ball must be genuinely climbing the curved ramp, not merely rolling on the floor near it.
+        # A ball at rest sits at z = BALL_RADIUS = 91.25, so the previous z > 80.0 gate was
+        # satisfied by every grounded ball within 750 uu of a sidewall / 770 uu of a backboard.
+        # That forced is_elevated_aerial false across a large slice of the pitch, enabled the
+        # wall-climb multipliers for ordinary corner play, and disabled the grounded approach
+        # pacing envelope and dribble boost penalty there. 160.0 matches the 140.0 used by the
+        # flat-wall predicates while clearing a resting ball's radius with margin.
+        is_ball_on_curve = bool((abs(arena.ball.pos[0]) > 3350.0 or abs(arena.ball.pos[1]) > 4350.0) and not is_in_goal_mouth and ball_z > 160.0)
         is_ball_on_wall = bool(is_ball_on_sidewall or is_ball_on_backboard or is_ball_on_curve)
         # Elevated aerial is strictly an open-air floating ball infield away from arena walls
         is_elevated_aerial = bool(ball_z > 350.0 and not is_ball_on_wall)
@@ -1041,9 +1279,118 @@ class PlayerToBallVelocityReward(BaseReward):
                         else:
                             roof_carry_reward = (0.40 * center_score * goal_progress + velcro_bonus + sync_bonus) * gutter_taper
 
+        # -- 6. Interception Timing & Opponent-Touch Re-Read -------------------
+        # Closing the distance to an intercept point is not the same as arriving when the ball
+        # does. This term scores the arrival-time error directly: how far off the car's own
+        # time-to-arrive is from the time the ball reaches the meeting point. Rewarding the
+        # REDUCTION in that error makes both halves of a mistimed approach correctable -- a car
+        # that will arrive early is paid to slow down or take a wider line, one that will arrive
+        # late is paid to hurry -- where a pure distance term only ever says "closer is better".
+        #
+        # The same term carries the response to an opponent touch. A touch rewrites the ball's
+        # trajectory, so the intercept point and its timing jump; the baseline is re-seeded on
+        # that step (no free reward for the discontinuity) and the term is amplified afterwards,
+        # which is what pays for re-reading a deflection instead of continuing to drive at where
+        # the ball used to be going.
+        timing_reward = 0.0
+        reread = self._reread_ticks.get(car.id, 0)
+        if opp_touched:
+            self._reread_ticks[car.id] = 24
+        elif reread > 0:
+            self._reread_ticks[car.id] = reread - 1
+
+        ball_speed_now = _norm3(arena.ball.vel)
+        timing_active = bool(ball_speed_now > 300.0 and eff_dist > 300.0 and not is_on_ceiling)
+        if timing_active:
+            intercept_pos, intercept_t = cached_intercept_point(arena, car.id, car.pos, car.vel)
+            car_arrival, _, _ = compute_trajectory_arrival_time(car.pos, car.vel, intercept_pos)
+            timing_err = abs(car_arrival - intercept_t)
+            prev_err = self._prev_timing_err.get(car.id)
+            self._prev_timing_err[car.id] = timing_err
+            if prev_err is not None and not opp_touched:
+                # Bounded per-step credit: this is a shaping nudge, not a headline term.
+                err_delta = _clip(prev_err - timing_err, -0.20, 0.20)
+                reread_mult = 1.75 if self._reread_ticks.get(car.id, 0) > 0 else 1.0
+                timing_reward = err_delta * 0.75 * reread_mult
+        else:
+            self._prev_timing_err.pop(car.id, None)
+
+        # -- 7. Pre-Play Boost Routing Ahead of the Ball -----------------------
+        # The pathing gate earlier only ever makes a detour LESS negative, so following the ball
+        # always outscored leaving it to refuel -- which is why a car with no boost trails the
+        # ball up the wall instead of collecting the pad in front of it and meeting the ball on
+        # the way back down with enough boost to actually do something. This pays outright for
+        # routing through a pad that sits AHEAD of the ball along the ball's own travel direction.
+        #
+        # Affordability is judged the same way the pathing gate judges it: against the race with
+        # the opponent, not against the ball. The meeting point is by construction the first spot
+        # the car can reach, so "will I beat the ball there" is always a tie and tells us nothing;
+        # "how much longer can I take and still get there before they do" is the real budget.
+        boost_ahead_reward = 0.0
+        pad_thresh = getattr(self, "boost_pathing_threshold", 50.0)
+        if (
+            car.on_ground and not is_kickoff and float(car.boost) < pad_thresh
+            and ball_speed_now > 300.0 and eff_dist > 900.0
+        ):
+            all_pad_pos = getattr(arena, "_all_pad_pos_2d", None)
+            all_pad_act = getattr(arena, "_all_pad_active", None)
+            all_pad_big = getattr(arena, "_all_pad_is_big", None)
+            _, threat_intensity, _ = arena.get_shot_threat(car.team) if hasattr(arena, "get_shot_threat") else (False, 0.0, 0.0)
+
+            if all_pad_pos is not None and all_pad_act is not None and np.any(all_pad_act) and threat_intensity < 0.40:
+                intercept_pos, _ = cached_intercept_point(arena, car.id, car.pos, car.vel)
+                car_arrival, _, _ = compute_trajectory_arrival_time(car.pos, car.vel, intercept_pos)
+                threats_ahead = compute_opponent_threats(car, arena, use_intercept=True)
+                opp_arrival = threats_ahead[0].arrival_time if threats_ahead else 999.0
+                # Time we can spend off the direct line and still win the ball.
+                cushion = opp_arrival - car_arrival
+
+                if cushion > 0.60:
+                    ball_dir = unit_horiz(arena.ball.vel)
+                    if _norm2(ball_dir) > 0.5:
+                        ball_xy = arena.ball.pos[:2]
+                        car_xy = car.pos[:2]
+                        icept_xy = np.asarray(intercept_pos, dtype=np.float32)[:2]
+                        active = np.asarray(all_pad_act, dtype=bool)
+                        poses = np.asarray(all_pad_pos, dtype=np.float32)[active]
+                        if len(poses) > 0:
+                            # "Ahead of the ball": downrange along the ball's own heading, and
+                            # near enough to the meeting point to still be on the way there.
+                            downrange = (poses - ball_xy) @ ball_dir
+                            to_icept = np.linalg.norm(poses - icept_xy, axis=1)
+                            from_car = np.linalg.norm(poses - car_xy, axis=1)
+                            direct = max(1.0, _norm2(icept_xy - car_xy))
+                            # Detour cost in seconds at a realistic ground cruising speed.
+                            detour_time = (from_car + to_icept - direct) / max(1000.0, _norm2(car.vel))
+                            usable = (
+                                (downrange > 200.0) & (downrange < 5000.0)
+                                & (to_icept < 3000.0) & (from_car < 3000.0)
+                                & (detour_time < 0.60 * cushion)
+                            )
+                            if np.any(usable):
+                                if all_pad_big is not None:
+                                    big = np.asarray(all_pad_big, dtype=bool)[active]
+                                else:
+                                    big = np.zeros(len(poses), dtype=bool)
+                                # Prefer the pad costing the least detour, valuing big orbs.
+                                cost = np.where(usable, detour_time - np.where(big, 0.35, 0.0), np.inf)
+                                pick = int(np.argmin(cost))
+                                pad_vec = poses[pick] - car_xy
+                                pad_dist = _norm2(pad_vec)
+                                if pad_dist > 1e-4:
+                                    speed_to_pad = float(np.dot(car.vel[:2], pad_vec / pad_dist))
+                                    if speed_to_pad > 150.0:
+                                        hunger = min(1.5, max(0.0, (pad_thresh - float(car.boost)) / max(1.0, pad_thresh)))
+                                        # Cheaper detours and larger cushions are worth more.
+                                        afford = min(1.0, max(0.0, 1.0 - (float(detour_time[pick]) / max(1e-4, 0.60 * cushion))))
+                                        speed_factor = min(1.0, speed_to_pad / 1200.0)
+                                        value = 1.6 if bool(big[pick]) else 1.0
+                                        boost_ahead_reward = 0.30 * hunger * afford * speed_factor * value
+
         total_reward = self.weight * (
             delta_dist + vel_toward_ball + vel_matching_bonus + pacing_penalty + dribble_boost_penalty +
-            overshoot_penalty + ceiling_penalty + wrong_side_push_penalty + turnaround_reward + roof_carry_reward
+            overshoot_penalty + ceiling_penalty + wrong_side_push_penalty + turnaround_reward + roof_carry_reward +
+            timing_reward + boost_ahead_reward
         )
         return float(total_reward)
 
@@ -1387,6 +1734,15 @@ class JumpBridgeReward(BaseReward):
         local_y = float(np.dot(car_to_ball[:2], unit_horiz(right_vec)))
         car_speed_horiz = _norm2(car.vel)
         car_fwd_speed = float(np.dot(car.vel[:2], unit_horiz(fwd_vec)))
+
+        # Horizontal-frame validity.
+        #
+        # Every quantity above projects the car's basis onto the XY plane. For a car driving up a
+        # wall the nose is near-vertical, so fwd[:2] is a tiny residual that unit_horiz either
+        # zeroes or renormalizes back to unit length -- amplifying orientation noise into
+        # confident-looking headings. The flip classifiers downstream then fire on garbage.
+        # Require the nose to be at least ~20 degrees off vertical before trusting them.
+        horiz_frame_valid = bool(_norm2(fwd_vec) > 0.35)
         pitch_input = float(action[2])
         yaw_input = float(action[3])
         stick_deflection = max(abs(pitch_input), abs(yaw_input))
@@ -1402,7 +1758,16 @@ class JumpBridgeReward(BaseReward):
             self._dodge_strike_ticks[car.id] = 0
 
         # ── 1. Takeoff Transition (Ground -> Air) ─────────────────────────────
-        if prev_ground and not car.on_ground and car.vel[2] > 80.0:
+        # Takeoff detection along the surface normal, not world +Z.
+        #
+        # A jump imparts CAR_JUMP_INITIAL_VEL along the car's up vector. On the flat wall that is
+        # entirely horizontal and on the upper curved ramp it is mostly horizontal, so the old
+        # car.vel[2] > 80.0 gate needed up[2] > ~0.27 and never fired there. That made the whole
+        # takeoff block -- including branch 1b, the wall takeoff / air-dribble pop bonus -- dead
+        # code in exactly the situations it was written for. Project the launch velocity onto the
+        # car's own up vector so a wall jump registers with the same threshold a floor jump does.
+        takeoff_normal_speed = float(np.dot(car.vel, car.get_up_vector()))
+        if prev_ground and not car.on_ground and (car.vel[2] > 80.0 or takeoff_normal_speed > 80.0):
             is_on_wall_zone = bool(abs(car.pos[0]) > 3400.0 or abs(car.pos[1]) > 4400.0)
             is_on_wall_curve = bool((abs(car.pos[0]) > 3300.0 or abs(car.pos[1]) > 4300.0) and car.pos[2] > 60.0)
             is_aerial_ball = bool(ball_z > 200.0)
@@ -1526,17 +1891,24 @@ class JumpBridgeReward(BaseReward):
             is_executing_dodge and is_dodge_backward and dist <= 450.0 and is_opponent_challenging
             and car_fwd_speed < 200.0 and nose_align_ball < 0.20
         )
+        # The three classes below are decided entirely from horizontal nose/heading projections,
+        # and two of them carry penalties. On a wall those projections are degenerate (see
+        # horiz_frame_valid), and a nose-up pitch off the wall toward the ball is a legitimate
+        # manoeuvre rather than a wasteful backflip, so leave all three unset there.
         is_halfflip_candidate = bool(
-            is_executing_dodge and (is_dodge_backward or (dodge_align > 0.15 and nose_align_tactical < -0.20))
+            horiz_frame_valid
+            and is_executing_dodge and (is_dodge_backward or (dodge_align > 0.15 and nose_align_tactical < -0.20))
             and nose_align_tactical < -0.20 and (dist > 450.0 or is_wrong_side)
         )
         is_uncontested_dribble_backflip = bool(
-            is_executing_dodge and is_dodge_backward and dist <= 450.0
+            horiz_frame_valid
+            and is_executing_dodge and is_dodge_backward and dist <= 450.0
             and not is_opponent_challenging and not is_flick_active and nose_align_ball < -0.20
             and not is_halfflip_candidate
         )
         is_forward_backflip = bool(
-            is_executing_dodge and is_dodge_backward
+            horiz_frame_valid
+            and is_executing_dodge and is_dodge_backward
             and not is_5050_backflip and not is_flick_active and not is_halfflip_candidate 
             and not is_fast_aerial_attempt
             and (car_fwd_speed > 100.0 or nose_align_tactical > 0.15)
@@ -1662,8 +2034,12 @@ class JumpBridgeReward(BaseReward):
         self._prev_ball_vel[car.id] = arena.ball.vel.copy()
 
         # ── 4. Wavedash & Speed Impulse on Touchdown / Flip Acceleration ─────
-        tactical_speed_curr = float(np.dot(car.vel[:2], tactical_dir[:2]))
-        tactical_speed_prev = float(np.dot(prev_vel[:2], tactical_dir[:2]))
+        # Normalize the tactical direction before projecting. Truncating a 3D unit vector to [:2]
+        # scales the measured speed by the direction's own horizontal fraction, so chasing a ball
+        # high overhead silently reported near-zero traversal speed and suppressed the impulse term.
+        tactical_dir_h = unit_horiz(tactical_dir)
+        tactical_speed_curr = float(np.dot(car.vel[:2], tactical_dir_h))
+        tactical_speed_prev = float(np.dot(prev_vel[:2], tactical_dir_h))
         delta_tactical_speed = tactical_speed_curr - tactical_speed_prev
 
         if (not prev_ground and car.on_ground) and self._halfflip_in_progress.get(car.id, False):
@@ -1982,7 +2358,7 @@ class AirRollRecoveryReward(BaseReward):
     """
     def __init__(self, weight: float = 0.10):
         super().__init__(weight)
-        self._prev_up_z: Dict[int, float] = {}
+        self._prev_surface_align: Dict[int, float] = {}
         self._prev_heading: Dict[int, float] = {}
         self._prev_on_ground: Dict[int, bool] = {}
         self._airborne_ticks: Dict[int, int] = {}
@@ -1995,7 +2371,7 @@ class AirRollRecoveryReward(BaseReward):
         self._takeoff_heading: Dict[int, float] = {}
 
     def reset(self, initial_state: RocketSimArena):
-        self._prev_up_z = {car.id: float(car.get_up_vector()[2]) for car in initial_state.cars}
+        self._prev_surface_align = {car.id: float(car.get_up_vector()[2]) for car in initial_state.cars}
         self._prev_heading = {car.id: 1.0 for car in initial_state.cars}
         self._prev_on_ground = {car.id: car.on_ground for car in initial_state.cars}
         self._airborne_ticks = {car.id: 0 for car in initial_state.cars}
@@ -2030,7 +2406,7 @@ class AirRollRecoveryReward(BaseReward):
 
         if car.on_ground and prev_ground:
             self._airborne_ticks[car.id] = 0
-            self._prev_up_z[car.id] = 1.0
+            self._prev_surface_align[car.id] = 1.0
             self._prev_heading[car.id] = 1.0
             self._was_disoriented[car.id] = False
             self._disoriented_this_flight[car.id] = False
@@ -2055,27 +2431,31 @@ class AirRollRecoveryReward(BaseReward):
         else:
             air_ticks = self._airborne_ticks.get(car.id, 0)
 
-        prev_up_z = self._prev_up_z.get(car.id, up_z)
-        self._prev_up_z[car.id] = up_z
+        # Surface-relative attitude.
+        #
+        # Recovery used to be scored against world +Z, which paid the car to point its wheels at
+        # the pitch floor even while flying at a side wall or backboard -- landing it on its door.
+        # Score against the normal of the surface the car is actually about to arrive at instead.
+        # compute_landing_surface_normal returns FLOOR_NORMAL whenever no wall is reached first,
+        # so open-field recoveries are unchanged and surface_align degenerates to up_z there.
+        landing_normal = compute_landing_surface_normal(car) if not car.on_ground else FLOOR_NORMAL
+        is_wall_landing = bool(landing_normal[2] < 0.5)
+        surface_align = float(np.dot(up, landing_normal))
+
+        prev_surface_align = self._prev_surface_align.get(car.id, surface_align)
+        self._prev_surface_align[car.id] = surface_align
 
         vel_z = float(car.vel[2])
 
         prev_heading = self._prev_heading.get(car.id, curr_heading)
         self._prev_heading[car.id] = curr_heading
 
-        # Track if car was genuinely knocked off-axis / inverted during this airborne sequence
-        # Gated by air_ticks >= 3 to filter out single-tick suspension micro-hops on curved ramps
+        # Track if car was genuinely knocked off-axis / inverted during this airborne sequence.
+        # Gated by air_ticks >= 3 to filter out single-tick suspension micro-hops on curved ramps.
+        # Measured against the surface the car is heading to, so a car correctly rolled onto its
+        # side to meet a wall is not flagged as disoriented (its old up_z would have read ~0).
         if air_ticks >= 3:
-            is_near_side = bool(abs(car.pos[0]) > 3500.0)
-            is_near_back = bool(abs(car.pos[1]) > 4500.0)
-            if (is_near_side or is_near_back) and car_z > 150.0:
-                wall_nx = -math.copysign(1.0, car.pos[0]) if is_near_side else 0.0
-                wall_ny = -math.copysign(1.0, car.pos[1]) if is_near_back else 0.0
-                w_align = float(up[0] * wall_nx + up[1] * wall_ny)
-                if up_z < 0.30 and w_align < 0.40:
-                    self._was_disoriented[car.id] = True
-                    self._disoriented_this_flight[car.id] = True
-            elif up_z < 0.30 or curr_heading < -0.20:
+            if surface_align < 0.30 or curr_heading < -0.20:
                 self._was_disoriented[car.id] = True
                 self._disoriented_this_flight[car.id] = True
 
@@ -2109,29 +2489,32 @@ class AirRollRecoveryReward(BaseReward):
             rec_spent = self._airborne_recovery_total.get(car.id, 0.0)
             rec_budget = max(0.0, 0.80 - rec_spent)
 
-            # 1a. Active Roll & Inversion Recovery (delta_up > 0)
-            delta_up = up_z - prev_up_z
-            if delta_up > 0.0 and prev_up_z < 0.90:
-                # Inversion multiplier: rotating from wheels-up (prev_up_z < 0) yields up to 2.0x reward
-                inversion_mult = 1.0 + max(0.0, -prev_up_z) * 1.0
+            # 1a. Active Roll & Inversion Recovery (delta_up > 0), measured toward the landing surface
+            delta_up = surface_align - prev_surface_align
+            if delta_up > 0.0 and prev_surface_align < 0.90:
+                # Inversion multiplier: rotating from wheels-away (prev align < 0) yields up to 2.0x reward
+                inversion_mult = 1.0 + max(0.0, -prev_surface_align) * 1.0
                 roll_rec = min(rec_budget, (delta_up * 1.5) * inversion_mult * urgency)
                 total_reward += roll_rec
                 rec_budget = max(0.0, rec_budget - roll_rec)
-                self._airborne_recovery_total[car.id] = rec_spent + roll_rec
+                # Accumulate against the running total, not the value read at the top of the step:
+                # 1b used to overwrite this with rec_spent + settle_bonus, dropping the roll credit
+                # from the ledger and letting the flight exceed its 0.80 recovery budget.
+                self._airborne_recovery_total[car.id] = self._airborne_recovery_total.get(car.id, 0.0) + roll_rec
 
             # 1b. Roll Rate Damping & Settling (D-term):
             # As the car approaches flat attitude (up_z > 0.75), damp angular velocity to prevent rotational overshoot.
             is_touchdown = bool((car_z < 60.0 and vel_z < -50.0) or (not prev_ground and car.on_ground))
-            if up_z > 0.75 and not is_touchdown:
+            if surface_align > 0.75 and not is_touchdown:
                 abs_roll = abs(roll_rate)
                 # Require both roll rate AND total angular velocity to be controlled (eliminates pitch-tumble blindspot)
-                if abs_roll < 1.0 and total_ang_speed < 1.8 and (prev_up_z < 0.90 or delta_up > 0.01):
+                if abs_roll < 1.0 and total_ang_speed < 1.8 and (prev_surface_align < 0.90 or delta_up > 0.01):
                     # Stabilized attitude bonus: reward arresting roll velocity near flat
                     settle_bonus = min(rec_budget, (1.0 - abs_roll) * 0.15 * urgency)
                     total_reward += settle_bonus
                     rec_budget = max(0.0, rec_budget - settle_bonus)
-                    self._airborne_recovery_total[car.id] = rec_spent + settle_bonus
-                elif abs_roll > 2.2 and up_z > 0.85:
+                    self._airborne_recovery_total[car.id] = self._airborne_recovery_total.get(car.id, 0.0) + settle_bonus
+                elif abs_roll > 2.2 and surface_align > 0.85:
                     # Excess rotational inertia penalty: penalize violent spin that will blow past upright
                     excess_spin = min(1.0, (abs_roll - 2.2) / 2.5)
                     total_reward -= excess_spin * 0.15 * urgency
@@ -2168,12 +2551,12 @@ class AirRollRecoveryReward(BaseReward):
                 self._halfflip_cancel_total[car.id] = cancel_spent + step_cancel_reward
 
             # Conclude in-flight roll/yaw recovery once upright attitude is restored AND total angular velocity has settled
-            if up_z > 0.88 and curr_heading > 0.85 and total_ang_speed < 1.5:
+            if surface_align > 0.88 and curr_heading > 0.85 and total_ang_speed < 1.5:
                 self._was_disoriented[car.id] = False
 
         # Upright Roll Input Suppression:
         # Prevents continuous Gaussian action noise or persistent roll holding from rolling off-axis once upright
-        if not car.on_ground and up_z > 0.90 and not is_active_halfflip_cancel and not is_aerial_engagement:
+        if not car.on_ground and surface_align > 0.90 and not is_active_halfflip_cancel and not is_aerial_engagement:
             if abs(roll_input) > 0.15:
                 total_reward -= (abs(roll_input) - 0.15) * 0.10
 
@@ -2190,7 +2573,10 @@ class AirRollRecoveryReward(BaseReward):
                     wall_nx = -math.copysign(1.0, car.pos[0]) if is_near_side else 0.0
                     wall_ny = -math.copysign(1.0, car.pos[1]) if is_near_back else 0.0
                     wall_align = float(up[0] * wall_nx + up[1] * wall_ny)
-                    best_landing_align = max(floor_align, wall_align)
+                    # surface_align included so a car that landed on the wall it was predicted to
+                    # reach still scores as wheels-down even when it is inside the fixed
+                    # |x| > 3400 / |y| > 4400 bands but the nearest-wall guess picked the other axis.
+                    best_landing_align = max(floor_align, wall_align, surface_align)
                 else:
                     best_landing_align = floor_align
 
@@ -2227,7 +2613,7 @@ class AirRollRecoveryReward(BaseReward):
 
         if car.on_ground:
             self._airborne_ticks[car.id] = 0
-            self._prev_up_z[car.id] = 1.0
+            self._prev_surface_align[car.id] = 1.0
             self._prev_heading[car.id] = 1.0
             self._was_disoriented[car.id] = False
             self._disoriented_this_flight[car.id] = False
@@ -2268,7 +2654,9 @@ class AirRollRecoveryReward(BaseReward):
                 # Must be flying toward ball and not hopelessly losing ground to a receding ball:
                 if fwd_align > 0.4 and car_approach_vel > 150.0 and rel_closing_vel > -150.0:
                     # Upright bonus: reward upright orientation for shallow aerials, exempt steep climbs (fwd[2] > 0.5)
-                    upright_bonus = max(0.0, up_z) * 0.2 if car.get_forward_vector()[2] < 0.5 else 0.1
+                    # Measured against the landing surface: demanding world-upright here fought the
+                    # correct attitude for challenging a ball up on a wall.
+                    upright_bonus = max(0.0, surface_align) * 0.2 if car.get_forward_vector()[2] < 0.5 else 0.1
                     total_reward += (fwd_align * 0.3 + upright_bonus) * 0.5
 
         return self.weight * total_reward

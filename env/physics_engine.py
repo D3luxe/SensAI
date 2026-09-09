@@ -295,6 +295,7 @@ class RocketSimArena:
         self._big_pad_active = np.array([self.boost_pads[i].is_active for i in self._bg_pad_indices], dtype=bool)
         self._all_pad_pos_2d = np.array([p.pos[:2] for p in self.boost_pads], dtype=np.float32)
         self._all_pad_active = np.array([p.is_active for p in self.boost_pads], dtype=bool)
+        self._all_pad_is_big = np.array([p.is_big for p in self.boost_pads], dtype=bool)
 
         self._init_cars()
         from env.state_setters import WeightedScenarioSetter
@@ -538,6 +539,9 @@ class RocketSimArena:
         bot_mask: If provided, True entries bypass SenseiBot's jump sequencer for external bot agents.
         """
         self.step_count += 1
+        # Published for rewards that need a per-step motion budget (e.g. bounding how far the
+        # ball could physically have moved) without hard-coding the trainer's tick_skip.
+        self.last_step_dt = float(dt)
 
         if self._use_rsim and self._rsim_arena:
             self.scored_team = None
