@@ -19,17 +19,20 @@ hyperparameters:
   rot_log_std_ceiling_final: -1.4
 league:
   contender_mu_margin: 4.0
-  contender_series_per_step: 16
+  contender_series_per_step: 32
+  benchmark_interval: 25
+  benchmark_series: 2
   eligibility_sigma: 1.5
   enabled: true
   eval_max_steps: 3000
   eval_no_touch_steps: 500
   eval_series_per_grade: 1
+  gauntlet_opponents: 3
   hall_of_fame_size: 20
   king_challenge_frequency: 3
   king_ratio: 0.25
-  max_contender_matches: 48
   max_consecutive_losses: 8
+  max_contender_matches: 48
   max_pool_size: 10
   max_provisional: 30
   min_contender_points_rate: 40.0
@@ -67,21 +70,20 @@ rewards:
   ball_to_goal_weight: 1.5
   boost_gain_weight: 1.1
   boost_lose_weight: 0.6
-  boost_pathing_threshold: 50.0
   concede_weight: -30.0
   goal_weight: 30.0
-  jump_bridge_weight: 0.8
+  jump_bridge_weight: 0.7
   player_to_ball_weight: 0.6
   powerslide_weight: 0.2
   save_weight: 6.0
   touch_weight: 0.5
 scenarios:
-  aerial_prob: 0.14
-  custom_prob: 0.03
-  dribble_flick_prob: 0.14
-  kickoff_prob: 0.1
-  replay_prob: 0.32
+  aerial_prob: 0.08
+  custom_prob: 0.21
+  dribble_flick_prob: 0.08
+  kickoff_prob: 0.12
+  replay_prob: 0.44
   save_prob: 0.03
-  turnaround_prob: 0.14
-  wall_prob: 0.04
-  wall_rebound_prob: 0.06
+  turnaround_prob: 0.0
+  wall_prob: 0.0
+  wall_rebound_prob: 0.04
