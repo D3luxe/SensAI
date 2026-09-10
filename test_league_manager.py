@@ -53,10 +53,76 @@ class TestLeagueManager(unittest.TestCase):
         shutil.rmtree(self.test_dir, ignore_errors=True)
 
     def test_cold_start_leaves_the_throne_empty(self):
-        """With nothing rated, there is no King: anchors are barred from the crown."""
+        """With nothing rated, there is no King and no pool: anchors fill neither."""
         self.assertIsNone(self.league.king_of_the_hill)
-        self.assertGreaterEqual(len(self.league.elite_pool), 1)
+        self.assertEqual(self.league.elite_pool, [])
         self.assertIn("heuristic", self.league.active_anchors)
+
+    def test_cold_start_falls_back_to_self_play(self):
+        """
+        An empty pool must still produce one assignment per environment.
+
+        The pool tier has nowhere to draw from before any checkpoint is rated, and the
+        anchors are not a substitute. Self-play is, and a short list would silently leave
+        the tail environments facing whatever they faced last.
+        """
+        dist = self.league.get_stratified_distribution(8)
+        self.assertEqual(len(dist), 8)
+        self.assertTrue(all(x is None for x in dist))
+
+    def test_a_reference_model_never_enters_the_pool(self):
+        """
+        Anchors are graded against, not trained against.
+
+        Nexto carries the highest declared mu on the ladder, so ranking alone would seat
+        it at the top of the pool permanently. Deliberate exposure to a reference is what
+        the training_opponents list is for.
+        """
+        for name in ("heuristic", "checkpoints/necto-model.pt"):
+            anchor = self.evaluator.get_or_create_rating(name, is_anchor=True)
+            anchor.mu, anchor.sigma = 99.0, 0.4
+            anchor.update_conservative()
+        ckpt = self.league._normalize_path(self.dummy_ckpt_path)
+        rec = self.evaluator.get_or_create_rating(ckpt)
+        rec.mu, rec.sigma, rec.matches_played = 30.0, 1.0, 40
+        rec.update_conservative()
+
+        self.league.refresh_pool()
+        self.assertIn(ckpt, self.league.elite_pool)
+        for path in self.league.elite_pool:
+            norm = self.league._normalize_path(path)
+            self.assertNotEqual(norm, "heuristic")
+            self.assertFalse(
+                getattr(self.evaluator.ratings.get(norm), "is_anchor", False),
+                f"anchor {norm} leaked into the elite pool",
+            )
+
+    def test_pool_groups_align_with_env_worker_slices(self):
+        """
+        Every subprocess worker must face exactly one opponent model.
+
+        A worker owns a contiguous slice of environments and a rollout step waits on all
+        of them, so a worker holding two models runs two unbatched forward passes and
+        sets the pace for every environment. That holds only while pool_group_size equals
+        environments per worker.
+        """
+        self._seat_a_king()
+        for extra in range(6):
+            rec = self.evaluator.get_or_create_rating(
+                self.league._normalize_path(f"checkpoints/checkpoint_iter_{900 + extra}.pt")
+            )
+            rec.mu, rec.sigma, rec.matches_played = 26.0 - extra * 0.1, 1.0, 40
+            rec.update_conservative()
+
+        num_envs, workers = 128, 16
+        per_worker = num_envs // workers
+        self.league.pool_group_size = per_worker
+        for _ in range(20):
+            dist = self.league.get_stratified_distribution(num_envs)
+            self.assertEqual(len(dist), num_envs)
+            for w in range(workers):
+                slice_ = set(dist[w * per_worker:(w + 1) * per_worker])
+                self.assertEqual(len(slice_), 1, f"worker {w} straddles models: {slice_}")
 
     def test_anchor_never_takes_the_crown(self):
         """Even rated far above every checkpoint, an anchor cannot be King."""
@@ -537,10 +603,7 @@ class TestLeagueManager(unittest.TestCase):
         # 4 envs with 50% SP, 25% King, 25% Pool -> 1 pool slot per call (the last slot)
         self._seat_a_king()
         explicit = set(self.league.training_opponents)
-        candidate_pool = [
-            m for m in dict.fromkeys(self.league.elite_pool + self.league.active_anchors)
-            if m not in explicit
-        ]
+        candidate_pool = [m for m in dict.fromkeys(self.league.elite_pool) if m not in explicit]
         self.assertGreater(len(candidate_pool), 0)
 
         seen = []

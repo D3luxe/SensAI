@@ -2,10 +2,10 @@ environment:
   game_mode: 1v1
   max_episode_steps: 600
   num_env_workers: 16
-  num_envs: 64
+  num_envs: 128
   tick_skip: 8
 hyperparameters:
-  batch_size: 8192
+  batch_size: 16384
   bc_decay_steps: 500000000
   bc_regularization_weight: 0.02
   clip_range: 0.2
@@ -33,6 +33,7 @@ league:
   max_provisional: 30
   min_contender_points_rate: 45.0
   min_matches_for_points_floor: 12
+  pool_group_size: 8
   pool_ratio: 0.25
   protect_top_k: 20
   rating_lock_matches: 64
@@ -40,9 +41,8 @@ league:
   series_length: 9
   series_wins_needed: 5
   target_eval_matches: 30
-  training_opponent_ratio: 0.1
-  training_opponents:
-  - checkpoints/necto-model.pt
+  training_opponent_ratio: 0.0
+  training_opponents: []
 logging:
   archive_stride: 5000
   autosave_interval: 20
