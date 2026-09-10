@@ -58,22 +58,20 @@
   {
     "id": "fast_breakaway_open_net",
     "name": "Midfield Fast Breakaway Sprint",
+    "enabled": false,
     "description": "Bot starts near midfield chasing a fast rolling ball toward an open net to practice boost feathering and supersonic power finishes.",
-    "enabled": true,
     "car": {
       "pos": [
         -600.0,
         -200.0,
         17.0
       ],
-      "yaw": 75.0,
-      "pitch": 0.0,
-      "roll": 0.0,
       "vel": [
         320.1414782637583,
         1194.7842624905534,
         0.0
       ],
+      "yaw": 75.0,
       "boost": 40.0
     },
     "ball": {
@@ -90,19 +88,6 @@
     },
     "opponent": {
       "mode": "shadow",
-      "pos": [
-        400.0,
-        2400.0,
-        17.0
-      ],
-      "yaw": 90.0,
-      "pitch": 0.0,
-      "roll": 0.0,
-      "vel": [
-        0.0,
-        0.0,
-        0.0
-      ],
       "boost": 33.3
     },
     "variance": {
