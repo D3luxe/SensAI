@@ -1763,14 +1763,41 @@ def create_ui():
                         with gr.Group():
                             gr.Markdown("### 👥 Fixed Training Opponents")
                             gr.Markdown(
-                                "*Models here are guaranteed a share of the environments, split evenly "
-                                "between them. The remainder keeps the standard 50% self-play / 25% King / "
-                                "25% pool split, so a 10% share across two opponents is 5% each and leaves "
-                                "45% / 22.5% / 22.5%. At 0% the league behaves exactly as if this list were "
-                                "empty. Listed models are excluded from the pool rotation, so their share is "
+                                "*Models here are guaranteed a block of environments, split evenly between "
+                                "them. The remainder keeps the standard 50% self-play / 25% King / 25% pool "
+                                "split. At zero the league behaves exactly as if this list were empty. "
+                                "Listed models are excluded from the pool rotation, so their share is "
                                 "exactly what you set here.*"
                             )
                             league_cfg_ui = default_cfg.get("league", {}) or {}
+
+                            # Environments, not a percentage.
+                            #
+                            # Each subprocess worker owns a contiguous block of environments and a rollout
+                            # step waits on all of them, so a share that ends mid-block leaves one worker
+                            # holding two opponent models and paying an unbatched forward pass every step.
+                            # Asking for a percentage made that easy to trip over: 20% of 128 is 25.6, which
+                            # put five of sixteen workers off their boundary. Stepping by the block size
+                            # means every position on this slider is one the scheduler can honour exactly.
+                            ui_num_envs = max(1, int(env_cfg.get("num_envs", 64) or 64))
+                            ui_workers = max(1, int(env_cfg.get("num_env_workers", 1) or 1))
+                            env_block = max(1, ui_num_envs // ui_workers)
+
+                            def _opp_env_readout(count: float) -> str:
+                                count = int(count or 0)
+                                pct = 100.0 * count / ui_num_envs
+                                if count <= 0:
+                                    return (f"**0 / {ui_num_envs} environments** &middot; the league picks "
+                                            "every opponent on its own")
+                                blocks = count // env_block
+                                return (f"**{count} / {ui_num_envs} environments** &middot; {pct:.3g}% of the "
+                                        f"rollout &middot; {blocks} of {ui_workers} workers")
+
+                            _opp_start = int(round(float(league_cfg_ui.get(
+                                "training_opponent_ratio",
+                                env_cfg.get("baseline_opponent_ratio", 0.0)
+                            ) or 0.0) * ui_num_envs))
+                            _opp_start = min(ui_num_envs, (_opp_start // env_block) * env_block)
                             with gr.Row():
                                 training_opponents_select = gr.Dropdown(
                                     choices=get_available_opponent_options(),
@@ -1783,14 +1810,18 @@ def create_ui():
                                 refresh_opponent_btn = gr.Button("🔄 Scan", scale=1)
 
                             baseline_opp_slider = gr.Slider(
-                                0.0, 1.0,
-                                value=float(league_cfg_ui.get(
-                                    "training_opponent_ratio",
-                                    env_cfg.get("baseline_opponent_ratio", 0.0)
-                                )),
-                                step=0.01,
-                                label="Combined Share",
-                                info="Total share of environments for this list, divided evenly among its entries."
+                                0, ui_num_envs,
+                                value=_opp_start,
+                                step=env_block,
+                                label="Environments for this list",
+                                info=(f"Steps of {env_block}, one env-worker's block. Divided evenly among "
+                                      "the entries above.")
+                            )
+                            opp_env_readout = gr.Markdown(_opp_env_readout(_opp_start))
+                            baseline_opp_slider.change(
+                                fn=_opp_env_readout,
+                                inputs=[baseline_opp_slider],
+                                outputs=[opp_env_readout],
                             )
                             apply_opp_btn = gr.Button("⚡ Apply Opponent Mix", variant="secondary")
                             opp_apply_msg = gr.Markdown("")
@@ -2569,7 +2600,12 @@ def create_ui():
             outputs=[live_hp_msg]
         )
 
-        def on_apply_opponent_mix(opp_list, opp_ratio):
+        def on_apply_opponent_mix(opp_list, opp_envs):
+            # The slider is in environments; the league stores a ratio. Converting here
+            # rather than there keeps every stored value one the scheduler can honour
+            # exactly, because the slider can only land on a worker-block boundary.
+            opp_envs = max(0, min(ui_num_envs, int(opp_envs or 0)))
+            opp_ratio = opp_envs / float(ui_num_envs)
             selected = []
             for item in (opp_list or []):
                 text = str(item).strip()
@@ -2598,13 +2634,16 @@ def create_ui():
                 save_yaml_config(base_cfg, "config/default_config.yaml")
             except Exception:
                 pass
-            if not selected or float(opp_ratio) <= 0.0:
+            if not selected or opp_envs <= 0:
                 return (f"✅ **Fixed opponents cleared** — league picks opponents on its own "
                         f"(50% self-play / 25% King / 25% pool) at {time.strftime('%H:%M:%S')}")
-            each = float(opp_ratio) / len(selected)
+            each = opp_envs // len(selected)
+            spare = opp_envs - each * len(selected)
             names = ", ".join(f"`{os.path.basename(x)}`" for x in selected)
-            return (f"✅ **Fixed opponents applied:** {names} — {float(opp_ratio):.0%} combined, "
-                    f"{each:.1%} each at {time.strftime('%H:%M:%S')}")
+            share = (f"{each} env{'s' if each != 1 else ''} each"
+                     + (f", {spare} rotating between them" if spare else ""))
+            return (f"✅ **Fixed opponents applied:** {names} — {opp_envs}/{ui_num_envs} environments "
+                    f"({share}) at {time.strftime('%H:%M:%S')}")
 
         apply_opp_btn.click(
             fn=on_apply_opponent_mix,

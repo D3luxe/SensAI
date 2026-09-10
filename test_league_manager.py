@@ -481,6 +481,34 @@ class TestLeagueManager(unittest.TestCase):
                 slice_ = set(dist[w * 8:(w + 1) * 8])
                 self.assertEqual(len(slice_), 1, f"worker {w} straddles models: {slice_}")
 
+    def test_every_slider_position_is_one_the_scheduler_can_honour(self):
+        """
+        The opponent-share control steps in whole env-worker blocks.
+
+        It used to be a percentage with a 0.01 step, which made it trivial to ask for a
+        share that cannot land on a worker boundary: 0.20 of 128 environments is 25.6.
+        In block units every reachable position round-trips through the stored ratio to
+        exactly the count requested, with no worker straddling two models.
+        """
+        self._seat_a_king()
+        num_envs, workers = 128, 16
+        block = num_envs // workers
+        self.league.pool_group_size = block
+        opponent = self.league._normalize_path("heuristic")
+
+        for count in range(0, num_envs + 1, block):
+            self.league.training_opponents = [opponent] if count else []
+            self.league.training_opponent_ratio = count / float(num_envs)
+            dist = self.league.get_stratified_distribution(num_envs)
+            self.assertEqual(len(dist), num_envs)
+            self.assertEqual(
+                sum(1 for x in dist if x == opponent and count), count,
+                f"asked for {count} environments, scheduler assigned something else",
+            )
+            for w in range(workers):
+                slice_ = set(dist[w * block:(w + 1) * block])
+                self.assertEqual(len(slice_), 1, f"count {count}, worker {w}: {slice_}")
+
     def test_status_panel_reports_the_league_not_the_legacy_keys(self):
         """
         The panel must name the tiers actually running.
