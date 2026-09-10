@@ -477,6 +477,37 @@ class TestLeagueManager(unittest.TestCase):
         self.assertAlmostEqual(rec_new.sigma, default_sigma, places=3,
                                msg="certainty must not be inherited, only the estimate")
 
+    def test_seeding_ignores_a_barely_played_predecessor(self):
+        """
+        A one or two series rating is not a measurement worth inheriting.
+
+        The abandoned debuts left on this leaderboard from before the debut skip range
+        from mu 18.89 to 22.92 between neighbouring saves. Passing that straight to the
+        next checkpoint would dress noise up as a starting point.
+        """
+        noisy = self.league._normalize_path("checkpoints/checkpoint_iter_200.pt")
+        rn = self.evaluator.get_or_create_rating(noisy)
+        rn.mu, rn.sigma, rn.matches_played = 19.0, 5.8, 2
+        rn.update_conservative()
+
+        newer = self.league._normalize_path("checkpoints/checkpoint_iter_400.pt")
+        rec = self.evaluator.get_or_create_rating(newer)
+        default_mu = rec.mu
+        self.assertFalse(self.league.seed_from_predecessor(newer, rec))
+        self.assertAlmostEqual(rec.mu, default_mu, places=3)
+
+        # A measured one further back is inherited instead of the noisy neighbour.
+        measured = self.league._normalize_path("checkpoints/checkpoint_iter_100.pt")
+        rm = self.evaluator.get_or_create_rating(measured)
+        rm.mu, rm.sigma, rm.matches_played = 21.4, 1.2, 40
+        rm.update_conservative()
+        rec2 = self.evaluator.get_or_create_rating(
+            self.league._normalize_path("checkpoints/checkpoint_iter_500.pt")
+        )
+        self.assertTrue(self.league.seed_from_predecessor(
+            self.league._normalize_path("checkpoints/checkpoint_iter_500.pt"), rec2))
+        self.assertAlmostEqual(rec2.mu, 21.4, places=3)
+
     def test_seeding_only_applies_to_a_checkpoint_that_has_not_played(self):
         """A record with results of its own is measured, so it is not re-seeded."""
         older = self.league._normalize_path("checkpoints/checkpoint_iter_100.pt")

@@ -679,6 +679,14 @@ class LeagueManager:
 
         Only mu is inherited. Sigma stays at the default, because nothing about the
         predecessor's certainty transfers to a model that has not played.
+
+        The predecessor must itself have cleared the grace period. A rating drawn from one
+        or two series is barely a measurement: on this leaderboard the abandoned debuts
+        left over from before the debut skip range from mu 18.89 to 22.92 between
+        neighbouring saves, so inheriting one would pass that noise straight to the new
+        checkpoint and call it a starting point. Seer's agents each had about twenty games
+        behind them before the next one seeded from their final mu. Where no predecessor
+        qualifies, the default rating stands and the gauntlet does the work.
         """
         if rec.matches_played > 0:
             return False
@@ -687,7 +695,9 @@ class LeagueManager:
             return False
         best_iter, best_rec = None, None
         for path, other in self.evaluator.ratings.items():
-            if other is rec or other.is_anchor or other.matches_played <= 0:
+            if other is rec or other.is_anchor:
+                continue
+            if other.matches_played < self.grace_period_matches:
                 continue
             k = self._checkpoint_iteration(path)
             if k is None or k >= n:
