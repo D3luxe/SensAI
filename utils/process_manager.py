@@ -35,15 +35,34 @@ class TrainingProcessManager:
             cls._instance = TrainingProcessManager()
         return cls._instance
 
-    def _reader_thread(self):
-        if self.process and self.process.stdout:
-            for line in iter(self.process.stdout.readline, ''):
+    def _reader_thread(self, stream=None):
+        """
+        Drains the child's stdout into the log buffer.
+
+        Takes the stream as an argument and holds it locally rather than reaching through
+        self.process on every use. stop_training sets self.process to None while this
+        thread is still parked in readline, so the old code raised
+        "'NoneType' object has no attribute 'stdout'" on the close() after the loop
+        broke. The exception killed the thread before it could close the pipe.
+        """
+        if stream is None:
+            proc = self.process
+            stream = proc.stdout if proc else None
+        if stream is None:
+            return
+        try:
+            for line in iter(stream.readline, ''):
                 if not line:
                     break
-                stripped = line.rstrip()
-                self.log_buffer.append(stripped)
-                # Also echo to console if needed
-            self.process.stdout.close()
+                self.log_buffer.append(line.rstrip())
+        except (ValueError, OSError):
+            # Pipe closed underneath us by a concurrent stop. Nothing to salvage.
+            pass
+        finally:
+            try:
+                stream.close()
+            except Exception:
+                pass
 
     def start_training(
         self,
@@ -84,11 +103,45 @@ class TrainingProcessManager:
             with open(os.path.join("logs", "start_time.txt"), "w") as f:
                 f.write(str(self.start_time))
 
-            self.log_thread = threading.Thread(target=self._reader_thread, daemon=True)
+            self.log_thread = threading.Thread(
+                target=self._reader_thread, args=(self.process.stdout,), daemon=True
+            )
             self.log_thread.start()
             return True, f"Training started successfully (PID: {self.process.pid})"
         except Exception as e:
             return False, f"Failed to start training: {e}"
+
+    @staticmethod
+    def _kill_process_tree(pid: int) -> None:
+        """
+        Kills a training process together with everything it spawned.
+
+        train.py is not a leaf: it forks 16 environment workers (num_env_workers) and a
+        league grading process, all multiprocessing children under the "spawn" start
+        method. They are daemon=True, which means the PARENT cleans them up in its
+        atexit handler -- and that only runs on a normal exit.
+
+        Popen.terminate() on Windows is TerminateProcess, which skips atexit entirely,
+        so every worker is orphaned and keeps spinning with no parent to stop it. That
+        is a pile of idle-but-busy processes after every Stop Training.
+
+        taskkill /T walks the tree; on POSIX we kill the process group.
+        """
+        try:
+            if os.name == "nt":
+                subprocess.run(
+                    ["taskkill", "/F", "/T", "/PID", str(pid)],
+                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=10
+                )
+            else:
+                import signal
+                try:
+                    os.killpg(os.getpgid(pid), signal.SIGTERM)
+                except (ProcessLookupError, PermissionError):
+                    pass
+        except Exception:
+            # Best effort: the direct terminate/kill below is still the backstop.
+            pass
 
     def stop_training(self) -> Tuple[bool, str]:
         if not self.is_running():
@@ -96,6 +149,7 @@ class TrainingProcessManager:
 
         try:
             if self.process:
+                self._kill_process_tree(self.process.pid)
                 self.process.terminate()
                 try:
                     self.process.wait(timeout=3)
@@ -109,9 +163,8 @@ class TrainingProcessManager:
                     try:
                         with open(pid_file, "r") as f:
                             pid = int(f.read().strip())
-                        if os.name == "nt":
-                            subprocess.run(["taskkill", "/F", "/PID", str(pid)], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-                        else:
+                        self._kill_process_tree(pid)
+                        if os.name != "nt":
                             os.kill(pid, 9)
                     except Exception:
                         pass
