@@ -13,6 +13,14 @@ hyperparameters:
   gae_lambda: 0.95
   gamma: 0.99
   learning_rate: 0.0003
+  # Per-channel exploration floor on log_std: [Throttle, Steer, Pitch, Yaw, Roll].
+  # Steer/Yaw/Roll are held above the others because they latch against the floor.
+  log_std_floor:
+  - -2.5
+  - -2.0
+  - -2.5
+  - -2.0
+  - -2.0
   mini_batch_size: 1024
   n_epochs: 2
   rot_log_std_anneal_iters: 4000

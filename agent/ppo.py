@@ -17,7 +17,7 @@ from typing import Dict, Any, Optional, List, Set
 
 from env.rocket_env import VectorizedRocketEnv
 from env.observations import OBS_MIRROR_MASK_NP, ACT_MIRROR_MASK_NP
-from agent.models import ActorCritic
+from agent.models import ActorCritic, LOG_STD_FLOOR_DEFAULT
 from utils.league_manager import LeagueManager
 
 
@@ -76,6 +76,13 @@ class PPOTrainer:
         self.ent_coef = float(hp.get("ent_coef", 0.01))
         self.vf_coef = float(hp.get("vf_coef", 0.5))
         self.max_grad_norm = float(hp.get("max_grad_norm", 0.5))
+        # Per-channel exploration floor [Throttle, Steer, Pitch, Yaw, Roll]. Config wins over
+        # whatever a resumed checkpoint was saved with, so raising it takes effect on resume
+        # rather than being overwritten by the old value in the state dict.
+        floor_cfg = hp.get("log_std_floor", model_cfg.get("log_std_floor"))
+        self.log_std_floor = (
+            [float(v) for v in floor_cfg] if floor_cfg else list(LOG_STD_FLOOR_DEFAULT)
+        )
         # Rotational (Pitch/Yaw/Roll) exploration ceiling anneal. See ActorCritic.log_std_max.
         self.rot_log_std_ceiling_final = float(hp.get("rot_log_std_ceiling_final", -1.4))
         self.rot_log_std_anneal_iters = int(hp.get("rot_log_std_anneal_iters", 4000))
@@ -196,7 +203,8 @@ class PPOTrainer:
             continuous_actions=self.continuous_actions,
             use_layer_norm=self.use_layer_norm,
             use_action_masking=bool(model_cfg.get("use_action_masking", True)),
-            handbrake_height_buffer=float(model_cfg.get("handbrake_height_buffer", 120.0))
+            handbrake_height_buffer=float(model_cfg.get("handbrake_height_buffer", 120.0)),
+            log_std_floor=self.log_std_floor
         ).to(self.device)
         # Switch to AdamW with decoupled weight decay (0.0 for standard PPO stability, preventing LayerNorm decay collapse)
         self.optimizer = optim.AdamW(self.agent.parameters(), lr=self.lr, eps=1e-5, weight_decay=0.0)
@@ -316,6 +324,31 @@ class PPOTrainer:
                 print(f"[PPO Trainer] Decaying BC Regularization: Loaded {len(obs):,} human replay frames (Weight: {self.bc_regularization_weight}, Decay Horizon: {self.bc_decay_steps:,} steps)")
         except Exception as e:
             print(f"[PPO Trainer] Warning: Could not initialize BC dataset: {e}")
+
+    def _apply_log_std_floor(self):
+        """
+        Re-assert the configured exploration floor over whatever the checkpoint carried.
+
+        A resumed run reloads actor_log_std exactly where the previous run left it, which
+        for a latched channel is sitting on the old floor. Applying the floor here lifts
+        those channels back into the band so the entropy bonus can move them again.
+
+        Runs before debias_symmetric_actions() so that the floor buffer is already synced
+        from config when debias clamps against it, and so the line logged here reports the
+        lift off the checkpoint's own value rather than off debias's intermediate result.
+        """
+        agent = self.agent
+        if not self.continuous_actions or not hasattr(agent, "set_log_std_floor"):
+            return
+        before = [round(float(v), 3) for v in agent.actor_log_std.detach().flatten()]
+        applied = agent.set_log_std_floor(self.log_std_floor)
+        after = [round(float(v), 3) for v in agent.actor_log_std.detach().flatten()]
+        if before != after:
+            names = ["throttle", "steer", "pitch", "yaw", "roll"]
+            lifted = ", ".join(
+                f"{n} {b:.2f}->{a:.2f}" for n, b, a in zip(names, before, after) if b != a
+            )
+            print(f"[PPO Trainer] Exploration floor {applied} lifted latched axes: {lifted}")
 
     def _step_rot_log_std_anneal(self):
         """
@@ -711,6 +744,7 @@ class PPOTrainer:
             self._reward_anneal_start_step = checkpoint.get("reward_anneal_start_step", None)
             self._rot_anneal_start_iter = checkpoint.get("rot_anneal_start_iter")
             self._rot_anneal_start_ceiling = checkpoint.get("rot_anneal_start_ceiling")
+            self._apply_log_std_floor()
             self.agent.debias_symmetric_actions()
             print(f"[PPO Trainer] Successfully migrated weights to new dimensions (Obs: {self.obs_dim}, Act: {self.act_dim}) from {path} (Iter: {self.iteration})")
             return
@@ -726,6 +760,7 @@ class PPOTrainer:
         self._reward_anneal_start_step = checkpoint.get("reward_anneal_start_step", None)
         self._rot_anneal_start_iter = checkpoint.get("rot_anneal_start_iter")
         self._rot_anneal_start_ceiling = checkpoint.get("rot_anneal_start_ceiling")
+        self._apply_log_std_floor()
         self.agent.debias_symmetric_actions()
 
         # Sanitize any legacy subnormal floating-point numbers in weights and optimizer states
