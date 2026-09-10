@@ -7,6 +7,7 @@ elite pool curation, and stratified vectorized environment distribution (Option 
 from __future__ import annotations
 import re
 import os
+import math
 import random
 import json
 import datetime
@@ -173,7 +174,6 @@ class LeagueManager:
         # calibrated anchors the checkpoint population sits far lower, so a fixed floor
         # evicts contenders that are stronger than the reigning King. Kept only as a
         # legacy backstop, and no longer consulted directly -- see _contender_mu_floor.
-        self.min_contender_mu = float(self.config.get("min_contender_mu", 25.5))
         # How far below the King a contender may sit before the skill floor bites. The
         # floor is only applied once the King's own rating is established; on a fresh
         # leaderboard nothing is established, so there is no floor to breach.
@@ -184,11 +184,25 @@ class LeagueManager:
             "min_matches_for_points_floor", 12
         ))
         # Points rate (draw = half a win), not raw win rate. See ModelRating.points_rate.
+        #
+        # 40 rather than 45. The floor sits under an even contest, and a contender is
+        # matched against the pool it is trying to join, so its true rate is near 50%.
+        # Placing the floor five points under that put ordinary variance across it; ten
+        # points under, and only when the interval clears it, asks the contender to be
+        # measurably worse than the field rather than merely unlucky.
         self.min_contender_points_rate = float(self.config.get(
             "min_contender_points_rate",
-            self.config.get("min_contender_win_rate", 45.0)
+            self.config.get("min_contender_win_rate", 40.0)
         ))
-        self.max_consecutive_losses = int(self.config.get("max_consecutive_losses", 4))
+        # Consecutive series losses before the knockout fires.
+        #
+        # 4 sounds decisive and is not. Between evenly matched models a run of four is an
+        # ordinary thing to see: across the 48 series of a full gauntlet it happens to
+        # about 80% of contenders, so as a signal it carried almost no information and
+        # did most of the evicting. 8 is genuinely unlikely for a contender worth keeping,
+        # around 8%, while a checkpoint losing four fifths of its series still exits fast
+        # because the points floor catches it by series 12.
+        self.max_consecutive_losses = int(self.config.get("max_consecutive_losses", 8))
         self.grace_period_matches = int(self.config.get("grace_period_matches", 6))
         # Also the minimum count for rank-eligibility, in SERIES. Measured convergence
         # against the calibrated ladder (200 runs/point, draw rate 6.7%): 24 series
@@ -866,36 +880,18 @@ class LeagueManager:
             and rec.sigma > self.target_eval_sigma
         )
 
-        # 1. Check Graduation.
+        # 1. Check Demotion first (only after grace period matches).
         #
-        # A contender leaves the gauntlet only once its rating can actually be ranked,
-        # or once it has exhausted max_contender_matches trying. Graduating on a looser
-        # sigma than the ranking gate produced a checkpoint that was out of the queue,
-        # below the pool, and therefore never played again -- its sigma frozen forever
-        # just short of the threshold.
-        should_graduate = False
-        if rec.mu >= self.min_contender_mu and rec.points_rate >= self.min_contender_points_rate:
-            if self._is_rank_eligible(rec):
-                should_graduate = True
-            elif rec.matches_played >= self.max_contender_matches:
-                # Out of budget. It leaves un-ranked and will sit as provisional until
-                # the pool has room, rather than blocking the queue indefinitely.
-                should_graduate = True
-
-        if should_graduate:
-            print(f"[League Manager] [Gauntlet Graduation] '{rec.name}' graduated with established rating: mu={rec.mu:.2f}, sigma={rec.sigma:.2f}, Score={self._compute_competitive_score(rec):.2f} over {rec.matches_played} matches!")
-            self.contender_queue.remove(contender_path)
-            self.contender_consecutive_losses.pop(contender_path, None)
-            self.refresh_pool()
-            self._record_event(
-                event_type="promotion",
-                model_name=rec.name,
-                detail=f"Graduated Gauntlet to Elite Pool! (mu: {rec.mu:.2f}, Pts: {rec.points_rate:.1f}% in {rec.matches_played} matches)",
-                extra={"mu": rec.mu, "matches": rec.matches_played, "points_rate": rec.points_rate}
-            )
-            return {"status": "graduated", "model": rec.name, "score": self._compute_competitive_score(rec)}
-
-        # 2. Check Demotion (Only after grace period matches)
+        # Order matters, and it used to be the other way round. Graduation sat behind two
+        # absolute preconditions, mu >= 25.5 and a points rate above the demotion floor,
+        # which opened a band where a contender could neither graduate nor be demoted. It
+        # then drew gauntlet trials forever, spending evaluation budget on a rating that
+        # had already settled and starving newer checkpoints of measurement. With the
+        # King at mu 24.09 that band was every contender between 20.09 and 25.50, and one
+        # record reached 91 matches inside it.
+        #
+        # Deciding demotion first and graduating on measurement alone makes the two
+        # exhaustive: a contender either leaves on evidence or leaves once measured.
         should_demote = False
         demote_reason = ""
         if rec.matches_played >= self.grace_period_matches:
@@ -910,13 +906,37 @@ class LeagueManager:
                     f"Skill floor breached (mu={rec.mu:.2f} +/- {rec.sigma:.2f} "
                     f"confidently below {mu_floor:.2f})"
                 )
-            elif (rec.matches_played >= self.min_matches_for_points_floor
-                  and rec.points_rate < self.min_contender_points_rate):
-                should_demote = True
-                demote_reason = f"Points rate dropped below floor ({rec.points_rate:.1f}% < {self.min_contender_points_rate:.1f}%)"
+            elif rec.matches_played >= self.min_matches_for_points_floor:
+                # Same standard of evidence as the skill floor, for the same reason. A
+                # points rate over 12 series carries a standard error near 14 points, so
+                # comparing it bare to a floor a few points under even odds evicts on
+                # variance. Simulated over a full 48-series gauntlet, an exactly average
+                # contender was thrown out 87% of the time and one genuinely better than
+                # the field, at 60%, still 58% of the time. Requiring the interval to
+                # clear the floor brings those to 17% and 4%, while a weak checkpoint at
+                # 25% is still caught by series 12.
+                rate = max(0.0, min(1.0, rec.points_rate / 100.0))
+                spread = math.sqrt(
+                    max(rate * (1.0 - rate), 0.01) / max(1, rec.matches_played)
+                ) * 100.0
+                if rec.points_rate + spread < self.min_contender_points_rate:
+                    should_demote = True
+                    demote_reason = (
+                        f"Points rate below floor ({rec.points_rate:.1f}% +/- {spread:.1f} "
+                        f"confidently below {self.min_contender_points_rate:.1f}%)"
+                    )
+                elif consec_losses >= self.max_consecutive_losses:
+                    should_demote = True
+                    demote_reason = (
+                        f"Loss streak knockout ({consec_losses} >= "
+                        f"{self.max_consecutive_losses} consecutive losses)"
+                    )
             elif consec_losses >= self.max_consecutive_losses:
                 should_demote = True
-                demote_reason = f"Loss streak knockout ({consec_losses} >= {self.max_consecutive_losses} consecutive losses)"
+                demote_reason = (
+                    f"Loss streak knockout ({consec_losses} >= "
+                    f"{self.max_consecutive_losses} consecutive losses)"
+                )
 
         if should_demote:
             print(f"[League Manager] [Gauntlet Demotion] '{rec.name}' evicted from contender queue. Reason: {demote_reason}")
@@ -930,6 +950,36 @@ class LeagueManager:
                 extra={"reason": demote_reason, "matches": rec.matches_played}
             )
             return {"status": "demoted", "model": rec.name, "reason": demote_reason}
+
+        # 2. Check Graduation, on measurement alone.
+        #
+        # Anything that deserved to leave on skill has already left above, so the only
+        # remaining question is whether the rating is worth ranking. Which contenders are
+        # actually good is decided by the elite pool, which takes the top max_pool_size by
+        # mu. The gauntlet's job is to find out, not to judge.
+        #
+        # Graduating on a looser sigma than the ranking gate produced a checkpoint that
+        # was out of the queue, below the pool, and therefore never played again, its
+        # sigma frozen forever just short of the threshold.
+        should_graduate = (
+            self._is_rank_eligible(rec)
+            # Out of budget. It leaves un-ranked and sits as provisional until the pool
+            # has room, rather than blocking the queue indefinitely.
+            or rec.matches_played >= self.max_contender_matches
+        )
+
+        if should_graduate:
+            print(f"[League Manager] [Gauntlet Graduation] '{rec.name}' graduated with established rating: mu={rec.mu:.2f}, sigma={rec.sigma:.2f}, Score={self._compute_competitive_score(rec):.2f} over {rec.matches_played} matches!")
+            self.contender_queue.remove(contender_path)
+            self.contender_consecutive_losses.pop(contender_path, None)
+            self.refresh_pool()
+            self._record_event(
+                event_type="promotion",
+                model_name=rec.name,
+                detail=f"Graduated Gauntlet to Elite Pool! (mu: {rec.mu:.2f}, Pts: {rec.points_rate:.1f}% in {rec.matches_played} matches)",
+                extra={"mu": rec.mu, "matches": rec.matches_played, "points_rate": rec.points_rate}
+            )
+            return {"status": "graduated", "model": rec.name, "score": self._compute_competitive_score(rec)}
 
         target = self.max_contender_matches if is_title_contender else self.target_eval_matches
         print(f"[League Manager] [Gauntlet Progress] '{rec.name}' now at {rec.matches_played}/{target} matches (mu={rec.mu:.2f}, sigma={rec.sigma:.2f}, Comp Score={self._compute_competitive_score(rec):.2f})")

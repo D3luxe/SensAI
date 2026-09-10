@@ -29,9 +29,10 @@ league:
   king_challenge_frequency: 3
   king_ratio: 0.25
   max_contender_matches: 48
+  max_consecutive_losses: 8
   max_pool_size: 10
   max_provisional: 30
-  min_contender_points_rate: 45.0
+  min_contender_points_rate: 40.0
   min_matches_for_points_floor: 12
   pool_group_size: 8
   pool_ratio: 0.25
