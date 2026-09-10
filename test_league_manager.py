@@ -350,6 +350,27 @@ class TestLeagueManager(unittest.TestCase):
         self.assertEqual(len(new_league.contender_queue), len(self.league.contender_queue))
         self.assertGreaterEqual(len(new_league.event_history), 1)
 
+    def test_how_it_works_reads_live_config(self):
+        """
+        The explainer quotes thresholds, so it must read them from config rather than
+        hard-coding them. Copy that drifts from the gates it describes is worse than no
+        copy at all.
+        """
+        from ui.app import build_how_it_works_html
+        import yaml
+
+        html = build_how_it_works_html()
+        cfg = yaml.safe_load(open("config/default_config.yaml", encoding="utf-8"))
+        league = cfg.get("league", {})
+
+        self.assertIn(str(cfg["logging"]["checkpoint_interval"]), html)
+        self.assertIn(str(league.get("series_length", 9)), html)
+        self.assertIn(str(league.get("target_eval_matches", 30)), html)
+        self.assertIn(str(league.get("eligibility_sigma", 1.5)), html)
+        # Reachable without a pointer, and announced as interactive.
+        self.assertIn('tabindex="0"', html)
+        self.assertIn('role="tooltip"', html)
+
     def test_ui_league_wire_and_queue_rendering(self):
         """The league board renders in both the empty and the populated state."""
         from ui.app import build_league_wire_and_queue_html
