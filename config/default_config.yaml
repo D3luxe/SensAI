@@ -18,19 +18,21 @@ hyperparameters:
   mini_batch_size: 1024
   n_epochs: 2
 league:
-  contender_eval_matches_per_step: 12
+  contender_series_per_step: 3
   eligibility_sigma: 1.5
   enabled: true
-  eval_matches_per_grade: 6
-  eval_max_steps: 600
-  eval_ot_random_kickoff: true
-  eval_ot_steps: 600
+  eval_series_per_grade: 1
+  eval_max_steps: 3000
+  eval_no_touch_steps: 500
   king_challenge_frequency: 3
   hall_of_fame_size: 20
   king_ratio: 0.25
   max_pool_size: 10
   max_provisional: 30
-  target_eval_matches: 24
+  series_length: 9
+  series_wins_needed: 5
+  max_contender_matches: 48
+  target_eval_matches: 30
   min_contender_points_rate: 45.0
   pool_ratio: 0.25
   protect_top_k: 20

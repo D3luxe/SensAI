@@ -73,7 +73,7 @@ def main():
     print("=" * 70)
     print("       SENSAI TRUESKILL TOURNAMENT & MODEL BENCHMARK          ")
     print("=" * 70)
-    print(f"Matches Per Pairing: {args.matches_per_pair} (Symmetric Home/Away)")
+    print(f"Series Per Pairing: {args.matches_per_pair} (best-of-9, first to 5; sides alternate)")
     print(f"Max Steps / Match:   {args.steps} (Overtime: {'Off' if args.no_overtime else 'Sudden-Death'})")
     print(f"Device:              {args.device}")
     print(f"Leaderboard Store:   {args.leaderboard_path}")
@@ -129,9 +129,8 @@ def main():
     # Execute tournament
     for update in evaluator.run_tournament(
         model_paths=models_to_eval,
-        matches_per_pair=args.matches_per_pair,
+        series_per_pair=args.matches_per_pair,
         max_steps=args.steps,
-        enable_overtime=not args.no_overtime,
         device=args.device
     ):
         p_idx = update["pairing_index"]

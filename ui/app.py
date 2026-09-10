@@ -3087,7 +3087,7 @@ def create_ui():
                 ts_evaluator.render_leaderboard_plot()
             )
 
-        def on_run_ts_tournament(ckpts, anchors, matches_per_pair, steps, enable_ot):
+        def on_run_ts_tournament(ckpts, anchors, series_per_pair, steps, enable_ot):
             model_list = list(ckpts or [])
             for a in (anchors or []):
                 if "heuristic" in a.lower():
@@ -3116,9 +3116,8 @@ def create_ui():
 
             for update in ts_evaluator.run_tournament(
                 model_paths=model_list,
-                matches_per_pair=int(matches_per_pair),
+                series_per_pair=max(1, int(series_per_pair)),
                 max_steps=int(steps),
-                enable_overtime=bool(enable_ot),
                 device="cpu"
             ):
                 p_idx = update["pairing_index"]

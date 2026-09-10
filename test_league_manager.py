@@ -404,7 +404,7 @@ class TestLeagueManager(unittest.TestCase):
         self.league.contender_queue = [norm_title]
         details = self.league.get_contender_queue_details()
         self.assertEqual(len(details), 1)
-        self.assertEqual(details[0]["target_matches"], 32)
+        self.assertEqual(details[0]["target_matches"], self.league.max_contender_matches)
         self.assertIn("Title Bout", details[0]["status"])
 
         # Stepping should progress instead of prematurely graduating
