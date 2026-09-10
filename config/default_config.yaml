@@ -78,6 +78,24 @@ rewards:
   powerslide_weight: 0.2
   save_weight: 6.0
   touch_weight: 0.5
+reward_annealing:
+  # Mechanic-shaped reward terms exist to bootstrap. Once the policy can execute the manoeuvre,
+  # the velocity potential in PlayerToBallVelocityReward carries turn-radius and traversal
+  # learning on its own, and a named manoeuvre that can be performed without achieving anything
+  # is where farmable terms come from. Decay them toward outcome-driven scoring.
+  #
+  # Anchored on the step at which annealing is first applied, not on step 0, so enabling this on
+  # a run already at billions of steps decays smoothly from now rather than snapping to a
+  # schedule that has already elapsed.
+  enabled: true
+  decay_steps: 400000000
+  targets:
+    # The audit's explicit recommendation: this term should not survive training.
+    powerslide_weight: 0.0
+    # jump_bridge_weight is deliberately NOT listed. That class mixes mechanic shaping (flip
+    # alignment, wavedash, half-flip cancel) with outcome bounties (dodge strike, flick launch),
+    # so decaying the weight would delete the outcome half along with the mechanics. Split the
+    # class before annealing it.
 scenarios:
   aerial_prob: 0.08
   custom_prob: 0.21

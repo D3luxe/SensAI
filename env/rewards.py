@@ -589,6 +589,12 @@ _ENDLINE_MAX_SLICE = 119
 ON_TARGET_FALLOFF = 2.0 * BALL_RADIUS
 ON_TARGET_BONUS = 0.6
 
+# Strike scoring: goalward velocity ADDED to the ball by the contact. Reference is the impulse a
+# solid strike imparts; the cap matches the combined ceiling of the power and impulse bonuses this
+# replaced, so a maximal strike is worth what it was worth before the consolidation.
+STRIKE_IMPULSE_REF = 1000.0
+STRIKE_IMPULSE_CAP = 2.3
+
 
 def project_ball_to_endline(arena: RocketSimArena, target_goal_y: float) -> Optional[Tuple[float, float]]:
     """
@@ -1751,22 +1757,36 @@ class TouchBallReward(BaseReward):
                 rel_speed = _norm3(car.vel - arena.ball.vel)
                 is_gentle_ground_push = bool(car.on_ground and ball_z < 130.0 and rel_speed < 150.0)
 
-                # Power and directional strike bonus:
-                # Rewards solid impact velocity transferred into the ball toward the opponent net
-                power_bonus = 0.0
-                if goal_alignment > 0.2 and not is_gentle_ground_push:
-                    power_bonus = min(1.5, ball_speed / 1500.0)
-
                 # Dedicated Wall Strike Bonus:
                 # Rewards solid wall contact (pops, pinches, passes, and strikes along/off the wall)
                 is_wall_touch = bool(car.pos[2] > 200.0 and (abs(car.pos[0]) > 3400.0 or abs(car.pos[1]) > 4400.0))
                 wall_strike_bonus = (0.60 * min(1.5, max(0.4, ball_speed / 1000.0))) if is_wall_touch else 0.0
 
                 # Directional Kinetic Impulse Transfer:
-                # Measures instantaneous velocity vector progress transferred into the ball along unit_to_goal
+                #
+                # Single strike estimator. This used to be three: a power bonus on the ball's
+                # absolute speed, this impulse bonus on the same collision projected toward the
+                # net, and the direction multiplier they were both multiplied by. Power and
+                # direction multiply out to roughly speed-times-alignment, which is the quantity
+                # impulse measures directly, so three knobs moved one number and tuning any of
+                # them silently rescaled the others.
+                #
+                # Impulse is the right one to keep. Absolute ball speed pays for a ball that was
+                # already travelling fast: tapping a rocket that is on its way to the net scored
+                # nearly as well as striking it, though the bot did almost nothing. Velocity
+                # ADDED along the goal direction is what the car is actually responsible for.
+                #
+                # Critically this does not cross the possession fork. A catch matches ball speed,
+                # so its impulse is near zero by construction, and an impulse-only score would
+                # pay hugely for booming the ball at a wall and near nothing for a soft catch or
+                # a roof carry -- boom-ball, conceding possession on every touch. Possession is
+                # scored by base_touch through soft_catch_bonus and the gentle-push path, both
+                # untouched here, and strike is gated off entirely for a gentle ground push.
                 delta_v_vec = arena.ball.vel - prev_b_vel
                 delta_v_goal = float(np.dot(delta_v_vec, unit_to_goal))
-                impulse_bonus = min(0.80, max(0.0, delta_v_goal / 1500.0)) if goal_alignment > 0.15 else 0.0
+                strike_impulse = 0.0
+                if goal_alignment > 0.15 and not is_gentle_ground_push:
+                    strike_impulse = _clip(delta_v_goal / STRIKE_IMPULSE_REF, 0.0, STRIKE_IMPULSE_CAP)
 
                 if is_defensive_clear:
                     clear_bonus = 0.5 * clear_urgency * max(0.0, (clear_quality - 0.5) / 0.5)
@@ -1797,11 +1817,10 @@ class TouchBallReward(BaseReward):
                     if contact_lateral_slip > 80.0:
                         slip_factor = max(0.2, 1.0 - (contact_lateral_slip - 80.0) / 300.0)
                         base_touch *= slip_factor
-                        power_bonus *= slip_factor
-                        impulse_bonus *= slip_factor
+                        strike_impulse *= slip_factor
                         kickoff_bounty *= slip_factor
 
-                return self.weight * ((base_touch + power_bonus + impulse_bonus) * direction_multiplier * height_multiplier + airborne_bonus + kickoff_bounty)
+                return self.weight * ((base_touch + strike_impulse) * direction_multiplier * height_multiplier + airborne_bonus + kickoff_bounty)
 
             # --- CASE 2: Ball hit directed backward toward defending half / goal ---
             else:

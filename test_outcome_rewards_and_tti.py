@@ -207,8 +207,18 @@ class TestOutcomeRewardsAndTTI(unittest.TestCase):
         )
         r_boom = rew.get_reward(car_boom, arena_boom, act, False, None)
 
-        # Soft touch should earn substantial reward (> 0.8) including soft catch bonus
-        self.assertGreater(r_soft, 0.8)
+        # A cushioned catch must beat blasting the ball away when uncontested. r_boom was
+        # computed here and never asserted on; the check was a bare threshold of 0.8 instead.
+        #
+        # That threshold no longer holds, and it should not. The ball is already moving at
+        # 200 uu/s in this scenario and the touch adds nothing to it, yet the old power bonus
+        # paid for the ball's pre-existing speed anyway -- the double count that collapsing the
+        # three strike estimators into one impulse measure removes. What survives is the
+        # relationship the test is named for.
+        self.assertGreater(r_soft, r_boom,
+                           f"Cushioned catch ({r_soft}) must beat an uncontested boom ({r_boom})")
+        self.assertGreater(r_soft, 0.5,
+                           f"Soft catch should still earn substantial reward, got {r_soft}")
 
     def test_jump_bridge_5050_synchronization(self):
         rew = JumpBridgeReward(weight=1.0)

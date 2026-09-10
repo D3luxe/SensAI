@@ -222,6 +222,24 @@ class PPOTrainer:
         self.bc_obs_tensor = None
         self.bc_act_tensor = None
 
+        # Mechanic-term reward annealing.
+        #
+        # Several reward classes name a manoeuvre rather than an outcome -- powerslide, flips,
+        # air-roll recovery. That is useful for bootstrapping and is probably why the bot has
+        # mechanics at all, but it is also a ceiling, and it is where farmable terms live, since
+        # a named manoeuvre can be performed without achieving anything. These weights decay so
+        # the mature policy runs on outcome terms.
+        anneal_cfg = self.config.get("reward_annealing", {})
+        self.reward_anneal_enabled = bool(anneal_cfg.get("enabled", False))
+        self.reward_anneal_steps = int(anneal_cfg.get("decay_steps", 300_000_000))
+        self.reward_anneal_targets = dict(anneal_cfg.get("targets", {}))
+        self.base_reward_weights = dict(rew_cfg)
+        # Anchored on first application rather than on step 0, so enabling this mid-run decays
+        # from where the policy is now instead of snapping to the end of a schedule already
+        # elapsed. Same reasoning as _rot_anneal_start_iter.
+        self._reward_anneal_start_step = None
+        self._last_pushed_reward_weights = None
+
         # State tracking
         self.global_step = 0
         self.iteration = 0
@@ -334,6 +352,41 @@ class PPOTrainer:
                   f"| anneal {progress * 100.0:.0f}% toward {final_c:.2f}")
             self._rot_ceiling_last_logged = applied
 
+    def _apply_reward_annealing(self):
+        """
+        Decay mechanic-shaped reward weights toward their targets and push the result to the envs.
+
+        Pushes only when something actually moved, since the broadcast fans out to every worker
+        process. With annealing disabled this still forwards a pending config change, so it is the
+        single path by which reward weights reach the envs.
+        """
+        weights = dict(self.base_reward_weights)
+
+        if self.reward_anneal_enabled and self.reward_anneal_targets:
+            if self._reward_anneal_start_step is None:
+                self._reward_anneal_start_step = self.global_step
+            elapsed = max(0, self.global_step - self._reward_anneal_start_step)
+            progress = min(1.0, elapsed / max(1, self.reward_anneal_steps))
+            for key, final_value in self.reward_anneal_targets.items():
+                start_value = float(self.base_reward_weights.get(key, 0.0))
+                weights[key] = start_value + (float(final_value) - start_value) * progress
+
+        prev = self._last_pushed_reward_weights
+        moved = prev is None or any(
+            abs(float(v) - float(prev.get(k, float("inf")))) > 1e-4 for k, v in weights.items()
+        )
+        if not moved:
+            return
+
+        self.env.update_reward_weights(weights)
+        self._last_pushed_reward_weights = weights
+
+        if self.reward_anneal_enabled and self.reward_anneal_targets and prev is not None:
+            elapsed = max(0, self.global_step - self._reward_anneal_start_step)
+            progress = min(1.0, elapsed / max(1, self.reward_anneal_steps))
+            summary = " | ".join(f"{k} {weights[k]:.3f}" for k in sorted(self.reward_anneal_targets))
+            print(f"[PPO Trainer] Reward annealing {progress * 100.0:.0f}%: {summary}")
+
     def check_live_config(self):
         """
         Dynamically reload hyperparameters and reward weights from live_config.json.
@@ -378,7 +431,11 @@ class PPOTrainer:
 
                 # Update rewards
                 if "rewards" in live and isinstance(live["rewards"], dict):
-                    self.env.update_reward_weights(live["rewards"])
+                    # Update the base, not the live value: annealing composes on top of whatever
+                    # the config says, so a config edit retargets the schedule rather than
+                    # fighting it. _apply_reward_annealing pushes within the same iteration.
+                    self.base_reward_weights.update(live["rewards"])
+                    self._last_pushed_reward_weights = None
                     print(f"[Live Config] Reward weights dynamically updated.")
 
                 # Update scenario distributions
@@ -500,6 +557,7 @@ class PPOTrainer:
         data = {
             "iteration": self.iteration,
             "global_step": self.global_step,
+            "reward_anneal_start_step": self._reward_anneal_start_step,
             "model_state_dict": self.agent.state_dict(),
             "optimizer_state_dict": self.optimizer.state_dict(),
             "config": self.config,
@@ -650,6 +708,7 @@ class PPOTrainer:
             self.agent.load_state_dict(model_state)
             self.iteration = checkpoint.get("iteration", 0)
             self.global_step = checkpoint.get("global_step", 0)
+            self._reward_anneal_start_step = checkpoint.get("reward_anneal_start_step", None)
             self._rot_anneal_start_iter = checkpoint.get("rot_anneal_start_iter")
             self._rot_anneal_start_ceiling = checkpoint.get("rot_anneal_start_ceiling")
             self.agent.debias_symmetric_actions()
@@ -664,6 +723,7 @@ class PPOTrainer:
                 pass
         self.iteration = checkpoint.get("iteration", 0)
         self.global_step = checkpoint.get("global_step", 0)
+        self._reward_anneal_start_step = checkpoint.get("reward_anneal_start_step", None)
         self._rot_anneal_start_iter = checkpoint.get("rot_anneal_start_iter")
         self._rot_anneal_start_ceiling = checkpoint.get("rot_anneal_start_ceiling")
         self.agent.debias_symmetric_actions()
@@ -717,6 +777,7 @@ class PPOTrainer:
 
             # 1. Dynamic live parameter check
             self.check_live_config()
+            self._apply_reward_annealing()
             self._step_rot_log_std_anneal()
 
             # Install any league update produced by a finished background grading job
@@ -961,6 +1022,7 @@ class PPOTrainer:
             metrics_payload = {
                 "iteration": self.iteration,
                 "global_step": self.global_step,
+            "reward_anneal_start_step": self._reward_anneal_start_step,
                 "mean_reward": round(mean_ep_rew, 3),
                 "policy_loss": round(mean_pg_loss, 5),
                 "value_loss": round(mean_v_loss, 5),
