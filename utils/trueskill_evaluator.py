@@ -109,7 +109,32 @@ DEFAULT_LEADERBOARD_PATH = "logs/trueskill_leaderboard.json"
 
 # Ranking gate. Sigma decides whether a rating may be ranked at all; mu decides where.
 DEFAULT_ELIGIBILITY_SIGMA = 1.5
-DEFAULT_MIN_RANKED_MATCHES = 16
+DEFAULT_MIN_RANKED_MATCHES = 24
+
+# Match-length defaults, chosen from measurement rather than intuition (n=102 per arm,
+# pinned near-peer pairings, decisive results per minute of compute):
+#
+#   reg 400 / ot 200 fixed    53.9% draws   1.33 s/game   20.7/min   baseline
+#   reg 400 / ot 600 random   28.4% draws   1.69 s/game   25.5/min   +23%
+#   reg 600 / ot 600 random   16.7% draws   1.92 s/game   26.1/min   +26%
+#   reg 600 / ot 200 fixed    51.0% draws   1.73 s/game   17.0/min   -18%
+#
+# The fourth arm isolates the surprise: longer regulation on its own does essentially
+# nothing for draws (51.0% vs 53.9%) while costing 30% more per game. The overtime
+# change does all the work. Regulation 600 is then chosen for validity, not throughput
+# -- it matches the 600-step training horizon, so the policy is graded on the horizon
+# it was optimised for, and it is throughput-neutral once overtime is fixed.
+# Per-episode step cap. Episodes end at the first goal, so this is a backstop for a
+# stalemate rather than a match clock; it is generous because it is rarely reached.
+DEFAULT_EVAL_MAX_STEPS = 3000
+
+# An episode with no ball contact for this many steps is dead and ends level, so two
+# passive policies cannot burn the full cap doing nothing.
+DEFAULT_NO_TOUCH_STEPS = 500
+
+# Series shape. Best-of-9, first to 5.
+DEFAULT_SERIES_LENGTH = 9
+DEFAULT_SERIES_WINS_NEEDED = 5
 
 # TrueSkill Global Configuration
 # draw_probability is calibrated to the rate actually observed in headless evaluation
@@ -117,7 +142,18 @@ DEFAULT_MIN_RANKED_MATCHES = 16
 # frequently stall). Declaring 0.05 here made every draw a large surprise to the model,
 # which dragged mu toward the opponent and shrank sigma faster than the evidence warranted
 # -- the mechanism behind the whole veteran population collapsing into a narrow mu band.
-DEFAULT_DRAW_PROBABILITY = 0.24
+# A rated encounter is a best-of-9 series, first to 5, and each episode inside it ends
+# at the first goal. A series is decisive by construction: it can only tie if the whole
+# nine play out level, which is rare. That is a structural fix for the draw problem
+# rather than the parameter tuning it replaces -- fixed-length matches scored on goals
+# drew 54% of the time between near-peers, and no amount of clock adjustment got that
+# below ~17%.
+# Measured, not inherited: 2 of 30 series between near-peer checkpoints ended level
+# (6.7%). The reference implementation declares 0.01, but its episodes cannot end
+# scoreless the way ours can -- a step cap or a no-touch timeout leaves an episode
+# undecided here, which lets nine of them split evenly. Near-peer pairings are also the
+# pessimistic case and the ones the league actually schedules.
+DEFAULT_DRAW_PROBABILITY = 0.07
 
 ts_env = trueskill.TrueSkill(
     mu=25.0,
@@ -226,79 +262,123 @@ def get_model_display_name(model_spec: str) -> str:
     return base
 
 
-def simulate_headless_match(
+def simulate_headless_episode(
     blue_bot: BaseOpponent,
     orange_bot: BaseOpponent,
-    max_steps: int = 400,
-    enable_overtime: bool = True,
-    max_ot_steps: int = 200,
-    dt: float = 1.0 / 15.0
+    max_steps: int = DEFAULT_EVAL_MAX_STEPS,
+    no_touch_steps: int = DEFAULT_NO_TOUCH_STEPS,
+    dt: float = 1.0 / 15.0,
+    arena: Optional[RocketSimArena] = None
 ) -> Dict[str, Any]:
     """
-    Simulates a fast headless 1v1 match between Blue and Orange bots without rendering overhead.
-    Correctly applies bot_mask for external TorchScript bots and resolves ties with sudden-death overtime.
+    One episode, ending at the first goal.
+
+    A fixed-length match keeps simulating after the outcome is effectively settled and
+    then reports a draw whenever the goals happen to be level. Ending at the first goal
+    spends the compute only up to the decision, and hands the series a clean win or loss.
+
+    Returns result 1 (blue), -1 (orange) or 0 (no goal: stalemate or no-touch timeout).
     """
-    arena = RocketSimArena(num_players=2, game_mode="1v1")
+    if arena is None:
+        arena = RocketSimArena(num_players=2, game_mode="1v1")
+
+    # random_kickoff=False selects the KickoffSetter, which picks one of five standard
+    # spawn locations at random and mirrors it exactly for the other team. Randomised
+    # for variety, symmetric so neither side is handed an advantage.
     arena.reset(random_kickoff=False)
 
-    # External bots (Necto/Nexto) must bypass SensAI jump sequencer via bot_mask
     bot_mask = [
         isinstance(blue_bot, NectoNextoOpponentBot),
         isinstance(orange_bot, NectoNextoOpponentBot)
     ]
 
-    blue_goals = 0
-    orange_goals = 0
-    ot_steps_taken = 0
-    went_to_overtime = False
+    prev_touches = sum(c.ball_touches for c in arena.cars)
+    last_touch_step = 0
+    result = 0
+    steps = 0
 
-    # 1. Regulation Period
     for step in range(max_steps):
+        steps = step + 1
         act0 = blue_bot.get_action(arena.cars[0], arena)
         act1 = orange_bot.get_action(arena.cars[1], arena)
-
         goal, scoring_team = arena.step([act0, act1], dt=dt, bot_mask=bot_mask)
+
+        touches = sum(c.ball_touches for c in arena.cars)
+        if touches != prev_touches:
+            prev_touches = touches
+            last_touch_step = step
+
         if goal:
-            if scoring_team == 0:
-                blue_goals += 1
-            else:
-                orange_goals += 1
-            arena.reset(random_kickoff=True)
+            result = 1 if scoring_team == 0 else -1
+            break
 
-    # 2. Sudden-Death Golden Goal Overtime (if tied)
-    if enable_overtime and blue_goals == orange_goals:
-        went_to_overtime = True
-        arena.reset(random_kickoff=False)
-        for ot_step in range(max_ot_steps):
-            ot_steps_taken = ot_step + 1
-            act0 = blue_bot.get_action(arena.cars[0], arena)
-            act1 = orange_bot.get_action(arena.cars[1], arena)
-
-            goal, scoring_team = arena.step([act0, act1], dt=dt, bot_mask=bot_mask)
-            if goal:
-                if scoring_team == 0:
-                    blue_goals += 1
-                else:
-                    orange_goals += 1
-                break
-
-    # Outcome
-    if blue_goals > orange_goals:
-        winner = "blue"
-    elif orange_goals > blue_goals:
-        winner = "orange"
-    else:
-        winner = "draw"
+        if step - last_touch_step >= no_touch_steps:
+            break
 
     return {
-        "blue_goals": blue_goals,
-        "orange_goals": orange_goals,
+        "result": result,
+        "steps": steps,
         "blue_touches": arena.cars[0].ball_touches,
         "orange_touches": arena.cars[1].ball_touches,
-        "winner": winner,
-        "overtime": went_to_overtime,
-        "overtime_steps": ot_steps_taken,
-        "total_steps": max_steps + ot_steps_taken
+        "no_touch_timeout": (steps - last_touch_step) >= no_touch_steps and result == 0,
+    }
+
+
+def simulate_headless_series(
+    bot_a: BaseOpponent,
+    bot_b: BaseOpponent,
+    series_length: int = DEFAULT_SERIES_LENGTH,
+    wins_needed: int = DEFAULT_SERIES_WINS_NEEDED,
+    max_steps: int = DEFAULT_EVAL_MAX_STEPS,
+    no_touch_steps: int = DEFAULT_NO_TOUCH_STEPS,
+    dt: float = 1.0 / 15.0
+) -> Dict[str, Any]:
+    """
+    A best-of-N series between two bots, stopping as soon as one reaches wins_needed.
+
+    Sides alternate every episode, so a series is symmetric even when the arena or the
+    policies carry a side preference. This is the unit that produces exactly one
+    TrueSkill update, which is what makes that update decisive and worth its cost.
+    """
+    arena = RocketSimArena(num_players=2, game_mode="1v1")
+    a_score = b_score = 0
+    episodes = []
+
+    for i in range(series_length):
+        a_is_blue = (i % 2 == 0)
+        blue, orange = (bot_a, bot_b) if a_is_blue else (bot_b, bot_a)
+        ep = simulate_headless_episode(
+            blue_bot=blue, orange_bot=orange, max_steps=max_steps,
+            no_touch_steps=no_touch_steps, dt=dt, arena=arena
+        )
+        raw = ep["result"]
+        # Translate blue/orange back into a/b.
+        if raw == 0:
+            outcome = 0
+        elif (raw == 1) == a_is_blue:
+            outcome = 1
+        else:
+            outcome = -1
+
+        if outcome > 0:
+            a_score += 1
+        elif outcome < 0:
+            b_score += 1
+        ep["outcome_for_a"] = outcome
+        episodes.append(ep)
+
+        if a_score >= wins_needed or b_score >= wins_needed:
+            break
+
+    score_diff = a_score - b_score
+    return {
+        "a_score": a_score,
+        "b_score": b_score,
+        "score_diff": score_diff,
+        "winner": "a" if score_diff > 0 else ("b" if score_diff < 0 else "draw"),
+        "episodes_played": len(episodes),
+        "total_steps": sum(e["steps"] for e in episodes),
+        "episodes": episodes,
     }
 
 
@@ -312,7 +392,16 @@ class TrueSkillEvaluator:
     min_ranked_matches: int = DEFAULT_MIN_RANKED_MATCHES
 
     def is_rank_eligible(self, rec: ModelRating) -> bool:
-        """Whether a rating has converged enough to be ranked on raw mu against peers."""
+        """
+        Whether a rating has converged enough to be ranked on raw mu against peers.
+
+        Anchors are always eligible. Their mu is declared by ANCHOR_CALIBRATION and their
+        sigma is pinned, so there is nothing to converge; holding them to a match count
+        they can never satisfy would sort a calibrated reference below every checkpoint
+        that cleared the gate.
+        """
+        if rec.is_anchor:
+            return True
         return rec.sigma <= self.eligibility_sigma and rec.matches_played >= self.min_ranked_matches
 
     def ranking_key(self, rec: ModelRating) -> Tuple[int, float, float]:
@@ -420,20 +509,36 @@ class TrueSkillEvaluator:
         self,
         model_a_path: str,
         model_b_path: str,
-        matches_per_pair: int = 2,
-        max_steps: int = 400,
-        enable_overtime: bool = True,
-        device: str = "cpu"
+        series_per_pair: int = 1,
+        max_steps: int = DEFAULT_EVAL_MAX_STEPS,
+        no_touch_steps: int = DEFAULT_NO_TOUCH_STEPS,
+        series_length: int = DEFAULT_SERIES_LENGTH,
+        wins_needed: int = DEFAULT_SERIES_WINS_NEEDED,
+        device: str = "cpu",
+        **legacy
     ) -> List[Dict[str, Any]]:
         """
-        Runs an even number of matches between two models, alternating Blue and Orange
-        sides to guarantee zero spawn or side bias.
+        Plays `series_per_pair` best-of-N series and applies ONE rating update per series.
+
+        Rating a whole series rather than each episode is the point: a series outcome is
+        decisive and carries far more information than a single short episode, so each
+        update moves the rating on real evidence instead of on one lucky goal. Sides
+        alternate inside the series, so no side symmetry handling is needed here.
+
+        `matches_per_pair` is accepted as a legacy alias and interpreted as a series
+        count, so older callers keep working rather than silently playing 9x the games.
         """
-        # Ensure even number of matches for perfect side symmetry
-        if matches_per_pair < 2:
-            matches_per_pair = 2
-        elif matches_per_pair % 2 != 0:
-            matches_per_pair += 1
+        # Retired kwargs from the fixed-length-match era. A series ends at the first goal
+        # and cannot tie except across all nine episodes, so overtime has no meaning now.
+        for retired in ("enable_overtime", "max_ot_steps", "ot_random_kickoff"):
+            legacy.pop(retired, None)
+        if "matches_per_pair" in legacy and legacy["matches_per_pair"] is not None:
+            # Old callers passed game counts; treat two games as one series, minimum one.
+            series_per_pair = max(1, int(legacy["matches_per_pair"]) // 2)
+            legacy.pop("matches_per_pair")
+        if legacy:
+            raise TypeError(f"evaluate_pairing got unexpected keyword(s): {sorted(legacy)}")
+        series_per_pair = max(1, int(series_per_pair))
 
         record_a = self.get_or_create_rating(model_a_path)
         record_b = self.get_or_create_rating(model_b_path)
@@ -441,84 +546,66 @@ class TrueSkillEvaluator:
         bot_a = create_opponent_bot(model_a_path, device=device)
         bot_b = create_opponent_bot(model_b_path, device=device)
 
-        match_results = []
-
-        for m_idx in range(matches_per_pair):
-            # Alternating sides: Game 0 (A Blue, B Orange), Game 1 (B Blue, A Orange)...
-            if m_idx % 2 == 0:
-                blue_bot, orange_bot = bot_a, bot_b
-                blue_rec, orange_rec = record_a, record_b
-                blue_is_a = True
-            else:
-                blue_bot, orange_bot = bot_b, bot_a
-                blue_rec, orange_rec = record_b, record_a
-                blue_is_a = False
-
-            res = simulate_headless_match(
-                blue_bot=blue_bot,
-                orange_bot=orange_bot,
-                max_steps=max_steps,
-                enable_overtime=enable_overtime
+        results = []
+        for _ in range(series_per_pair):
+            res = simulate_headless_series(
+                bot_a=bot_a, bot_b=bot_b,
+                series_length=series_length, wins_needed=wins_needed,
+                max_steps=max_steps, no_touch_steps=no_touch_steps
             )
 
-            # Update scores
-            bg, og = res["blue_goals"], res["orange_goals"]
-            blue_rec.goals_for += bg
-            blue_rec.goals_against += og
-            orange_rec.goals_for += og
-            orange_rec.goals_against += bg
+            record_a.matches_played += 1
+            record_b.matches_played += 1
+            record_a.goals_for += res["a_score"]
+            record_a.goals_against += res["b_score"]
+            record_b.goals_for += res["b_score"]
+            record_b.goals_against += res["a_score"]
 
-            blue_rec.matches_played += 1
-            orange_rec.matches_played += 1
+            r_a = record_a.to_trueskill_rating()
+            r_b = record_b.to_trueskill_rating()
+            drawn = (res["score_diff"] == 0)
 
-            r_blue = blue_rec.to_trueskill_rating()
-            r_orange = orange_rec.to_trueskill_rating()
-
-            if res["winner"] == "blue":
-                blue_rec.wins += 1
-                orange_rec.losses += 1
-                new_blue, new_orange = trueskill.rate_1vs1(r_blue, r_orange)
-                if not blue_rec.is_anchor:
-                    blue_rec.from_trueskill_rating(new_blue)
-                if not orange_rec.is_anchor:
-                    orange_rec.from_trueskill_rating(new_orange)
-            elif res["winner"] == "orange":
-                orange_rec.wins += 1
-                blue_rec.losses += 1
-                new_orange, new_blue = trueskill.rate_1vs1(r_orange, r_blue)
-                if not orange_rec.is_anchor:
-                    orange_rec.from_trueskill_rating(new_orange)
-                if not blue_rec.is_anchor:
-                    blue_rec.from_trueskill_rating(new_blue)
+            if drawn:
+                record_a.draws += 1
+                record_b.draws += 1
+                new_a, new_b = trueskill.rate_1vs1(r_a, r_b, drawn=True)
+            elif res["score_diff"] > 0:
+                record_a.wins += 1
+                record_b.losses += 1
+                new_a, new_b = trueskill.rate_1vs1(r_a, r_b)
             else:
-                blue_rec.draws += 1
-                orange_rec.draws += 1
-                new_blue, new_orange = trueskill.rate_1vs1(r_blue, r_orange, drawn=True)
-                if not blue_rec.is_anchor:
-                    blue_rec.from_trueskill_rating(new_blue)
-                if not orange_rec.is_anchor:
-                    orange_rec.from_trueskill_rating(new_orange)
+                record_b.wins += 1
+                record_a.losses += 1
+                new_b, new_a = trueskill.rate_1vs1(r_b, r_a)
 
-            blue_rec.update_conservative()
-            orange_rec.update_conservative()
+            # Anchors are calibrated references; their rating never moves.
+            if not record_a.is_anchor:
+                record_a.from_trueskill_rating(new_a)
+            if not record_b.is_anchor:
+                record_b.from_trueskill_rating(new_b)
+            record_a.update_conservative()
+            record_b.update_conservative()
 
-            res["blue_name"] = blue_rec.name
-            res["orange_name"] = orange_rec.name
-            res["blue_mu"] = blue_rec.mu
-            res["orange_mu"] = orange_rec.mu
-            res["winner_name"] = blue_rec.name if res["winner"] == "blue" else (orange_rec.name if res["winner"] == "orange" else "Draw")
-            match_results.append(res)
+            res["model_a"] = record_a.name
+            res["model_b"] = record_b.name
+            res["a_mu"] = record_a.mu
+            res["b_mu"] = record_b.mu
+            res["winner_name"] = (
+                record_a.name if res["score_diff"] > 0
+                else (record_b.name if res["score_diff"] < 0 else "Draw")
+            )
+            results.append(res)
             self.match_history.append(res)
 
         self.save_leaderboard()
-        return match_results
+        return results
 
     def run_tournament(
         self,
         model_paths: List[str],
-        matches_per_pair: int = 2,
-        max_steps: int = 400,
-        enable_overtime: bool = True,
+        series_per_pair: int = 1,
+        max_steps: int = DEFAULT_EVAL_MAX_STEPS,
+        no_touch_steps: int = DEFAULT_NO_TOUCH_STEPS,
         device: str = "cpu",
         progress_callback: Optional[Callable[[int, int, str], None]] = None
     ) -> Generator[Dict[str, Any], None, None]:
@@ -549,9 +636,9 @@ class TrueSkillEvaluator:
             results = self.evaluate_pairing(
                 model_a_path=mA,
                 model_b_path=mB,
-                matches_per_pair=matches_per_pair,
+                series_per_pair=series_per_pair,
                 max_steps=max_steps,
-                enable_overtime=enable_overtime,
+                no_touch_steps=no_touch_steps,
                 device=device
             )
 

@@ -102,6 +102,23 @@ class TestLeagueManager(unittest.TestCase):
         norm_key = self.league._normalize_path(self.dummy_ckpt_path)
         self.assertIn(norm_key, self.evaluator.ratings)
 
+    def test_anchors_rank_by_calibrated_mu_not_match_count(self):
+        """A calibrated anchor outranks a weaker checkpoint despite having no record."""
+        strong = os.path.join(self.test_dir, "checkpoint_iter_900.pt")
+        shutil.copyfile(self.dummy_ckpt_path, strong)
+        rec = self.evaluator.get_or_create_rating(self.league._normalize_path(strong))
+        rec.mu, rec.sigma, rec.matches_played = 26.0, 1.0, 60
+        rec.update_conservative()
+
+        necto = self.evaluator.ratings.get("checkpoints/necto-model.pt")
+        if necto is None:
+            self.skipTest("necto anchor not present in this environment")
+
+        # Anchors never accumulate a record -- their rating is declared, not earned -- so
+        # gating them on match count would sort them below every ranked checkpoint.
+        self.assertTrue(self.league._is_rank_eligible(necto))
+        self.assertGreater(self.league._ranking_key(necto), self.league._ranking_key(rec))
+
     def test_protected_checkpoints(self):
         """Verify protected checkpoints include top-K models and King-of-the-Hill."""
         self.league.grade_checkpoint(self.dummy_ckpt_path)
@@ -214,11 +231,27 @@ class TestLeagueManager(unittest.TestCase):
         r_grad = self.evaluator.get_or_create_rating(norm_grad)
         r_grad.mu = 29.0
         r_grad.matches_played = self.league.target_eval_matches
-        r_grad.wins = 12
-        r_grad.sigma = 1.8
+        r_grad.wins = 20
+        r_grad.sigma = self.league.eligibility_sigma + 0.3   # still un-converged
         r_grad.update_conservative()
+        self.league.max_consecutive_losses = 99   # isolate graduation from match outcomes
+        # A production-sized 12-game trial would converge this rating past the gate
+        # inside the first step, which is the opposite of what this fixture tests.
+        self.league.contender_eval_matches_per_step = 2
 
+        # Hitting the match target is not enough on its own: while sigma is above the
+        # ranking gate, graduating would push the contender out of the queue and below
+        # the pool, where it would never play again and never converge.
         self.league.contender_queue = [norm_grad]
+        res_early = self.league.step_contender_gauntlet()
+        self.assertIsNotNone(res_early)
+        self.assertNotEqual(res_early["status"], "graduated")
+        self.assertIn(norm_grad, self.league.contender_queue)
+
+        # Once the rating converges past the gate, it graduates.
+        r_grad.sigma = self.league.eligibility_sigma - 0.2
+        r_grad.matches_played = max(r_grad.matches_played, self.league.target_eval_matches)
+        r_grad.update_conservative()
         res = self.league.step_contender_gauntlet()
         self.assertIsNotNone(res)
         self.assertEqual(res["status"], "graduated")
@@ -354,7 +387,7 @@ class TestLeagueManager(unittest.TestCase):
         norm_title = self.league._normalize_path(c_title)
         r = self.evaluator.get_or_create_rating(norm_title)
         r.mu = 32.0  # High skill
-        r.matches_played = 16  # Hit standard target
+        r.matches_played = self.league.target_eval_matches  # Hit standard target
         r.sigma = 2.4  # Still above target_eval_sigma (1.8)
         r.wins = 25  # Ample win padding so headless eval test matches don't breach floor
         r.losses = 2
@@ -364,11 +397,14 @@ class TestLeagueManager(unittest.TestCase):
         # plays four real simulated games, so a chance losing streak would otherwise trip
         # the knockout rule and demote the contender, making the assertion a coin flip.
         self.league.max_consecutive_losses = 99
+        # Keep the trial short so sigma stays above target_eval_sigma and the contender
+        # remains in the extended-trial window this test is about.
+        self.league.contender_eval_matches_per_step = 2
 
         self.league.contender_queue = [norm_title]
         details = self.league.get_contender_queue_details()
         self.assertEqual(len(details), 1)
-        self.assertEqual(details[0]["target_matches"], 32)
+        self.assertEqual(details[0]["target_matches"], self.league.max_contender_matches)
         self.assertIn("Title Bout", details[0]["status"])
 
         # Stepping should progress instead of prematurely graduating
@@ -377,8 +413,8 @@ class TestLeagueManager(unittest.TestCase):
         self.assertEqual(res.get("status"), "progress")
         self.assertIn(norm_title, self.league.contender_queue)
 
-        # Now simulate reaching max_contender_matches (32) with sufficient wins
-        r.matches_played = 30
+        # Now simulate reaching max_contender_matches with sufficient wins
+        r.matches_played = self.league.max_contender_matches - 2
         r.wins = 25
         r.losses = 5
         r.update_conservative()
@@ -404,7 +440,7 @@ class TestLeagueManager(unittest.TestCase):
         rc = self.evaluator.get_or_create_rating(norm_chal)
         rc.mu = 34.0
         rc.sigma = 2.0
-        rc.matches_played = 20
+        rc.matches_played = self.league.target_eval_matches
         rc.update_conservative()
 
         # Still above the eligibility sigma, so a high mu alone does not take the crown.

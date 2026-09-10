@@ -13,7 +13,9 @@ import datetime
 from typing import Dict, Any, List, Optional, Set, Tuple
 
 from utils.trueskill_evaluator import (
-    TrueSkillEvaluator, ModelRating, get_model_display_name, DEFAULT_LEADERBOARD_PATH
+    TrueSkillEvaluator, ModelRating, get_model_display_name, DEFAULT_LEADERBOARD_PATH,
+    DEFAULT_EVAL_MAX_STEPS, DEFAULT_NO_TOUCH_STEPS,
+    DEFAULT_SERIES_LENGTH, DEFAULT_SERIES_WINS_NEEDED
 )
 
 
@@ -49,8 +51,16 @@ class LeagueManager:
         self.hall_of_fame_size = int(self.config.get("hall_of_fame_size", 20))
         self.hall_of_fame_min_matches = int(self.config.get("hall_of_fame_min_matches", 16))
         self.hall_of_fame_max_sigma = float(self.config.get("hall_of_fame_max_sigma", 2.5))
-        self.eval_matches_per_grade = int(self.config.get("eval_matches_per_grade", 2))
-        self.eval_max_steps = int(self.config.get("eval_max_steps", 400))
+        # Debut games per opponent. Raised from 2 because the checkpoint interval moved
+        # from 20 to 200 iterations: grading events became 10x rarer, so holding the
+        # per-event budget fixed silently cut total evaluation throughput 10x. There is
+        # room for it -- a grading event now costs ~20% of the ~175s window between
+        # checkpoints, against ~70-100% under the old interval.
+        self.eval_series_per_grade = int(self.config.get("eval_series_per_grade", 1))
+        self.eval_max_steps = int(self.config.get("eval_max_steps", DEFAULT_EVAL_MAX_STEPS))
+        self.eval_no_touch_steps = int(self.config.get("eval_no_touch_steps", DEFAULT_NO_TOUCH_STEPS))
+        self.series_length = int(self.config.get("series_length", DEFAULT_SERIES_LENGTH))
+        self.series_wins_needed = int(self.config.get("series_wins_needed", DEFAULT_SERIES_WINS_NEEDED))
 
         # Evaluator
         self.evaluator = evaluator or TrueSkillEvaluator(leaderboard_path=leaderboard_path)
@@ -85,12 +95,33 @@ class LeagueManager:
         ))
         self.max_consecutive_losses = int(self.config.get("max_consecutive_losses", 4))
         self.grace_period_matches = int(self.config.get("grace_period_matches", 6))
-        self.target_eval_matches = int(self.config.get("target_eval_matches", 16))
-        self.max_contender_matches = int(self.config.get("max_contender_matches", 32))
+        # Also the minimum count for rank-eligibility, in SERIES. Measured convergence
+        # against the calibrated ladder (200 runs/point, draw rate 6.7%): 24 series
+        # leaves mean sigma at 1.54 with only 17% clearing the 1.5 gate, while 30 series
+        # reaches 1.37 and 99.5%. Setting this below where sigma actually crosses is what
+        # produced un-rankable graduates before.
+        self.target_eval_matches = int(self.config.get("target_eval_matches", 30))
+        # Budget ceiling, in series. Headroom above target so a slow-converging
+        # contender is not evicted un-ranked the moment it reaches the target.
+        self.max_contender_matches = int(self.config.get("max_contender_matches", 48))
+        # Kept only for the extended-trial check. Graduation itself is gated on
+        # rank-eligibility now: a separate 1.8 threshold sitting next to an
+        # eligibility_sigma of 1.5 meant a contender could satisfy graduation while
+        # still being unrankable, then stop receiving games -- the original lock-out,
+        # one step further down the pipeline.
         self.target_eval_sigma = float(self.config.get("target_eval_sigma", 1.8))
-        self.king_challenge_frequency = int(self.config.get("king_challenge_frequency", 2))
+        # Every Nth gauntlet step is spent on a King title bout instead of a contender
+        # trial. At 2 that was half the (now much rarer) steps, spent re-measuring the
+        # model whose rating is already the most certain. 3 leaves two thirds for
+        # contenders, which is where the uncertainty actually is.
+        self.king_challenge_frequency = int(self.config.get("king_challenge_frequency", 3))
         self.max_active_contenders = int(self.config.get("max_active_contenders", 3))
-        self.contender_eval_matches_per_step = int(self.config.get("contender_eval_matches_per_step", 2))
+        # Games per gauntlet trial, split across the trial's opponents. Simulated sigma
+        # convergence against the calibrated ladder (200 runs per point) puts the
+        # sigma <= 1.5 eligibility gate at ~24 games: 16 games leaves mean sigma at 1.75
+        # and 0% eligible, 24 games reaches 95%. At 12 per trial a contender converges
+        # in a debut plus two trials.
+        self.contender_series_per_step = int(self.config.get("contender_series_per_step", 3))
         # Retention: a newly minted checkpoint must survive on disk long enough for the
         # evaluator to reach it. Without this tier a recency window can delete a
         # checkpoint before it is ever measured, which silently biases the league toward
@@ -185,6 +216,9 @@ class LeagueManager:
         """
         if not rec:
             return False
+        # Anchors are calibrated, not measured; see TrueSkillEvaluator.is_rank_eligible.
+        if rec.is_anchor:
+            return True
         return rec.sigma <= self.eligibility_sigma and rec.matches_played >= self.target_eval_matches
 
     def _ranking_key(self, rec: Optional[ModelRating]) -> Tuple[int, float, float]:
@@ -203,12 +237,12 @@ class LeagueManager:
 
     def _compute_competitive_score(self, rec: Optional[ModelRating]) -> float:
         """
-        Computes the effective competitive ranking score for King and Elite Pool determination.
-        - Models with < target_eval_matches (16): uses conservative lower bound mu - 3*sigma
-          to enforce debut protection and prevent unearned ascension on small-sample flukes.
-        - Established models (>= 16 matches): uses mu - 2*sigma (95% confidence lower bound)
-          to eliminate the sample-size penalty trap where incumbents with 800+ matches
-          block vastly superior challengers with 16-32 matches.
+        Fallback ordering for models that are not yet rank-eligible.
+
+        Below target_eval_matches this is the conservative lower bound mu - 3*sigma, so a
+        lucky four-game debut cannot vault the table; at or above it, mu - 2*sigma. Note
+        that rank-eligible models are ordered by raw mu instead, via _ranking_key -- this
+        score only separates provisional models from each other.
         """
         if not rec:
             return 0.0
@@ -541,9 +575,11 @@ class LeagueManager:
             self.evaluator.evaluate_pairing(
                 model_a_path=norm_challenger,
                 model_b_path=norm_king,
-                matches_per_pair=2,
+                series_per_pair=1,
                 max_steps=self.eval_max_steps,
-                enable_overtime=True,
+                no_touch_steps=self.eval_no_touch_steps,
+                series_length=self.series_length,
+                wins_needed=self.series_wins_needed,
                 device=device
             )
         except Exception as e:
@@ -627,9 +663,11 @@ class LeagueManager:
                 self.evaluator.evaluate_pairing(
                     model_a_path=contender_path,
                     model_b_path=opp,
-                    matches_per_pair=max(2, self.contender_eval_matches_per_step // len(opponents)),
+                    series_per_pair=max(1, self.contender_series_per_step // len(opponents)),
                     max_steps=self.eval_max_steps,
-                    enable_overtime=True,
+                    no_touch_steps=self.eval_no_touch_steps,
+                    series_length=self.series_length,
+                    wins_needed=self.series_wins_needed,
                     device=device
                 )
             except Exception as e:
@@ -656,12 +694,20 @@ class LeagueManager:
             and rec.sigma > self.target_eval_sigma
         )
 
-        # 1. Check Graduation (if qualified by skill and matches)
+        # 1. Check Graduation.
+        #
+        # A contender leaves the gauntlet only once its rating can actually be ranked,
+        # or once it has exhausted max_contender_matches trying. Graduating on a looser
+        # sigma than the ranking gate produced a checkpoint that was out of the queue,
+        # below the pool, and therefore never played again -- its sigma frozen forever
+        # just short of the threshold.
         should_graduate = False
         if rec.mu >= self.min_contender_mu and rec.points_rate >= self.min_contender_points_rate:
-            if rec.matches_played >= self.max_contender_matches or rec.sigma <= self.target_eval_sigma:
+            if self._is_rank_eligible(rec):
                 should_graduate = True
-            elif rec.matches_played >= self.target_eval_matches and not is_title_contender:
+            elif rec.matches_played >= self.max_contender_matches:
+                # Out of budget. It leaves un-ranked and will sit as provisional until
+                # the pool has room, rather than blocking the queue indefinitely.
                 should_graduate = True
 
         if should_graduate:
@@ -749,14 +795,16 @@ class LeagueManager:
 
         for opp in opponents_to_test:
             opp_name = get_model_display_name(opp)
-            print(f"  -> Matchup: {rec.name} vs {opp_name} ({self.eval_matches_per_grade} games)")
+            print(f"  -> Matchup: {rec.name} vs {opp_name} (best-of-{self.series_length} x{self.eval_series_per_grade})")
             try:
                 self.evaluator.evaluate_pairing(
                     model_a_path=norm_ckpt,
                     model_b_path=opp,
-                    matches_per_pair=self.eval_matches_per_grade,
+                    series_per_pair=self.eval_series_per_grade,
                     max_steps=self.eval_max_steps,
-                    enable_overtime=True,
+                    no_touch_steps=self.eval_no_touch_steps,
+                    series_length=self.series_length,
+                    wins_needed=self.series_wins_needed,
                     device=device
                 )
             except Exception as e:

@@ -94,9 +94,8 @@ def main():
             evaluator.evaluate_pairing(
                 model_a_path=args.model,
                 model_b_path=anchor,
-                matches_per_pair=2,
+                series_per_pair=1,
                 max_steps=args.steps,
-                enable_overtime=True
             )
 
         rec = evaluator.get_or_create_rating(args.model)
