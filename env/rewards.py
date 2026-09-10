@@ -572,13 +572,142 @@ class GoalReward(BaseReward):
 # ==============================================================================
 # 2. BALL-TO-GOAL PROGRESSION (Field Displacement & On-Target Trajectory)
 # ==============================================================================
+# Endline projection shared by BallToGoalVelocityReward and OwnGoalThreatReward. Both used to
+# carry their own copy of the same ballistic block, with the same gravity constant and the same
+# goal geometry, and disagree about what to do with the result.
+_ENDLINE_SCAN_STRIDE = 10
+# RocketSim's prediction array holds 120 slices, indices 0..119. Asking for index 120 falls
+# through get_predicted_ball_pos's out-of-range path into a separate pure-Python simulation,
+# whose state does not line up with the slices around it -- estimating a velocity across that
+# seam produced a continuation pointing somewhere the ball never goes. Stay inside the array.
+_ENDLINE_MAX_SLICE = 119
+# A shot missing the opening by more than this earns no placement bonus at all. Two ball radii
+# is the width of the graze band the old branch ladder covered, expressed once.
+ON_TARGET_FALLOFF = 2.0 * BALL_RADIUS
+ON_TARGET_BONUS = 0.6
+
+
+def project_ball_to_endline(arena: RocketSimArena, target_goal_y: float) -> Optional[Tuple[float, float]]:
+    """
+    Where the ball would cross the plane y = target_goal_y, as (x_impact, z_impact).
+    Returns None when it never gets there.
+
+    Walks the RocketSim predicted trajectory first. Rocket League is a cage, and a bare parabola
+    has no ceiling at 2044 uu and no side walls at +/-4096 uu: a lob that bounces off the ceiling
+    down into the net projects to an impact height above the arena, and an angled shot toward a
+    corner yields an impact x outside the world. The predictor models all of that. It only spans
+    one second, so beyond the horizon this continues ballistically from the last predicted slice,
+    which is safe because a ball more than a second from the endline is nowhere near the
+    backboard and gravity dominates its arc.
+    """
+    sign = 1.0 if target_goal_y > 0.0 else -1.0
+    ball_pos = arena.ball.pos
+    if sign * (float(ball_pos[1]) - target_goal_y) >= 0.0:
+        return None  # already past the plane
+
+    prev_pos = np.asarray(ball_pos, dtype=np.float32)
+    prev_t = 0.0
+    have_pred = bool(hasattr(arena, "get_predicted_ball_pos") and predictions_trustworthy(arena))
+
+    if have_pred:
+        # Track the closest approach to the plane as well as an outright crossing. A shot that
+        # strikes the back wall or the backboard beside the opening never reaches y = goal_y at
+        # all -- it stops a ball radius short and rebounds -- so waiting for a crossing would
+        # miss every wide or over-the-bar shot and fall through to a continuation computed from
+        # post-bounce state, which points somewhere meaningless.
+        best_fwd = sign * float(prev_pos[1])
+        best_pos = prev_pos
+        turned_back = False
+        prev_prev = prev_pos
+
+        for s in range(_ENDLINE_SCAN_STRIDE, _ENDLINE_MAX_SLICE + 1, _ENDLINE_SCAN_STRIDE):
+            pred = arena.get_predicted_ball_pos(s)
+            if pred is None:
+                break
+            if sign * (float(pred[1]) - target_goal_y) >= 0.0:
+                # Bracketed: linear interpolation inside one stride is well under a ball radius
+                # of error at any speed the ball can reach.
+                y0, y1 = float(prev_pos[1]), float(pred[1])
+                span = y1 - y0
+                frac = 1.0 if abs(span) < 1e-6 else _clip((target_goal_y - y0) / span, 0.0, 1.0)
+                x_i = float(prev_pos[0]) + frac * (float(pred[0]) - float(prev_pos[0]))
+                z_i = float(prev_pos[2]) + frac * (float(pred[2]) - float(prev_pos[2]))
+                return x_i, max(BALL_RADIUS, z_i)
+
+            fwd = sign * float(pred[1])
+            if fwd > best_fwd:
+                best_fwd, best_pos = fwd, np.asarray(pred, dtype=np.float32)
+            elif fwd < best_fwd - 1.0:
+                turned_back = True
+                break
+
+            prev_prev = prev_pos
+            prev_pos = np.asarray(pred, dtype=np.float32)
+            prev_t = s / 120.0
+
+        if turned_back:
+            # Deepest point reached is where it met the wall. That is the impact point.
+            return float(best_pos[0]), max(BALL_RADIUS, float(best_pos[2]))
+
+    # Beyond the prediction horizon (or with no usable prediction): ballistic continuation from
+    # wherever the trajectory left off, using the velocity across the last two scanned slices so
+    # the continuation starts from post-bounce state rather than the ball's launch velocity.
+    if prev_t > 0.0:
+        vel = (prev_pos - prev_prev) / (_ENDLINE_SCAN_STRIDE / 120.0)
+    else:
+        vel = arena.ball.vel
+
+    vy = float(vel[1])
+    if sign * vy <= 50.0:
+        return None  # not travelling toward that endline fast enough to arrive
+
+    dt = (target_goal_y - float(prev_pos[1])) / vy
+    if dt <= 0.0:
+        return None
+    x_i = float(prev_pos[0]) + float(vel[0]) * dt
+    z_i = float(prev_pos[2]) + float(vel[2]) * dt + 0.5 * (-650.0) * (dt ** 2)
+    return x_i, max(BALL_RADIUS, z_i)
+
+
+def on_target_factor(arena: RocketSimArena, target_goal_y: float) -> float:
+    """
+    Placement quality of the ball's current trajectory against one goal mouth, in [0, 1].
+    1.0 is cleanly inside the opening; it falls off smoothly to 0 two ball radii outside, with
+    post and crossbar treated identically rather than through separate branches.
+    """
+    proj = project_ball_to_endline(arena, target_goal_y)
+    if proj is None:
+        return 0.0
+    x_i, z_i = proj
+    miss = max(
+        0.0,
+        abs(x_i) - EFFECTIVE_GOAL_HALF_WIDTH,
+        z_i - EFFECTIVE_GOAL_HEIGHT,
+    )
+    return 1.0 - _clip(miss / ON_TARGET_FALLOFF, 0.0, 1.0)
+
+
 class BallToGoalVelocityReward(BaseReward):
     """
-    Continuous Potential-Based Progression with Goal Opening Targeting.
-    Rewards ball velocity directed toward the opponent's goal opening (X in [-GOAL_HALF_WIDTH, +GOAL_HALF_WIDTH]).
-    Heavily bonuses on-target trajectories that enter the net (1.6x), while dampening
-    wide shots that roll into the backwall/corner beside the goal.
-    Applies an asymmetric 1.5x penalty when ball velocity is directed towards the defending net.
+    Symmetric potential-based progression with goal-opening targeting.
+
+    Rewards ball velocity projected toward the opponent's goal, and charges the same rate for
+    losing that ground, so the term telescopes: accumulated reward tracks where the ball ended
+    up rather than the path it took there.
+
+    On-target placement is a BONUS on that rate, in [1.0, 1.6] -- never a suppressor. The old
+    multiplier spanned [0.0, 1.6] and returned exactly 0.0 for any shot projecting above the
+    crossbar, which zeroed the whole progression term rather than a bonus: a ball leaving the
+    boot at 3000 uu/s scored what a motionless ball scored. Paired with a flat 1.5x penalty on
+    the rebound, elevating the ball anywhere in the attacking third was net-negative, which
+    foreclosed pops into aerial finishes, air dribbles and ceiling shots. The reverse multiplier
+    is gone; own-goal danger is handled by OwnGoalThreatReward, which is localized to the
+    defensive third where it belongs.
+
+    The bonus is applied to a rate rather than added per step deliberately. A flat additive
+    on-target term integrates over time-in-flight, so a floating shot that takes 60 steps to
+    arrive would out-earn a blast that takes 10, biasing the policy toward slow saveable shots.
+    Scaling the rate keeps the integral over a flight invariant to shot speed.
     """
     def __init__(self, weight: float = 1.5):
         super().__init__(weight)
@@ -602,51 +731,60 @@ class BallToGoalVelocityReward(BaseReward):
 
         unit_to_goal = ball_to_goal / dist
         ball_velocity_toward_goal = float(np.dot(arena.ball.vel, unit_to_goal))
+        normalized_progress = ball_velocity_toward_goal / BALL_MAX_SPEED
 
-        # Asymmetric penalty for advancing ball toward defending net
-        if ball_velocity_toward_goal < 0.0:
-            normalized_progress = (ball_velocity_toward_goal / BALL_MAX_SPEED) * 1.5
+        # Losing ground costs exactly what gaining it pays. No reverse multiplier: the old 1.5x
+        # applied anywhere on the pitch, so a rebound off the OPPONENT's backboard was priced as
+        # an own-goal threat. OwnGoalThreatReward handles real own-goal danger where it occurs.
+        if ball_velocity_toward_goal <= 0.0:
             return self.weight * normalized_progress
 
-        # On-Target Trajectory & Backwall Miss Multiplier:
-        # If ball is moving downfield into attacking half, calculate where its trajectory intersects the opponent endline
-        vy_forward = arena.ball.vel[1] if car.team == 0 else -arena.ball.vel[1]
-        ball_y_forward = arena.ball.pos[1] if car.team == 0 else -arena.ball.pos[1]
-        on_target_mult = 1.0
-        if vy_forward > 50.0:
-            delta_y = abs(target_goal_y - arena.ball.pos[1])
-            dt = delta_y / vy_forward
-            x_impact = arena.ball.pos[0] + arena.ball.vel[0] * dt
-            # Ballistic trajectory with physical floor boundary clamp (z >= BALL_RADIUS for rolling shots)
-            z_impact = max(BALL_RADIUS, arena.ball.pos[2] + arena.ball.vel[2] * dt + 0.5 * (-650.0) * (dt ** 2))
-            is_crossbar_miss = bool(z_impact > EFFECTIVE_GOAL_HEIGHT)
-            is_backboard_hit = bool(z_impact > GOAL_HEIGHT)
-            if abs(x_impact) <= EFFECTIVE_GOAL_HALF_WIDTH and not is_crossbar_miss:
-                # Shot is cleanly on target into the net opening without hitting post or bar!
-                on_target_mult = 1.6
-            elif abs(x_impact) <= GOAL_HALF_WIDTH and not is_backboard_hit:
-                # Near-post / crossbar grazing shot: inside post center but outer sphere contacts post/bar
-                # Smoothly attenuate from 1.0 down to 0.8 instead of awarding clean 1.6x goal bonus
-                post_miss_x = max(0.0, abs(x_impact) - EFFECTIVE_GOAL_HALF_WIDTH) / max(1e-4, BALL_RADIUS)
-                bar_miss_z = max(0.0, z_impact - EFFECTIVE_GOAL_HEIGHT) / max(1e-4, BALL_RADIUS)
-                graze_factor = min(1.0, max(post_miss_x, bar_miss_z))
-                on_target_mult = 1.0 - 0.20 * graze_factor
-            elif is_backboard_hit or ball_y_forward > 1000.0:
-                # High over crossbar into backboard or wide into corner:
-                # Strictly zero on-target shot bonus! Backboard rebounds are not goals.
-                if is_backboard_hit or (ball_y_forward > 500.0 and abs(x_impact) > GOAL_HALF_WIDTH + 100.0):
-                    on_target_mult = 0.0
-                else:
-                    miss_dist = max(abs(x_impact) - EFFECTIVE_GOAL_HALF_WIDTH, z_impact - EFFECTIVE_GOAL_HEIGHT)
-                    on_target_mult = max(0.0, 1.0 - (miss_dist / 300.0))
-            elif (abs(x_impact) > EFFECTIVE_GOAL_HALF_WIDTH * 1.3 or is_crossbar_miss) and ball_y_forward > 0.0:
-                # Midfield wide/high trajectory dampening
-                miss_val = max(abs(x_impact) - EFFECTIVE_GOAL_HALF_WIDTH, z_impact - EFFECTIVE_GOAL_HEIGHT)
-                miss_factor = min(1.0, miss_val / 1500.0)
-                on_target_mult = max(0.20, 1.0 - (0.80 * miss_factor))
+        # Placement bonus on the progression rate, floored at 1.0 so a fast goalward ball is
+        # never worth what a motionless one is worth.
+        placement = on_target_factor(arena, target_goal_y)
+        return self.weight * normalized_progress * (1.0 + ON_TARGET_BONUS * placement)
 
-        normalized_progress = (ball_velocity_toward_goal / BALL_MAX_SPEED) * on_target_mult
-        return self.weight * normalized_progress
+
+class OwnGoalThreatReward(BaseReward):
+    """
+    Localized deterrent against driving the ball at your own net.
+
+    This used to live inside BallToGoalVelocityReward as a flat 1.5x multiplier on reverse
+    progression, applied at every point on the pitch. That priced any ball travelling back
+    toward your half as an own-goal threat, including a rebound off the OPPONENT's backboard
+    roughly 10000 uu from your net, which taught the bot never to use the backboard at all.
+
+    Own-goal danger is a defensive-third concern, so the term activates only there, only when
+    the ball is actually travelling at your net, and only in proportion to how much of a shot
+    the trajectory really is. A ball rolling into your own corner at speed is not a threat and
+    is not charged as one.
+    """
+    DEFENSIVE_THIRD_DEPTH = 3400.0
+
+    def __init__(self, weight: float = 2.0):
+        super().__init__(weight)
+
+    def get_reward(self, car: CarState, arena: RocketSimArena, action: np.ndarray, is_goal: bool, scoring_team: Optional[int]) -> float:
+        if is_goal:
+            return 0.0
+
+        defend_goal_y = -ARENA_EXTENT_Y if car.team == 0 else ARENA_EXTENT_Y
+        dist_to_defend = abs(float(arena.ball.pos[1]) - defend_goal_y)
+        if dist_to_defend > self.DEFENSIVE_THIRD_DEPTH:
+            return 0.0
+
+        # Ball speed along the axis into our own net.
+        vy_defend = -float(arena.ball.vel[1]) if car.team == 0 else float(arena.ball.vel[1])
+        if vy_defend <= 0.0:
+            return 0.0
+
+        placement = on_target_factor(arena, defend_goal_y)
+        if placement <= 0.0:
+            return 0.0
+
+        # Closer to the net is harder to recover from.
+        urgency = 0.5 + _clip(1.0 - (dist_to_defend / self.DEFENSIVE_THIRD_DEPTH), 0.0, 1.0)
+        return -self.weight * (vy_defend / BALL_MAX_SPEED) * placement * urgency
 
 
 # ==============================================================================
@@ -1494,19 +1632,19 @@ class TouchBallReward(BaseReward):
 
             # --- CASE 1: Ball hit directed toward opponent half / goal ---
             if goal_alignment >= 0.0:
-                # On-Target Trajectory Bonus: Check if touch velocity produces a direct shot into the net
+                # On-Target Trajectory Bonus: Check if touch velocity produces a direct shot into
+                # the net. This used to carry its own copy of the endline projection, with the
+                # same gravity constant and goal geometry as BallToGoalVelocityReward's copy and
+                # a different set of thresholds on the result. Both now read the shared helper,
+                # which also means both inherit its arena-aware trajectory rather than a bare
+                # parabola that ignores the ceiling and side walls.
                 vy_forward = arena.ball.vel[1] if car.team == 0 else -arena.ball.vel[1]
                 if vy_forward > 80.0:
-                    delta_y = abs(target_goal_y - arena.ball.pos[1])
-                    dt = delta_y / vy_forward
-                    x_impact = arena.ball.pos[0] + arena.ball.vel[0] * dt
-                    z_impact = max(BALL_RADIUS, arena.ball.pos[2] + arena.ball.vel[2] * dt + 0.5 * (-650.0) * (dt ** 2))
-                    is_crossbar_miss = bool(z_impact > EFFECTIVE_GOAL_HEIGHT)
-                    is_backboard_hit = bool(z_impact > GOAL_HEIGHT)
-                    if abs(x_impact) <= EFFECTIVE_GOAL_HALF_WIDTH and not is_crossbar_miss:
+                    placement = on_target_factor(arena, target_goal_y)
+                    if placement >= 1.0:
                         # Direct shot on target into the net opening!
                         goal_alignment = max(goal_alignment, 0.7) + 0.35
-                    elif abs(x_impact) <= GOAL_HALF_WIDTH and not is_backboard_hit:
+                    elif placement > 0.0:
                         # Near-post / crossbar grazing shot: moderate alignment without clean goal bonus
                         goal_alignment = max(goal_alignment, 0.45)
 
@@ -2732,6 +2870,9 @@ class CombinedReward:
             "ball_to_goal": BallToGoalVelocityReward(
                 weight=weights.get("ball_to_goal_weight", 1.5)
             ),
+            "own_goal_threat": OwnGoalThreatReward(
+                weight=weights.get("own_goal_threat_weight", 2.0)
+            ),
             "player_to_ball": PlayerToBallVelocityReward(
                 weight=weights.get("player_to_ball_weight", 0.6),
                 boost_pathing_threshold=weights.get("boost_pathing_threshold", 50.0)
@@ -2771,6 +2912,9 @@ class CombinedReward:
 
         if "ball_to_goal_weight" in new_weights and "ball_to_goal" in self.rewards:
             self.rewards["ball_to_goal"].weight = float(new_weights["ball_to_goal_weight"])
+
+        if "own_goal_threat_weight" in new_weights and "own_goal_threat" in self.rewards:
+            self.rewards["own_goal_threat"].weight = float(new_weights["own_goal_threat_weight"])
 
         if "player_to_ball_weight" in new_weights and "player_to_ball" in self.rewards:
             self.rewards["player_to_ball"].weight = float(new_weights["player_to_ball_weight"])

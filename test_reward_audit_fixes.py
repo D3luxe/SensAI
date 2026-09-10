@@ -223,8 +223,17 @@ class TestRewardAuditFixes(unittest.TestCase):
         # Distance is constant, velocity matching is blocked for ground nose-pushing
         self.assertAlmostEqual(r, 0.0, places=3, msg=f"Grounded nose-pushing should not farm velocity matching reward, got {r}")
 
-    def test_attacking_backwall_push_zero_reward(self):
-        """Test that pushing the ball into the backwall/corner wide of the net in attacking half yields 0 progression."""
+    def test_attacking_backwall_push_gets_no_placement_bonus(self):
+        """A wide push earns plain field progression and no on-target bonus -- but is never zeroed.
+
+        This used to assert exactly 0.0. Zeroing was applied to the whole progression term rather
+        than to a bonus on top of it, so a ball leaving the boot at speed scored what a motionless
+        ball scored. Combined with a flat reverse penalty on the rebound that made elevating the
+        ball in the attacking third net-negative. The multiplier is floored at 1.0 now, and
+        placement only ever adds.
+        """
+        from env.rewards import on_target_factor, ARENA_EXTENT_Y as _AY
+
         rew = BallToGoalVelocityReward(weight=1.5)
         car = CarState(
             id=0, team=0,
@@ -236,8 +245,19 @@ class TestRewardAuditFixes(unittest.TestCase):
         self.arena.ball.vel = np.array([0.0, 1400.0, 0.0], dtype=np.float32)  # Heading straight into X=2000 backwall
 
         action = np.zeros(8, dtype=np.float32)
-        r = rew.get_reward(car, self.arena, action, False, None)
-        self.assertEqual(r, 0.0, f"Pushing wide into attacking backwall/corner should yield 0.0 progression reward, got {r}")
+        r_wide = rew.get_reward(car, self.arena, action, False, None)
+
+        self.assertGreater(r_wide, 0.0,
+                           "Moving the ball downfield must keep its base progression credit")
+        self.assertEqual(on_target_factor(self.arena, ARENA_EXTENT_Y), 0.0,
+                         "A push into the corner must earn no on-target placement bonus")
+
+        # Same speed, same depth, but aimed at the opening: strictly better.
+        self.arena.ball.pos = np.array([0.0, 3200.0, 93.0], dtype=np.float32)
+        self.arena.ball.vel = np.array([0.0, 1400.0, 0.0], dtype=np.float32)
+        r_on_target = rew.get_reward(car, self.arena, action, False, None)
+        self.assertGreater(r_on_target, r_wide,
+                           f"On-target shot ({r_on_target}) must outscore a wide push ({r_wide})")
 
     def test_on_target_shot_progression_bonus(self):
         """Test that a shot on target into the net opening receives full on-target progression multiplier."""

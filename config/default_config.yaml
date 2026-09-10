@@ -73,6 +73,7 @@ rewards:
   concede_weight: -30.0
   goal_weight: 30.0
   jump_bridge_weight: 0.7
+  own_goal_threat_weight: 2.0
   player_to_ball_weight: 0.6
   powerslide_weight: 0.2
   save_weight: 6.0
