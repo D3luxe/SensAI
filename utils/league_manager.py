@@ -19,6 +19,68 @@ from utils.trueskill_evaluator import (
 )
 
 
+def snap_tiers_to_worker_slices(
+    num_envs: int,
+    n_training: int,
+    n_self_play: int,
+    n_king: int,
+    n_pool: int,
+    quantum: int,
+) -> Tuple[int, int, int, int]:
+    """
+    Rounds each tier to a whole env-worker slice, returning the adjusted counts.
+
+    A worker owns a contiguous run of environments and a rollout step does not finish
+    until every worker returns, so a tier ending mid-slice leaves one worker holding two
+    opponent models. That worker pays an unbatched forward pass on every step and sets
+    the pace for all the environments, not just its own.
+
+    Ratios land off-boundary easily. At 128 environments a fixed-opponent share of 0.20
+    asks for 25.6, and rounding that to 26 pushed five of sixteen workers off their
+    boundary. Snapping moves a tier by at most half a slice, a far smaller distortion of
+    the requested mix than the throughput cost of honouring the ratio exactly.
+
+    `quantum` is pool_group_size, which is already required to equal environments per
+    worker because the pool tier depends on that same equality.
+    """
+    quantum = max(1, int(quantum))
+    if quantum <= 1 or num_envs % quantum:
+        return n_training, n_self_play, n_king, n_pool
+
+    # With fewer slices than active tiers, snapping cannot give every tier a whole one
+    # and would silently delete the losers: at 4 environments and a quantum of 4 the
+    # King would round up to all four and self-play would vanish. There is also nothing
+    # to gain, because a single worker holding a mixed set is not a straddle that any
+    # rounding can fix. Honour the requested mix instead.
+    active = sum(1 for n in (n_training, n_self_play, n_king, n_pool) if n > 0)
+    if num_envs // quantum < active:
+        return n_training, n_self_play, n_king, n_pool
+
+    def snap(n: int) -> int:
+        # A tier that was asked for at all keeps at least one whole slice.
+        return max(quantum, int(round(n / quantum)) * quantum) if n > 0 else 0
+
+    n_training = snap(n_training)
+    n_king = snap(n_king)
+    n_pool = (n_pool // quantum) * quantum
+
+    # Self-play absorbs the remainder, which stays slice-aligned because every other
+    # tier is and num_envs divides evenly. Give slices back in order of what the league
+    # can most afford to lose if rounding overshot the budget.
+    leftover = num_envs - n_training - n_king - n_pool
+    while leftover < 0:
+        if n_pool >= quantum:
+            n_pool -= quantum
+        elif n_king >= quantum:
+            n_king -= quantum
+        elif n_training >= quantum:
+            n_training -= quantum
+        else:
+            break
+        leftover += quantum
+    return n_training, max(0, leftover), n_king, n_pool
+
+
 class LeagueManager:
     """
     Coordinates Bayesian TrueSkill evaluation and dynamic league self-play.
@@ -1124,6 +1186,25 @@ class LeagueManager:
             n_self_play += n_king + n_pool
             n_king = 0
             n_pool = 0
+
+        # Snap every tier boundary onto a whole env-worker slice.
+        #
+        # A worker owns a contiguous run of environments, and a rollout step does not
+        # finish until every worker returns. So a tier that ends mid-slice leaves one
+        # worker holding two opponent models, paying an unbatched forward pass on every
+        # step, and setting the pace for all the environments rather than just its own.
+        #
+        # Ratios land off-boundary easily. At 128 environments a fixed-opponent share of
+        # 0.20 asks for 25.6, and rounding that to 26 pushed five of sixteen workers off
+        # their boundary, with every environment paying for it. Rounding to the quantum
+        # moves a tier by at most half a slice, which is a far smaller distortion of the
+        # requested mix than the throughput it costs to honour the ratio exactly.
+        #
+        # pool_group_size is the quantum because it is already required to equal
+        # environments per worker; the pool tier depends on that same equality.
+        n_training, n_self_play, n_king, n_pool = snap_tiers_to_worker_slices(
+            num_envs, n_training, n_self_play, n_king, n_pool, self.pool_group_size
+        )
 
         assignments: List[Optional[str]] = []
 

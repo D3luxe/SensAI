@@ -418,6 +418,130 @@ class TestLeagueManager(unittest.TestCase):
         self.assertEqual(len(new_league.contender_queue), len(self.league.contender_queue))
         self.assertGreaterEqual(len(new_league.event_history), 1)
 
+    def test_tiers_snap_to_whole_worker_slices(self):
+        """
+        Every tier must end on an env-worker boundary.
+
+        A worker owns a contiguous run of environments and a rollout step waits on all of
+        them, so a tier ending mid-slice puts two opponent models in one worker and makes
+        it set the pace for every environment.
+        """
+        from utils.league_manager import snap_tiers_to_worker_slices
+
+        # 20% of 128 asks for 25.6 environments, which is what broke alignment.
+        for quantum in (4, 8, 16):
+            for ratio in (0.05, 0.1, 0.2, 0.33, 0.5):
+                n_env = 128
+                n_train = int(round(n_env * ratio))
+                rest = n_env - n_train
+                counts = snap_tiers_to_worker_slices(
+                    n_env, n_train, rest // 2, rest // 4, rest - rest // 2 - rest // 4, quantum
+                )
+                self.assertEqual(sum(counts), n_env, (quantum, ratio, counts))
+                for n in counts:
+                    self.assertEqual(n % quantum, 0, (quantum, ratio, counts))
+
+    def test_snapping_leaves_indivisible_env_counts_alone(self):
+        """A count that does not divide by the quantum has no slices to snap to."""
+        from utils.league_manager import snap_tiers_to_worker_slices
+
+        original = (3, 10, 5, 2)
+        self.assertEqual(snap_tiers_to_worker_slices(20, *original, 8), original)
+
+    def test_snapping_never_deletes_a_tier(self):
+        """
+        Fewer slices than tiers means snapping would round some tier to nothing.
+
+        At 4 environments with a quantum of 4 the King rounds up to all four and
+        self-play disappears. One worker holding a mixed set is not a straddle any
+        rounding can fix, so the requested mix wins.
+        """
+        from utils.league_manager import snap_tiers_to_worker_slices
+
+        original = (0, 2, 1, 1)
+        self.assertEqual(snap_tiers_to_worker_slices(4, *original, 4), original)
+        self.assertEqual(snap_tiers_to_worker_slices(16, 0, 8, 4, 4, 8), (0, 8, 4, 4))
+
+    def test_a_fixed_opponent_cannot_straddle_a_worker(self):
+        """
+        The failure this was written for: necto on the fixed list at 0.20.
+
+        That share is 25.6 of 128 environments. Rounding it to 26 pushed five of sixteen
+        workers off their boundary, and every environment paid the unbatched forward pass.
+        """
+        self._seat_a_king()
+        self.league.training_opponents = [self.league._normalize_path("heuristic")]
+        self.league.training_opponent_ratio = 0.20
+        self.league.pool_group_size = 8
+
+        for _ in range(15):
+            dist = self.league.get_stratified_distribution(128)
+            self.assertEqual(len(dist), 128)
+            for w in range(16):
+                slice_ = set(dist[w * 8:(w + 1) * 8])
+                self.assertEqual(len(slice_), 1, f"worker {w} straddles models: {slice_}")
+
+    def test_every_slider_position_is_one_the_scheduler_can_honour(self):
+        """
+        The opponent-share control steps in whole env-worker blocks.
+
+        It used to be a percentage with a 0.01 step, which made it trivial to ask for a
+        share that cannot land on a worker boundary: 0.20 of 128 environments is 25.6.
+        In block units every reachable position round-trips through the stored ratio to
+        exactly the count requested, with no worker straddling two models.
+        """
+        self._seat_a_king()
+        num_envs, workers = 128, 16
+        block = num_envs // workers
+        self.league.pool_group_size = block
+        opponent = self.league._normalize_path("heuristic")
+
+        for count in range(0, num_envs + 1, block):
+            self.league.training_opponents = [opponent] if count else []
+            self.league.training_opponent_ratio = count / float(num_envs)
+            dist = self.league.get_stratified_distribution(num_envs)
+            self.assertEqual(len(dist), num_envs)
+            self.assertEqual(
+                sum(1 for x in dist if x == opponent and count), count,
+                f"asked for {count} environments, scheduler assigned something else",
+            )
+            for w in range(workers):
+                slice_ = set(dist[w * block:(w + 1) * block])
+                self.assertEqual(len(slice_), 1, f"count {count}, worker {w}: {slice_}")
+
+    def test_status_panel_reports_the_league_not_the_legacy_keys(self):
+        """
+        The panel must name the tiers actually running.
+
+        baseline_opponent_type and baseline_opponent_ratio only take effect when the
+        league is disabled. Quoting them while it runs advertised Nexto at 5% through a
+        whole session in which no environment faced Nexto.
+        """
+        from ui.app import describe_opponent_mix, opponent_mix_shares
+
+        league = {
+            "enabled": True, "self_play_ratio": 0.5, "king_ratio": 0.25,
+            "pool_ratio": 0.25, "training_opponents": [], "training_opponent_ratio": 0.0,
+            "pool_group_size": 8,
+        }
+        line = describe_opponent_mix(
+            league, {"king_of_the_hill": "checkpoint_iter_10", "elite_pool_size": 10},
+            fallback="checkpoints/nexto-model.pt", num_envs=128,
+        )
+        self.assertIn("Self-play", line)
+        self.assertIn("checkpoint_iter_10", line)
+        self.assertNotIn("nexto", line)
+
+        # The reported split is the one the scheduler runs, not the one requested.
+        with_fixed = dict(league, training_opponents=["checkpoints/necto-model.pt"],
+                          training_opponent_ratio=0.20)
+        self.assertAlmostEqual(opponent_mix_shares(with_fixed)["fixed"], 20.0)
+        self.assertAlmostEqual(opponent_mix_shares(with_fixed, 128)["fixed"], 18.75)
+
+        off = dict(league, enabled=False)
+        self.assertIn("nexto", describe_opponent_mix(
+            off, {}, fallback="checkpoints/nexto-model.pt", num_envs=128))
+
     def test_how_it_works_reads_live_config(self):
         """
         The explainer quotes thresholds, so it must read them from config rather than
