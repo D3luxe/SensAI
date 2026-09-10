@@ -78,6 +78,12 @@ class TestRocketLeagueEnvironment(unittest.TestCase):
             with open("config/default_config.yaml", "r") as f:
                 cfg = yaml.safe_load(f)
             cfg["logging"]["save_dir"] = tmpdir
+            # Keep the test off the live logs/ directory: a real training run
+            # writes metrics.json / history.jsonl there.
+            cfg["logging"]["log_dir"] = tmpdir
+            cfg["logging"]["tensorboard"] = False
+            # Same reason: the league state file lives in logs/ by default.
+            cfg.setdefault("league", {})["league_state_path"] = os.path.join(tmpdir, "league_state.json")
             cfg_path = os.path.join(tmpdir, "test_config.yaml")
             with open(cfg_path, "w") as f:
                 yaml.dump(cfg, f)
@@ -85,9 +91,9 @@ class TestRocketLeagueEnvironment(unittest.TestCase):
             # Run 2 training iterations
             trainer.train(max_iterations=2)
 
-        # Check that metrics were generated
-        self.assertTrue(os.path.exists("logs/metrics.json"))
-        self.assertTrue(os.path.exists("logs/history.jsonl"))
+            # Check that metrics were generated
+            self.assertTrue(os.path.exists(os.path.join(tmpdir, "metrics.json")))
+            self.assertTrue(os.path.exists(os.path.join(tmpdir, "history.jsonl")))
 
     def test_baseline_chaser_and_vectorized_partitioning(self):
         from env.baseline_agent import BaselineChaser

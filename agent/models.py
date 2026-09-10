@@ -39,6 +39,12 @@ except ImportError:
     OBS_LEGACY_MIRROR_MASK_NP = OBS_MIRROR_MASK_NP
 
 
+# Per-channel log_std floor for [Throttle, Steer, Pitch, Yaw, Roll]. Steer, Yaw and Roll
+# sit higher than the other two because they are the axes that latch against the floor;
+# see the log_std_min buffer in ActorCritic.__init__ for the reasoning.
+LOG_STD_FLOOR_DEFAULT = [-2.5, -2.0, -2.5, -2.0, -2.0]
+
+
 class ActorCritic(nn.Module):
     def __init__(
         self,
@@ -51,7 +57,8 @@ class ActorCritic(nn.Module):
         use_layer_norm: bool = True,
         legacy_mirror_mask: bool = False,
         use_action_masking: bool = True,
-        handbrake_height_buffer: float = 120.0
+        handbrake_height_buffer: float = 120.0,
+        log_std_floor: Optional[List[float]] = None
     ):
         super().__init__()
         self.obs_dim = obs_dim
@@ -96,6 +103,22 @@ class ActorCritic(nn.Module):
             # 5 Continuous Analog Axes: Throttle (0), Steer (1), Pitch (2), Yaw (3), Roll (4)
             self.actor_mean = layer_init(nn.Linear(prev_dim, 5), std=0.01)
             self.actor_log_std = nn.Parameter(torch.full((1, 5), -1.5))
+            # Per-channel exploration floor on log_std.
+            # Steer, Yaw and Roll converge hardest -- steer because it acts on every tick
+            # and carries most of the advantage, yaw/roll because the rotational anneal
+            # walked their ceiling down to -1.4 and the policy gradient kept pushing from
+            # there. Left on the shared -2.5 floor all three latch against it at sigma
+            # ~0.08, which is too tight to keep proposing new approach angles or recovery
+            # rolls. Holding them at -2.0 (sigma ~0.135) restores that search while staying
+            # well under the -1.4 rotational ceiling the anneal deliberately established.
+            # Persistent for the same reason as log_std_max: the floor must survive reload
+            # into evaluation and the in-game bot, not silently revert to the default.
+            floor = list(log_std_floor if log_std_floor is not None else LOG_STD_FLOOR_DEFAULT)
+            self.register_buffer(
+                "log_std_min",
+                torch.tensor([floor], dtype=torch.float32),
+                persistent=True,
+            )
             # Per-channel exploration ceiling on log_std.
             # Pitch/Yaw/Roll are masked off while grounded, so they only collect policy
             # gradient on the airborne minority of steps, while the entropy bonus pushes
@@ -106,7 +129,6 @@ class ActorCritic(nn.Module):
             # The trainer anneals the rotational entry down via set_rot_log_std_ceiling().
             # Persistent so the annealed ceiling survives reload in training, evaluation and
             # the in-game bot alike, rather than silently reverting to the ground default.
-            self.log_std_min = -2.5
             self.log_std_ceiling_ground = -0.7
             self.log_std_ceiling_rot = -0.7
             self.register_buffer("log_std_max", torch.full((1, 5), -0.7), persistent=True)
@@ -129,11 +151,18 @@ class ActorCritic(nn.Module):
 
     def clamped_log_std(self) -> torch.Tensor:
         """
-        actor_log_std bounded below by a global floor and above by the per-channel
-        log_std_max ceiling. Gradient behaviour matches the previous torch.clamp: it flows
-        while the parameter is inside the band and is cut once it reaches the ceiling.
+        actor_log_std bounded by the per-channel log_std_min floor and log_std_max
+        ceiling. Gradient behaviour matches the previous torch.clamp: it flows while the
+        parameter is inside the band and is cut once it reaches either bound.
         """
-        floored = torch.clamp(self.actor_log_std, min=self.log_std_min)
+        # torch.where rather than torch.clamp for the same reason as the ceiling below:
+        # the floor is now per-channel, and where() keeps clamp's gradient behaviour
+        # (full gradient at the boundary, none beyond it) against a tensor bound.
+        floored = torch.where(
+            self.actor_log_std < self.log_std_min,
+            self.log_std_min.expand_as(self.actor_log_std),
+            self.actor_log_std,
+        )
         # torch.where rather than torch.minimum: minimum splits gradient evenly on exact
         # ties, and the parameter sits exactly at the ceiling for the whole anneal, which
         # would halve the gradient on the very channels the anneal is meant to free up.
@@ -143,16 +172,34 @@ class ActorCritic(nn.Module):
     def set_rot_log_std_ceiling(self, ceiling: float) -> float:
         """
         Set the exploration ceiling for the rotational axes (Pitch 2, Yaw 3, Roll 4).
-        Never raised above the ground ceiling, never pushed below the global floor. The
+        Never raised above the ground ceiling, never pushed below the rotational floor. The
         live parameter is pulled down with it so the change takes effect immediately
         rather than waiting for the optimizer to walk it down.
         """
-        c = float(min(self.log_std_ceiling_ground, max(self.log_std_min, float(ceiling))))
+        rot_floor = float(self.log_std_min[0, 2:5].max())
+        c = float(min(self.log_std_ceiling_ground, max(rot_floor, float(ceiling))))
         self.log_std_ceiling_rot = c
         with torch.no_grad():
             self.log_std_max[0, 2:5] = c
             self.actor_log_std.data[0, 2:5].clamp_(max=c)
         return c
+
+    def set_log_std_floor(self, floor: List[float]) -> List[float]:
+        """
+        Set the per-channel exploration floor. Never raised above that channel's ceiling.
+
+        The live parameter is pulled up with the floor rather than left underneath it.
+        clamped_log_std() cuts the gradient once actor_log_std passes a bound, so a channel
+        that has already sunk below a newly raised floor would otherwise read as the floor
+        while its raw parameter stayed latched below, unable to be moved back up by the
+        entropy bonus. Mirrors the pull-down in set_rot_log_std_ceiling().
+        """
+        with torch.no_grad():
+            f = torch.tensor([list(floor)], dtype=torch.float32, device=self.log_std_min.device)
+            f = torch.minimum(f, self.log_std_max)
+            self.log_std_min.copy_(f)
+            self.actor_log_std.data.clamp_(min=self.log_std_min)
+        return [round(float(v), 4) for v in self.log_std_min.flatten()]
 
     def debias_symmetric_actions(self):
         """
@@ -181,7 +228,12 @@ class ActorCritic(nn.Module):
                         self.actor_log_std.data.fill_(-1.1)
                         self.actor_log_std.data[0, 2:5].clamp_(max=float(self.log_std_ceiling_rot))
                     else:
-                        self.actor_log_std.data.clamp_(min=-2.2)
+                        # Was a hardcoded -2.2, which predated the per-channel floor and
+                        # silently overrode it on every reload: an axis that had sunk to
+                        # log_std_min during a run came back at -2.2 regardless of what the
+                        # floor was configured to be. Defer to log_std_min so the config is
+                        # the single source of truth for how tight an axis may get.
+                        self.actor_log_std.data.clamp_(min=self.log_std_min.to(self.actor_log_std.device))
                         self.actor_log_std.data.clamp_(max=self.log_std_max.to(self.actor_log_std.device))
                     # Guarantee healthy exploration on Pitch (index 2) to discover forward/diagonal/flick dodges.
                     # The floor tracks the rotational ceiling: a fixed -1.0 sat *above* an annealed
@@ -224,10 +276,15 @@ class ActorCritic(nn.Module):
         # Checkpoints predating the per-channel exploration ceiling carry no log_std_max.
         # Seed it from the current buffer so strict loads still succeed, then adopt whatever
         # ceiling the checkpoint was actually trained under.
+        # Likewise for log_std_min: checkpoints predating the per-channel floor carry none,
+        # and those are exactly the runs whose steer/yaw/roll latched onto the old shared
+        # -2.5. Seeding from the current buffer both keeps strict loads working and applies
+        # the configured floor to them on resume.
         if self.continuous_actions and hasattr(self, "log_std_max"):
-            if "log_std_max" not in state_dict:
+            if "log_std_max" not in state_dict or "log_std_min" not in state_dict:
                 state_dict = dict(state_dict)
-                state_dict["log_std_max"] = self.log_std_max.detach().clone()
+                state_dict.setdefault("log_std_max", self.log_std_max.detach().clone())
+                state_dict.setdefault("log_std_min", self.log_std_min.detach().clone())
             result = super().load_state_dict(state_dict, strict=strict)
             self.log_std_ceiling_rot = float(self.log_std_max[0, 2:5].min())
             self.log_std_ceiling_ground = float(self.log_std_max[0, :2].max())

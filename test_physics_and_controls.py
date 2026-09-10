@@ -12,7 +12,7 @@ import RocketSim as rsim
 
 from env.physics_engine import RocketSimArena
 from env.observations import DefaultObservationBuilder, OBS_DIM, OBS_MIRROR_MASK_NP, ACT_MIRROR_MASK_NP
-from agent.models import ActorCritic
+from agent.models import ActorCritic, LOG_STD_FLOOR_DEFAULT
 from bot import SenseiRLBot
 
 
@@ -637,6 +637,93 @@ class TestPhysicsAndControls(unittest.TestCase):
         self.assertAlmostEqual(float(model.actor_mean.bias[3].detach()), 0.0, places=5)
         self.assertAlmostEqual(float(model.actor_mean.bias[4].detach()), 0.0, places=5)
         self.assertAlmostEqual(float(model.actor_binary.bias[2].detach()), 0.0, places=5)
+
+    def test_per_channel_log_std_floor_lifts_latched_axes(self):
+        """
+        Guarantees that raising the per-channel exploration floor lifts the raw actor_log_std
+        parameter rather than only clamping the forward pass.
+
+        clamped_log_std() cuts the gradient once the parameter passes a bound, so an axis
+        left sitting below a newly raised floor would read as the floor while its parameter
+        stayed latched underneath, unreachable by the entropy bonus for the rest of the run.
+        """
+        model = ActorCritic(obs_dim=OBS_DIM, act_dim=8, continuous_actions=True)
+
+        # Sink every axis to the old shared floor, as a long run does to steer/yaw/roll.
+        with torch.no_grad():
+            model.actor_log_std.data.fill_(-2.5)
+
+        model.set_log_std_floor(LOG_STD_FLOOR_DEFAULT)
+
+        raw = model.actor_log_std.detach().flatten().tolist()
+        for idx, name in [(1, "steer"), (3, "yaw"), (4, "roll")]:
+            self.assertAlmostEqual(raw[idx], -2.0, places=5,
+                                   msg=f"{name} must be lifted to its floor, not left latched below it")
+        for idx, name in [(0, "throttle"), (2, "pitch")]:
+            self.assertAlmostEqual(raw[idx], -2.5, places=5,
+                                   msg=f"{name} keeps the tighter floor and must not be lifted")
+
+        # The whole point of lifting the parameter: gradient must flow again.
+        model.zero_grad()
+        model.clamped_log_std().sum().backward()
+        grad = model.actor_log_std.grad.flatten().tolist()
+        for idx, name in [(1, "steer"), (3, "yaw"), (4, "roll")]:
+            self.assertAlmostEqual(grad[idx], 1.0, places=5,
+                                   msg=f"{name} must be free to move after the lift, not gradient-latched")
+
+    def test_log_std_floor_is_honoured_by_debias_and_survives_reload(self):
+        """
+        Guarantees the configured floor is the single source of truth for how tight an axis
+        may get: debias_symmetric_actions() must defer to it rather than to its own constant,
+        and the floor must survive a save/load round trip into evaluation and the in-game bot.
+        """
+        model = ActorCritic(obs_dim=OBS_DIM, act_dim=8, continuous_actions=True)
+        with torch.no_grad():
+            model.actor_log_std.data.fill_(-2.5)
+
+        model.debias_symmetric_actions()
+        raw = model.actor_log_std.detach().flatten().tolist()
+        self.assertAlmostEqual(raw[1], -2.0, places=5,
+                               msg="debias must clamp steer to the configured floor, not a hardcoded constant")
+        self.assertAlmostEqual(raw[0], -2.5, places=5,
+                               msg="debias must not lift throttle above its own tighter floor")
+
+        # Round trip through a state dict, as evaluation and bot.py do.
+        reloaded = ActorCritic(obs_dim=OBS_DIM, act_dim=8, continuous_actions=True)
+        reloaded.load_state_dict(model.state_dict())
+        self.assertEqual(
+            [round(float(v), 4) for v in reloaded.log_std_min.flatten()],
+            [round(float(v), 4) for v in model.log_std_min.flatten()],
+            "the exploration floor must survive reload, not revert to the default",
+        )
+
+    def test_legacy_checkpoint_without_floor_buffer_loads_strictly(self):
+        """
+        Guarantees checkpoints predating the per-channel floor still load under strict=True.
+        These are exactly the runs whose axes latched onto the old shared floor, so failing
+        to load them would strand every existing checkpoint.
+        """
+        model = ActorCritic(obs_dim=OBS_DIM, act_dim=8, continuous_actions=True)
+        legacy = {k: v for k, v in model.state_dict().items() if k not in ("log_std_min", "log_std_max")}
+
+        fresh = ActorCritic(obs_dim=OBS_DIM, act_dim=8, continuous_actions=True)
+        fresh.load_state_dict(legacy)  # must not raise on the missing buffers
+        self.assertEqual(
+            [round(float(v), 4) for v in fresh.log_std_min.flatten()],
+            [round(float(v), 4) for v in LOG_STD_FLOOR_DEFAULT],
+            "a legacy checkpoint must adopt the configured floor, not lose it",
+        )
+
+    def test_rot_ceiling_anneal_cannot_cross_the_floor(self):
+        """
+        Guarantees the rotational anneal stops at the floor instead of driving the ceiling
+        underneath it, which would invert the band and pin yaw/roll to a single value.
+        """
+        model = ActorCritic(obs_dim=OBS_DIM, act_dim=8, continuous_actions=True)
+        applied = model.set_rot_log_std_ceiling(-3.0)
+        rot_floor = max(float(v) for v in model.log_std_min.flatten()[2:5])
+        self.assertGreaterEqual(applied, rot_floor,
+                                "the rotational ceiling must never anneal below the rotational floor")
 
     def test_bot_boost_pad_awareness(self):
         """
