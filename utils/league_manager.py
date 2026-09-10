@@ -47,6 +47,25 @@ class LeagueManager:
         # keeps the same long-run opponent diversity (the pool cycle advances each refresh)
         # at a fraction of the inference overhead.
         self.pool_group_size = max(1, int(self.config.get("pool_group_size", 4)))
+
+        # Explicit, always-on training opponents. These are guaranteed a share of the
+        # environments rather than competing for round-robin slots in the elite pool,
+        # where a fixed reference ends up at whatever percentage the pool size implies.
+        #
+        # The ratio squashes the standard split rather than carving out of one tier: at
+        # 0.10, ten percent of environments face this list and the remaining ninety are
+        # divided 50/25/25 between self-play, King and pool. At 0.0 (the default) the
+        # behaviour is exactly as before.
+        self.training_opponents: List[str] = [
+            self._normalize_path(x) for x in self.config.get("training_opponents", []) if x
+        ]
+        self.training_opponent_ratio = float(self.config.get(
+            "training_opponent_ratio",
+            # Migration: this control used to be a single model plus a weight.
+            self.config.get("baseline_opponent_ratio", 0.0)
+        ))
+        self.training_opponent_ratio = max(0.0, min(1.0, self.training_opponent_ratio))
+        self._training_opp_cycle_idx: int = 0
         self.protect_top_k = int(self.config.get("protect_top_k", 20))
         self.hall_of_fame_size = int(self.config.get("hall_of_fame_size", 20))
         self.hall_of_fame_min_matches = int(self.config.get("hall_of_fame_min_matches", 16))
@@ -420,8 +439,10 @@ class LeagueManager:
                 valid_models.append((norm_key, comp_score, rec))
 
         if not valid_models:
-            self.king_of_the_hill = self.active_anchors[0] if self.active_anchors else "heuristic"
-            self.elite_pool = [self.king_of_the_hill]
+            # Nothing rated at all: no King, and the pool falls back to the anchors so
+            # training still has opponents.
+            self.king_of_the_hill = None
+            self.elite_pool = list(self.active_anchors) or ["heuristic"]
             return
 
         # Sort descending: rank-eligible models first (ordered by raw mu), provisional
@@ -431,12 +452,21 @@ class LeagueManager:
             reverse=True
         )
 
-        # Prioritize non-anchor checkpoints for King of the Hill if any exist with reasonable rating
+        # The King is always a checkpoint, never an anchor.
+        #
+        # An anchor is a fixed external reference, not a competitor: it cannot be
+        # dethroned, it does not improve, and crowning it points a quarter of all
+        # environments at an opponent chosen for being a stable yardstick rather than for
+        # being a useful sparring partner. On a freshly reset leaderboard Nexto took the
+        # crown on its declared mu of 34.7 and drew 31% of environments, against a policy
+        # that scores about 19% on it.
         checkpoints_only = [m for m in valid_models if not m[2].is_anchor and m[0] != "heuristic"]
         if checkpoints_only:
             self.king_of_the_hill = checkpoints_only[0][0]
         else:
-            self.king_of_the_hill = valid_models[0][0]
+            # No rated checkpoint yet. Hold the throne empty rather than seating an
+            # anchor; get_stratified_distribution falls back for the King tier.
+            self.king_of_the_hill = None
 
         # Check coronation (King handoff)
         if old_king and self.king_of_the_hill and old_king != self.king_of_the_hill:
@@ -590,7 +620,7 @@ class LeagueManager:
         self.refresh_pool()
         self.save_league_state()
 
-        if self.king_of_the_hill != old_king:
+        if self.king_of_the_hill and self.king_of_the_hill != old_king:
             print(f"[League Manager] [King Title Bout] Coronation! '{get_model_display_name(self.king_of_the_hill)}' dethroned '{get_model_display_name(old_king)}'!")
             return {"status": "coronation", "new_king": self.king_of_the_hill, "old_king": old_king}
         return {"status": "defended", "king": self.king_of_the_hill, "challenger": norm_challenger}
@@ -938,8 +968,10 @@ class LeagueManager:
                 # Self-Play
                 return [None] * num_envs
             elif self._temporal_cycle_idx == 1:
-                # King of the Hill
-                king = self.king_of_the_hill or (self.active_anchors[0] if self.active_anchors else "heuristic")
+                # King of the Hill, or the pool when the throne is empty.
+                king = self.king_of_the_hill
+                if not king:
+                    king = random.choice(self.elite_pool) if self.elite_pool else "heuristic"
                 return [king] * num_envs
             else:
                 # Pool
@@ -959,12 +991,25 @@ class LeagueManager:
         else:
             sp_r, k_r, p_r = 0.50, 0.25, 0.25
 
-        n_self_play = max(1, int(round(num_envs * sp_r)))
-        n_king = max(1, int(round(num_envs * k_r)))
-        n_pool = max(0, num_envs - n_self_play - n_king)
+        # Explicit training opponents take their share off the top; whatever remains is
+        # divided by the standard ratios. So the list squashes the default split rather
+        # than competing inside one tier, and a ratio of 0.0 reproduces the old
+        # behaviour exactly.
+        live_training_opps = [
+            op for op in self.training_opponents
+            if op == "heuristic" or os.path.exists(op)
+        ]
+        n_training = 0
+        if live_training_opps and self.training_opponent_ratio > 0.0:
+            n_training = min(num_envs, int(round(num_envs * self.training_opponent_ratio)))
 
-        # Adjust in case rounding exceeded num_envs
-        while (n_self_play + n_king + n_pool) > num_envs:
+        remaining = max(0, num_envs - n_training)
+        n_self_play = max(1, int(round(remaining * sp_r))) if remaining else 0
+        n_king = max(1, int(round(remaining * k_r))) if remaining else 0
+        n_pool = max(0, remaining - n_self_play - n_king)
+
+        # Adjust in case rounding exceeded the remaining budget
+        while (n_self_play + n_king + n_pool) > remaining:
             if n_self_play > 1:
                 n_self_play -= 1
             elif n_king > 1:
@@ -972,19 +1017,60 @@ class LeagueManager:
             else:
                 n_pool = max(0, n_pool - 1)
 
+        # No King means no rated checkpoint yet, which means the pool holds nothing but
+        # anchors. Handing them half the environments is worse than useless: the ladder
+        # spans the BC baseline, which loses 100-0 to everything, and Nexto, which beats
+        # the current policy four times out of five. Neither is a useful sparring
+        # partner, and between them they would supply the entire training signal.
+        #
+        # Fall back to pure self-play for both tiers until the league has real data. The
+        # explicit training-opponent share is kept, because that is a deliberate choice
+        # by the operator rather than a default the league picked on its own.
+        if not self.king_of_the_hill:
+            n_self_play += n_king + n_pool
+            n_king = 0
+            n_pool = 0
+
         assignments: List[Optional[str]] = []
+
+        # 0. Tier 0: Explicit training opponents, split evenly.
+        #
+        # Allocated by even division rather than by pool_group_size runs: with 6 envs and
+        # two opponents, contiguous runs of 4 would hand one of them 4 and the other 2.
+        # Each opponent's block is still contiguous, so opponent inference stays batched.
+        # Any remainder rotates between refreshes so it does not always favour the same
+        # entry.
+        if n_training and live_training_opps:
+            k = len(live_training_opps)
+            base, extra = divmod(n_training, k)
+            rotated = [
+                live_training_opps[(self._training_opp_cycle_idx + i) % k] for i in range(k)
+            ]
+            for i, opp in enumerate(rotated):
+                assignments.extend([opp] * (base + (1 if i < extra else 0)))
+            if extra:
+                self._training_opp_cycle_idx = (self._training_opp_cycle_idx + extra) % k
 
         # 1. Tier 1: Self-Play (None)
         assignments.extend([None] * n_self_play)
 
-        # 2. Tier 2: King of the Hill
-        king_bot = self.king_of_the_hill or (self.active_anchors[0] if self.active_anchors else "heuristic")
-        assignments.extend([king_bot] * n_king)
+        # 2. Tier 2: King of the Hill. n_king is zero when the throne is empty.
+        if n_king and self.king_of_the_hill:
+            assignments.extend([self.king_of_the_hill] * n_king)
 
         # 3. Tier 3: Historical Diversity Pool (round-robin rotation through elite pool and anchors)
-        candidate_pool = list(dict.fromkeys(self.elite_pool + self.active_anchors))
+        # Anything on the explicit training-opponent list is excluded here: it already
+        # holds a guaranteed share, and letting it also draw pool slots would make its
+        # real exposure the ratio PLUS whatever the round-robin hands it. Keeping the
+        # two disjoint is what makes the ratio mean what it says -- 0.10 across two
+        # listed opponents is 5% each, not 5% plus pool spillover.
+        explicit = set(live_training_opps)
+        candidate_pool = [
+            m for m in dict.fromkeys(self.elite_pool + self.active_anchors)
+            if m not in explicit
+        ]
         if not candidate_pool:
-            candidate_pool = ["heuristic"]
+            candidate_pool = ["heuristic"] if "heuristic" not in explicit else list(explicit)
 
         # Contiguous runs of `pool_group_size` envs per model, rather than one env each:
         # batches the opponent forward passes and keeps each subprocess env worker facing

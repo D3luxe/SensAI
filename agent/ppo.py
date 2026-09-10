@@ -420,12 +420,30 @@ class PPOTrainer:
                     if "pool_ratio" in live and abs(float(live["pool_ratio"]) - self.league_manager.pool_ratio) > 1e-4:
                         self.league_manager.pool_ratio = float(live["pool_ratio"])
                         league_changed = True
+                    if "training_opponents" in live:
+                        new_list = [
+                            self.league_manager._normalize_path(x)
+                            for x in (live["training_opponents"] or []) if x
+                        ]
+                        if new_list != self.league_manager.training_opponents:
+                            self.league_manager.training_opponents = new_list
+                            league_changed = True
+                    if "training_opponent_ratio" in live:
+                        new_r = max(0.0, min(1.0, float(live["training_opponent_ratio"])))
+                        if abs(new_r - self.league_manager.training_opponent_ratio) > 1e-4:
+                            self.league_manager.training_opponent_ratio = new_r
+                            league_changed = True
 
                     if league_changed:
                         if self.league_manager.enabled:
                             strat_assignments = self.league_manager.get_stratified_distribution(self.num_envs)
                             self.env.set_stratified_opponents(strat_assignments)
-                            print(f"[Live Config] Stratified League reconfigured: SP={self.league_manager.self_play_ratio:.2f}, King={self.league_manager.king_ratio:.2f}, Pool={self.league_manager.pool_ratio:.2f}")
+                            fixed = self.league_manager.training_opponents
+                            fixed_note = (
+                                f", Fixed={len(fixed)}@{self.league_manager.training_opponent_ratio:.2f}"
+                                if fixed and self.league_manager.training_opponent_ratio > 0 else ""
+                            )
+                            print(f"[Live Config] Stratified League reconfigured: SP={self.league_manager.self_play_ratio:.2f}, King={self.league_manager.king_ratio:.2f}, Pool={self.league_manager.pool_ratio:.2f}{fixed_note}")
                         else:
                             self.env.update_baseline_opponent(self.baseline_opponent_ratio, self.baseline_opponent_type)
                             print(f"[Live Config] Stratified League disabled. Reverted to static baseline ratio.")

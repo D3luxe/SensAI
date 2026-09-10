@@ -35,6 +35,8 @@ league:
   series_wins_needed: 5
   max_contender_matches: 48
   target_eval_matches: 30
+  training_opponent_ratio: 0.0
+  training_opponents: []
   min_contender_points_rate: 45.0
   pool_ratio: 0.25
   protect_top_k: 20

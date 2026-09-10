@@ -50,14 +50,48 @@ class TestLeagueManager(unittest.TestCase):
     def tearDown(self):
         shutil.rmtree(self.test_dir, ignore_errors=True)
 
-    def test_cold_start_and_anchors(self):
-        """Verify cold start gracefully falls back to anchor and never crashes."""
-        self.assertIsNotNone(self.league.king_of_the_hill)
+    def test_cold_start_leaves_the_throne_empty(self):
+        """With nothing rated, there is no King: anchors are barred from the crown."""
+        self.assertIsNone(self.league.king_of_the_hill)
         self.assertGreaterEqual(len(self.league.elite_pool), 1)
         self.assertIn("heuristic", self.league.active_anchors)
 
+    def test_anchor_never_takes_the_crown(self):
+        """Even rated far above every checkpoint, an anchor cannot be King."""
+        strong_anchor = self.evaluator.get_or_create_rating("heuristic", is_anchor=True)
+        strong_anchor.mu, strong_anchor.sigma = 99.0, 0.5
+        strong_anchor.update_conservative()
+
+        ckpt = self.league._normalize_path(self.dummy_ckpt_path)
+        rec = self.evaluator.get_or_create_rating(ckpt)
+        rec.mu, rec.sigma, rec.matches_played = 20.0, 1.0, 40
+        rec.update_conservative()
+
+        self.league.refresh_pool()
+        self.assertEqual(self.league.king_of_the_hill, ckpt)
+
+    def test_cold_start_distribution_is_pure_self_play(self):
+        """
+        No rated checkpoint means the pool holds only anchors, which span a bot that
+        loses 100-0 to everything and one that beats the policy four times in five.
+        Neither is a useful sparring partner, so training falls back to self-play.
+        """
+        dist = self.league.get_stratified_distribution(64)
+        self.assertEqual(len(dist), 64)
+        self.assertEqual(dist.count(None), 64)
+
+    def _seat_a_king(self):
+        """Rate the dummy checkpoint so a King exists and the standard split applies."""
+        ckpt = self.league._normalize_path(self.dummy_ckpt_path)
+        rec = self.evaluator.get_or_create_rating(ckpt)
+        rec.mu, rec.sigma, rec.matches_played = 26.0, 1.0, 40
+        rec.update_conservative()
+        self.league.refresh_pool()
+        self.assertIsNotNone(self.league.king_of_the_hill)
+
     def test_stratified_distribution_allocation(self):
         """Test stratification logic across various environment counts."""
+        self._seat_a_king()
         # 64 envs: 32 self-play, 16 king, 16 pool
         dist64 = self.league.get_stratified_distribution(64)
         self.assertEqual(len(dist64), 64)
@@ -463,8 +497,12 @@ class TestLeagueManager(unittest.TestCase):
     def test_round_robin_stratified_distribution(self):
         """Verify stratified distribution rotates evenly through pool candidates without skipping."""
         # 4 envs with 50% SP, 25% King, 25% Pool -> 1 pool slot per call (the last slot)
-        self.league.refresh_pool()
-        candidate_pool = list(dict.fromkeys(self.league.elite_pool + self.league.active_anchors))
+        self._seat_a_king()
+        explicit = set(self.league.training_opponents)
+        candidate_pool = [
+            m for m in dict.fromkeys(self.league.elite_pool + self.league.active_anchors)
+            if m not in explicit
+        ]
         self.assertGreater(len(candidate_pool), 0)
 
         seen = []
@@ -477,6 +515,43 @@ class TestLeagueManager(unittest.TestCase):
         self.assertEqual(seen, expected)
 
 
+
+    def test_training_opponents_take_an_even_share(self):
+        """
+        The ratio squashes the standard split rather than carving out of one tier, and
+        the listed opponents divide their share evenly. Listed models are excluded from
+        the pool rotation so their exposure is exactly the ratio, not the ratio plus
+        whatever round-robin slots they happen to draw.
+        """
+        self._seat_a_king()
+        self.league.training_opponents = ["heuristic", "checkpoints/necto-model.pt"]
+        self.league.training_opponent_ratio = 0.25
+
+        counts = {}
+        total = 0
+        for _ in range(8):
+            for slot in self.league.get_stratified_distribution(64):
+                counts[slot] = counts.get(slot, 0) + 1
+                total += 1
+
+        listed = [op for op in self.league.training_opponents
+                  if op == "heuristic" or os.path.exists(op)]
+        shares = [counts.get(op, 0) / total for op in listed]
+        self.assertEqual(len(shares), len(listed))
+        # Roughly a quarter of environments, split evenly between the listed entries.
+        self.assertAlmostEqual(sum(shares), 0.25, delta=0.03)
+        for share in shares:
+            self.assertAlmostEqual(share, 0.25 / len(listed), delta=0.02)
+        # Self-play keeps its 50% of what remains.
+        self.assertAlmostEqual(counts.get(None, 0) / total, 0.75 * 0.5, delta=0.03)
+
+    def test_zero_ratio_reproduces_the_standard_split(self):
+        """An empty list, or a ratio of zero, must leave the old behaviour untouched."""
+        self._seat_a_king()
+        self.league.training_opponents = ["heuristic"]
+        self.league.training_opponent_ratio = 0.0
+        dist = self.league.get_stratified_distribution(64)
+        self.assertEqual(dist.count(None), 32)
 
 
 class TestStratifiedVectorizedEnv(unittest.TestCase):
