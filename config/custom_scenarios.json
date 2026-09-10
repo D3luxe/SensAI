@@ -334,5 +334,46 @@
       "vel_jitter": 60.0,
       "mirror_symmetry": true
     }
+  },
+  {
+    "id": "wall_dribble_midfield",
+    "name": "Following ball up wall near midfield",
+    "enabled": true,
+    "description": "Ball rolling along the ground with bot following behind it.",
+    "car": {
+      "pos": [
+        1700.0,
+        -1150.0,
+        17.0
+      ],
+      "vel": [
+        540.3232569518973,
+        196.66158241225952,
+        0.0
+      ],
+      "yaw": 20.0,
+      "boost": 20.0
+    },
+    "ball": {
+      "pos": [
+        2775.0,
+        -475.0,
+        93.15
+      ],
+      "vel": [
+        1400.0,
+        600.0,
+        0.0
+      ]
+    },
+    "opponent": {
+      "mode": "goalie",
+      "boost": 70.0
+    },
+    "variance": {
+      "pos_jitter": 60.0,
+      "vel_jitter": 40.0,
+      "mirror_symmetry": true
+    }
   }
 ]
