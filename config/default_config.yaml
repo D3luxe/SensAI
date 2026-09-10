@@ -18,6 +18,7 @@ hyperparameters:
   rot_log_std_anneal_iters: 4000
   rot_log_std_ceiling_final: -1.4
 league:
+  contender_mu_margin: 4.0
   contender_series_per_step: 3
   eligibility_sigma: 1.5
   enabled: true
@@ -31,6 +32,7 @@ league:
   max_pool_size: 10
   max_provisional: 30
   min_contender_points_rate: 45.0
+  min_matches_for_points_floor: 12
   pool_ratio: 0.25
   protect_top_k: 20
   rating_lock_matches: 64

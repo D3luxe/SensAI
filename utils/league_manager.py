@@ -106,7 +106,21 @@ class LeagueManager:
         self.active_anchors: List[str] = []
 
         # Gauntlet Contender Queue Configuration
+        # Absolute skill floors do not survive a rescaling of the ladder. 25.5 was
+        # calibrated when every rating converged near 30 on the old scale; against the
+        # calibrated anchors the checkpoint population sits far lower, so a fixed floor
+        # evicts contenders that are stronger than the reigning King. Kept only as a
+        # legacy backstop, and no longer consulted directly -- see _contender_mu_floor.
         self.min_contender_mu = float(self.config.get("min_contender_mu", 25.5))
+        # How far below the King a contender may sit before the skill floor bites. The
+        # floor is only applied once the King's own rating is established; on a fresh
+        # leaderboard nothing is established, so there is no floor to breach.
+        self.contender_mu_margin = float(self.config.get("contender_mu_margin", 4.0))
+        # Minimum series before the points floor is applied. At the grace period of 6 a
+        # points rate is 2-3 results wide and demotes on noise.
+        self.min_matches_for_points_floor = int(self.config.get(
+            "min_matches_for_points_floor", 12
+        ))
         # Points rate (draw = half a win), not raw win rate. See ModelRating.points_rate.
         self.min_contender_points_rate = float(self.config.get(
             "min_contender_points_rate",
@@ -229,6 +243,27 @@ class LeagueManager:
         if len(self.event_history) > 30:
             self.event_history = self.event_history[-30:]
         self.save_league_state()
+
+    def _contender_mu_floor(self) -> Optional[float]:
+        """
+        The skill floor a contender must stay above, or None when there is not enough
+        established rating to define one.
+
+        Relative to the King rather than absolute. A fixed threshold assumes the scale
+        is fixed, and ours is not: recalibrating the anchors moved the whole checkpoint
+        population, after which a floor of 25.5 sat *above* a King rated 23.26 and
+        evicted contenders for outranking him.
+
+        Returns None while the King is still provisional, which is the fresh-leaderboard
+        case: nothing has been measured well enough for "too weak" to mean anything, and
+        demoting on a noisy mu just starves the queue.
+        """
+        if not self.king_of_the_hill:
+            return None
+        king_rec = self.evaluator.ratings.get(self._normalize_path(self.king_of_the_hill))
+        if not king_rec or not self._is_rank_eligible(king_rec):
+            return None
+        return king_rec.mu - self.contender_mu_margin
 
     def _is_rank_eligible(self, rec: Optional[ModelRating]) -> bool:
         """
@@ -782,10 +817,19 @@ class LeagueManager:
         should_demote = False
         demote_reason = ""
         if rec.matches_played >= self.grace_period_matches:
-            if rec.mu < self.min_contender_mu:
+            mu_floor = self._contender_mu_floor()
+            # Demote on skill only when the rating is confidently below the floor, not
+            # when a noisy point estimate dips under it. At 6 series sigma is ~3.5, so
+            # comparing bare mu to a threshold decides on noise: 159600 was evicted at
+            # mu 24.34 +/- 3.41 against a floor of 25.50, which its interval straddled.
+            if mu_floor is not None and (rec.mu + rec.sigma) < mu_floor:
                 should_demote = True
-                demote_reason = f"Skill floor breached (mu={rec.mu:.2f} < {self.min_contender_mu:.2f})"
-            elif rec.points_rate < self.min_contender_points_rate:
+                demote_reason = (
+                    f"Skill floor breached (mu={rec.mu:.2f} +/- {rec.sigma:.2f} "
+                    f"confidently below {mu_floor:.2f})"
+                )
+            elif (rec.matches_played >= self.min_matches_for_points_floor
+                  and rec.points_rate < self.min_contender_points_rate):
                 should_demote = True
                 demote_reason = f"Points rate dropped below floor ({rec.points_rate:.1f}% < {self.min_contender_points_rate:.1f}%)"
             elif consec_losses >= self.max_consecutive_losses:
@@ -872,7 +916,12 @@ class LeagueManager:
 
         # Check qualification for Gauntlet Promotion Queue
         if not rec.is_anchor and norm_ckpt != "heuristic" and "latest_model" not in norm_ckpt.lower():
-            if rec.mu >= 26.0 and rec.points_rate >= 50.0:
+            # Admission is relative for the same reason demotion is: a fixed mu bar
+            # assumes a fixed scale. With no established King the bar is the default
+            # starting rating, so a debut that has not actively gone backwards competes.
+            floor = self._contender_mu_floor()
+            admit_mu = floor if floor is not None else (25.0 - self.contender_mu_margin)
+            if rec.mu >= admit_mu and rec.points_rate >= 33.4:
                 self._admit_contender(norm_ckpt)
 
         return rec

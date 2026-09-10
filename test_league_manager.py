@@ -298,8 +298,18 @@ class TestLeagueManager(unittest.TestCase):
         shutil.copyfile(self.dummy_ckpt_path, c_dem)
         norm_dem = self.league._normalize_path(c_dem)
         r_dem = self.evaluator.get_or_create_rating(norm_dem)
-        r_dem.mu = 23.0  # Below 25.5
+        # An established King is what defines the floor; without one there is no skill
+        # floor at all, which is the fresh-leaderboard safeguard.
+        king_path = self.league._normalize_path(c_grad)
+        king = self.evaluator.get_or_create_rating(king_path)
+        king.mu, king.sigma, king.matches_played = 35.0, 1.0, 60
+        king.update_conservative()
+        self.league.king_of_the_hill = king_path
+
+        r_dem.mu = 23.0            # confidently below king 35.0 - margin
+        r_dem.sigma = 1.0
         r_dem.matches_played = self.league.grace_period_matches + 1
+        r_dem.wins, r_dem.losses = 3, 4
         r_dem.update_conservative()
 
         self.league.contender_queue = [norm_dem]
@@ -543,6 +553,46 @@ class TestLeagueManager(unittest.TestCase):
         self.assertEqual(seen, expected)
 
 
+
+    def test_no_skill_floor_while_the_king_is_provisional(self):
+        """
+        On a fresh leaderboard nothing is measured well enough for "too weak" to mean
+        anything. A fixed floor of 25.5 evicted contenders rated ABOVE a King at 23.26,
+        because recalibrating the anchors moved the whole population under the constant.
+        """
+        ckpt = self.league._normalize_path(self.dummy_ckpt_path)
+        king = self.evaluator.get_or_create_rating(ckpt)
+        king.mu, king.sigma, king.matches_played = 23.26, 2.45, 17
+        king.update_conservative()
+        self.league.king_of_the_hill = ckpt
+
+        self.assertFalse(self.league._is_rank_eligible(king))
+        self.assertIsNone(self.league._contender_mu_floor())
+
+    def test_skill_floor_is_relative_to_an_established_king(self):
+        """Once the King's rating is established the floor tracks it, not a constant."""
+        ckpt = self.league._normalize_path(self.dummy_ckpt_path)
+        king = self.evaluator.get_or_create_rating(ckpt)
+        king.mu, king.sigma, king.matches_played = 30.0, 1.0, 60
+        king.update_conservative()
+        self.league.king_of_the_hill = ckpt
+
+        floor = self.league._contender_mu_floor()
+        self.assertIsNotNone(floor)
+        self.assertAlmostEqual(floor, 30.0 - self.league.contender_mu_margin, places=3)
+
+        # Confidently below the floor -> demoted. Straddling it on a wide sigma -> kept,
+        # because at that uncertainty the comparison is noise rather than evidence.
+        self.assertLess(18.0 + 1.5, floor)
+        self.assertGreater(20.0 + 7.0, floor)
+
+    def test_points_floor_waits_for_a_real_sample(self):
+        """A points rate over the 6-match grace period is 2-3 results wide."""
+        self.assertGreater(
+            self.league.min_matches_for_points_floor,
+            self.league.grace_period_matches,
+            "points floor must not bite at the grace period, where it decides on noise"
+        )
 
     def test_training_opponents_take_an_even_share(self):
         """
