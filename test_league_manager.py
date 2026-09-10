@@ -455,6 +455,116 @@ class TestLeagueManager(unittest.TestCase):
             return "graduate"
         return "keep playing"
 
+    def test_a_new_checkpoint_inherits_its_predecessor_mu(self):
+        """
+        Seer's seeding rule: mu from the previous agent, sigma from the environment.
+
+        Seeding every arrival at the global 25.0 held the population about three mu above
+        where the anchor ladder measures it, because a handful of anchor games cannot pull
+        back a prior that wide.
+        """
+        older = self.league._normalize_path("checkpoints/checkpoint_iter_100.pt")
+        rec_old = self.evaluator.get_or_create_rating(older)
+        rec_old.mu, rec_old.sigma, rec_old.matches_played = 21.4, 1.2, 40
+        rec_old.update_conservative()
+
+        newer = self.league._normalize_path("checkpoints/checkpoint_iter_300.pt")
+        rec_new = self.evaluator.get_or_create_rating(newer)
+        default_sigma = rec_new.sigma
+
+        self.assertTrue(self.league.seed_from_predecessor(newer, rec_new))
+        self.assertAlmostEqual(rec_new.mu, 21.4, places=3)
+        self.assertAlmostEqual(rec_new.sigma, default_sigma, places=3,
+                               msg="certainty must not be inherited, only the estimate")
+
+    def test_seeding_only_applies_to_a_checkpoint_that_has_not_played(self):
+        """A record with results of its own is measured, so it is not re-seeded."""
+        older = self.league._normalize_path("checkpoints/checkpoint_iter_100.pt")
+        r = self.evaluator.get_or_create_rating(older)
+        r.mu, r.matches_played = 21.0, 30
+        r.update_conservative()
+
+        newer = self.league._normalize_path("checkpoints/checkpoint_iter_300.pt")
+        rn = self.evaluator.get_or_create_rating(newer)
+        rn.mu, rn.matches_played = 27.5, 4
+        rn.update_conservative()
+        self.assertFalse(self.league.seed_from_predecessor(newer, rn))
+        self.assertAlmostEqual(rn.mu, 27.5, places=3)
+
+        # Nor does a later checkpoint seed from one that comes after it.
+        latest = self.league._normalize_path("checkpoints/checkpoint_iter_50.pt")
+        rl = self.evaluator.get_or_create_rating(latest)
+        self.assertFalse(self.league.seed_from_predecessor(latest, rl))
+
+    def test_gauntlet_opponents_are_peers_not_anchors(self):
+        """
+        Every anchor is saturated against the current population.
+
+        Measured over five checkpoints spanning 63,000 iterations, four series each: the
+        heuristic and the BC baseline lost every series, Necto won every series, Nexto
+        lost every series. A trial against any of them returns a foregone conclusion, so
+        opponents must be chosen from rated peers.
+        """
+        self._seat_a_king()
+        for i, mu in enumerate((26.4, 24.0, 30.0, 21.0)):
+            # Real files: peer selection skips paths that are no longer on disk.
+            disk = os.path.join(self.test_dir, f"checkpoint_iter_{500+i}.pt")
+            with open(disk, "w") as f:
+                f.write("stub")
+            path = self.league._normalize_path(disk)
+            r = self.evaluator.get_or_create_rating(path)
+            r.mu, r.sigma, r.matches_played = mu, 1.2, 40
+            r.update_conservative()
+        for name in ("heuristic", "checkpoints/necto-model.pt"):
+            a = self.evaluator.get_or_create_rating(name, is_anchor=True)
+            a.is_anchor = True
+            a.mu, a.sigma, a.matches_played = 26.5, 0.5, 200
+            a.update_conservative()
+
+        subject = self.evaluator.get_or_create_rating(
+            self.league._normalize_path(self.dummy_ckpt_path)
+        )
+        subject.mu = 26.5
+        peers = self.league.nearest_rated_peers(subject, exclude=subject.path, limit=3)
+        self.assertTrue(peers, "expected peers to be available")
+        for path in peers:
+            rec = self.evaluator.ratings[self.league._normalize_path(path)]
+            self.assertFalse(rec.is_anchor, f"{rec.name} is an anchor and must not spar")
+            self.assertNotEqual(self.league._normalize_path(path), "heuristic")
+        # Ordered by closeness, so the first is at least as near as the last.
+        gaps = [abs(self.evaluator.ratings[p].mu - subject.mu) for p in peers]
+        self.assertEqual(gaps, sorted(gaps))
+
+    def test_nexto_is_a_benchmark_and_never_a_rated_anchor(self):
+        """
+        Nexto sits in a closed cycle: it beats Necto every series, loses to every
+        checkpoint every series, and Necto beats those same checkpoints every series. No
+        scalar rating can hold all three legs, and Nexto is pinned above the field, so
+        rated wins against it would inflate the whole population.
+        """
+        for path in self.league.active_anchors:
+            self.assertNotIn("nexto", str(path).lower())
+        self.assertTrue(any("nexto" in str(x).lower() for x in self.league.benchmark_opponents))
+
+    def test_benchmarks_do_not_move_any_rating(self):
+        """A benchmark is played and reported; it must never update the leaderboard."""
+        self.league.benchmark_opponents = ["heuristic"]
+        self.league.benchmark_series = 1
+        subject = self.league._normalize_path(self.dummy_ckpt_path)
+        rec = self.evaluator.get_or_create_rating(subject)
+        rec.mu, rec.sigma, rec.matches_played = 26.0, 1.4, 20
+        rec.update_conservative()
+        before = (rec.mu, rec.sigma, rec.matches_played, rec.wins, rec.losses)
+
+        results = self.league.run_benchmarks(subject)
+
+        after = (rec.mu, rec.sigma, rec.matches_played, rec.wins, rec.losses)
+        self.assertEqual(before, after, "a benchmark changed a rating")
+        if results:
+            for res in results.values():
+                self.assertIn("points_rate", res)
+                self.assertGreaterEqual(res["series"], 1)
+
     def test_a_debut_is_skipped_when_nothing_can_come_of_it(self):
         """
         A checkpoint that cannot enter the gauntlet should not be graded.

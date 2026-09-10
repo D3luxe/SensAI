@@ -16,8 +16,13 @@ from typing import Dict, Any, List, Optional, Set, Tuple
 from utils.trueskill_evaluator import (
     TrueSkillEvaluator, ModelRating, get_model_display_name, DEFAULT_LEADERBOARD_PATH,
     DEFAULT_EVAL_MAX_STEPS, DEFAULT_NO_TOUCH_STEPS,
-    DEFAULT_SERIES_LENGTH, DEFAULT_SERIES_WINS_NEEDED
+    DEFAULT_SERIES_LENGTH, DEFAULT_SERIES_WINS_NEEDED,
+    simulate_headless_series
 )
+
+# Checkpoint files are named by the iteration that produced them, and that ordering is
+# what lets a new arrival inherit its predecessor's rating.
+_CHECKPOINT_ITER_RE = re.compile(r"checkpoint_iter_(\d+)", re.I)
 
 
 def snap_tiers_to_worker_slices(
@@ -160,13 +165,38 @@ class LeagueManager:
         # beaten trivially by every checkpoint, so games against it carry almost no
         # information while consuming half of each debut's evaluation budget. It remains
         # available as a manual regression tripwire, just not as a rating reference.
+        # Nexto is deliberately absent. It beats Necto 100% of series and loses 100% to
+        # every checkpoint measured across a 63,000 iteration span, while Necto beats
+        # those same checkpoints 100% of the time. That is a closed cycle, and no single
+        # scalar rating can hold all three legs at once, so any value Nexto is pinned at
+        # is wrong against someone. Worse, it is pinned above the field, so every win a
+        # checkpoint takes off it would inflate the whole population.
+        #
+        # It stays a benchmark instead: played, reported, never rated. See
+        # benchmark_opponents below.
         default_anchors = [
             "checkpoints/necto-model.pt",
-            "checkpoints/nexto-model.pt",
             "heuristic"
         ]
         self.anchor_candidates = self.config.get("anchors", default_anchors)
         self.active_anchors: List[str] = []
+
+        # Played for reporting only; results never touch a rating. This is where a
+        # reference goes when it is genuinely strong but does not sit on one scale with
+        # the models being rated.
+        self.benchmark_opponents: List[str] = [
+            self._normalize_path(x)
+            for x in self.config.get("benchmark_opponents", ["checkpoints/nexto-model.pt"])
+            if x
+        ]
+        self.benchmark_interval = int(self.config.get("benchmark_interval", 25))
+        self.benchmark_series = int(self.config.get("benchmark_series", 2))
+        self._benchmark_counter = 0
+        self.benchmark_results: Dict[str, Any] = {}
+
+        # Opponents a gauntlet trial is split across. More than one because a long run
+        # against a single opponent measures the pair rather than the population.
+        self.gauntlet_opponents = max(1, int(self.config.get("gauntlet_opponents", 3)))
 
         # Gauntlet Contender Queue Configuration
         # Absolute skill floors do not survive a rescaling of the ladder. 25.5 was
@@ -628,6 +658,129 @@ class LeagueManager:
 
         self.elite_pool = pool_paths
 
+    def _checkpoint_iteration(self, path: str) -> Optional[int]:
+        """The training iteration a checkpoint file came from, or None if unnamed."""
+        m = _CHECKPOINT_ITER_RE.search(os.path.basename(str(path)))
+        return int(m.group(1)) if m else None
+
+    def seed_from_predecessor(self, ckpt_path: str, rec: ModelRating) -> bool:
+        """
+        Starts a brand-new checkpoint at the previous checkpoint's mu.
+
+        Seer's method (Neville & Walo, sec. 4.1): a new agent's sigma comes from the
+        environment but its mu is initialised to the final mu of the agent before it.
+        Consecutive checkpoints are 200 iterations apart and genuinely similar, so the
+        predecessor is a far better guess than the global default of 25.0.
+
+        Seeding at 25.0 was actively harmful here. The field measures at roughly 22 from
+        both ends of the anchor ladder, so every arrival entered three mu above the
+        population and the handful of anchor games it played could not pull it back. The
+        cluster was held up by its own seeding rather than by any result.
+
+        Only mu is inherited. Sigma stays at the default, because nothing about the
+        predecessor's certainty transfers to a model that has not played.
+        """
+        if rec.matches_played > 0:
+            return False
+        n = self._checkpoint_iteration(ckpt_path)
+        if n is None:
+            return False
+        best_iter, best_rec = None, None
+        for path, other in self.evaluator.ratings.items():
+            if other is rec or other.is_anchor or other.matches_played <= 0:
+                continue
+            k = self._checkpoint_iteration(path)
+            if k is None or k >= n:
+                continue
+            if best_iter is None or k > best_iter:
+                best_iter, best_rec = k, other
+        if best_rec is None:
+            return False
+        rec.mu = best_rec.mu
+        rec.update_conservative()
+        return True
+
+    def nearest_rated_peers(
+        self, rec: ModelRating, exclude: str = "", limit: int = 3
+    ) -> List[str]:
+        """
+        The rated checkpoints closest to this one in mu.
+
+        Seer picks the matchup with the highest probability of a draw when evaluating a
+        new agent, for the reason that information per series peaks near even odds. Here
+        it is also the only workable choice, because no anchor is anywhere near a draw
+        against a current checkpoint. Measured over five checkpoints spanning 63,000
+        iterations, four series each: the heuristic and the BC baseline lost every series,
+        Necto won every series, Nexto lost every series. All four are saturated, so none
+        of them can tell an early checkpoint from a late one.
+
+        Peers can. The same probe found the checkpoint round robin cleanly transitive,
+        with no cycles, which is what makes a scalar rating meaningful over this set.
+        """
+        candidates: List[Tuple[float, str]] = []
+        for path, other in self.evaluator.ratings.items():
+            norm = self._normalize_path(path)
+            if norm == exclude or norm == "heuristic" or other.is_anchor:
+                continue
+            if "latest_model" in norm.lower() or not os.path.exists(norm):
+                continue
+            if other.matches_played < self.grace_period_matches:
+                continue
+            candidates.append((abs(other.mu - rec.mu), norm))
+        candidates.sort(key=lambda c: c[0])
+        return [path for _, path in candidates[:max(1, limit)]]
+
+    def run_benchmarks(self, subject_path: str, device: str = "cpu") -> Dict[str, Any]:
+        """
+        Plays the benchmark references and records the score without rating anything.
+
+        This is where a reference goes when it is strong but not on one scale with the
+        models under test. Nexto beats Necto every series and loses to every checkpoint
+        every series, so it cannot be ranked alongside them, but knowing how the current
+        best does against it is still worth having. Nothing here calls the evaluator, so
+        no rating moves.
+        """
+        results: Dict[str, Any] = {}
+        subject = self._normalize_path(subject_path)
+        if not self.benchmark_opponents or not os.path.exists(subject):
+            return results
+        try:
+            from env.baseline_agent import create_opponent_bot
+        except Exception:
+            return results
+        for opp in self.benchmark_opponents:
+            if opp != "heuristic" and not os.path.exists(opp):
+                continue
+            try:
+                a = create_opponent_bot(subject, continuous_actions=True)
+                b = create_opponent_bot(opp, continuous_actions=True)
+                wins = goals_for = goals_against = 0
+                for _ in range(max(1, self.benchmark_series)):
+                    r = simulate_headless_series(
+                        a, b,
+                        series_length=self.series_length,
+                        wins_needed=self.series_wins_needed,
+                        max_steps=self.eval_max_steps,
+                        no_touch_steps=self.eval_no_touch_steps,
+                    )
+                    wins += 1 if r.get("winner") == "a" else 0
+                    goals_for += int(r.get("a_score", 0))
+                    goals_against += int(r.get("b_score", 0))
+                played = max(1, self.benchmark_series)
+                results[get_model_display_name(opp)] = {
+                    "series": played,
+                    "series_won": wins,
+                    "points_rate": round(100.0 * wins / played, 1),
+                    "goals": f"{goals_for}-{goals_against}",
+                    "subject": get_model_display_name(subject),
+                    "at": datetime.datetime.now().isoformat(),
+                }
+            except Exception as e:
+                print(f"[League Manager] Benchmark against {opp} failed: {e}")
+        if results:
+            self.benchmark_results = results
+        return results
+
     def _nearest_anchor(self, rec: Optional[ModelRating], exclude: str = "") -> Optional[str]:
         """
         Returns the active anchor whose calibrated mu sits closest to `rec`'s.
@@ -843,22 +996,32 @@ class LeagueManager:
             self.contender_queue.remove(contender_path)
             return None
 
-        # Gauntlet pairing: the nearest-strength anchor on the calibrated ladder, plus the
-        # King. Matches between mismatched players carry almost no information -- a game
-        # against a reference three ladder rungs below tells you only what you already
-        # knew -- so the anchor is chosen by proximity in mu rather than by a fixed
-        # preference order.
-        ref_anchor = self._nearest_anchor(rec, exclude=contender_path)
+        # Gauntlet pairing: the nearest-rated peers, not an anchor.
+        #
+        # Half of every trial used to go to the nearest anchor, which was always Necto,
+        # which takes 93.4% of points off checkpoints over 311 recorded series. That put
+        # the ceiling on a trial at roughly 28% for a contender exactly as good as the
+        # King, against a floor of 40%, so no contender could pass however good it was.
+        #
+        # A probe over five checkpoints spanning 63,000 iterations found every anchor
+        # saturated: heuristic and the BC baseline lost every series, Necto won every
+        # series, Nexto lost every series. None of them distinguishes an early checkpoint
+        # from a late one. Peers do, and the same probe found the checkpoint round robin
+        # cleanly transitive.
+        opponents = self.nearest_rated_peers(
+            rec, exclude=contender_path, limit=self.gauntlet_opponents
+        )
 
-        opponents = []
-        if ref_anchor:
-            opponents.append(ref_anchor)
-
-        king = self.king_of_the_hill
-        if king and king != contender_path and king not in opponents and "latest_model" not in king.lower():
-            opponents.append(king)
-        elif not opponents and self.active_anchors:
-            opponents.append(self.active_anchors[0])
+        # Fallbacks, in descending order of how much the result will tell us. Early in a
+        # run there may be no rated peer yet.
+        if not opponents:
+            king = self.king_of_the_hill
+            if king and king != contender_path and "latest_model" not in king.lower():
+                opponents = [king]
+        if not opponents:
+            near = self._nearest_anchor(rec, exclude=contender_path)
+            if near:
+                opponents = [near]
 
         if not opponents:
             return None
@@ -1029,6 +1192,13 @@ class LeagueManager:
         # Ensure model rating record exists
         rec = self.evaluator.get_or_create_rating(norm_ckpt)
 
+        # A new arrival starts where its predecessor finished, not at the global default.
+        if self.seed_from_predecessor(norm_ckpt, rec):
+            print(
+                f"[League Manager] Seeded '{rec.name}' at mu={rec.mu:.2f} from the "
+                f"preceding checkpoint rather than the default."
+            )
+
         # Grade only what could actually enter the gauntlet.
         #
         # A debut costs two series and exists to decide admission. With the queue full of
@@ -1054,16 +1224,21 @@ class LeagueManager:
         if self.king_of_the_hill and self.king_of_the_hill != norm_ckpt and "latest_model" not in self.king_of_the_hill.lower():
             opponents_to_test.append(self.king_of_the_hill)
 
-        # Nearest-strength anchor, so the debut games are actually informative. A brand
-        # new checkpoint sits at the default mu of 25.0, which puts it between the
-        # heuristic and Necto rungs of the ladder.
-        near = self._nearest_anchor(rec, exclude=norm_ckpt)
-        if near and near not in opponents_to_test:
-            opponents_to_test.append(near)
+        # A nearest-rated peer rather than a nearest anchor. The debut no longer has to
+        # establish an absolute position, because the checkpoint inherits its
+        # predecessor's mu; it has to place this checkpoint against the current field,
+        # and only a peer can do that. Every anchor is saturated against the population.
+        for peer in self.nearest_rated_peers(rec, exclude=norm_ckpt, limit=2):
+            if peer not in opponents_to_test:
+                opponents_to_test.append(peer)
+            if len(opponents_to_test) >= 2:
+                break
 
-        # If no opponents found, test against heuristic
+        # Nothing rated yet: fall back to the ladder so the first checkpoints of a run
+        # still get placed somewhere.
         if not opponents_to_test:
-            opponents_to_test.append("heuristic")
+            near = self._nearest_anchor(rec, exclude=norm_ckpt)
+            opponents_to_test.append(near or "heuristic")
 
         print(f"[League Manager] Auto-Grading Checkpoint '{rec.name}' against {len(opponents_to_test)} opponent(s)...")
 
@@ -1086,6 +1261,20 @@ class LeagueManager:
 
         # Refresh state
         self.refresh_pool()
+
+        # Benchmarks are rating-free and only run occasionally, so a reference that
+        # cannot be ranked alongside the field is still tracked.
+        self._benchmark_counter += 1
+        if (self.benchmark_opponents and self.benchmark_interval > 0
+                and self._benchmark_counter % self.benchmark_interval == 0):
+            subject = self.king_of_the_hill or norm_ckpt
+            for name, res in (self.run_benchmarks(subject) or {}).items():
+                print(
+                    f"[League Manager] Benchmark: {res['subject']} vs {name} -> "
+                    f"{res['series_won']}/{res['series']} series, goals {res['goals']} "
+                    f"(reported only, no rating changed)"
+                )
+
         king_name = get_model_display_name(self.king_of_the_hill) if self.king_of_the_hill else "None"
         print(f"[League Manager] Grading complete for {rec.name}: mu={rec.mu:.2f} (Score: {rec.conservative_rating:.2f}). King of the Hill: {king_name}")
 
@@ -1367,6 +1556,7 @@ class LeagueManager:
             "king_sigma": round(king_rec.sigma, 2) if king_rec else 8.33,
             "elite_pool_size": len(self.elite_pool),
             "protected_checkpoints_count": len(self.get_protected_checkpoint_paths()),
+            "benchmark_results": self.benchmark_results,
             "contender_queue_count": len(self.contender_queue),
             "contenders": self.get_contender_queue_details(),
             "recent_events": self.event_history[-5:]

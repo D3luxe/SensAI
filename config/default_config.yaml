@@ -20,11 +20,14 @@ hyperparameters:
 league:
   contender_mu_margin: 4.0
   contender_series_per_step: 16
+  benchmark_interval: 25
+  benchmark_series: 2
   eligibility_sigma: 1.5
   enabled: true
   eval_max_steps: 3000
   eval_no_touch_steps: 500
   eval_series_per_grade: 1
+  gauntlet_opponents: 3
   hall_of_fame_size: 20
   king_challenge_frequency: 3
   king_ratio: 0.25
