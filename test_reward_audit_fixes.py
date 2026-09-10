@@ -396,9 +396,16 @@ class TestRewardAuditFixes(unittest.TestCase):
         self.assertLessEqual(r, 0.025, f"Wall-crawling when ball is infield must be heavily dampened, got {r}")
 
 
-    def test_powerslide_reward_low_speed_yaw_rate(self):
-        """Test that PowerslideReward activates at low speed (120 uu/s) when rapid yaw pivoting occurs with handbrake."""
+    def test_powerslide_yaw_rate_alone_does_not_pay(self):
+        """Yaw rate on its own must not pay: that path let a car farm reward by driving in circles.
+
+        A car circling at distance sits under the 0.60 alignment gate for roughly two thirds of
+        every lap. While `yaw_rate > 1.2` was a standalone qualifier, each of those steps paid,
+        no boost required, and nothing else in the stack offset it. Only heading-alignment
+        PROGRESS toward the ball qualifies now, capped by a per-activation budget.
+        """
         rew = PowerslideReward(weight=0.30)
+        # Rapid yaw, but the heading does not actually improve between steps.
         car = CarState(
             id=0, team=0,
             pos=np.array([0.0, 0.0, 17.0], dtype=np.float32),
@@ -417,8 +424,58 @@ class TestRewardAuditFixes(unittest.TestCase):
         action[1] = -1.0  # steer left
         action[7] = 1.0   # handbrake active
 
-        r = rew.get_reward(car, self.arena, action, False, None)
-        self.assertGreater(r, 0.05, f"PowerslideReward should reward low-speed yaw cuts with handbrake, got {r}")
+        r_spin = rew.get_reward(car, self.arena, action, False, None)
+        self.assertEqual(r_spin, 0.0, f"Yaw rate without heading progress must pay nothing, got {r_spin}")
+
+        # A genuine low-speed cut that does swing the nose toward the ball still pays.
+        car_turned = CarState(
+            id=0, team=0,
+            pos=np.array([0.0, 0.0, 17.0], dtype=np.float32),
+            vel=np.array([120.0, 0.0, 0.0], dtype=np.float32),
+            ang_vel=np.array([0.0, 0.0, 2.5], dtype=np.float32),
+            rot=np.array([0.0, 0.4, 0.0], dtype=np.float32),      # yawed toward the ball
+            on_ground=True
+        )
+        self.arena.cars = [car_turned]
+        r_cut = rew.get_reward(car_turned, self.arena, action, False, None)
+        self.assertGreater(r_cut, 0.05, f"Low-speed cut with real heading progress should pay, got {r_cut}")
+
+    def test_powerslide_activation_budget_caps_a_single_turn(self):
+        """One continuous turn cannot be extended into an income stream by weaving the nose."""
+        rew = PowerslideReward(weight=0.30)
+        self.arena.ball.pos = np.array([3000.0, 0.0, 93.0], dtype=np.float32)
+        base = CarState(
+            id=0, team=0,
+            pos=np.array([0.0, 0.0, 17.0], dtype=np.float32),
+            vel=np.array([600.0, 0.0, 0.0], dtype=np.float32),
+            ang_vel=np.array([0.0, 0.0, 2.0], dtype=np.float32),
+            rot=np.array([0.0, 2.0, 0.0], dtype=np.float32),
+            on_ground=True
+        )
+        self.arena.cars = [base]
+        rew.reset(self.arena)
+
+        action = np.zeros(8, dtype=np.float32)
+        action[0] = 1.0
+        action[1] = 0.8
+
+        total = 0.0
+        for _ in range(6):
+            for yaw in list(np.linspace(2.0, 1.0, 10)) + list(np.linspace(1.0, 2.0, 10)):
+                car = CarState(
+                    id=0, team=0,
+                    pos=np.array([0.0, 0.0, 17.0], dtype=np.float32),
+                    vel=np.array([600.0 * math.cos(yaw), 600.0 * math.sin(yaw), 0.0], dtype=np.float32),
+                    ang_vel=np.array([0.0, 0.0, 2.0], dtype=np.float32),
+                    rot=np.array([0.0, float(yaw), 0.0], dtype=np.float32),
+                    on_ground=True
+                )
+                self.arena.cars = [car]
+                total += rew.get_reward(car, self.arena, action, False, None)
+
+        cap = PowerslideReward.ACTIVATION_BUDGET * 0.30
+        self.assertLessEqual(total, cap + 1e-6,
+                             f"6 weave cycles paid {total}, above the single-activation cap of {cap}")
 
     def test_wrong_way_throttle_exempt_when_steering(self):
         """Test that forward throttle while facing away from the ball is NOT penalized if the bot is actively steering to turn."""
@@ -1055,7 +1112,21 @@ class TestRewardAuditFixes(unittest.TestCase):
         act[1] = 0.35  # Active cut steering
         act[7] = 1.0   # Handbrake
 
-        total_r, breakdown = combined.get_reward(car, self.arena, act, False, None, include_breakdown=True)
+        # Two steps: powerslide pays on heading-alignment progress, so the cut has to actually
+        # swing the nose toward the ball between calls.
+        combined.get_reward(car, self.arena, act, False, None, include_breakdown=False)
+
+        car_cut = CarState(
+            id=0, team=0,
+            pos=np.array([0.0, 0.0, 17.0], dtype=np.float32),
+            vel=np.array([0.0, 400.0, 0.0], dtype=np.float32),
+            ang_vel=np.array([0.0, 0.0, 2.0], dtype=np.float32),
+            rot=np.array([0.0, 0.4, 0.0], dtype=np.float32),  # yawed toward the ball
+            on_ground=True
+        )
+        self.arena.cars = [car_cut]
+
+        total_r, breakdown = combined.get_reward(car_cut, self.arena, act, False, None, include_breakdown=True)
         self.assertNotIn("handbrake_penalty", breakdown, "Active powerslide cut must not receive handbrake economy penalty")
         self.assertGreater(breakdown.get("powerslide", 0.0), 0.0, "PowerslideReward should be active")
 

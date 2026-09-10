@@ -1980,6 +1980,11 @@ class JumpBridgeReward(BaseReward):
                 reward += self.weight * forward_alignment * 0.5
 
         # ── 3b. Flick Launch Impulse & Goal Acceleration Bonus ────────────────
+        # 3b and 3c below are both keyed on the same touch counter and were previously sequential
+        # `if` blocks, so a flick that also registered as a dodge strike collected both bounties
+        # for one collision. They are mutually exclusive now: the flick is the more specific
+        # classification and takes precedence.
+        flick_bounty_paid = False
         target_goal_y = ARENA_EXTENT_Y if car.team == 0 else -ARENA_EXTENT_Y
         target_x = _clip(arena.ball.pos[0], -GOAL_HALF_WIDTH * 0.8, GOAL_HALF_WIDTH * 0.8)
         target_net_pos = np.array([target_x, target_goal_y, GOAL_HEIGHT * 0.35], dtype=np.float32)
@@ -2002,13 +2007,17 @@ class JumpBridgeReward(BaseReward):
                 elif abs(target_goal_y - arena.ball.pos[1]) < 2800.0:
                     tactical_mult = 1.25
 
-                # Coefficient cut 3.5 -> 1.3 rather than clamped: at live weights the old term
-                # peaked near 14.7, roughly half a goal for a single flick, which dwarfed the
-                # outcome signal. A hard min() would have capped the peak but saturated the
-                # term, flattening the tactical multiplier and flick_power into a constant.
-                # Scaling the coefficient lands the peak near 5.5 and stays strictly monotonic.
-                reward += self.weight * 1.3 * flick_power * tactical_mult
+                # Coefficient cut 3.5 -> 1.3 -> 0.55. The first cut was sized against the nominal
+                # goal weight, which is the wrong yardstick: at gamma 0.99 and tick_skip 8 the
+                # policy runs 15 steps/s, so a goal three seconds out is worth ~19, not 30. The
+                # bounty is also certain the instant contact registers while the goal is only a
+                # probability -- at a 30% conversion rate the expected discounted goal was worth
+                # LESS than the contact bounty, so farming contact was the better trade and the
+                # value function was right to prefer it. 0.55 lands the peak near 2.0, roughly a
+                # tenth of a discounted goal, which is shaping rather than competition.
+                reward += self.weight * 0.55 * flick_power * tactical_mult
                 self._flick_window_active[car.id] = False
+                flick_bounty_paid = True
 
         # ── 3c. Outcome-Driven Dodge Strike & Aerial Interception Bounty ──────
         if car.ball_touches > prev_touch:
@@ -2018,15 +2027,20 @@ class JumpBridgeReward(BaseReward):
                 (not car.on_ground and prev_flip and not car.has_flip)
             )
             if is_dodge_strike:
-                vy_forward = arena.ball.vel[1] if car.team == 0 else -arena.ball.vel[1]
-                prev_b_vel = self._prev_ball_vel.get(car.id, arena.ball.vel)
-                delta_v_vec = arena.ball.vel - prev_b_vel
-                delta_v_mag = _norm3(delta_v_vec)
+                # A flick already paid for this collision in 3b. Consume the dodge window so the
+                # next touch is scored fresh, but do not pay a second bounty for one impact.
+                if not flick_bounty_paid:
+                    vy_forward = arena.ball.vel[1] if car.team == 0 else -arena.ball.vel[1]
+                    prev_b_vel = self._prev_ball_vel.get(car.id, arena.ball.vel)
+                    delta_v_vec = arena.ball.vel - prev_b_vel
+                    delta_v_mag = _norm3(delta_v_vec)
 
-                if vy_forward > -100.0 or delta_v_mag > 300.0:
-                    power_factor = min(1.5, max(0.3, delta_v_mag / 800.0))
-                    fwd_factor = max(0.2, (vy_forward + 500.0) / 1500.0)
-                    reward += self.weight * 1.5 * power_factor * min(1.2, fwd_factor)
+                    if vy_forward > -100.0 or delta_v_mag > 300.0:
+                        power_factor = min(1.5, max(0.3, delta_v_mag / 800.0))
+                        fwd_factor = max(0.2, (vy_forward + 500.0) / 1500.0)
+                        # 1.5 -> 1.2 for the same discounted-return reason as the flick
+                        # coefficient above; peak lands near 1.5 at the live weight.
+                        reward += self.weight * 1.2 * power_factor * min(1.2, fwd_factor)
                 self._dodge_strike_ticks[car.id] = 0
             elif not car.on_ground and ball_z > 250.0:
                 reward += self.weight * 1.0 * min(1.5, (ball_z - 150.0) / 500.0)
@@ -2288,15 +2302,26 @@ class BoostReward(BaseReward):
 class PowerslideReward(BaseReward):
     """
     Rewards tight, responsive ground turnarounds and snap cuts toward the ball.
-    Purely outcome-driven based on yaw velocity and positive heading alignment rate when off-axis,
-    gated with proximity and self-TTI arrival suppression to prevent drift-skating into the ball.
+    Outcome-driven on positive heading alignment rate when off-axis, gated with proximity and
+    self-TTI arrival suppression to prevent drift-skating into the ball, and capped by a
+    per-activation budget so a single turnaround cannot be extended into an income stream.
+
+    This is a bootstrapping term. Once the policy can pivot, the velocity potential in
+    PlayerToBallVelocityReward carries turn-radius learning on its own, so powerslide_weight is
+    expected to be annealed toward zero rather than held at its starting value.
     """
+    # Most of a turnaround's value is delivered in the first few tenths of a second. The cap is
+    # expressed pre-weight so it tracks powerslide_weight as that weight is annealed down.
+    ACTIVATION_BUDGET = 1.0
+
     def __init__(self, weight: float = 0.30):
         super().__init__(weight)
         self._prev_alignment: Dict[int, float] = {}
+        self._activation_spent: Dict[int, float] = {}
 
     def reset(self, initial_state: RocketSimArena):
         self._prev_alignment = {}
+        self._activation_spent = {car.id: 0.0 for car in initial_state.cars}
         for car in initial_state.cars:
             d = initial_state.ball.pos - car.pos
             dist = _norm3(d)
@@ -2328,17 +2353,44 @@ class PowerslideReward(BaseReward):
         # while straightaway powersliding is penalized by CombinedReward's economy penalty.
         speed = _norm3(car.vel)
         steer_mag = abs(float(action[1]))
-        yaw_rate = abs(float(np.dot(car.ang_vel, car.get_up_vector()))) if (hasattr(car, "ang_vel") and car.ang_vel is not None) else 0.0
 
-        if car.on_ground and fwd_alignment < 0.60 and steer_mag > 0.25 and speed > 50.0:
-            alignment_rate = max(0.0, fwd_alignment - prev_align)
-            # Rapid pivoting (high yaw velocity) or positive heading alignment progression:
-            if yaw_rate > 1.2 or alignment_rate > 0.02:
-                pivot_efficiency = min(1.0, max(alignment_rate * 5.0, yaw_rate / 3.5))
-                turn_bonus = pivot_efficiency * (0.6 + 0.4 * steer_mag)
-                return self.weight * turn_bonus
+        is_turning = bool(car.on_ground and fwd_alignment < 0.60 and steer_mag > 0.25 and speed > 50.0)
+        if not is_turning:
+            # Leaving the turning state closes the activation and restores the budget. Note the
+            # early returns above (degenerate distance, proximity/TTI suppression) deliberately
+            # do NOT reset it: they suppress payout inside the strike zone, and treating that as
+            # the end of an activation would refund the budget mid-turn.
+            self._activation_spent[car.id] = 0.0
+            return 0.0
 
-        return 0.0
+        # Heading alignment progression only.
+        #
+        # This previously also qualified on `yaw_rate > 1.2` alone and took the larger of the two
+        # as its efficiency factor. Nothing in that path required the car to be turning toward
+        # anything, so sustained yaw with the stick held paid out on its own: a car circling more
+        # than 300 uu from the ball sits under the 0.60 alignment gate for roughly two thirds of
+        # every lap and collected on each of those steps, burning no boost. The handbrake economy
+        # penalty in CombinedReward could not offset it either, since that fires only when steer
+        # is UNDER 0.25, and the distance potential nets to zero around a closed loop.
+        alignment_rate = max(0.0, fwd_alignment - prev_align)
+        if alignment_rate <= 0.02:
+            return 0.0
+
+        pivot_efficiency = min(1.0, alignment_rate * 5.0)
+        turn_bonus = pivot_efficiency * (0.6 + 0.4 * steer_mag)
+
+        # Per-activation budget. alignment_rate only ever credits gains and never charges for
+        # alignment lost, so weaving the nose in and out still collects on every upswing. The cap
+        # bounds what one continuous turn can pay regardless of how the heading oscillates inside
+        # it. Same pattern as AirRollRecoveryReward's per-flight budgets.
+        spent = self._activation_spent.get(car.id, 0.0)
+        remaining = max(0.0, self.ACTIVATION_BUDGET - spent)
+        turn_bonus = min(turn_bonus, remaining)
+        if turn_bonus <= 0.0:
+            return 0.0
+        self._activation_spent[car.id] = spent + turn_bonus
+
+        return self.weight * turn_bonus
 
 
 # ==============================================================================

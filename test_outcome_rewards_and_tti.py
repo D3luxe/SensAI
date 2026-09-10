@@ -72,8 +72,21 @@ class TestOutcomeRewardsAndTTI(unittest.TestCase):
         arena.cars = [car]
         rew.reset(arena)
 
+        # Two steps: the payout is heading-alignment PROGRESS toward the ball, so it needs an
+        # actual change in heading between calls. Yaw rate on its own no longer qualifies.
         action = np.array([1.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0], dtype=np.float32)
-        r = rew.get_reward(car, arena, action, False, None)
+        rew.get_reward(car, arena, action, False, None)
+
+        car_turned = CarState(
+            id=0, team=0,
+            pos=np.array([0.0, 0.0, 17.0], dtype=np.float32),
+            rot=np.array([0.0, 0.4, 0.0], dtype=np.float32),  # yawed toward the ball
+            vel=np.array([500.0, 0.0, 0.0], dtype=np.float32),
+            ang_vel=np.array([0.0, 0.0, 2.5], dtype=np.float32),
+            on_ground=True
+        )
+        arena.cars = [car_turned]
+        r = rew.get_reward(car_turned, arena, action, False, None)
         self.assertGreater(r, 0.0, 'Outcome-driven PowerslideReward should award reward without action[7] > 0')
 
     def test_powerslide_strike_zone_and_tti_suppression(self):
