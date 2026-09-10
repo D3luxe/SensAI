@@ -265,6 +265,9 @@ def compute_effective_alignment(
 # already requested by the observation builder, so those two come back from the arena's cache.
 INTERCEPT_SLICE_LADDER = (0, 30, 60, 120, 180)
 
+# Depth goalside of the ball that a beaten defender should be shadowing toward.
+SHADOW_OFFSET_Y = 700.0
+
 # Rung used to decide whether the engine's trajectory can be trusted at all. Shared with the
 # ladder so the probe never costs an extra trajectory integration on the pure-Python fallback.
 _TRUST_PROBE_TICKS = 30
@@ -830,7 +833,7 @@ class PlayerToBallVelocityReward(BaseReward):
             return float((1.0 - alpha) * d2 + alpha * d3)
         return _norm3(ball_pos - car_pos)
 
-    def _get_target_pos(self, car_pos: np.ndarray, arena: RocketSimArena, is_kickoff: bool, car_vel: Optional[np.ndarray] = None, car_id: int = -1) -> np.ndarray:
+    def _get_target_pos(self, car_pos: np.ndarray, arena: RocketSimArena, is_kickoff: bool, car_vel: Optional[np.ndarray] = None, car_id: int = -1, car_team: int = 0) -> np.ndarray:
         """
         Computes the tactical target point for distance delta and alignment.
         When the ball has significant velocity (> 300 uu/s) and has future trajectory,
@@ -846,12 +849,12 @@ class PlayerToBallVelocityReward(BaseReward):
         ball_speed = _norm3(arena.ball.vel)
         # A near-stationary ball's intercept point is its current position, so skip the solver.
         if ball_speed <= 150.0 or not hasattr(arena, "get_predicted_ball_pos"):
-            return target_pos
+            return self._apply_shadow_retarget(target_pos, car_pos, arena, car_team)
 
         chaser_vel = car_vel if car_vel is not None else np.zeros(3, dtype=np.float32)
         pred_pos, _ = cached_intercept_point(arena, car_id, car_pos, chaser_vel)
         if pred_pos is None:
-            return target_pos
+            return self._apply_shadow_retarget(target_pos, car_pos, arena, car_team)
 
         # Blend on proximity alone. The solver already collapses to the live ball position when
         # the intercept is immediate, so the old speed_factor damping only weakened correct
@@ -862,11 +865,72 @@ class PlayerToBallVelocityReward(BaseReward):
         blended = (1.0 - blend) * arena.ball.pos + blend * pred_pos
 
         # Clamp within arena bounds to prevent numerical overshoot
-        return np.array([
+        clamped = np.array([
             _clip(blended[0], -ARENA_EXTENT_X + 100.0, ARENA_EXTENT_X - 100.0),
             _clip(blended[1], -ARENA_EXTENT_Y + 100.0, ARENA_EXTENT_Y - 100.0),
             _clip(blended[2], 93.0, ARENA_HEIGHT_Z - 100.0)
         ], dtype=np.float32)
+        return self._apply_shadow_retarget(clamped, car_pos, arena, car_team)
+
+    def _apply_shadow_retarget(self, target_pos: np.ndarray, car_pos: np.ndarray, arena: RocketSimArena, car_team: int) -> np.ndarray:
+        """
+        Slides the tactical target toward a shadow point when the ball is goalside of the car.
+
+        The distance potential used to aim at the ball unconditionally. The wrong-side flag was
+        computed and then spent only on suppressing velocity-matching and pursuit bonuses, never
+        on the delta itself, so a bot doing the correct 1v1 thing -- turning and retreating toward
+        its back post to delay an attacker instead of diving from a bad angle -- was charged for
+        every uu of ground it gave up. A persistent per-step cost against a delayed and uncertain
+        benefit is the shape of pressure that produces desperate challenges.
+
+        Retargeting rather than nulling: nulling removes the penalty and the guidance together,
+        while a shadow point keeps a gradient pointing where a defender should actually go. Same
+        construction JumpBridgeReward already uses, including its clamp keeping the point on the
+        playable pitch rather than inside the net structure.
+
+        The offset is blended in over 250 uu of relative depth. Switching it on a boolean would
+        teleport the target by 700 uu in one tick, and inside a distance delta that does not even
+        surface as a visible spike: the decomposition clips target motion to the ball's own travel
+        budget, so the potential would quietly swallow most of the transition instead.
+        """
+        defend_goal_y = -ARENA_EXTENT_Y if car_team == 0 else ARENA_EXTENT_Y
+        dist_car_to_defend = abs(float(car_pos[1]) - defend_goal_y)
+        dist_ball_to_defend = abs(float(arena.ball.pos[1]) - defend_goal_y)
+
+        # 0 while the car is goalside of the ball, ramping to 1 once the ball is 300 uu behind it.
+        wrong_t = _clip((dist_car_to_defend - dist_ball_to_defend - 50.0) / 250.0, 0.0, 1.0)
+
+        # Being goalside of the ball is not the same as being beaten. Two guards, both ramped:
+        #
+        # Proximity: with the ball within reach the car is contesting, not retreating, and pulling
+        # its target off the ball would starve every strike-zone term that depends on aiming at
+        # it. Only a ball that has genuinely got past and away calls for shadowing.
+        raw_dist = self._calc_dist(car_pos, arena.ball.pos)
+        wrong_t *= _clip((raw_dist - 600.0) / 600.0, 0.0, 1.0)
+
+        # Field position: deep in the attacking half, "farther from our own goal than the ball"
+        # is ordinary attacking posture, not a defender who has been beaten. Full weight in our
+        # own half, fading out across the attacking half.
+        ball_y = float(arena.ball.pos[1])
+        ball_depth = -ball_y if car_team == 0 else ball_y  # > 0 when the ball is in our half
+        wrong_t *= _clip((ball_depth + 2000.0) / 2000.0, 0.0, 1.0)
+
+        if wrong_t <= 0.0:
+            return target_pos
+
+        shadow_offset = -SHADOW_OFFSET_Y if car_team == 0 else SHADOW_OFFSET_Y
+        shadow_y = float(arena.ball.pos[1]) + shadow_offset
+        if car_team == 0:
+            shadow_y = max(-ARENA_EXTENT_Y + 200.0, min(0.0, shadow_y))
+        else:
+            shadow_y = min(ARENA_EXTENT_Y - 200.0, max(0.0, shadow_y))
+
+        shadow = np.array([
+            float(arena.ball.pos[0]) * 0.5,
+            shadow_y,
+            BALL_RADIUS,
+        ], dtype=np.float32)
+        return ((1.0 - wrong_t) * np.asarray(target_pos, dtype=np.float32) + wrong_t * shadow).astype(np.float32)
 
     def reset(self, initial_state: RocketSimArena):
         is_kickoff = bool(
@@ -878,7 +942,7 @@ class PlayerToBallVelocityReward(BaseReward):
         self._prev_dist = {}
         self._prev_pos = {car.id: car.pos.copy() for car in initial_state.cars}
         self._prev_target = {
-            car.id: np.asarray(self._get_target_pos(car.pos, initial_state, is_kickoff, car.vel, car.id), dtype=np.float32).copy()
+            car.id: np.asarray(self._get_target_pos(car.pos, initial_state, is_kickoff, car.vel, car.id, car.team), dtype=np.float32).copy()
             for car in initial_state.cars
         }
         self._prev_touches = {car.id: car.ball_touches for car in initial_state.cars}
@@ -899,7 +963,7 @@ class PlayerToBallVelocityReward(BaseReward):
             _norm3(arena.ball.vel) < 100.0
         )
 
-        target_pos = self._get_target_pos(car.pos, arena, is_kickoff, car.vel, car.id)
+        target_pos = self._get_target_pos(car.pos, arena, is_kickoff, car.vel, car.id, car.team)
         curr_dist = self._calc_dist(car.pos, target_pos)
 
         # Stationary-potential decomposition.
@@ -1010,12 +1074,24 @@ class PlayerToBallVelocityReward(BaseReward):
             c.ball_touches > self._prev_car_touches.get(c.id, c.ball_touches)
             for c in arena.cars if c.team != car.team
         )
+        bot_touched = bool(car.ball_touches > self._prev_car_touches.get(car.id, car.ball_touches))
         self._prev_car_touches = {c.id: c.ball_touches for c in arena.cars}
 
-        # When an opponent touches/clears the ball away, distance increased due to the opponent's strike;
-        # clamp the delta so the bot is not penalized with an artificial distance penalty cliff for an external hit.
-        if opp_touched and raw_delta_dist < 0.0:
-            raw_delta_dist = max(-0.08, raw_delta_dist)
+        # An opponent strike displaces the ball by an amount the bot did not cause, in whichever
+        # direction the strike happened to send it, so the delta it produces is not credit or
+        # blame either way. Clamp both sides to the same budget.
+        #
+        # This clamped only the negative side before. The class's own potential decomposition
+        # above was written to fix exactly this asymmetry for target motion, and this reintroduced
+        # it on a different input: an opponent knocking the ball toward the bot paid the full
+        # positive delta for distance the bot did nothing to close.
+        #
+        # `not bot_touched` matters in 1v1, where a large share of contact is a simultaneous 50/50
+        # with both cars registering a touch within a frame or two. That is not an external
+        # displacement to be clamped away -- it is an outcome the bot half-caused, and it should
+        # be paid or charged on the resulting trajectory.
+        if opp_touched and not bot_touched:
+            raw_delta_dist = _clip(raw_delta_dist, -0.08, 0.08)
 
         # 1. Anti-Overshoot Penalty & Strike Zone Tracking
         overshoot_penalty = 0.0
@@ -1084,15 +1160,36 @@ class PlayerToBallVelocityReward(BaseReward):
         # 1. When ball has bounced away from the wall into the infield (lateral separation), heavily dampen wall driving.
         # 2. When car is climbing away higher than the ball (car_z > ball_z + 200 and car_vz > -50), dampen wall driving.
         # 3. When tracking a ball on the wall, award active distance progression bonus (1.25x).
+        # Both factors ramp rather than switch. A hard boolean multiplying a potential derivative
+        # destroys telescoping and leaves a seam at the boundary: one uu of ball travel across
+        # abs(ball.x) == 2800 used to swing this term by more than eight times, so the accumulated
+        # reward depended on which side of an invisible line the ball sat rather than on where the
+        # car actually went. Same technique the class already uses for the 2D-to-3D distance blend
+        # between car heights of 150 and 350.
         is_ball_infield = False
         is_car_above_ball = False
         if is_on_wall:
-            is_ball_infield = bool(abs(arena.ball.pos[0]) < 2800.0) if abs(car.pos[0]) > 3450.0 else bool(abs(arena.ball.pos[1]) < 3800.0)
-            is_car_above_ball = bool(car.pos[2] > ball_z + 200.0 and car.vel[2] > -50.0)
-            if is_ball_infield or is_car_above_ball:
-                delta_dist *= 0.15
+            if abs(car.pos[0]) > 3450.0:
+                # On a side wall: how far infield the ball has bounced, ramped over 2600..3000.
+                infield_t = _clip((3000.0 - abs(float(arena.ball.pos[0]))) / 400.0, 0.0, 1.0)
+            else:
+                # On a backboard: same ramp against the y wall, 3600..4000.
+                infield_t = _clip((4000.0 - abs(float(arena.ball.pos[1]))) / 400.0, 0.0, 1.0)
+
+            # Climbing away above the ball, ramped over 200 uu of separation and 50 uu/s of climb.
+            above_t = _clip((float(car.pos[2]) - ball_z - 200.0) / 200.0, 0.0, 1.0)
+            above_t *= _clip((float(car.vel[2]) + 50.0) / 100.0, 0.0, 1.0)
+
+            damp_t = max(infield_t, above_t)
+            is_ball_infield = bool(infield_t > 0.5)
+            is_car_above_ball = bool(above_t > 0.5)
+
+            if damp_t > 0.0:
+                delta_dist *= 1.0 + damp_t * (0.15 - 1.0)
             elif is_ball_on_wall and fwd_alignment > 0.20:
-                delta_dist *= 1.25
+                # Ramp the pursuit bonus in over the alignment threshold too.
+                track_t = _clip((fwd_alignment - 0.20) / 0.20, 0.0, 1.0)
+                delta_dist *= 1.0 + 0.25 * track_t
 
         # If car is moving in reverse, executing a half-flip, or executing an active dodge/speedflip towards target,
         # evaluate horizontal travel velocity alignment rather than car nose forward vector:
