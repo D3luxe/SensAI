@@ -177,11 +177,27 @@ ts_env = trueskill.TrueSkill(
 # debut needs to reach the sigma<=1.5 eligibility gate from ~73 to ~23, at zero extra
 # compute. That ratio is the difference between a checkpoint that can converge inside its
 # gauntlet trial and one that never can.
+# Values derived from a measured round robin (14 games per pair: heuristic, Necto,
+# Nexto, BC baseline, and two SensAI checkpoints), converting each head-to-head points
+# rate p into a mu gap via the TrueSkill relation gap = sqrt(2) * beta * Phi^-1(p).
+#
+# Necto stays at 30.0 as the scale reference; only gaps carry meaning, and it is the
+# most-played anchor, so moving it would churn every rating for nothing.
+#
+#   heuristic over BC baseline    p=0.536  ->  gap +0.53   (they are near-parity)
+#   Nexto over Necto              p=0.786  ->  gap +4.67
+#   heuristic -> Necto, two independent chains through the SensAI checkpoints, give
+#   12.58 and 17.30, averaging 14.9 against the existing gap of 15 -- so heuristic 15
+#   and Necto 30 were already right and are left alone.
+#
+# The two that were wrong came from reputation rather than measurement: the BC baseline
+# was placed 3.0 below the heuristic when they are a coin flip, and Nexto was placed 8.0
+# above Necto when the measured gap is 4.7.
 ANCHOR_CALIBRATION: Dict[str, float] = {
-    "pretrained_baseline": 12.0,   # BC init; weakest reference, kept only as a tripwire
+    "pretrained_baseline": 14.5,   # BC init; near-parity with the scripted chaser
     "heuristic": 15.0,             # scripted ball-chaser
-    "necto": 30.0,
-    "nexto": 38.0,
+    "necto": 30.0,                 # scale reference
+    "nexto": 34.7,                 # Necto + measured 4.67
 }
 ANCHOR_SIGMA = 0.5
 

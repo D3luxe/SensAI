@@ -182,5 +182,45 @@ class TestSeriesSettings(unittest.TestCase):
             self.assertEqual(call.kwargs.get("wins_needed"), 3)
 
 
+class TestAnchorCalibration(unittest.TestCase):
+    """
+    The anchor ladder is a declaration of the scale every rating is solved against, so
+    its numbers must come from measurement. These pin the two relationships that were
+    previously set from reputation and measured wrong.
+    """
+
+    @staticmethod
+    def _implied(a: str, b: str) -> float:
+        from math import sqrt, erf
+        from utils.trueskill_evaluator import ANCHOR_CALIBRATION
+        beta = 25.0 / 6.0
+        z = (ANCHOR_CALIBRATION[a] - ANCHOR_CALIBRATION[b]) / (sqrt(2) * beta)
+        return 0.5 * (1.0 + erf(z / sqrt(2)))
+
+    def test_ladder_reproduces_measured_head_to_heads(self):
+        # Round robin, 14 games per pair. Nexto beat Necto 78.6%; the heuristic and the
+        # BC baseline were a coin flip at 53.6%.
+        self.assertAlmostEqual(self._implied("nexto", "necto"), 0.786, delta=0.02)
+        self.assertAlmostEqual(self._implied("heuristic", "pretrained_baseline"), 0.536, delta=0.02)
+
+    def test_anchor_sigma_stays_tight(self):
+        """Anchors are known quantities; a wide sigma cripples information transfer."""
+        from utils.trueskill_evaluator import ANCHOR_SIGMA
+        self.assertLessEqual(ANCHOR_SIGMA, 1.0)
+
+    def test_calibration_is_applied_on_load(self):
+        """A leaderboard carrying stale anchor values is corrected when it is read."""
+        import json, os, tempfile
+        from utils.trueskill_evaluator import TrueSkillEvaluator, ANCHOR_CALIBRATION
+        path = os.path.join(tempfile.mkdtemp(), "lb.json")
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump({"ratings": {"checkpoints/nexto-model.pt": {
+                "name": "Nexto (EARL TorchScript)", "path": "checkpoints/nexto-model.pt",
+                "mu": 25.0, "sigma": 8.333, "is_anchor": True}}}, f)
+        ev = TrueSkillEvaluator(leaderboard_path=path)
+        rec = ev.ratings["checkpoints/nexto-model.pt"]
+        self.assertAlmostEqual(rec.mu, ANCHOR_CALIBRATION["nexto"], places=3)
+
+
 if __name__ == "__main__":
     unittest.main()
