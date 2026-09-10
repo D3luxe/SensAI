@@ -418,6 +418,125 @@ class TestLeagueManager(unittest.TestCase):
         self.assertEqual(len(new_league.contender_queue), len(self.league.contender_queue))
         self.assertGreaterEqual(len(new_league.event_history), 1)
 
+    def _queued_contender(self, name, mu, sigma, wins, losses, draws=0):
+        """Puts a rated contender in the queue so a gauntlet exit can be evaluated."""
+        path = self.league._normalize_path(f"checkpoints/{name}.pt")
+        rec = self.evaluator.get_or_create_rating(path)
+        rec.mu, rec.sigma = mu, sigma
+        rec.wins, rec.losses, rec.draws = wins, losses, draws
+        rec.matches_played = wins + losses + draws
+        rec.update_conservative()
+        if path not in self.league.contender_queue:
+            self.league.contender_queue.append(path)
+        return path, rec
+
+    def _gauntlet_exit(self, rec):
+        """
+        The exit decision for a contender, without playing any matches.
+
+        Mirrors the demote-then-graduate order in step_contender_gauntlet, which is the
+        property under test: the two branches must be exhaustive.
+        """
+        import math
+
+        lm = self.league
+        if rec.matches_played >= lm.grace_period_matches:
+            floor = lm._contender_mu_floor()
+            if floor is not None and (rec.mu + rec.sigma) < floor:
+                return "demote"
+            if rec.matches_played >= lm.min_matches_for_points_floor:
+                rate = max(0.0, min(1.0, rec.points_rate / 100.0))
+                spread = math.sqrt(
+                    max(rate * (1.0 - rate), 0.01) / max(1, rec.matches_played)
+                ) * 100.0
+                if rec.points_rate + spread < lm.min_contender_points_rate:
+                    return "demote"
+        if lm._is_rank_eligible(rec) or rec.matches_played >= lm.max_contender_matches:
+            return "graduate"
+        return "keep playing"
+
+    def test_a_contender_out_of_budget_always_leaves(self):
+        """
+        Demotion and graduation must be exhaustive at the budget.
+
+        Graduation used to sit behind an absolute mu bar of 25.5 and a points-rate bar.
+        A contender that cleared neither could not graduate, and if it was not confidently
+        below the relative demotion floor it could not be demoted either. It drew gauntlet
+        trials forever. With a King at mu 24.09 that trap was every rating between 20.09
+        and 25.50, and one record reached 91 matches inside it.
+        """
+        self._seat_a_king()
+        king = self.evaluator.ratings[self.league._normalize_path(self.dummy_ckpt_path)]
+        king.mu, king.sigma, king.matches_played = 24.09, 1.25, 40
+        king.update_conservative()
+        self.league.refresh_pool()
+
+        for mu in (20.5, 22.0, 24.0, 25.4, 26.0):
+            for wins, losses in ((20, 28), (22, 26), (24, 24)):
+                _, rec = self._queued_contender(
+                    f"stuck_{mu}_{wins}", mu, 1.2, wins, losses
+                )
+                self.assertIn(
+                    self._gauntlet_exit(rec), ("demote", "graduate"),
+                    f"mu={mu} record={wins}W-{losses}L is stuck in the gauntlet",
+                )
+
+    def test_graduation_no_longer_needs_an_absolute_rating(self):
+        """A contender below the retired 25.5 bar but measured still graduates."""
+        self._seat_a_king()
+        king = self.evaluator.ratings[self.league._normalize_path(self.dummy_ckpt_path)]
+        king.mu, king.sigma, king.matches_played = 24.09, 1.25, 40
+        king.update_conservative()
+        self.league.refresh_pool()
+
+        _, rec = self._queued_contender("measured_below_bar", 24.5, 1.2, 16, 18)
+        self.assertLess(rec.mu, 25.5)
+        self.assertEqual(self._gauntlet_exit(rec), "graduate")
+        self.assertFalse(hasattr(self.league, "min_contender_mu"))
+
+    def test_points_floor_needs_confidence_not_a_dip(self):
+        """
+        The floor bites on evidence, the way the skill floor already did.
+
+        A points rate over 12 series carries a standard error near 14 points, so a bare
+        comparison against a floor just under even odds evicted on variance.
+        """
+        self._seat_a_king()
+        # 5W-7L is 41.7%, which used to evict against the old 45% floor.
+        _, unlucky = self._queued_contender("unlucky", 26.0, 2.2, 5, 7)
+        self.assertAlmostEqual(unlucky.points_rate, 41.7, places=1)
+        self.assertNotEqual(self._gauntlet_exit(unlucky), "demote")
+
+        # 3W-13L is 18.8%, which is a real signal rather than a dip.
+        _, weak = self._queued_contender("weak", 26.0, 2.2, 3, 13)
+        self.assertEqual(self._gauntlet_exit(weak), "demote")
+
+    def test_loss_streak_cap_is_not_an_ordinary_event(self):
+        """
+        Four straight losses happen to most contenders over a full gauntlet.
+
+        Simulated across 48 evenly matched series, a run of four occurs about 80% of the
+        time, so as a knockout it carried almost no information. The cap must sit high
+        enough that tripping it means something.
+        """
+        import random
+
+        self.assertGreaterEqual(self.league.max_consecutive_losses, 8)
+        random.seed(5)
+        trials, tripped_at_four, tripped_at_cap = 4000, 0, 0
+        for _ in range(trials):
+            streak = best = 0
+            for _ in range(48):
+                if random.random() < 0.5:
+                    streak = 0
+                else:
+                    streak += 1
+                    best = max(best, streak)
+            tripped_at_four += best >= 4
+            tripped_at_cap += best >= self.league.max_consecutive_losses
+        self.assertGreater(tripped_at_four / trials, 0.6)
+        self.assertLess(tripped_at_cap / trials, 0.2)
+
     def test_tiers_snap_to_whole_worker_slices(self):
         """
         Every tier must end on an env-worker boundary.
