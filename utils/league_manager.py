@@ -480,10 +480,11 @@ class LeagueManager:
                 valid_models.append((norm_key, comp_score, rec))
 
         if not valid_models:
-            # Nothing rated at all: no King, and the pool falls back to the anchors so
-            # training still has opponents.
+            # Nothing rated at all: no King, and no pool. The pool tier folds back into
+            # self-play rather than falling back to the anchors -- see below for why a
+            # reference never belongs in the pool.
             self.king_of_the_hill = None
-            self.elite_pool = list(self.active_anchors) or ["heuristic"]
+            self.elite_pool = []
             return
 
         # Sort descending: rank-eligible models first (ordered by raw mu), provisional
@@ -522,9 +523,28 @@ class LeagueManager:
                 extra={"old_king": old_name, "new_king": new_name}
             )
 
-        # Populate elite pool with top models (mix of checkpoints and anchors)
+        # Populate the elite pool with checkpoints only.
+        #
+        # An anchor is a yardstick, not a sparring partner. It exists to give a new
+        # checkpoint a calibrated reference to be measured against, and grading does that
+        # job in full. Letting one into the pool hands it a share of training
+        # environments it was never meant to have: Nexto's declared mu is the highest on
+        # the ladder, so ranking alone seated it at the top of the pool permanently,
+        # while heuristic and the BC baseline sat below every real checkpoint and taught
+        # the policy nothing it had not already outgrown.
+        #
+        # It is also the most expensive opponent to run. The pool hands each model a
+        # contiguous run of pool_group_size environments, which is one subprocess worker,
+        # and a rollout step does not finish until every worker does. One worker drawing
+        # Nexto costs 3.02 ms per step against 2.44 ms for a checkpoint, and all 128
+        # environments pay that difference, not just the eight facing it.
+        #
+        # Deliberate exposure to a reference model is a separate control: the
+        # training_opponents list gives it a guaranteed, explicitly chosen share.
         pool_paths = []
-        for path, _, _ in valid_models:
+        for path, _, rec in valid_models:
+            if rec.is_anchor or path == "heuristic":
+                continue
             if path not in pool_paths:
                 pool_paths.append(path)
             if len(pool_paths) >= self.max_pool_size:
@@ -1139,17 +1159,19 @@ class LeagueManager:
         # two disjoint is what makes the ratio mean what it says -- 0.10 across two
         # listed opponents is 5% each, not 5% plus pool spillover.
         explicit = set(live_training_opps)
-        candidate_pool = [
-            m for m in dict.fromkeys(self.elite_pool + self.active_anchors)
-            if m not in explicit
-        ]
-        if not candidate_pool:
-            candidate_pool = ["heuristic"] if "heuristic" not in explicit else list(explicit)
+        candidate_pool = [m for m in dict.fromkeys(self.elite_pool) if m not in explicit]
 
         # Contiguous runs of `pool_group_size` envs per model, rather than one env each:
         # batches the opponent forward passes and keeps each subprocess env worker facing
         # only a couple of distinct models. The cycle index still advances, so successive
         # refreshes walk the whole pool.
+        # An empty pool means no rated checkpoint is available to spar with. Self-play is
+        # the right fallback: it is always well matched, and it costs less per step than
+        # any opponent model.
+        if not candidate_pool:
+            assignments.extend([None] * n_pool)
+            n_pool = 0
+
         assigned = 0
         while assigned < n_pool:
             choice = candidate_pool[self._pool_cycle_idx % len(candidate_pool)]
