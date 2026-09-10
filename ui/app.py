@@ -332,8 +332,9 @@ button.primary-btn {
 /* ---- Anchor legend --------------------------------------------------- */
 
 .lb-anchor-legend {
-    display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
-    padding: 7px 14px; margin-bottom: 10px;
+    display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+    width: 100%; box-sizing: border-box;
+    padding: 6px 14px; margin: 0 0 10px;
     background: rgba(15, 23, 42, 0.6);
     border: 1px solid rgba(168, 85, 247, 0.28);
     border-radius: 8px;
@@ -354,7 +355,30 @@ button.primary-btn {
 }
 
 .lb-anchor-mu { color: #c4b5fd; font-variant-numeric: tabular-nums; }
-.lb-anchor-note { color: #64748b; font-style: italic; margin-left: auto; }
+.lb-anchor-note { color: #64748b; font-style: italic; margin-left: auto; white-space: nowrap; }
+
+/* Below the width where the note can sit on the same line without crowding the
+   chips, drop it rather than letting it push them onto another row. */
+@media (max-width: 780px) {
+    .lb-anchor-note { display: none; }
+}
+
+/* ---- Empty throne ---------------------------------------------------- */
+
+.lb-king-empty {
+    border-color: rgba(100, 116, 139, 0.4);
+    border-left-color: #64748b;
+    background:
+        radial-gradient(120% 180% at 0% 0%, rgba(100, 116, 139, 0.12) 0%, rgba(100, 116, 139, 0) 55%),
+        linear-gradient(160deg, rgba(24, 30, 45, 0.96) 0%, rgba(9, 13, 22, 0.98) 100%);
+}
+.lb-king-empty::after { animation: none; }
+.lb-king-empty .lb-king-label { color: #94a3b8; }
+.lb-king-empty .lb-king-name { color: #cbd5e1; font-size: 1.2em; }
+
+.lb-crown-dim {
+    filter: none; opacity: 0.55; animation: none;
+}
 
 /* ---- Elite standings table ------------------------------------------ */
 
@@ -924,18 +948,49 @@ def build_cockpit_leaderboard_summary_html(evaluator: TrueSkillEvaluator, league
             if r.path.replace("\\", "/").lower() == norm_target or r.name.lower() in norm_target:
                 king = r
                 break
-    if king is None:
-        for r in sorted_ratings:
-            if r.is_anchor or r.name == "heuristic" or os.path.exists(r.path):
-                king = r
-                break
-    if king is None:
-        king = sorted_ratings[0]
+    # An anchor is never King. The league bars it, and the banner must agree: falling
+    # back to "the best rated thing" here crowned Nexto on its declared mu and made a
+    # fixed yardstick look like the reigning champion.
+    if king is not None and king.is_anchor:
+        king = None
 
     ckpts = [r for r in sorted_ratings if not r.is_anchor and _lb_iteration(r) >= 0]
     latest_iter = max((_lb_iteration(r) for r in ckpts), default=-1)
     ranked_count = sum(1 for r in ratings if evaluator.is_rank_eligible(r))
     total_matches = sum(r.matches_played for r in ratings) // 2
+
+    if king is None:
+        # Cold start: no rated checkpoint, so the King and pool tiers fall back to pure
+        # self-play. Say that plainly rather than showing an empty crown.
+        return f"""
+    <div class="lb-king lb-king-empty">
+        <div class="lb-king-id">
+            <span class="lb-crown lb-crown-dim">&#9876;&#65039;</span>
+            <div style="min-width: 0;">
+                <div class="lb-king-label">Throne Vacant</div>
+                <div class="lb-king-name">Awaiting a rated checkpoint</div>
+                <div class="lb-king-sub">
+                    Anchors cannot hold the crown &middot; King and pool tiers are running
+                    as self-play until the first checkpoints are graded
+                </div>
+            </div>
+        </div>
+        <div class="lb-king-stats">
+            <div class="lb-stat">
+                <span class="lb-stat-label">Latest Ckpt</span>
+                <span class="lb-stat-value accent">{latest_iter if latest_iter >= 0 else '&mdash;'}</span>
+            </div>
+            <div class="lb-stat">
+                <span class="lb-stat-label">Roster</span>
+                <span class="lb-stat-value">{ranked_count}<span style="color:#64748b; font-size:0.7em; font-weight:600;"> ranked / {len(ratings)}</span></span>
+            </div>
+            <div class="lb-stat">
+                <span class="lb-stat-label">Matches</span>
+                <span class="lb-stat-value">{total_matches:,}</span>
+            </div>
+        </div>
+    </div>
+    """
 
     king_chip, _ = _lb_confidence(king)
     king_iter = _lb_iteration(king)
@@ -1195,6 +1250,21 @@ def _build_elite_standings(state: Dict[str, Any], evaluator: TrueSkillEvaluator)
         </div>
         """
 
+    # At cold start the pool holds nothing but anchors and the league is running pure
+    # self-play, so calling it an active sparring roster would be wrong.
+    anchors_only = all(m.get("is_anchor") for m in items)
+    if anchors_only and not king_path:
+        roster_note = (
+            "<b>Standby</b> &middot; anchors only, not in rotation &middot; "
+            "King and pool tiers are running as self-play until a checkpoint is rated"
+        )
+    else:
+        gate = getattr(evaluator, "eligibility_sigma", 1.5)
+        roster_note = (
+            f"<b>{len(items)}</b> active &middot; ranked by &mu; behind a &sigma; &le; {gate:.1f} gate "
+            "&middot; 50% self-play / 25% king / 25% pool"
+        )
+
     mus = [float(m.get("mu", 25.0)) for m in items]
     lo, hi = min(mus), max(mus)
     span = max(hi - lo, 1.0)  # never divide by zero when the pool has converged tightly
@@ -1266,10 +1336,7 @@ def _build_elite_standings(state: Dict[str, Any], evaluator: TrueSkillEvaluator)
     <div class="lb-panel">
         <div class="lb-panel-head">
             <span class="lb-panel-title">&#128737;&#65039; Elite Pool &middot; Sparring Roster</span>
-            <span class="lb-panel-meta">
-                <b>{len(items)}</b> active &middot; ranked by &mu; behind a &sigma; &le; {getattr(evaluator, 'eligibility_sigma', 1.5):.1f} gate
-                &middot; 50% self-play / 25% king / 25% pool
-            </span>
+            <span class="lb-panel-meta">{roster_note}</span>
         </div>
         <div class="lb-standings">{head}{"".join(rows)}</div>
     </div>
@@ -1513,8 +1580,10 @@ def create_ui():
                 with gr.Group():
                     with gr.Row():
                         gr.Markdown("### 🏆 Top Performing Iterations (Live TrueSkill Leaderboard)")
-                        cockpit_anchor_legend = gr.HTML(build_anchor_legend_html(ts_evaluator))
-                        refresh_cockpit_lb_btn = gr.Button("🔄 Refresh Standings", size="sm", scale=1)
+                        refresh_cockpit_lb_btn = gr.Button("🔄 Refresh Standings", size="sm", scale=0)
+                    # Full width of its own: squeezed between the title and the button it
+                    # wrapped onto three lines and read as a broken toolbar.
+                    cockpit_anchor_legend = gr.HTML(build_anchor_legend_html(ts_evaluator))
 
                     cockpit_lb_summary = gr.HTML(build_cockpit_leaderboard_summary_html(ts_evaluator))
                     cockpit_league_ticker = gr.HTML(build_league_wire_and_queue_html(ts_evaluator))
