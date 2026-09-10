@@ -111,6 +111,30 @@ DEFAULT_LEADERBOARD_PATH = "logs/trueskill_leaderboard.json"
 DEFAULT_ELIGIBILITY_SIGMA = 1.5
 DEFAULT_MIN_RANKED_MATCHES = 24
 
+# Series after which a converged rating stops moving. Past this point further play makes
+# the number worse, not better, and the reason is the schedule rather than the sample.
+#
+# Against a fixed, well-measured opponent more series is monotonically good: the true
+# spread of mu falls 1.30 -> 0.89 between 30 and 64 series, then only 0.89 -> 0.59 across
+# the next 336. But an established model does not face a fixed opponent. It faces a
+# stream of fresh challengers, each entering at sigma 8.33 and replaced after ~3 series.
+# Simulating that schedule with every player's true skill held identical (n=300 runs):
+#
+#     challengers   series   true spread of mu   reported sigma
+#          10          30          0.36               0.97
+#          25          75          0.53               0.95
+#          50         150          0.61               0.94
+#         100         300          0.70               0.94
+#
+# The rating random-walks with roughly the square root of reigns served, because a fresh
+# challenger's enormous uncertainty pushes variance into the established side instead of
+# pulling information out of it. Sigma flatlines around 0.94 and stops telling the truth:
+# it reports 0.94 while the actual dispersion is 0.70 and still climbing, against an
+# elite pool whose entire measured spread is 1.51 mu.
+#
+# 64 is where the precision curve flattens and before the walk dominates.
+DEFAULT_RATING_LOCK_MATCHES = 64
+
 # Match-length defaults, chosen from measurement rather than intuition (n=102 per arm,
 # pinned near-peer pairings, decisive results per minute of compute):
 #
@@ -230,6 +254,12 @@ class ModelRating:
     goal_diff: int = 0
     win_rate: float = 0.0
     is_anchor: bool = False
+    # Locked ratings keep playing but stop absorbing updates -- a checkpoint that has
+    # earned the same treatment the calibrated anchors get. Recorded on the rating rather
+    # than recomputed from config, so raising or lowering the cap later cannot silently
+    # re-open a model that was already frozen, and the leaderboard stays auditable.
+    rating_locked: bool = False
+    locked_at_matches: int = 0
     last_updated: str = ""
 
     def update_conservative(self):
@@ -406,6 +436,36 @@ class TrueSkillEvaluator:
     # LeagueManager's King/Elite Pool selection cannot disagree about who outranks whom.
     eligibility_sigma: float = DEFAULT_ELIGIBILITY_SIGMA
     min_ranked_matches: int = DEFAULT_MIN_RANKED_MATCHES
+    rating_lock_matches: int = DEFAULT_RATING_LOCK_MATCHES
+
+    def is_rating_frozen(self, rec: ModelRating) -> bool:
+        """
+        Whether this record's rating is a fixed reference rather than a live measurement.
+
+        Two ways to get here. Anchors are declared fixed by ANCHOR_CALIBRATION. Locked
+        checkpoints earned it by converging and then hitting the series cap. Both keep
+        playing -- they are still training opponents and still the yardstick new arrivals
+        are graded against -- but neither absorbs the result.
+        """
+        return rec.is_anchor or rec.rating_locked
+
+    def maybe_lock_rating(self, rec: ModelRating) -> bool:
+        """
+        Freezes a rating that has hit the cap. Returns True on the transition only.
+
+        Requires sigma at or under the eligibility gate as well as the match count. A
+        model that somehow reached the cap without converging has not been measured, and
+        freezing it there would enshrine the noise permanently instead of the estimate.
+        """
+        if rec.is_anchor or rec.rating_locked:
+            return False
+        if rec.matches_played < self.rating_lock_matches:
+            return False
+        if rec.sigma > self.eligibility_sigma:
+            return False
+        rec.rating_locked = True
+        rec.locked_at_matches = rec.matches_played
+        return True
 
     def is_rank_eligible(self, rec: ModelRating) -> bool:
         """
@@ -594,13 +654,23 @@ class TrueSkillEvaluator:
                 record_a.losses += 1
                 new_b, new_a = trueskill.rate_1vs1(r_b, r_a)
 
-            # Anchors are calibrated references; their rating never moves.
-            if not record_a.is_anchor:
+            # Calibrated anchors and locked checkpoints are fixed references; their
+            # ratings never move. The series is still played and still counted, because
+            # the point of it is to measure the other side.
+            if not self.is_rating_frozen(record_a):
                 record_a.from_trueskill_rating(new_a)
-            if not record_b.is_anchor:
+            if not self.is_rating_frozen(record_b):
                 record_b.from_trueskill_rating(new_b)
             record_a.update_conservative()
             record_b.update_conservative()
+
+            for rec in (record_a, record_b):
+                if self.maybe_lock_rating(rec):
+                    print(
+                        f"[TrueSkill] Rating locked: '{rec.name}' at mu={rec.mu:.2f} "
+                        f"(sigma={rec.sigma:.2f}) after {rec.matches_played} series. "
+                        f"It stays in the pool as a fixed reference."
+                    )
 
             res["model_a"] = record_a.name
             res["model_b"] = record_b.name

@@ -327,6 +327,8 @@ button.primary-btn {
 .lb-chip-ranked      { background: rgba(56, 189, 248, 0.14); color: #7dd3fc; border: 1px solid rgba(56, 189, 248, 0.45); }
 .lb-chip-provisional { background: rgba(148, 163, 184, 0.12); color: #94a3b8; border: 1px solid rgba(148, 163, 184, 0.35); }
 .lb-chip-anchor      { background: rgba(168, 85, 247, 0.14); color: #c4b5fd; border: 1px solid rgba(168, 85, 247, 0.4); }
+/* A locked rating is a checkpoint that earned anchor treatment: fixed, still playing. */
+.lb-chip-locked      { background: rgba(148, 163, 184, 0.16); color: #cbd5e1; border: 1px solid rgba(148, 163, 184, 0.38); }
 .lb-chip-king        { background: rgba(234, 179, 8, 0.16); color: #facc15; border: 1px solid rgba(234, 179, 8, 0.5); }
 
 /* ---- "How it works" explainer ---------------------------------------- */
@@ -937,6 +939,10 @@ def _lb_confidence(rec) -> tuple:
     """(chip_html, is_ranked) describing whether a rating may be ranked on raw mu."""
     if getattr(rec, "is_anchor", False):
         return '<span class="lb-chip lb-chip-anchor">Anchor</span>', True
+    if getattr(rec, "rating_locked", False):
+        # Distinct from Ranked: the rating is not merely trusted, it is final. Worth its
+        # own chip so a number that will never move again does not read as a live one.
+        return '<span class="lb-chip lb-chip-locked">&#128274; Locked</span>', True
     ranked = _LB_EVALUATOR_GATE(rec)
     if ranked:
         return '<span class="lb-chip lb-chip-ranked">Ranked</span>', True
@@ -982,6 +988,17 @@ def build_how_it_works_html(league_state: Optional[Dict[str, Any]] = None) -> st
     gate = league.get("eligibility_sigma", 1.5)
     pool_size = league.get("max_pool_size", 10)
     streak = league.get("max_consecutive_losses", 4)
+    lock_at = league.get("rating_lock_matches", 64)
+
+    # The King's share of training opponents is king_ratio of what the fixed
+    # training_opponents list leaves behind, not king_ratio of everything. Quoting the
+    # raw 25% overstates it whenever that list is non-empty.
+    king_ratio = float(league.get("king_ratio", 0.25))
+    opp_ratio = float(league.get("training_opponent_ratio", 0.0) or 0.0)
+    if not (league.get("training_opponents") or []):
+        opp_ratio = 0.0
+    king_pct = round(king_ratio * (1.0 - opp_ratio) * 100.0, 1)
+    king_pct = int(king_pct) if float(king_pct).is_integer() else king_pct
 
     steps = [
         ("1", "Saved",
@@ -991,16 +1008,20 @@ def build_how_it_works_html(league_state: Optional[Dict[str, Any]] = None) -> st
          f"the King. A series is best-of-{best_of}, first to {to_win}, each episode ending "
          "at the first goal."),
         ("3", "Gauntlet",
-         f"If the debut holds up it joins the contender queue and plays {per_trial} series "
-         "per trial. Trials go to whichever contender is least measured, not whichever "
-         "currently looks best."),
+         f"If the debut holds up it joins the contender queue and plays up to {per_trial} "
+         "series per trial, split across its opponents. Trials go to whichever contender "
+         "is least measured, not whichever currently looks best."),
         ("4", "Ranked",
          f"After {target} series with uncertainty down to σ ≤ {gate}, its rating is "
          "trusted and it graduates to the Elite Pool."),
         ("5", "King",
          f"The Elite Pool is the top {pool_size} by rating μ among trusted models. The "
-         "highest is crowned and becomes 25% of training opponents. Anchors are never "
-         "crowned."),
+         f"highest is crowned and becomes {king_pct}% of training opponents. Anchors are "
+         "never crowned."),
+        ("6", "Locked",
+         f"At {lock_at} series its rating stops moving for good. It keeps playing as an "
+         "opponent and as a yardstick, but a long reign would otherwise re-score it on "
+         "whoever happened to challenge it next."),
     ]
     rows = "".join(
         f'<div class="hiw-step"><span class="hiw-num">{n}</span>'
@@ -1428,6 +1449,9 @@ def _build_elite_standings(state: Dict[str, Any], evaluator: TrueSkillEvaluator)
 
         if is_anchor:
             chip = '<span class="lb-chip lb-chip-anchor">Anchor</span>'
+            ranked = True
+        elif getattr(rec, "rating_locked", False):
+            chip = '<span class="lb-chip lb-chip-locked">&#128274; Locked</span>'
             ranked = True
         elif rec is not None and evaluator.is_rank_eligible(rec):
             chip = '<span class="lb-chip lb-chip-ranked">Ranked</span>'

@@ -137,6 +137,11 @@ class LeagueManager:
         # Budget ceiling, in series. Headroom above target so a slow-converging
         # contender is not evicted un-ranked the moment it reaches the target.
         self.max_contender_matches = int(self.config.get("max_contender_matches", 48))
+        # Series after which a converged rating is frozen. Sits above
+        # max_contender_matches on purpose: the Gauntlet always finishes before the lock
+        # can bite, so a contender is never frozen mid-trial. See
+        # TrueSkillEvaluator.maybe_lock_rating for why the cap exists at all.
+        self.rating_lock_matches = int(self.config.get("rating_lock_matches", 64))
         # Kept only for the extended-trial check. Graduation itself is gated on
         # rank-eligibility now: a separate 1.8 threshold sitting next to an
         # eligibility_sigma of 1.5 meant a contender could satisfy graduation while
@@ -179,6 +184,7 @@ class LeagueManager:
         # leaderboard the user reads cannot rank models differently from the league.
         self.evaluator.eligibility_sigma = self.eligibility_sigma
         self.evaluator.min_ranked_matches = self.target_eval_matches
+        self.evaluator.rating_lock_matches = self.rating_lock_matches
 
         self.load_league_state()
         self._init_anchors()
@@ -618,6 +624,25 @@ class LeagueManager:
         ]
         if not valid_challengers:
             return None
+
+        # A bout between two frozen ratings changes nothing on either side, so it is the
+        # one place the series cap actually reclaims compute. Prefer a challenger whose
+        # rating can still move, and if the King is frozen too, skip the bout entirely
+        # and hand the step back to the Gauntlet where the budget does buy something.
+        king_frozen = self.evaluator.is_rating_frozen(
+            self.evaluator.ratings.get(self._normalize_path(self.king_of_the_hill))
+            or ModelRating(name="", path="")
+        )
+        if king_frozen:
+            live = [
+                p for p in valid_challengers
+                if not self.evaluator.is_rating_frozen(
+                    self.evaluator.ratings.get(self._normalize_path(p)) or ModelRating(name="", path="")
+                )
+            ]
+            if not live:
+                return None
+            valid_challengers = live
 
         # Pick top challenger by the same rule that decides the pool, so the title bout
         # and the ranking cannot disagree about who the best challenger is.

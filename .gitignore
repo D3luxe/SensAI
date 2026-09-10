@@ -25,3 +25,11 @@ checkpoints/hall_of_fame/
 
 # graft's local graph cache — regenerable, not committed (run `graft build`).
 /graft/
+league_board_preview.html
+.claude/helpers/graft-hooks.cjs
+.claude/helpers/graft-statusline.cjs
+.claude/settings.json
+.claude/skills/graft/SKILL.md
+.claude/skills/graft/SKILL.md
+.claude/settings.json
+/.claude

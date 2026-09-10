@@ -35,6 +35,7 @@ league:
   min_matches_for_points_floor: 12
   pool_ratio: 0.25
   protect_top_k: 20
+  rating_lock_matches: 64
   self_play_ratio: 0.5
   series_length: 9
   series_wins_needed: 5
