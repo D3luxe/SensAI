@@ -1,6 +1,4 @@
 environment:
-  baseline_opponent_ratio: 0.05
-  baseline_opponent_type: checkpoints/nexto-model.pt
   game_mode: 1v1
   max_episode_steps: 600
   num_env_workers: 16
@@ -23,25 +21,26 @@ league:
   contender_series_per_step: 3
   eligibility_sigma: 1.5
   enabled: true
-  eval_series_per_grade: 1
   eval_max_steps: 3000
   eval_no_touch_steps: 500
-  king_challenge_frequency: 3
+  eval_series_per_grade: 1
   hall_of_fame_size: 20
+  king_challenge_frequency: 3
   king_ratio: 0.25
+  max_contender_matches: 48
   max_pool_size: 10
   max_provisional: 30
-  series_length: 9
-  series_wins_needed: 5
-  max_contender_matches: 48
-  target_eval_matches: 30
-  training_opponent_ratio: 0.0
-  training_opponents: []
   min_contender_points_rate: 45.0
   pool_ratio: 0.25
   protect_top_k: 20
   rating_lock_matches: 64
   self_play_ratio: 0.5
+  series_length: 9
+  series_wins_needed: 5
+  target_eval_matches: 30
+  training_opponent_ratio: 0.1
+  training_opponents:
+  - checkpoints/necto-model.pt
 logging:
   archive_stride: 5000
   autosave_interval: 20
