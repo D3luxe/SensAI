@@ -667,8 +667,15 @@ class TrueSkillEvaluator:
                 "leaderboard_df": self.get_leaderboard_dataframe()
             }
 
-    def get_leaderboard_dataframe(self, ascii_safe: bool = False) -> pd.DataFrame:
-        """Returns a ranked Pandas DataFrame of all models."""
+    def get_leaderboard_dataframe(self, ascii_safe: bool = False, include_anchors: bool = False) -> pd.DataFrame:
+        """
+        Ranked standings of the checkpoints.
+
+        Anchors are excluded by default. They are fixed reference points whose mu is
+        declared rather than earned, so ranking them alongside checkpoints invites the
+        reading that a checkpoint is "beating Nexto" when it has merely been assigned a
+        higher number. Their values belong in a legend, not in the table.
+        """
         mu_col = "Rating (mu)" if ascii_safe else "Rating (μ)"
         sigma_col = "Uncertainty (sigma)" if ascii_safe else "Uncertainty (σ)"
         plus_minus = "+/-" if ascii_safe else "±"
@@ -689,6 +696,7 @@ class TrueSkillEvaluator:
         records = [
             r for r in self.ratings.values()
             if "latest_model" not in r.path.lower() and "latest_model" not in r.name.lower()
+            and (include_anchors or not r.is_anchor)
         ]
         records.sort(key=lambda r: (self.ranking_key(r), r.matches_played), reverse=True)
 
@@ -709,6 +717,12 @@ class TrueSkillEvaluator:
             })
 
         return pd.DataFrame(rows)
+
+    def get_anchor_ratings(self) -> List[ModelRating]:
+        """The calibrated reference ladder, strongest first, for the legend."""
+        anchors = [r for r in self.ratings.values() if r.is_anchor]
+        anchors.sort(key=lambda r: r.mu, reverse=True)
+        return anchors
 
     def render_leaderboard_plot(self, max_models: int = 25) -> plt.Figure:
         """

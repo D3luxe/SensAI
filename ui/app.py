@@ -329,6 +329,33 @@ button.primary-btn {
 .lb-chip-anchor      { background: rgba(168, 85, 247, 0.14); color: #c4b5fd; border: 1px solid rgba(168, 85, 247, 0.4); }
 .lb-chip-king        { background: rgba(234, 179, 8, 0.16); color: #facc15; border: 1px solid rgba(234, 179, 8, 0.5); }
 
+/* ---- Anchor legend --------------------------------------------------- */
+
+.lb-anchor-legend {
+    display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+    padding: 7px 14px; margin-bottom: 10px;
+    background: rgba(15, 23, 42, 0.6);
+    border: 1px solid rgba(168, 85, 247, 0.28);
+    border-radius: 8px;
+    font-size: 0.78em;
+}
+
+.lb-anchor-legend-label {
+    font-weight: 800; letter-spacing: 0.9px; text-transform: uppercase;
+    color: #c4b5fd;
+}
+
+.lb-anchor-chip {
+    display: inline-flex; align-items: center; gap: 6px;
+    padding: 2px 9px; border-radius: 9999px;
+    background: rgba(168, 85, 247, 0.12);
+    border: 1px solid rgba(168, 85, 247, 0.3);
+    color: #e2e8f0;
+}
+
+.lb-anchor-mu { color: #c4b5fd; font-variant-numeric: tabular-nums; }
+.lb-anchor-note { color: #64748b; font-style: italic; margin-left: auto; }
+
 /* ---- Elite standings table ------------------------------------------ */
 
 .lb-standings { padding: 4px 8px 10px; }
@@ -831,6 +858,35 @@ def _lb_short_name(rec) -> str:
     """'Iteration 130740' for checkpoints, the display name for everything else."""
     it = _lb_iteration(rec)
     return f"Iteration {it}" if it >= 0 else rec.name
+
+
+def build_anchor_legend_html(evaluator: TrueSkillEvaluator) -> str:
+    """
+    A compact legend for the calibrated reference ladder.
+
+    These sit outside the standings because their mu is a declaration, not a result:
+    they never move, they cannot be dethroned, and listing them among the checkpoints
+    makes a fixed yardstick look like a competitor.
+    """
+    anchors = evaluator.get_anchor_ratings() if hasattr(evaluator, "get_anchor_ratings") else []
+    if not anchors:
+        return ""
+
+    chips = []
+    for rec in anchors:
+        chips.append(
+            f'<span class="lb-anchor-chip">'
+            f'<b>{rec.name}</b>'
+            f'<span class="lb-anchor-mu">&mu; {rec.mu:.1f}</span>'
+            f'</span>'
+        )
+    return f"""
+    <div class="lb-anchor-legend">
+        <span class="lb-anchor-legend-label">&#9875; Reference ladder</span>
+        {''.join(chips)}
+        <span class="lb-anchor-note">fixed calibration &middot; excluded from standings</span>
+    </div>
+    """
 
 
 def build_cockpit_leaderboard_summary_html(evaluator: TrueSkillEvaluator, league_state: Optional[Dict[str, Any]] = None) -> str:
@@ -1363,33 +1419,38 @@ def create_ui():
                             live_hp_btn = gr.Button("⚡ Apply Live Hyperparameters", variant="primary")
                             live_hp_msg = gr.Markdown("")
 
-                        # Card 2: Opponent Bot Matchup & Mixup
+                        # Card 2: Fixed Training Opponents
                         with gr.Group():
-                            gr.Markdown("### 👥 Opponent Bot Matchup & Mixup")
+                            gr.Markdown("### 👥 Fixed Training Opponents")
+                            gr.Markdown(
+                                "*Models here are guaranteed a share of the environments, split evenly "
+                                "between them. The remainder keeps the standard 50% self-play / 25% King / "
+                                "25% pool split, so a 10% share across two opponents is 5% each and leaves "
+                                "45% / 22.5% / 22.5%. At 0% the league behaves exactly as if this list were "
+                                "empty. Listed models are excluded from the pool rotation, so their share is "
+                                "exactly what you set here.*"
+                            )
+                            league_cfg_ui = default_cfg.get("league", {}) or {}
                             with gr.Row():
-                                initial_opp = env_cfg.get("baseline_opponent_type", "heuristic")
-                                opp_choices = get_available_opponent_options()
-                                default_opp_val = opp_choices[0]
-                                for opt in opp_choices:
-                                    if initial_opp.lower() in opt.lower() or opt.replace("\\", "/").endswith(initial_opp.replace("\\", "/")):
-                                        default_opp_val = opt
-                                        break
-                                
-                                opponent_bot_dropdown = gr.Dropdown(
-                                    choices=opp_choices,
-                                    value=default_opp_val,
-                                    label="Opponent Bot Model",
-                                    info="Select sparring model (Checkpoints or Heuristic Chaser).",
+                                training_opponents_select = gr.Dropdown(
+                                    choices=get_available_opponent_options(),
+                                    value=[str(x) for x in league_cfg_ui.get("training_opponents", []) if x],
+                                    multiselect=True,
+                                    label="Opponent List",
+                                    info="Add or remove models. Empty means the league picks opponents on its own.",
                                     scale=3
                                 )
                                 refresh_opponent_btn = gr.Button("🔄 Scan", scale=1)
 
                             baseline_opp_slider = gr.Slider(
                                 0.0, 1.0,
-                                value=float(env_cfg.get("baseline_opponent_ratio", 0.25)),
+                                value=float(league_cfg_ui.get(
+                                    "training_opponent_ratio",
+                                    env_cfg.get("baseline_opponent_ratio", 0.0)
+                                )),
                                 step=0.01,
-                                label="Opponent Matchup Ratio",
-                                info="0% = Pure Self-Play, 100% = Pure Opponent Sparring."
+                                label="Combined Share",
+                                info="Total share of environments for this list, divided evenly among its entries."
                             )
                             apply_opp_btn = gr.Button("⚡ Apply Opponent Mix", variant="secondary")
                             opp_apply_msg = gr.Markdown("")
@@ -1452,6 +1513,7 @@ def create_ui():
                 with gr.Group():
                     with gr.Row():
                         gr.Markdown("### 🏆 Top Performing Iterations (Live TrueSkill Leaderboard)")
+                        cockpit_anchor_legend = gr.HTML(build_anchor_legend_html(ts_evaluator))
                         refresh_cockpit_lb_btn = gr.Button("🔄 Refresh Standings", size="sm", scale=1)
 
                     cockpit_lb_summary = gr.HTML(build_cockpit_leaderboard_summary_html(ts_evaluator))
@@ -2165,35 +2227,52 @@ def create_ui():
             outputs=[live_hp_msg]
         )
 
-        def on_apply_opponent_mix(opp_bot, opp_ratio):
-            clean_opp_type = "heuristic"
-            if opp_bot and not str(opp_bot).startswith("Heuristic"):
-                clean_opp_type = str(opp_bot).strip()
+        def on_apply_opponent_mix(opp_list, opp_ratio):
+            selected = []
+            for item in (opp_list or []):
+                text = str(item).strip()
+                if not text:
+                    continue
+                selected.append("heuristic" if text.startswith("Heuristic") else text)
+            # Preserve order while dropping duplicates: the share is split evenly, so a
+            # repeated entry would quietly receive double weight.
+            selected = list(dict.fromkeys(selected))
             payload = {
-                "baseline_opponent_type": clean_opp_type,
-                "baseline_opponent_ratio": float(opp_ratio),
+                "training_opponents": selected,
+                "training_opponent_ratio": float(opp_ratio),
             }
             mgr.update_live_config(payload)
             try:
                 base_cfg = load_yaml_config("config/default_config.yaml")
                 if "environment" not in base_cfg:
                     base_cfg["environment"] = {}
-                base_cfg["environment"]["baseline_opponent_type"] = clean_opp_type
-                base_cfg["environment"]["baseline_opponent_ratio"] = float(opp_ratio)
+                if "league" not in base_cfg:
+                    base_cfg["league"] = {}
+                base_cfg["league"]["training_opponents"] = selected
+                base_cfg["league"]["training_opponent_ratio"] = float(opp_ratio)
+                # Retire the single-model control this replaces, so the two cannot drift.
+                base_cfg.get("environment", {}).pop("baseline_opponent_type", None)
+                base_cfg.get("environment", {}).pop("baseline_opponent_ratio", None)
                 save_yaml_config(base_cfg, "config/default_config.yaml")
             except Exception:
                 pass
-            return f"✅ **Opponent Mix Applied:** `{os.path.basename(clean_opp_type)}` ({float(opp_ratio):.0%}) at {time.strftime('%H:%M:%S')}"
+            if not selected or float(opp_ratio) <= 0.0:
+                return (f"✅ **Fixed opponents cleared** — league picks opponents on its own "
+                        f"(50% self-play / 25% King / 25% pool) at {time.strftime('%H:%M:%S')}")
+            each = float(opp_ratio) / len(selected)
+            names = ", ".join(f"`{os.path.basename(x)}`" for x in selected)
+            return (f"✅ **Fixed opponents applied:** {names} — {float(opp_ratio):.0%} combined, "
+                    f"{each:.1%} each at {time.strftime('%H:%M:%S')}")
 
         apply_opp_btn.click(
             fn=on_apply_opponent_mix,
-            inputs=[opponent_bot_dropdown, baseline_opp_slider],
+            inputs=[training_opponents_select, baseline_opp_slider],
             outputs=[opp_apply_msg]
         )
 
         refresh_opponent_btn.click(
             fn=lambda: gr.Dropdown(choices=get_available_opponent_options()),
-            outputs=[opponent_bot_dropdown]
+            outputs=[training_opponents_select]
         )
 
         # Quick Live Rewards (Tab 1)
