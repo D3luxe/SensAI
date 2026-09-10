@@ -88,7 +88,8 @@ def main() -> int:
             "mu": mu, "sigma": sigma, "conservative_rating": round(mu - 3.0 * sigma, 2),
             "matches_played": 0, "wins": 0, "losses": 0, "draws": 0,
             "goals_for": 0, "goals_against": 0, "goal_diff": 0, "win_rate": 0.0,
-            "is_anchor": True, "last_updated": datetime.datetime.now().isoformat(),
+            "is_anchor": True, "rating_locked": False, "locked_at_matches": 0,
+            "last_updated": datetime.datetime.now().isoformat(),
         })
         kept[key] = rec
 

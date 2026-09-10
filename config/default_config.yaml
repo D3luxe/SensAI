@@ -40,6 +40,7 @@ league:
   min_contender_points_rate: 45.0
   pool_ratio: 0.25
   protect_top_k: 20
+  rating_lock_matches: 64
   self_play_ratio: 0.5
 logging:
   archive_stride: 5000
