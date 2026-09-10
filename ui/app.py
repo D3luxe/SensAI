@@ -329,12 +329,88 @@ button.primary-btn {
 .lb-chip-anchor      { background: rgba(168, 85, 247, 0.14); color: #c4b5fd; border: 1px solid rgba(168, 85, 247, 0.4); }
 .lb-chip-king        { background: rgba(234, 179, 8, 0.16); color: #facc15; border: 1px solid rgba(234, 179, 8, 0.5); }
 
+/* ---- "How it works" explainer ---------------------------------------- */
+
+/* CSS-only disclosure: no JS, no per-frame cost. Opens on hover and on keyboard
+   focus, so it is reachable without a pointer. */
+.hiw { position: relative; display: inline-flex; outline: none; }
+
+.hiw-chip {
+    display: inline-flex; align-items: center; gap: 5px;
+    padding: 2px 9px; border-radius: 9999px; cursor: help;
+    background: rgba(56, 189, 248, 0.1);
+    border: 1px solid rgba(56, 189, 248, 0.3);
+    color: #7dd3fc; font-weight: 700; letter-spacing: 0.4px;
+    white-space: nowrap;
+    transition: background-color 0.15s ease, border-color 0.15s ease;
+}
+.hiw:hover .hiw-chip,
+.hiw:focus-visible .hiw-chip {
+    background: rgba(56, 189, 248, 0.18);
+    border-color: rgba(56, 189, 248, 0.55);
+}
+
+.hiw-pop {
+    position: absolute; top: calc(100% + 8px); left: 0; z-index: 40;
+    width: min(430px, 78vw);
+    display: flex; flex-direction: column; gap: 9px;
+    padding: 13px 15px;
+    background: #0d1421;
+    border: 1px solid #2b3a52; border-radius: 10px;
+    box-shadow: 0 12px 30px rgba(0, 0, 0, 0.55);
+    opacity: 0; visibility: hidden; transform: translateY(-4px);
+    transition: opacity 0.16s ease, transform 0.16s ease, visibility 0.16s;
+    text-align: left; white-space: normal; cursor: default;
+}
+.hiw:hover .hiw-pop,
+.hiw:focus-within .hiw-pop {
+    opacity: 1; visibility: visible; transform: translateY(0);
+}
+
+.hiw-title {
+    font-size: 1.02em; font-weight: 800; color: #f1f5f9;
+    letter-spacing: 0.3px;
+}
+
+.hiw-step { display: flex; align-items: flex-start; gap: 10px; }
+.hiw-step > div { display: flex; flex-direction: column; gap: 1px; min-width: 0; }
+.hiw-step b { color: #7dd3fc; font-size: 0.97em; font-weight: 800; }
+.hiw-step span { color: #94a3b8; line-height: 1.45; }
+
+.hiw-num {
+    flex-shrink: 0; width: 19px; height: 19px; margin-top: 1px;
+    display: inline-flex; align-items: center; justify-content: center;
+    border-radius: 50%; font-size: 0.82em; font-weight: 800;
+    background: rgba(56, 189, 248, 0.14);
+    border: 1px solid rgba(56, 189, 248, 0.4);
+    color: #7dd3fc;
+}
+
+.hiw-foot {
+    color: #64748b; font-style: italic; line-height: 1.45;
+    border-top: 1px solid rgba(51, 65, 85, 0.5); padding-top: 8px;
+}
+
+/* Near the right edge the popover would overflow; flip its anchor. */
+@media (max-width: 620px) {
+    .hiw-pop { left: auto; right: 0; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+    .hiw-pop { transition: none; }
+}
+
 /* ---- Anchor legend --------------------------------------------------- */
 
 .lb-anchor-legend {
     display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
     width: 100%; box-sizing: border-box;
     padding: 6px 14px; margin: 0 0 10px;
+    /* Kept as a guard, not a fix for an observed bug: standalone, the popover already
+       paints above the King banner without it. Gradio wraps each HTML component in its
+       own container, so this makes the legend's stacking explicit rather than relying
+       on whatever the host's wrappers happen to do. */
+    position: relative; z-index: 60;
     background: rgba(15, 23, 42, 0.6);
     border: 1px solid rgba(168, 85, 247, 0.28);
     border-radius: 8px;
@@ -884,6 +960,70 @@ def _lb_short_name(rec) -> str:
     return f"Iteration {it}" if it >= 0 else rec.name
 
 
+def build_how_it_works_html(league_state: Optional[Dict[str, Any]] = None) -> str:
+    """
+    A hover explainer for the path a checkpoint takes from training to King.
+
+    Numbers are read from the live league config rather than written into the copy, so
+    the explainer cannot drift away from the thresholds actually in force. CSS-only:
+    reveals on :hover and :focus-within, so it costs nothing per frame and is reachable
+    from the keyboard.
+    """
+    cfg = (load_yaml_config("config/default_config.yaml") or {})
+    league = cfg.get("league", {}) or {}
+    logging_cfg = cfg.get("logging", {}) or {}
+
+    interval = logging_cfg.get("checkpoint_interval", 200)
+    best_of = league.get("series_length", 9)
+    to_win = league.get("series_wins_needed", 5)
+    debut = league.get("eval_series_per_grade", 1)
+    per_trial = league.get("contender_series_per_step", 3)
+    target = league.get("target_eval_matches", 30)
+    gate = league.get("eligibility_sigma", 1.5)
+    pool_size = league.get("max_pool_size", 10)
+    streak = league.get("max_consecutive_losses", 4)
+
+    steps = [
+        ("1", "Saved",
+         f"A checkpoint is written every {interval} iterations and enters as un-rated."),
+        ("2", "Debut",
+         f"It plays {debut} series against the nearest-strength anchor and {debut} against "
+         f"the King. A series is best-of-{best_of}, first to {to_win}, each episode ending "
+         "at the first goal."),
+        ("3", "Gauntlet",
+         f"If the debut holds up it joins the contender queue and plays {per_trial} series "
+         "per trial. Trials go to whichever contender is least measured, not whichever "
+         "currently looks best."),
+        ("4", "Ranked",
+         f"After {target} series with uncertainty down to σ ≤ {gate}, its rating is "
+         "trusted and it graduates to the Elite Pool."),
+        ("5", "King",
+         f"The Elite Pool is the top {pool_size} by rating μ among trusted models. The "
+         "highest is crowned and becomes 25% of training opponents. Anchors are never "
+         "crowned."),
+    ]
+    rows = "".join(
+        f'<div class="hiw-step"><span class="hiw-num">{n}</span>'
+        f'<div><b>{title}</b><span>{body}</span></div></div>'
+        for n, title, body in steps
+    )
+
+    return f"""
+    <span class="hiw" tabindex="0" role="button" aria-label="How a checkpoint becomes King">
+        <span class="hiw-chip">&#9432; How it works</span>
+        <span class="hiw-pop" role="tooltip">
+            <span class="hiw-title">From training run to King</span>
+            {rows}
+            <span class="hiw-foot">
+                Falls out at any stage on {streak} straight series losses, or once its
+                rating is confidently below the King's. Nothing is dropped while its
+                rating is still too uncertain to judge.
+            </span>
+        </span>
+    </span>
+    """
+
+
 def build_anchor_legend_html(evaluator: TrueSkillEvaluator) -> str:
     """
     A compact legend for the calibrated reference ladder.
@@ -894,7 +1034,8 @@ def build_anchor_legend_html(evaluator: TrueSkillEvaluator) -> str:
     """
     anchors = evaluator.get_anchor_ratings() if hasattr(evaluator, "get_anchor_ratings") else []
     if not anchors:
-        return ""
+        # No ladder to show yet, but the explainer is still worth having.
+        return f'<div class="lb-anchor-legend">{build_how_it_works_html()}</div>'
 
     chips = []
     for rec in anchors:
@@ -906,6 +1047,7 @@ def build_anchor_legend_html(evaluator: TrueSkillEvaluator) -> str:
         )
     return f"""
     <div class="lb-anchor-legend">
+        {build_how_it_works_html()}
         <span class="lb-anchor-legend-label">&#9875; Reference ladder</span>
         {''.join(chips)}
         <span class="lb-anchor-note">fixed calibration &middot; excluded from standings</span>
