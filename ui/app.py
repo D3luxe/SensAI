@@ -41,6 +41,7 @@ from utils.scenario_manager import (
     DEFAULT_CUSTOM_SCENARIOS
 )
 from utils.trueskill_evaluator import TrueSkillEvaluator, get_model_display_name
+from utils.league_manager import snap_tiers_to_worker_slices
 
 
 def load_yaml_config(path: str = "config/default_config.yaml") -> dict:
@@ -740,6 +741,15 @@ def build_full_diagnostic_export() -> tuple[str, str]:
         except Exception:
             pass
 
+    # What the environments actually face, which is the league split rather than the
+    # legacy baseline_opponent_* keys the trainer ignores while the league is running.
+    opponent_mix = describe_opponent_mix(
+        default_cfg.get("league", {}) or {},
+        metrics.get("league", {}) or {},
+        fallback=str(env.get("baseline_opponent_type", "heuristic")),
+        num_envs=int(env.get("num_envs", 0) or 0),
+    )
+
     # 3. Model Architecture & Weights
     pts = get_available_checkpoints()
     latest_ckpt = pts[0] if pts else "None"
@@ -784,7 +794,7 @@ def build_full_diagnostic_export() -> tuple[str, str]:
 * **Gamma:** `{hp.get('gamma', 0.99)}` | **GAE Lambda:** `{hp.get('gae_lambda', 0.95)}`
 * **Batch Size:** `{hp.get('batch_size', 8192)}` | **Mini-Batch Size:** `{hp.get('mini_batch_size', 512)}` | **Epochs:** `{hp.get('n_epochs', 10)}`
 * **Vectorized Envs:** `{env.get('num_envs', 64)}` | **Tick Skip:** `{env.get('tick_skip', 8)}`
-* **Baseline Opponent:** `{env.get('baseline_opponent_type', 'heuristic')}` (Matchup Ratio: `{env.get('baseline_opponent_ratio', 0.25):.0%}`)
+* **Opponent Mix:** {opponent_mix}
 
 ## 4. Active Reward Weights
 ```yaml
@@ -807,7 +817,7 @@ def build_full_diagnostic_export() -> tuple[str, str]:
 * **Unit Tests:** `{tests_summary}`
 * **Physics Engine:** `{engine_str}`
 * **Active Weights:** {model_details}
-* **Opponent Sparring:** `{os.path.basename(str(env.get('baseline_opponent_type', 'heuristic')))}` ({env.get('baseline_opponent_ratio', 0.25):.0%})
+* **Opponent Mix:** {opponent_mix}
 
 *Copy the raw Markdown on the right into your conversation with the AI assistant for instant debugging.*
 """
@@ -966,6 +976,109 @@ def _lb_short_name(rec) -> str:
     return f"Iteration {it}" if it >= 0 else rec.name
 
 
+def opponent_mix_shares(
+    league: Dict[str, Any], num_envs: Optional[int] = None
+) -> Dict[str, float]:
+    """
+    What percentage of training environments each tier actually gets.
+
+    Two corrections to the raw ratios. The fixed training-opponent list is taken off the
+    top, so the standard ratios divide only what it leaves behind. And when num_envs is
+    known, the tiers are snapped to whole env-worker slices exactly as the scheduler
+    snaps them, because that is the split the environments really run: asking for 20%
+    of 128 environments yields 18.75%, and a panel that prints 20% is repeating in
+    miniature the mistake this display was fixed for.
+    """
+    opp_ratio = float(league.get("training_opponent_ratio", 0.0) or 0.0)
+    if not (league.get("training_opponents") or []):
+        opp_ratio = 0.0
+    opp_ratio = max(0.0, min(1.0, opp_ratio))
+
+    sp = float(league.get("self_play_ratio", 0.50))
+    king = float(league.get("king_ratio", 0.25))
+    pool = float(league.get("pool_ratio", 0.25))
+    total = sp + king + pool
+    if total <= 1e-6:
+        sp, king, pool, total = 0.50, 0.25, 0.25, 1.0
+
+    remaining = 1.0 - opp_ratio
+    shares = {
+        "fixed": opp_ratio * 100.0,
+        "self_play": remaining * (sp / total) * 100.0,
+        "king": remaining * (king / total) * 100.0,
+        "pool": remaining * (pool / total) * 100.0,
+    }
+    if not num_envs or num_envs < 1:
+        return shares
+
+    n_training = min(num_envs, int(round(num_envs * opp_ratio)))
+    rest = max(0, num_envs - n_training)
+    n_sp = max(1, int(round(rest * sp / total))) if rest else 0
+    n_king = max(1, int(round(rest * king / total))) if rest else 0
+    n_pool = max(0, rest - n_sp - n_king)
+    n_training, n_sp, n_king, n_pool = snap_tiers_to_worker_slices(
+        num_envs, n_training, n_sp, n_king, n_pool,
+        int(league.get("pool_group_size", 4) or 4),
+    )
+    return {
+        "fixed": 100.0 * n_training / num_envs,
+        "self_play": 100.0 * n_sp / num_envs,
+        "king": 100.0 * n_king / num_envs,
+        "pool": 100.0 * n_pool / num_envs,
+    }
+
+
+def _pct(value: float) -> str:
+    """Trims a trailing .0 so whole percentages do not read as false precision."""
+    rounded = round(value, 1)
+    return f"{int(rounded)}%" if float(rounded).is_integer() else f"{rounded}%"
+
+
+def describe_opponent_mix(
+    league: Dict[str, Any],
+    telemetry: Optional[Dict[str, Any]] = None,
+    fallback: str = "heuristic",
+    num_envs: Optional[int] = None,
+) -> str:
+    """
+    One line naming what the training environments are really facing.
+
+    Not the legacy baseline_opponent_* pair. Those two keys only take effect when the
+    league is disabled, and the trainer ignores them otherwise, so quoting them while the
+    league runs reports a matchup nobody is playing. This panel advertised Nexto at 5%
+    through an entire session in which no environment faced Nexto at all, which is worse
+    than saying nothing while the opponent mix is the thing under investigation.
+    """
+    if not league.get("enabled", True):
+        return f"League disabled. Static baseline: `{fallback}`"
+
+    telemetry = telemetry or {}
+    shares = opponent_mix_shares(league, num_envs)
+    king = telemetry.get("king_of_the_hill") or "None"
+
+    parts = [f"Self-play `{_pct(shares['self_play'])}`"]
+    if king and king != "None":
+        parts.append(f"King `{_pct(shares['king'])}` ({king})")
+    else:
+        # No King means the King and pool tiers fold back into self-play; saying "25%"
+        # here would name a tier that is not running.
+        parts = [f"Self-play `{_pct(shares['self_play'] + shares['king'] + shares['pool'])}` (no King seated)"]
+        if shares["fixed"]:
+            parts.append(
+                f"Fixed `{_pct(shares['fixed'])}` "
+                f"({', '.join(os.path.basename(str(x)) for x in league.get('training_opponents') or [])})"
+            )
+        return " | ".join(parts)
+
+    pool_n = telemetry.get("elite_pool_size")
+    pool_note = f" across {pool_n} checkpoints" if pool_n else ""
+    parts.append(f"Elite pool `{_pct(shares['pool'])}`{pool_note}")
+    if shares["fixed"]:
+        listed = ", ".join(os.path.basename(str(x)) for x in league.get("training_opponents") or [])
+        parts.append(f"Fixed `{_pct(shares['fixed'])}` ({listed})")
+    return " | ".join(parts)
+
+
 def build_how_it_works_html(league_state: Optional[Dict[str, Any]] = None) -> str:
     """
     A hover explainer for the path a checkpoint takes from training to King.
@@ -990,15 +1103,9 @@ def build_how_it_works_html(league_state: Optional[Dict[str, Any]] = None) -> st
     streak = league.get("max_consecutive_losses", 4)
     lock_at = league.get("rating_lock_matches", 64)
 
-    # The King's share of training opponents is king_ratio of what the fixed
-    # training_opponents list leaves behind, not king_ratio of everything. Quoting the
-    # raw 25% overstates it whenever that list is non-empty.
-    king_ratio = float(league.get("king_ratio", 0.25))
-    opp_ratio = float(league.get("training_opponent_ratio", 0.0) or 0.0)
-    if not (league.get("training_opponents") or []):
-        opp_ratio = 0.0
-    king_pct = round(king_ratio * (1.0 - opp_ratio) * 100.0, 1)
-    king_pct = int(king_pct) if float(king_pct).is_integer() else king_pct
+    # The King's share is king_ratio of what the fixed training_opponents list leaves
+    # behind, not king_ratio of everything. See opponent_mix_shares.
+    king_pct = _pct(opponent_mix_shares(league)["king"]).rstrip("%")
 
     steps = [
         ("1", "Saved",
