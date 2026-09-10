@@ -33,3 +33,7 @@ league_board_preview.html
 .claude/skills/graft/SKILL.md
 .claude/settings.json
 /.claude
+.claude/skills/graft/SKILL.md
+.claude/settings.json
+.claude/helpers/graft-statusline.cjs
+.claude/helpers/graft-hooks.cjs

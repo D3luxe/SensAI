@@ -9,7 +9,7 @@ hyperparameters:
   bc_decay_steps: 500000000
   bc_regularization_weight: 0.02
   clip_range: 0.2
-  ent_coef: 0.015
+  ent_coef: 0.01
   gae_lambda: 0.95
   gamma: 0.99
   learning_rate: 0.0003
@@ -42,8 +42,9 @@ league:
   series_length: 9
   series_wins_needed: 5
   target_eval_matches: 30
-  training_opponent_ratio: 0.0
-  training_opponents: []
+  training_opponent_ratio: 0.1875
+  training_opponents:
+  - checkpoints/necto-model.pt
 logging:
   archive_stride: 5000
   autosave_interval: 20

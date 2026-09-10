@@ -1,7 +1,7 @@
 {
-  "updated_at": 1789010930.780749,
+  "updated_at": 1789049776.697259,
   "learning_rate": 0.0003,
-  "ent_coef": 0.015,
+  "ent_coef": 0.01,
   "clip_range": 0.2,
   "bc_regularization_weight": 0.02,
   "bc_decay_steps": 500000000,
@@ -40,5 +40,6 @@
   "training_opponents": [
     "checkpoints/necto-model.pt"
   ],
-  "training_opponent_ratio": 0.1
+  "training_opponent_ratio": 0.1875,
+  "torch_num_threads": 8
 }
