@@ -455,6 +455,84 @@ class TestLeagueManager(unittest.TestCase):
             return "graduate"
         return "keep playing"
 
+    def test_a_debut_is_skipped_when_nothing_can_come_of_it(self):
+        """
+        A checkpoint that cannot enter the gauntlet should not be graded.
+
+        Preemption needs the most settled contender to be rank-eligible, and a fresh
+        checkpoint always carries the highest sigma, so the answer is knowable before any
+        match is played. Ten saves an hour were each spending two series to be told no,
+        leaving records stranded at their debut sigma that never joined the pool either.
+        """
+        self._seat_a_king()
+        self.league.max_active_contenders = 2
+
+        # Room in the queue: a newcomer is worth grading.
+        self.assertTrue(self.league.can_admit_a_newcomer())
+
+        # Full, and nothing in it has converged: nobody can be displaced.
+        for i, sigma in enumerate((2.4, 2.8)):
+            path, rec = self._queued_contender(f"unconverged_{i}", 26.0, sigma, 6, 6)
+            self.assertFalse(self.league._is_rank_eligible(rec))
+        self.assertEqual(len(self.league.contender_queue), 2)
+        self.assertFalse(self.league.can_admit_a_newcomer())
+
+        # One converges, so it can be preempted and a newcomer is worth grading again.
+        settled = self.evaluator.ratings[self.league.contender_queue[0]]
+        settled.sigma, settled.matches_played = 1.1, 40
+        settled.update_conservative()
+        self.assertTrue(self.league._is_rank_eligible(settled))
+        self.assertTrue(self.league.can_admit_a_newcomer())
+
+    def test_a_skipped_debut_leaves_no_rating_behind(self):
+        """grade_checkpoint returns without playing when admission is impossible."""
+        self._seat_a_king()
+        self.league.max_active_contenders = 1
+        _, blocker = self._queued_contender("blocker", 26.0, 2.9, 6, 6)
+        self.assertFalse(self.league.can_admit_a_newcomer())
+
+        newcomer = self.league._normalize_path(self.dummy_ckpt_path)
+        before = self.evaluator.ratings[newcomer].matches_played
+        rec = self.league.grade_checkpoint(self.dummy_ckpt_path, device="cpu")
+        self.assertEqual(rec.matches_played, before, "a deferred debut still played matches")
+
+    def test_budget_estimate_matches_the_scheduling_arithmetic(self):
+        """
+        The panel's numbers must be the ones the scheduler actually produces.
+
+        A grading event admits at most one checkpoint and delivers series_per_step series,
+        while ranking one costs target_eval_matches. So the share of saves that get ranked
+        is the ratio of those two, independent of the checkpoint interval and the queue
+        depth, because both scale arrivals and grading events together.
+        """
+        from ui.app import gauntlet_budget_estimate
+
+        league = {"target_eval_matches": 30, "max_active_contenders": 3,
+                  "eval_series_per_grade": 1}
+        logging_cfg = {"checkpoint_interval": 200}
+        hp = {"batch_size": 16384}
+
+        at_target = gauntlet_budget_estimate(30, league, logging_cfg, hp, 9500)
+        self.assertAlmostEqual(at_target["ranked_pct"], 100.0, places=5)
+        half = gauntlet_budget_estimate(15, league, logging_cfg, hp, 9500)
+        self.assertAlmostEqual(half["ranked_pct"], 50.0, places=5)
+
+        # Doubling the checkpoint interval leaves the ranked share untouched and only
+        # stretches the wall clock. This is why raising the interval cannot fix a queue
+        # that is falling behind.
+        slower = gauntlet_budget_estimate(15, league, {"checkpoint_interval": 400}, hp, 9500)
+        self.assertAlmostEqual(slower["ranked_pct"], half["ranked_pct"], places=5)
+        self.assertAlmostEqual(slower["minutes_to_rank"], half["minutes_to_rank"] * 2, places=3)
+
+        # More budget is monotonically faster and monotonically more expensive.
+        prev = None
+        for step in (4, 8, 12, 16, 20, 24, 28, 32):
+            est = gauntlet_budget_estimate(step, league, logging_cfg, hp, 9500)
+            if prev:
+                self.assertLess(est["minutes_to_rank"], prev["minutes_to_rank"])
+                self.assertGreater(est["duty_pct"], prev["duty_pct"])
+            prev = est
+
     def test_a_contender_out_of_budget_always_leaves(self):
         """
         Demotion and graduation must be exhaustive at the budget.

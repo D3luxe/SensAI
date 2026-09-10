@@ -433,6 +433,20 @@ class PPOTrainer:
                         if abs(new_r - self.league_manager.training_opponent_ratio) > 1e-4:
                             self.league_manager.training_opponent_ratio = new_r
                             league_changed = True
+                    if "contender_series_per_step" in live:
+                        # Series each gauntlet trial plays, which is the evaluation budget
+                        # and therefore how much CPU grading takes while training runs.
+                        #
+                        # Written into self.config as well as onto the manager, and that is
+                        # the half that matters: gauntlet trials happen in the grading child,
+                        # which is handed this dict at spawn and rebuilds its own
+                        # LeagueManager from it. Setting only the attribute would change
+                        # nothing the child ever sees.
+                        new_b = max(1, int(live["contender_series_per_step"]))
+                        if new_b != int(self.league_manager.contender_series_per_step):
+                            self.league_manager.contender_series_per_step = new_b
+                            self.config.setdefault("league", {})["contender_series_per_step"] = new_b
+                            print(f"[Live Config] Gauntlet trial budget updated to {new_b} series per trial")
 
                     if league_changed:
                         if self.league_manager.enabled:

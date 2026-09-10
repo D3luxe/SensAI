@@ -19,7 +19,7 @@ hyperparameters:
   rot_log_std_ceiling_final: -1.4
 league:
   contender_mu_margin: 4.0
-  contender_series_per_step: 3
+  contender_series_per_step: 16
   eligibility_sigma: 1.5
   enabled: true
   eval_max_steps: 3000

@@ -976,6 +976,49 @@ def _lb_short_name(rec) -> str:
     return f"Iteration {it}" if it >= 0 else rec.name
 
 
+# Seconds for one best-of-9 series between two current checkpoints, measured on this
+# machine. It moves with how the policy plays: a pair that scores quickly finishes a
+# series in well under a second, while two evenly matched checkpoints that rally take
+# several. Used only to estimate the duty cycle for display, never to decide anything.
+SECONDS_PER_EVAL_SERIES = 3.3
+
+
+def gauntlet_budget_estimate(
+    series_per_step: int,
+    league: Dict[str, Any],
+    logging_cfg: Dict[str, Any],
+    hyperparams: Dict[str, Any],
+    sps: float,
+) -> Dict[str, float]:
+    """
+    What a given gauntlet trial budget costs and buys.
+
+    A grading event fires once per checkpoint save and admits at most one newcomer, so
+    the arithmetic is short. It delivers `series_per_step` series to a single contender,
+    ranking one costs target_eval_matches, and a contender's turn comes round once per
+    max_active_contenders events. The share of saves that ever get ranked is therefore
+    series_per_step / target_eval_matches, independent of both the checkpoint interval
+    and the queue depth, because those two scale the arrival rate and the grading rate
+    together.
+    """
+    target = max(1, int(league.get("target_eval_matches", 30)))
+    queue = max(1, int(league.get("max_active_contenders", 3)))
+    debut = max(0, int(league.get("eval_series_per_grade", 1))) * 2
+    interval = max(1, int(logging_cfg.get("checkpoint_interval", 200)))
+    batch = max(1, int(hyperparams.get("batch_size", 16384)))
+    sps = sps if sps and sps > 0 else 9500.0
+
+    window_s = interval * batch / sps
+    step = max(1, int(series_per_step))
+    return {
+        "window_s": window_s,
+        "duty_pct": 100.0 * (step + debut) * SECONDS_PER_EVAL_SERIES / window_s,
+        "minutes_to_rank": (target / step) * queue * window_s / 60.0,
+        "ranked_pct": 100.0 * min(1.0, step / target),
+        "slot_minutes": (target / step) * window_s / 60.0,
+    }
+
+
 def opponent_mix_shares(
     league: Dict[str, Any], num_envs: Optional[int] = None
 ) -> Dict[str, float]:
@@ -1826,6 +1869,52 @@ def create_ui():
                             apply_opp_btn = gr.Button("⚡ Apply Opponent Mix", variant="secondary")
                             opp_apply_msg = gr.Markdown("")
 
+                        # Card 2b: Gauntlet Evaluation Budget
+                        with gr.Group():
+                            gr.Markdown("### 🥊 Gauntlet Evaluation Budget")
+                            gr.Markdown(
+                                "*Series each contender plays per trial. This is the whole knob for how "
+                                "much CPU grading takes: matches run in a separate process alongside "
+                                "training, so a higher setting ranks checkpoints sooner and leaves less "
+                                "machine for everything else. Applies live, no restart.*"
+                            )
+
+                            def _budget_readout(step: float) -> str:
+                                st = mgr.get_status_info()
+                                est = gauntlet_budget_estimate(
+                                    int(step or 1),
+                                    default_cfg.get("league", {}) or {},
+                                    default_cfg.get("logging", {}) or {},
+                                    default_cfg.get("hyperparameters", {}) or {},
+                                    float((st.get("metrics") or {}).get("sps") or 0.0),
+                                )
+                                return (
+                                    f"**{int(step)} series per trial** &middot; about "
+                                    f"{est['duty_pct']:.0f}% of the machine's evaluation window &middot; "
+                                    f"a contender is ranked in ~{est['minutes_to_rank']:.0f} min &middot; "
+                                    f"~{est['ranked_pct']:.0f}% of saved checkpoints get ranked"
+                                )
+
+                            _budget_start = int(league_cfg_ui.get("contender_series_per_step", 16))
+                            gauntlet_budget_slider = gr.Slider(
+                                4, 32,
+                                value=_budget_start,
+                                step=4,
+                                label="Series per gauntlet trial",
+                                info=(
+                                    "Ranking one checkpoint costs target_eval_matches series, so at 30 "
+                                    "and above every save gets ranked and nothing queues."
+                                ),
+                            )
+                            gauntlet_budget_readout = gr.Markdown(_budget_readout(_budget_start))
+                            gauntlet_budget_slider.change(
+                                fn=_budget_readout,
+                                inputs=[gauntlet_budget_slider],
+                                outputs=[gauntlet_budget_readout],
+                            )
+                            apply_budget_btn = gr.Button("⚡ Apply Evaluation Budget", variant="secondary")
+                            budget_apply_msg = gr.Markdown("")
+
                         # Card 3: Quick Live Reward Weights
                         with gr.Group():
                             gr.Markdown("### 🎛️ Quick Live Reward Weights")
@@ -2649,6 +2738,37 @@ def create_ui():
             fn=on_apply_opponent_mix,
             inputs=[training_opponents_select, baseline_opp_slider],
             outputs=[opp_apply_msg]
+        )
+
+        def on_apply_gauntlet_budget(series_per_step):
+            step = max(1, int(series_per_step or 1))
+            # Live config reaches the trainer, which copies it into the dict handed to
+            # each grading child; the yaml keeps it across restarts.
+            mgr.update_live_config({"contender_series_per_step": step})
+            try:
+                base_cfg = load_yaml_config("config/default_config.yaml")
+                base_cfg.setdefault("league", {})["contender_series_per_step"] = step
+                save_yaml_config(base_cfg, "config/default_config.yaml")
+            except Exception:
+                pass
+            st = mgr.get_status_info()
+            est = gauntlet_budget_estimate(
+                step,
+                load_yaml_config("config/default_config.yaml").get("league", {}) or {},
+                default_cfg.get("logging", {}) or {},
+                default_cfg.get("hyperparameters", {}) or {},
+                float((st.get("metrics") or {}).get("sps") or 0.0),
+            )
+            return (
+                f"✅ **Evaluation budget applied:** {step} series per trial — "
+                f"~{est['minutes_to_rank']:.0f} min to rank a contender, "
+                f"~{est['duty_pct']:.0f}% evaluation duty at {time.strftime('%H:%M:%S')}"
+            )
+
+        apply_budget_btn.click(
+            fn=on_apply_gauntlet_budget,
+            inputs=[gauntlet_budget_slider],
+            outputs=[budget_apply_msg]
         )
 
         refresh_opponent_btn.click(

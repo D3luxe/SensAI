@@ -651,6 +651,29 @@ class LeagueManager:
                 best, best_gap = norm_c, gap
         return best
 
+    def can_admit_a_newcomer(self) -> bool:
+        """
+        Whether a checkpoint saved right now could enter the gauntlet at all.
+
+        Knowable before any matches are played, which is the point. A fresh checkpoint
+        always carries the highest sigma in the queue, so the only open question is
+        whether the most settled contender is rank-eligible and can therefore be
+        preempted. If it is not, admission is impossible and the debut buys nothing.
+
+        Without this, every save was graded and thrown away: ten an hour spending two
+        series each, leaving records stranded at sigma 5.1 that never joined the pool
+        either, while the contenders those series could have measured sat idle.
+        """
+        if len(self.contender_queue) < self.max_active_contenders:
+            return True
+        rated = [
+            r for r in (self.evaluator.ratings.get(p) for p in self.contender_queue)
+            if r is not None
+        ]
+        if not rated:
+            return True
+        return self._is_rank_eligible(min(rated, key=lambda r: r.sigma))
+
     def _admit_contender(self, ckpt_path: str):
         """Admits or preempts into the active Gauntlet contender queue based on raw skill (mu)."""
         if ckpt_path in self.contender_queue:
@@ -1005,6 +1028,26 @@ class LeagueManager:
 
         # Ensure model rating record exists
         rec = self.evaluator.get_or_create_rating(norm_ckpt)
+
+        # Grade only what could actually enter the gauntlet.
+        #
+        # A debut costs two series and exists to decide admission. With the queue full of
+        # contenders that are not yet rank-eligible, nothing can be preempted, so the
+        # answer is already no and the matches are spent for nothing. Skipping returns
+        # that budget to the contenders being measured, and stops the leaderboard filling
+        # with records stranded at their debut sigma.
+        #
+        # Anchors and the rolling latest_model are handled above; this only ever skips a
+        # checkpoint, and the next save after a slot frees is graded normally. Since the
+        # newest save is the one that takes the free slot, skipping costs nothing but the
+        # rating of a model that was about to be superseded anyway.
+        if not rec.is_anchor and not self.can_admit_a_newcomer():
+            print(
+                f"[League Manager] Gauntlet queue full and none of it converged; "
+                f"deferring the debut of '{rec.name}' rather than spending "
+                f"{self.eval_series_per_grade * 2} series on a rating that cannot enter."
+            )
+            return rec
 
         # Determine benchmark opponents
         opponents_to_test: List[str] = []
