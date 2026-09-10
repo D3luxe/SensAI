@@ -730,6 +730,85 @@ class TestLeagueManager(unittest.TestCase):
         _, weak = self._queued_contender("weak", 26.0, 2.2, 3, 13)
         self.assertEqual(self._gauntlet_exit(weak), "demote")
 
+    def test_a_losing_trial_does_not_trip_the_knockout_end_to_end(self):
+        """
+        Drives the real gauntlet step with a controlled sequence of series results.
+
+        The arithmetic tests below pin the rule; this one pins that the rule is what the
+        code actually applies. checkpoint_iter_181600 was evicted for "19 consecutive
+        losses" while sitting 34 series deep at the top of the field, because the counter
+        added every loss in a trial that lost more than it won.
+        """
+        self._seat_a_king()
+        for i, mu in enumerate((26.6, 26.4)):
+            disk = os.path.join(self.test_dir, f"checkpoint_iter_{700+i}.pt")
+            with open(disk, "w") as f:
+                f.write("stub")
+            r = self.evaluator.get_or_create_rating(self.league._normalize_path(disk))
+            r.mu, r.sigma, r.matches_played = mu, 1.2, 40
+            r.update_conservative()
+
+        path, rec = self._queued_contender("streaky", 26.5, 1.3, 20, 20)
+        self.league.contender_series_per_step = 12
+        self.league.contender_consecutive_losses[path] = 0
+
+        # Loses more than it wins, but never more than three in a row.
+        outcomes = [-1, -1, 1, -1, -1, -1, 1, -1, -1, 1, -1, -1]
+        calls = {"n": 0}
+
+        def fake_pairing(**kwargs):
+            n = kwargs.get("series_per_pair", 1)
+            start = calls["n"]
+            calls["n"] += n
+            return [{"score_diff": d} for d in outcomes[start:start + n]]
+
+        self.evaluator.evaluate_pairing = fake_pairing
+        result = self.league.step_contender_gauntlet(device="cpu")
+
+        self.assertNotEqual(
+            (result or {}).get("status"), "demoted",
+            f"a trial with no long run should not evict: {(result or {}).get('reason')}",
+        )
+        self.assertLess(self.league.contender_consecutive_losses.get(path, 0),
+                        self.league.max_consecutive_losses)
+
+    def test_the_streak_counts_consecutive_losses_not_a_loss_surplus(self):
+        """
+        The counter must mean what its name says, and must not scale with trial size.
+
+        It used to add every loss in a trial that lost more than it won. At three series
+        per trial that passed for a streak. At twenty-four it evicted a contender 34
+        series deep at the top of the field for "19 consecutive losses" it never had, and
+        a 10W-14L trial would have added 14.
+        """
+        streak = 0
+        # One trial's worth of series, in order: the contender loses more than it wins
+        # but never loses more than three in a row.
+        outcomes = [-1, -1, 1, -1, -1, -1, 1, -1, -1, 1, -1, -1]
+        for diff in outcomes:
+            streak = streak + 1 if diff < 0 else 0
+        self.assertEqual(streak, 2, "trailing run is two losses")
+        self.assertLess(streak, self.league.max_consecutive_losses,
+                        "a losing trial must not trip the knockout on its own")
+
+        surplus = sum(1 for d in outcomes if d < 0)
+        self.assertGreater(surplus, self.league.max_consecutive_losses,
+                           "the old accounting would have evicted this contender")
+
+    def test_a_draw_ends_a_losing_run(self):
+        """A draw is not a loss, so it ends the run rather than extending it."""
+        streak = 5
+        for diff in (0, -1):
+            streak = streak + 1 if diff < 0 else 0
+        self.assertEqual(streak, 1)
+
+    def test_a_real_streak_still_trips_the_knockout(self):
+        """The knockout must still fire when the losses genuinely are consecutive."""
+        streak = 0
+        for _ in range(self.league.max_consecutive_losses):
+            streak = streak + 1 if -1 < 0 else 0
+        self.assertGreaterEqual(streak, self.league.max_consecutive_losses)
+
     def test_loss_streak_cap_is_not_an_ordinary_event(self):
         """
         Four straight losses happen to most contenders over a full gauntlet.

@@ -1036,13 +1036,25 @@ class LeagueManager:
         if not opponents:
             return None
 
-        prev_wins = rec.wins
-        prev_losses = rec.losses
-
         print(f"[League Manager] [Gauntlet Trial] Testing contender '{rec.name}' against {len(opponents)} opponent(s)...")
+
+        # The streak is counted series by series, in the order they were played.
+        #
+        # It used to be inferred from the trial's totals: add every loss when a trial lost
+        # more than it won, subtract the wins otherwise. That is a running loss surplus,
+        # not a streak, and it scales with the trial size. At three series per trial the
+        # increments were small enough to pass for one. At twenty-four it evicted
+        # checkpoint_iter_181600, a contender 34 series deep at the top of the field, for
+        # "19 consecutive losses" it never had. A 10W-14L trial would have added 14.
+        #
+        # evaluate_pairing returns one entry per series, in order, so the real run is
+        # available and there is no need to infer anything. A loss extends it and anything
+        # else ends it, which is what the name says and what max_consecutive_losses of 8
+        # was calibrated against.
+        streak = self.contender_consecutive_losses.get(contender_path, 0)
         for opp in opponents:
             try:
-                self.evaluator.evaluate_pairing(
+                series_results = self.evaluator.evaluate_pairing(
                     model_a_path=contender_path,
                     model_b_path=opp,
                     series_per_pair=max(1, self.contender_series_per_step // len(opponents)),
@@ -1052,20 +1064,18 @@ class LeagueManager:
                     wins_needed=self.series_wins_needed,
                     device=device
                 )
+                for res in (series_results or []):
+                    # The contender is always model_a here, so a negative score_diff is
+                    # its loss. A draw is not a loss, so it ends the run too.
+                    streak = streak + 1 if res.get("score_diff", 0) < 0 else 0
             except Exception as e:
                 print(f"[League Manager] Warning: Gauntlet trial error {contender_path} vs {opp}: {e}")
 
+        self.contender_consecutive_losses[contender_path] = streak
+
         # Refresh rating after matches
         rec = self.evaluator.ratings.get(contender_path, rec)
-        new_wins = rec.wins - prev_wins
-        new_losses = rec.losses - prev_losses
-
-        if new_losses > new_wins:
-            self.contender_consecutive_losses[contender_path] = self.contender_consecutive_losses.get(contender_path, 0) + new_losses
-        elif new_wins > 0:
-            self.contender_consecutive_losses[contender_path] = max(0, self.contender_consecutive_losses.get(contender_path, 0) - new_wins)
-
-        consec_losses = self.contender_consecutive_losses.get(contender_path, 0)
+        consec_losses = streak
 
         king_rec = self.evaluator.ratings.get(self.king_of_the_hill) if self.king_of_the_hill else None
         king_mu = king_rec.mu if king_rec else 25.0
