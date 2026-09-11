@@ -14,9 +14,9 @@ from env.physics_engine import (
     BALL_PRED_SHORT_TICKS, BALL_PRED_MEDIUM_TICKS
 )
 
-OBS_DIM = 94
+OBS_DIM = 108
 
-# 94-Dimensional Left-Right (X -> -X) Observation Symmetry Reflection Mask
+# 108-Dimensional Left-Right (X -> -X) Observation Symmetry Reflection Mask
 # Multiplies features by -1.0 for lateral X components, roll, yaw, and relative right offsets
 # Features 80..93 (pad active flags and cooldown timers) are strictly positive scalars (+1.0)
 OBS_MIRROR_MASK_NP = np.array([
@@ -63,7 +63,35 @@ OBS_MIRROR_MASK_NP = np.array([
      1.0,  1.0,         # Midfield Left Orb (is_active, cooldown) [86..87]
      1.0,  1.0,         # Midfield Right Orb (is_active, cooldown) [88..89]
      1.0,  1.0,         # Attacking Left Corner Orb (is_active, cooldown) [90..91]
-     1.0,  1.0          # Attacking Right Corner Orb (is_active, cooldown) [92..93]
+     1.0,  1.0,  # Attacking Right Corner Orb (is_active, cooldown) [92..93]
+    # 8. Self Mechanical State (5 features: 94..98)
+    # The policy could see on_ground/has_jump/has_flip but never whether it was mid-flip.
+    # Measured on the iteration-223320 policy, is_dodging is true for 23% of car-steps and
+    # was entirely unobservable, while JumpBridgeReward pays out against it from hidden
+    # Python state. That is the non-Markovian reward problem in the audit: the fix is to let
+    # the critic see the state the reward keys on.
+     1.0,                # is_dodging [94]
+     1.0,                # flip_timer (phase within / since the flip) [95]
+     1.0,                # air_timer (time since leaving the turf) [96]
+     1.0,                # has_double_jumped [97]
+     1.0,                # is_supersonic [98]
+    # 9. Scalar Magnitudes (4 features: 99..102)
+    # A linear layer approximates sqrt(x^2 + y^2 + z^2) poorly, so magnitudes the policy
+    # needs constantly are fed directly rather than inferred from components. dist_ball
+    # already existed at [49]; these are the ones that did not.
+     1.0,                # |v_car| [99]
+     1.0,                # |v_ball| [100]
+     1.0,                # distance to opponent [101]
+     1.0,                # closing speed to opponent (signed, + is closing) [102]
+    # 10. Opponent Mechanical & Demo State (5 features: 103..107)
+    # The opponent block carried only position, velocity, boost and on_ground. Whether the
+    # opponent can still challenge (has_flip) or exists at all (alive) is what decides
+    # whether a net is open.
+     1.0,                # opp is_dodging [103]
+     1.0,                # opp is_supersonic [104]
+     1.0,                # opp has_flip [105]
+     1.0,                # opp alive (0.0 while demoed) [106]
+     1.0                 # opp demo respawn timer [107]
 ], dtype=np.float32)
 
 # Bilateral Permutation Indices for Mirror Reflection across X=0:
@@ -106,7 +134,10 @@ OBS_LEGACY_MIRROR_MASK_NP = np.array([
      1.0, -1.0,  1.0,    # small pad
      1.0, -1.0,  1.0,    # big pad
      1.0,  1.0,        # timers (80..81)
-     1.0,  1.0,  1.0,  1.0,  1.0,  1.0,  1.0,  1.0,  1.0,  1.0,  1.0,  1.0 # big pads (82..93)
+     1.0,  1.0,  1.0,  1.0,  1.0,  1.0,  1.0,  1.0,  1.0,  1.0,  1.0,  1.0,  # big pads (82..93)
+     1.0,  1.0,  1.0,  1.0,  1.0,   # self mechanical state (94..98)
+     1.0,  1.0,  1.0,  1.0,         # scalar magnitudes (99..102)
+     1.0,  1.0,  1.0,  1.0,  1.0    # opponent mechanical & demo state (103..107)
 ], dtype=np.float32)
 
 # 8-Dimensional Action Reflection Mask: [throttle, steer, pitch, yaw, roll, jump, boost, handbrake]
@@ -323,8 +354,27 @@ class DefaultObservationBuilder:
             out[71] = (odvx * ux + odvy * uy + odvz * uz) / CAR_MAX_SPEED
             out[72] = opp.boost * 0.01
             out[73] = 1.0 if opp.on_ground else 0.0
+
+            # 9b/10. Opponent scalars and mechanical state (101..107).
+            # Distance and closing speed are fed as scalars because a linear layer
+            # approximates a Euclidean norm poorly; the components at 66..71 do not make
+            # either quantity directly available.
+            o_dist = math.sqrt(odx * odx + ody * ody + odz * odz)
+            out[101] = o_dist / 6000.0
+            if o_dist > 1e-4:
+                # Positive when the gap is shrinking. odv is (opponent - self), so a
+                # closing opponent projects negatively onto the unit vector toward it.
+                out[102] = -((odvx * odx + odvy * ody + odvz * odz) / o_dist) / CAR_MAX_SPEED
+            else:
+                out[102] = 0.0
+            out[103] = 1.0 if getattr(opp, "is_dodging", False) else 0.0
+            out[104] = 1.0 if opp.is_supersonic else 0.0
+            out[105] = 1.0 if opp.has_flip else 0.0
+            out[106] = 0.0 if opp.demoed else 1.0
+            out[107] = min(1.0, max(0.0, float(opp.demo_timer) / 3.0))
         else:
             out[60:74] = 0.0
+            out[101:108] = 0.0
 
         # 5. Fast Zero-Allocation Boost Pad Spatial Vectors (6 features: 74..79)
         min_sm_idx = -1
@@ -420,5 +470,21 @@ class DefaultObservationBuilder:
             else:
                 out[base_idx] = 1.0
                 out[base_idx + 1] = 0.0
+
+        # 8. Self Mechanical State (5 features: 94..98)
+        # is_dodging is the important one. The policy is mid-flip for roughly a quarter of
+        # every second of play and had no way to know it, while the flip rewards pay out
+        # against exactly that state held in hidden Python. flip_timer carries the phase:
+        # RocketSim keeps counting past the animation, so paired with is_dodging it
+        # distinguishes "inside the flip" from "how long since it started".
+        out[94] = 1.0 if getattr(car, "is_dodging", False) else 0.0
+        out[95] = min(1.0, float(getattr(car, "flip_timer", 0.0)) / 2.0)
+        out[96] = min(1.0, float(getattr(car, "air_timer", 0.0)) / 2.0)
+        out[97] = 1.0 if car.has_double_jumped else 0.0
+        out[98] = 1.0 if car.is_supersonic else 0.0
+
+        # 9. Scalar Magnitudes (2 of 4 here: 99..100; 101..102 are set with the opponent)
+        out[99] = math.sqrt(float(cv[0]) ** 2 + float(cv[1]) ** 2 + float(cv[2]) ** 2) / CAR_MAX_SPEED
+        out[100] = math.sqrt(bvx * bvx + bvy * bvy + bvz * bvz) / BALL_MAX_SPEED
 
         return out
