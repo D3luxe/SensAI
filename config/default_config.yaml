@@ -28,8 +28,11 @@ hyperparameters:
 league:
   contender_mu_margin: 4.0
   contender_series_per_step: 32
-  benchmark_interval: 25
-  benchmark_series: 2
+  benchmark_opponents:
+    - checkpoints/necto-model.pt
+    - checkpoints/nexto-model.pt
+  benchmark_interval: 15
+  benchmark_series: 8
   eligibility_sigma: 1.5
   enabled: true
   eval_max_steps: 3000
