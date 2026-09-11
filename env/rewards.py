@@ -2500,6 +2500,8 @@ class AirRollRecoveryReward(BaseReward):
         self._airborne_ticks: Dict[int, int] = {}
         self._was_disoriented: Dict[int, bool] = {}
         self._disoriented_this_flight: Dict[int, bool] = {}
+        # Did the car put ITSELF off-axis this flight, by dodging? See the detector below.
+        self._self_dodged_this_flight: Dict[int, bool] = {}
         self._airborne_recovery_total: Dict[int, float] = {}
         self._wall_landed: Dict[int, bool] = {}
         self._halfflip_cancel_executed: Dict[int, bool] = {}
@@ -2513,6 +2515,7 @@ class AirRollRecoveryReward(BaseReward):
         self._airborne_ticks = {car.id: 0 for car in initial_state.cars}
         self._was_disoriented = {car.id: False for car in initial_state.cars}
         self._disoriented_this_flight = {car.id: False for car in initial_state.cars}
+        self._self_dodged_this_flight = {car.id: False for car in initial_state.cars}
         self._airborne_recovery_total = {car.id: 0.0 for car in initial_state.cars}
         self._wall_landed = {car.id: False for car in initial_state.cars}
         self._halfflip_cancel_executed = {car.id: False for car in initial_state.cars}
@@ -2546,6 +2549,7 @@ class AirRollRecoveryReward(BaseReward):
             self._prev_heading[car.id] = 1.0
             self._was_disoriented[car.id] = False
             self._disoriented_this_flight[car.id] = False
+            self._self_dodged_this_flight[car.id] = False
             self._airborne_recovery_total[car.id] = 0.0
             self._wall_landed[car.id] = False
             self._halfflip_cancel_executed[car.id] = False
@@ -2590,7 +2594,20 @@ class AirRollRecoveryReward(BaseReward):
         # Gated by air_ticks >= 3 to filter out single-tick suspension micro-hops on curved ramps.
         # Measured against the surface the car is heading to, so a car correctly rolled onto its
         # side to meet a wall is not flagged as disoriented (its old up_z would have read ~0).
-        if air_ticks >= 3:
+        #
+        # A dodge the car CHOSE does not count. This detector reads pure geometry -- on its back,
+        # or travelling backwards -- and a backflip satisfies both, so the car could invert itself
+        # for free and then be paid 0.315 for righting what it had just broken. With jump_bridge
+        # zeroed, that loop became the last standing reason to flip: at iteration 1129 the policy
+        # was airborne 71% of the time, never reversed (0.0% reverse throttle), and drew 2.55 per
+        # episode from this term with 91% of it earned in the air.
+        #
+        # Order is handled naturally. A car knocked off-axis BEFORE it dodges has already had the
+        # flag set, so dodging to recover from a real bump still earns. Only a flight whose
+        # disorientation began with the car's own dodge is excluded.
+        if car.just_dodged or getattr(car, "is_dodging", False):
+            self._self_dodged_this_flight[car.id] = True
+        if air_ticks >= 3 and not self._self_dodged_this_flight.get(car.id, False):
             if surface_align < 0.30 or curr_heading < -0.20:
                 self._was_disoriented[car.id] = True
                 self._disoriented_this_flight[car.id] = True
@@ -2611,7 +2628,17 @@ class AirRollRecoveryReward(BaseReward):
 
         # ── 1. Active 3D Disorientation Recovery (Roll & Yaw) ────────────────
         # Only active when the car was genuinely knocked off-axis, inverted, or executed a flip turnaround
-        is_recovering = bool(self._was_disoriented.get(car.id, False))
+        # The half-flip cancel block (1d) has its own trigger and its own budget, and a half-flip
+        # is a dodge by construction. Gating it behind _was_disoriented would have killed it
+        # outright once self-inflicted dodges stopped setting that flag.
+        is_halfflip_candidate = bool(self._takeoff_heading.get(car.id, 1.0) < -0.20)
+        # Generic recovery income: only for a disorientation the car did not cause itself.
+        pay_generic_recovery = bool(self._was_disoriented.get(car.id, False))
+        # The outer gate additionally opens for a half-flip so block 1d stays reachable, but
+        # 1a/1b/1c below each re-check pay_generic_recovery. Without that, is_halfflip_candidate
+        # is true of ANY backward-moving flight -- which is exactly what a backflip is -- and
+        # the whole branch would reopen for the behaviour this is meant to stop.
+        is_recovering = pay_generic_recovery or is_halfflip_candidate
         roll_input = float(action[4])
         is_active_halfflip_cancel = bool(air_ticks <= 18 and self._halfflip_cancel_executed.get(car.id, False))
 
@@ -2627,7 +2654,7 @@ class AirRollRecoveryReward(BaseReward):
 
             # 1a. Active Roll & Inversion Recovery (delta_up > 0), measured toward the landing surface
             delta_up = surface_align - prev_surface_align
-            if delta_up > 0.0 and prev_surface_align < 0.90:
+            if pay_generic_recovery and delta_up > 0.0 and prev_surface_align < 0.90:
                 # Inversion multiplier: rotating from wheels-away (prev align < 0) yields up to 2.0x reward
                 inversion_mult = 1.0 + max(0.0, -prev_surface_align) * 1.0
                 roll_rec = min(rec_budget, (delta_up * 1.5) * inversion_mult * urgency)
@@ -2641,7 +2668,7 @@ class AirRollRecoveryReward(BaseReward):
             # 1b. Roll Rate Damping & Settling (D-term):
             # As the car approaches flat attitude (up_z > 0.75), damp angular velocity to prevent rotational overshoot.
             is_touchdown = bool((car_z < 60.0 and vel_z < -50.0) or (not prev_ground and car.on_ground))
-            if surface_align > 0.75 and not is_touchdown:
+            if pay_generic_recovery and surface_align > 0.75 and not is_touchdown:
                 abs_roll = abs(roll_rate)
                 # Require both roll rate AND total angular velocity to be controlled (eliminates pitch-tumble blindspot)
                 if abs_roll < 1.0 and total_ang_speed < 1.8 and (prev_surface_align < 0.90 or delta_up > 0.01):
@@ -2657,7 +2684,7 @@ class AirRollRecoveryReward(BaseReward):
 
             # 1c. Active Yaw & Momentum Heading Recovery (delta_heading > 0)
             delta_heading = curr_heading - prev_heading
-            if delta_heading > 0.0 and prev_heading < 0.90 and speed_horiz > 250.0:
+            if pay_generic_recovery and delta_heading > 0.0 and prev_heading < 0.90 and speed_horiz > 250.0:
                 heading_inversion_mult = 1.0 + max(0.0, -prev_heading) * 1.0
                 yaw_rec = min(rec_budget, (delta_heading * 1.0) * heading_inversion_mult * urgency)
                 total_reward += yaw_rec
@@ -2671,14 +2698,30 @@ class AirRollRecoveryReward(BaseReward):
                 step_cancel_reward = 0.0
                 pitch_rate = abs(float(np.dot(ang_vel, car.get_right_vector())))
                 roll_rate_mag = abs(roll_rate)
-                # Physical flip-cancel: pitch tumble arrested while inverted
-                if not self._halfflip_cancel_executed.get(car.id, False) and pitch_rate < 2.5:
+                # Physical flip-cancel: pitch tumble arrested while the dodge is still running.
+                #
+                # This used to credit a cancel on `pitch_rate < 2.5` alone. A car with no pitch
+                # rotation whatsoever satisfies that, so any backward-moving flight -- a plain
+                # backflip, or simply leaving the ground while reversing -- read as a perfectly
+                # executed half-flip and collected 0.40. Nothing required the flip to have been
+                # started, let alone cancelled.
+                #
+                # A cancel is the conjunction of two things: a dodge is in progress, and its
+                # pitch rotation has already been arrested. An UNCANCELLED backflip fails the
+                # second for the length of the animation and the first once the animation ends,
+                # so it never satisfies both at once. RocketSim owns is_dodging, so this reads
+                # the simulator's own notion of the flip rather than inferring one.
+                is_cancelling_now = bool(getattr(car, "is_dodging", False) and pitch_rate < 2.5)
+                if not self._halfflip_cancel_executed.get(car.id, False) and is_cancelling_now:
                     self._halfflip_cancel_executed[car.id] = True
                     c_rew = min(cancel_budget, (0.40 * max(0.0, 1.0 - pitch_rate / 2.5)) * urgency)
                     step_cancel_reward += c_rew
                     cancel_budget = max(0.0, cancel_budget - c_rew)
-                # Physical roll-upright: rolling around forward vector toward wheels down
-                if delta_up > 0.0 or roll_rate_mag > 0.8:
+                # Physical roll-upright: rolling around forward vector toward wheels down.
+                # Gated on the cancel having actually been credited, so the roll bonus is the
+                # second half of a genuine half-flip rather than a payout for any backward
+                # flight that happens to be rotating.
+                if self._halfflip_cancel_executed.get(car.id, False) and (delta_up > 0.0 or roll_rate_mag > 0.8):
                     roll_metric = min(1.0, max(delta_up / 0.05, roll_rate_mag / 3.0))
                     r_rew = min(cancel_budget, (0.40 * roll_metric) * urgency)
                     step_cancel_reward += r_rew
@@ -2698,6 +2741,9 @@ class AirRollRecoveryReward(BaseReward):
 
         # ── 2. Touchdown Alignment (Evaluated as a single impulse near ground contact) ──
         if (car_z < 60.0 and vel_z < -50.0) or (not prev_ground and car.on_ground):
+            # A flight the car put itself into does not qualify. _was_disoriented and
+            # _disoriented_this_flight are already withheld for self-inflicted dodges; the
+            # half-flip cancel remains a genuine outcome and still opens the touchdown reward.
             had_disorientation = bool(self._was_disoriented.get(car.id, False) or self._disoriented_this_flight.get(car.id, False) or self._halfflip_cancel_executed.get(car.id, False))
             if had_disorientation:
                 # Multi-Surface Landing Evaluator:
@@ -2753,6 +2799,7 @@ class AirRollRecoveryReward(BaseReward):
             self._prev_heading[car.id] = 1.0
             self._was_disoriented[car.id] = False
             self._disoriented_this_flight[car.id] = False
+            self._self_dodged_this_flight[car.id] = False
             self._airborne_recovery_total[car.id] = 0.0
             self._wall_landed[car.id] = False
             self._halfflip_cancel_executed[car.id] = False

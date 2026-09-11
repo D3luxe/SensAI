@@ -119,6 +119,13 @@ class TestFlippingAndMechanics(unittest.TestCase):
         recovery._was_disoriented[car.id] = True
         recovery._prev_surface_align[car.id] = -0.8
         recovery._prev_heading[car.id] = -0.5
+        # A cancel happens WHILE the dodge is running: that is what distinguishes it from an
+        # uncancelled backflip, whose pitch stays at full rate for the whole animation. The
+        # flip-cancel detector now requires it, so the fixture has to reflect it. Before this
+        # flag existed the detector credited a cancel on low pitch rate alone, which any
+        # backward-moving flight satisfied -- including a car that never flipped at all.
+        car.is_dodging = True
+        recovery._takeoff_heading[car.id] = -1.0
 
         # Active Flip-Cancel (act[2] = +1.0) + Air-Roll (act[4] = +1.0)
         act_cancel = np.array([1.0, 0.0, 1.0, 0.0, 1.0, 0.0, 0.0, 0.0], dtype=np.float32)
@@ -136,6 +143,74 @@ class TestFlippingAndMechanics(unittest.TestCase):
 
         # Must include +1.50 turnaround bonus!
         self.assertGreaterEqual(rew_touchdown, 1.80, "Half-flip forward touchdown must receive the +1.50 completion bonus!")
+
+    def test_self_inflicted_flip_earns_no_recovery_income(self):
+        """A backflip is not a disorientation to be paid for fixing.
+
+        The detector reads pure geometry -- on its back, or travelling backwards -- and a
+        backflip satisfies both, so the car could invert itself for free and then collect for
+        righting what it had just broken. With jump_bridge zeroed that loop was the last
+        standing reason to flip: at iteration 1129 the policy was airborne 71% of the time,
+        never reversed, and drew 2.55 per episode from this term with 91% earned in the air.
+        Measured on live trajectories the same term now pays 0.35.
+        """
+        def fly(self_dodge):
+            rew = AirRollRecoveryReward(weight=1.0)
+            self.arena.ball.pos = np.array([0.0, 3000.0, 93.0], dtype=np.float32)
+            rew.reset(self.arena)
+            car = self.arena.cars[0]
+            total = 0.0
+            act = np.zeros(8, dtype=np.float32)
+            for i, up_z in enumerate([-0.9, -0.4, 0.2, 0.7, 0.95]):
+                car.on_ground = False
+                car.is_dodging = bool(self_dodge and i < 3)
+                car.just_dodged = bool(self_dodge and i == 0)
+                car.pos = np.array([0.0, -60.0 * i, 140.0], dtype=np.float32)
+                car.vel = np.array([0.0, -700.0, -40.0], dtype=np.float32)
+                lateral = float(np.sqrt(max(0.0, 1.0 - up_z ** 2)))
+                car.rot_mat = np.array([[0, 1, 0], [1, 0, 0], [0, lateral, up_z]],
+                                       dtype=np.float32)
+                rew._airborne_ticks[car.id] = i + 4
+                total += rew.get_reward(car, self.arena, act, False, None)
+            return total
+
+        bumped = fly(self_dodge=False)
+        flipped = fly(self_dodge=True)
+        self.assertGreater(bumped, 0.0,
+                           "recovering from a genuine knock must still be reinforced")
+        self.assertLess(flipped, bumped,
+                        "righting a flip the car chose must not pay what a real recovery pays")
+
+    def test_uncancelled_backflip_is_not_credited_as_a_half_flip(self):
+        """The cancel used to be credited on low pitch rate alone, so a car with no rotation
+        at all read as a perfectly executed half-flip. A cancel is the conjunction of a dodge
+        in progress AND its pitch already arrested; an uncancelled backflip fails the second
+        for the length of the animation and the first once it ends."""
+        rew = AirRollRecoveryReward(weight=1.0)
+        self.arena.ball.pos = np.array([0.0, 3000.0, 93.0], dtype=np.float32)
+        rew.reset(self.arena)
+        car = self.arena.cars[0]
+        car.on_ground = False
+        car.pos = np.array([0.0, 0.0, 150.0], dtype=np.float32)
+        car.vel = np.array([0.0, -750.0, -50.0], dtype=np.float32)
+        car.rot_mat = np.array([[0, 1, 0], [1, 0, 0], [0, 0, -1]], dtype=np.float32)
+        rew._airborne_ticks[car.id] = 8
+        rew._takeoff_heading[car.id] = -1.0
+        rew._prev_surface_align[car.id] = -0.8
+
+        # Still tumbling at full dodge pitch rate: not a cancel.
+        car.is_dodging = True
+        car.ang_vel = np.array([5.5, 0.0, 0.0], dtype=np.float32)
+        rew.get_reward(car, self.arena, np.zeros(8, dtype=np.float32), False, None)
+        self.assertFalse(rew._halfflip_cancel_executed[car.id],
+                         "a flip still rotating at full rate has not been cancelled")
+
+        # Animation over, rotation decayed on its own: also not a cancel.
+        car.is_dodging = False
+        car.ang_vel = np.array([0.2, 0.0, 0.0], dtype=np.float32)
+        rew.get_reward(car, self.arena, np.zeros(8, dtype=np.float32), False, None)
+        self.assertFalse(rew._halfflip_cancel_executed[car.id],
+                         "a flip that simply ran its course was never cancelled")
 
     def test_open_field_standstill_flip_unrewarded(self):
         """Guarantees that open-field traversal flips require speed > 350 uu/s to prevent flipping in place."""
