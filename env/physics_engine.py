@@ -208,6 +208,7 @@ class CarState:
     prev_jump: bool = False
     just_dodged: bool = False   # EDGE: True only on the step the dodge impulse fires
     is_dodging: bool = False    # LEVEL: True for the duration of the flip animation
+    flip_timer: float = 0.0     # Seconds elapsed into the current flip; phase within is_dodging
     rot_mat: Optional[np.ndarray] = None  # 3x3 orthonormal basis: [forward, right, up]
 
     def get_forward_vector(self) -> np.ndarray:
@@ -537,6 +538,14 @@ class RocketSimArena:
             car.just_dodged = bool(car.is_dodging and not was_dodging)
             car.is_supersonic = bool(c_state.is_supersonic)
             car.demoed = bool(c_state.is_demoed)
+            # air_timer, flip_timer and demo_timer are maintained by the pure-Python
+            # integrator, which never runs while RocketSim drives the sim. Measured over
+            # 19200 car-steps of self-play they were identically zero, so anything reading
+            # them (or observing them) was reading a constant. RocketSim owns the real
+            # values; mirror them here.
+            car.air_timer = float(getattr(c_state, "air_time", 0.0))
+            car.flip_timer = float(getattr(c_state, "flip_time", 0.0))
+            car.demo_timer = float(getattr(c_state, "demo_respawn_timer", 0.0))
 
         # Synchronize boost pads
         r_pads = getattr(self, "_rsim_pads", None)

@@ -31,15 +31,20 @@ class TestBoostPadTimersAndSymmetry(unittest.TestCase):
         self.obs_builder = DefaultObservationBuilder(symmetric=True)
 
     def test_obs_dim_constant_and_output_shape(self):
-        """Verify OBS_DIM is 94 and build_obs outputs exactly 94 floats."""
-        self.assertEqual(OBS_DIM, 94)
-        self.assertEqual(self.obs_builder.obs_dim, 94)
-        self.assertEqual(len(OBS_MIRROR_MASK_NP), 94)
-        self.assertEqual(len(OBS_MIRROR_INDICES_NP), 94)
+        """The builder and every symmetry array must agree on one width.
+
+        Asserted against OBS_DIM rather than a literal: the masks are hand-written parallel
+        arrays, and a width that drifts out of step with them corrupts the mirrored pass
+        silently rather than raising.
+        """
+        self.assertEqual(OBS_DIM, 108)
+        self.assertEqual(self.obs_builder.obs_dim, OBS_DIM)
+        self.assertEqual(len(OBS_MIRROR_MASK_NP), OBS_DIM)
+        self.assertEqual(len(OBS_MIRROR_INDICES_NP), OBS_DIM)
 
         car = self.arena.cars[0]
         obs = self.obs_builder.build_obs(car, self.arena)
-        self.assertEqual(obs.shape, (94,))
+        self.assertEqual(obs.shape, (OBS_DIM,))
         self.assertFalse(np.isnan(obs).any(), "Observation vector must not contain NaNs")
 
     def test_nearest_pad_cooldown_sync(self):
@@ -80,7 +85,7 @@ class TestBoostPadTimersAndSymmetry(unittest.TestCase):
           [86, 87] <-> [88, 89] (Midfield Left <-> Right)
           [90, 91] <-> [92, 93] (Attacking Left <-> Right)
         """
-        test_obs = np.zeros(94, dtype=np.float32)
+        test_obs = np.zeros(OBS_DIM, dtype=np.float32)
         # Set distinctive values for pad states and timers
         test_obs[82], test_obs[83] = 1.0, 0.2  # DefL
         test_obs[84], test_obs[85] = 0.0, 0.7  # DefR

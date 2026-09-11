@@ -257,6 +257,12 @@ class SenseiRLBot(Bot):
         self.dodge_cooldown = 0
         self.ball_touched_since_kickoff = False
         self.kickoff_stagnation_ticks = 0
+        # RocketSim publishes air_time and flip_time on its car state; the RLBot packet has
+        # no equivalent, so they are integrated here from air_state transitions. Both reset
+        # on ground contact, matching the training-side semantics exactly (verified against
+        # RocketSim: neither is ever non-zero while on_ground).
+        self._air_timers: dict[int, float] = {}
+        self._flip_timers: dict[int, float] = {}
         self.boost_pad_mapping: list[int] | None = None
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self.obs_builder = DefaultObservationBuilder(symmetric=True)
@@ -394,6 +400,36 @@ class SenseiRLBot(Bot):
             self.model = ActorCritic(obs_dim=obs_dim, act_dim=act_dim, continuous_actions=self.continuous_actions).to(self.device)
             self.model.eval()
 
+    def _update_air_flip_timers(self, packet) -> None:
+        """Integrate per-car air and flip timers, which the RLBot packet does not carry.
+
+        Called once per tick for every player. A car on the ground has both at zero, so the
+        timers self-correct after any tick this bot skipped (goal replays, pauses) as soon
+        as the cars respawn on the floor.
+        """
+        dt = 1.0 / 120.0
+        for i, p in enumerate(packet.players):
+            state = getattr(p, "air_state", AirState.OnGround)
+            if state == AirState.OnGround:
+                self._air_timers[i] = 0.0
+                self._flip_timers[i] = 0.0
+                continue
+            self._air_timers[i] = self._air_timers.get(i, 0.0) + dt
+            # flip_time starts when the dodge starts and keeps running until touchdown,
+            # so it outlives the dodge animation itself.
+            running = self._flip_timers.get(i, 0.0)
+            if state == AirState.Dodging or running > 0.0:
+                self._flip_timers[i] = running + dt
+            else:
+                self._flip_timers[i] = 0.0
+
+    def _demo_state(self, player) -> tuple:
+        """(demoed, seconds until respawn) from whichever field this RLBot build exposes."""
+        timeout = float(getattr(player, "demolished_timeout", -1.0) or -1.0)
+        if timeout > 0.0:
+            return True, timeout
+        return bool(getattr(player, "is_demolished", False)), 0.0
+
     def get_output(self, packet: GamePacket) -> ControllerState:
         controller = ControllerState()
 
@@ -449,6 +485,7 @@ class SenseiRLBot(Bot):
                     self.ball_touched_since_kickoff = True
 
             # Extract self car
+            self._update_air_flip_timers(packet)
             my_car = packet.players[self.index]
             is_on_ground = my_car.air_state == AirState.OnGround
             has_jump = is_on_ground or (not my_car.has_jumped)
@@ -475,6 +512,17 @@ class SenseiRLBot(Bot):
                 has_flip=has_flip,
                 ball_touches=1 if self.ball_touched_since_kickoff else 0
             )
+            # Observation indices 94..98 read these. Left unset they default to zero, which
+            # would tell the deployed policy it is never flipping and never supersonic while
+            # training saw those true for 23% and 4% of steps respectively.
+            my_demoed, my_demo_timer = self._demo_state(my_car)
+            car_state.is_dodging = bool(my_car.air_state == AirState.Dodging)
+            car_state.flip_timer = float(self._flip_timers.get(self.index, 0.0))
+            car_state.air_timer = float(self._air_timers.get(self.index, 0.0))
+            car_state.has_double_jumped = bool(my_car.has_double_jumped)
+            car_state.is_supersonic = bool(getattr(my_car, "is_supersonic", False))
+            car_state.demoed = my_demoed
+            car_state.demo_timer = my_demo_timer
 
             # Extract future ball trajectory from RLBot. v5 publishes 720 slices at 120 Hz covering
             # 6 seconds; the indexer measures the spacing rather than assuming it.
@@ -508,6 +556,15 @@ class SenseiRLBot(Bot):
                         has_flip=opp_flip,
                         ball_touches=1 if self.ball_touched_since_kickoff else 0
                     ))
+                    # Observation indices 103..107 read these off the opponent.
+                    opp_demoed, opp_demo_timer = self._demo_state(opp_car)
+                    opponents[-1].is_dodging = bool(opp_car.air_state == AirState.Dodging)
+                    opponents[-1].flip_timer = float(self._flip_timers.get(i, 0.0))
+                    opponents[-1].air_timer = float(self._air_timers.get(i, 0.0))
+                    opponents[-1].has_double_jumped = bool(opp_car.has_double_jumped)
+                    opponents[-1].is_supersonic = bool(getattr(opp_car, "is_supersonic", False))
+                    opponents[-1].demoed = opp_demoed
+                    opponents[-1].demo_timer = opp_demo_timer
 
             self.ticks_since_last_action += 1
             if self.ticks_since_last_action >= self.tick_skip or self.prev_action is None:
