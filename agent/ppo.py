@@ -48,6 +48,55 @@ def _league_grade_entry(ckpt_path: str, league_cfg: Dict[str, Any], project_root
         print(f"[League Grading] Failed for {ckpt_path}: {e}")
 
 
+class RunningMeanStd:
+    """
+    Streaming mean/variance of the discounted returns, used to put the critic's targets on
+    a unit scale.
+
+    Rewards here run from a +/-30 goal down to shaping terms worth a few hundredths, so raw
+    returns span roughly two orders of magnitude. A critic regressed directly onto that
+    needs a different effective learning rate at different points in training, and the
+    value loss silently dominates the policy loss through vf_coef. Normalizing the target
+    fixes both without touching reward semantics: the critic predicts a standardized value
+    and the trainer converts back whenever a real-scale value is needed.
+
+    Chan et al.'s parallel variance update, so a whole rollout folds in at once.
+    """
+
+    def __init__(self, epsilon: float = 1e-4):
+        self.mean = 0.0
+        self.var = 1.0
+        self.count = epsilon
+
+    def update(self, x) -> None:
+        batch_mean = float(x.mean())
+        batch_var = float(x.var())
+        batch_count = int(x.numel() if hasattr(x, "numel") else x.size)
+        if batch_count < 2:
+            return
+        delta = batch_mean - self.mean
+        tot = self.count + batch_count
+        new_mean = self.mean + delta * batch_count / tot
+        m_a = self.var * self.count
+        m_b = batch_var * batch_count
+        m2 = m_a + m_b + (delta * delta) * self.count * batch_count / tot
+        self.mean = new_mean
+        self.var = max(m2 / tot, 1e-8)
+        self.count = tot
+
+    @property
+    def std(self) -> float:
+        return float(math.sqrt(self.var))
+
+    def state_dict(self):
+        return {"mean": self.mean, "var": self.var, "count": self.count}
+
+    def load_state_dict(self, d) -> None:
+        self.mean = float(d.get("mean", 0.0))
+        self.var = max(float(d.get("var", 1.0)), 1e-8)
+        self.count = float(d.get("count", 1e-4))
+
+
 class PPOTrainer:
     def __init__(
         self,
@@ -75,6 +124,24 @@ class PPOTrainer:
         self.clip_range = float(hp.get("clip_range", 0.2))
         self.ent_coef = float(hp.get("ent_coef", 0.01))
         self.vf_coef = float(hp.get("vf_coef", 0.5))
+        # Value-function clipping is OFF by default and no longer shares the policy's
+        # clip_range. Reusing clip_range meant the critic could move its prediction by at
+        # most 0.2 per update on returns that span roughly +/-40, so it was structurally
+        # incapable of tracking a goal, and every update where it tried had its gradient
+        # replaced by the flat clipped branch. Set vf_clip_range to a float to restore the
+        # pessimistic clipped objective on the NORMALIZED target scale, where 0.2 is a
+        # meaningful fraction of a standard deviation rather than of a goal.
+        vf_clip_cfg = hp.get("vf_clip_range", None)
+        self.vf_clip_range = None if vf_clip_cfg in (None, "", "none", "null") else float(vf_clip_cfg)
+        # Standardize the critic's regression target against a running estimate of the
+        # discounted returns. See RunningMeanStd.
+        self.normalize_returns = bool(hp.get("normalize_returns", True))
+        self.ret_rms = RunningMeanStd()
+        # A checkpoint predating return normalization holds a critic trained in raw reward
+        # units. Reinterpreting those outputs as standardized would scale every value by the
+        # return standard deviation overnight, so the head is rescaled once instead (see
+        # _migrate_critic_to_normalized_values).
+        self._needs_value_norm_migration = False
         self.max_grad_norm = float(hp.get("max_grad_norm", 0.5))
         # Per-channel exploration floor [Throttle, Steer, Pitch, Yaw, Roll]. Config wins over
         # whatever a resumed checkpoint was saved with, so raising it takes effect on resume
@@ -638,6 +705,54 @@ class PPOTrainer:
         except Exception as e:
             print(f"[Live Config Error] {e}")
 
+    # ---- Value normalization ------------------------------------------------
+
+    def _denormalize_values(self, v: torch.Tensor) -> torch.Tensor:
+        """Critic output (standardized) -> real reward units, for GAE and bootstrapping."""
+        if not self.normalize_returns:
+            return v
+        return v * self.ret_rms.std + self.ret_rms.mean
+
+    def _normalize_returns(self, r: torch.Tensor) -> torch.Tensor:
+        """Real reward units -> the standardized space the critic is regressed onto."""
+        if not self.normalize_returns:
+            return r
+        return (r - self.ret_rms.mean) / self.ret_rms.std
+
+    def _migrate_critic_to_normalized_values(self, prev_mean: float, prev_std: float):
+        """
+        Rescale the critic's output layer so a resumed checkpoint keeps the value function
+        it learned.
+
+        Before this change the critic predicted returns in raw reward units. Afterwards it
+        predicts (return - mean) / std. Those differ by an affine map, and the last layer of
+        the critic is affine, so the whole conversion is one rescale of that layer's weight
+        and bias -- no relearning, no discontinuity in the value estimates.
+
+        prev_mean/prev_std describe the space the loaded critic was trained in: raw units
+        for a pre-normalization checkpoint, which is mean 0 and std 1.
+        """
+        head = None
+        for module in reversed(self.agent.critic):
+            if isinstance(module, nn.Linear):
+                head = module
+                break
+        if head is None:
+            return
+        new_std = self.ret_rms.std
+        new_mean = self.ret_rms.mean
+        with torch.no_grad():
+            # v_old = v_head * prev_std + prev_mean  (real units)
+            # v_new = (v_old - new_mean) / new_std
+            scale = prev_std / new_std
+            head.weight.data.mul_(scale)
+            head.bias.data.mul_(scale)
+            head.bias.data.add_((prev_mean - new_mean) / new_std)
+        print(
+            f"[PPO Trainer] Rescaled critic head for return normalization "
+            f"(mean {new_mean:.3f}, std {new_std:.3f})"
+        )
+
     def save_checkpoint(self, path: str):
         data = {
             "iteration": self.iteration,
@@ -653,6 +768,7 @@ class PPOTrainer:
             "activation": self.activation,
             "rot_anneal_start_iter": self._rot_anneal_start_iter,
             "rot_anneal_start_ceiling": self._rot_anneal_start_ceiling,
+            "return_rms": self.ret_rms.state_dict(),
         }
         # Atomic save on Windows: write to .tmp file then replace with retry to avoid file lock conflict (Error 1224)
         tmp_path = path + f".tmp.{os.getpid()}"
@@ -760,6 +876,22 @@ class PPOTrainer:
             except Exception as e:
                 print(f"[PPO Trainer] Warning: Could not delete old checkpoint {old_file}: {e}")
 
+    def _load_return_rms(self, checkpoint):
+        """
+        Restore the return statistics, or flag the checkpoint as predating them.
+
+        A checkpoint that carries no "return_rms" was trained with a critic that predicted
+        raw reward units. Its head is rescaled once, after the first rollout has supplied
+        real statistics to rescale it against.
+        """
+        stats = checkpoint.get("return_rms") if isinstance(checkpoint, dict) else None
+        if stats:
+            self.ret_rms.load_state_dict(stats)
+            self._needs_value_norm_migration = False
+        elif self.normalize_returns:
+            self.ret_rms = RunningMeanStd()
+            self._needs_value_norm_migration = True
+
     def load_checkpoint(self, path: str):
         if not os.path.exists(path):
             print(f"[PPO Trainer] Checkpoint not found at {path}")
@@ -796,6 +928,7 @@ class PPOTrainer:
             self._load_reward_anneal_clocks(checkpoint)
             self._rot_anneal_start_iter = checkpoint.get("rot_anneal_start_iter")
             self._rot_anneal_start_ceiling = checkpoint.get("rot_anneal_start_ceiling")
+            self._load_return_rms(checkpoint)
             self._apply_log_std_floor()
             self.agent.debias_symmetric_actions()
             print(f"[PPO Trainer] Successfully migrated weights to new dimensions (Obs: {self.obs_dim}, Act: {self.act_dim}) from {path} (Iter: {self.iteration})")
@@ -812,6 +945,7 @@ class PPOTrainer:
         self._load_reward_anneal_clocks(checkpoint)
         self._rot_anneal_start_iter = checkpoint.get("rot_anneal_start_iter")
         self._rot_anneal_start_ceiling = checkpoint.get("rot_anneal_start_ceiling")
+        self._load_return_rms(checkpoint)
         self._apply_log_std_floor()
         self.agent.debias_symmetric_actions()
 
@@ -885,6 +1019,13 @@ class PPOTrainer:
             episode_touches_list = []
             episode_goals_list = []
             rollout_touches_total = 0
+            # Truncated transitions accumulated over the rollout: (flat index into the
+            # step-major buffers, terminal observation). Sparse by construction -- typically
+            # well under one actor per step -- so they are gathered and bootstrapped in a
+            # single batched critic pass after collection rather than per step.
+            trunc_flat_idx: List[int] = []
+            trunc_term_obs: List[np.ndarray] = []
+            rollout_truncations = 0
 
             # 2. Collect Rollout
             for step in range(self.num_steps):
@@ -914,12 +1055,40 @@ class PPOTrainer:
                         episode_touches_list.extend(info.get("episode_touches", []))
                         episode_goals_list.append(sum(info.get("episode_goals", [0, 0])))
 
+                # Time-limit bootstrapping: record which actors were cut off by a clock or a
+                # resolved-scenario check, and the observation they were cut off at.
+                if hasattr(self.env, "get_truncation"):
+                    trunc_mask, term_obs = self.env.get_truncation()
+                    if trunc_mask.any():
+                        rows = np.nonzero(trunc_mask)[0]
+                        rollout_truncations += int(rows.size)
+                        base = step * self.total_actors
+                        trunc_flat_idx.extend((base + rows).tolist())
+                        trunc_term_obs.append(term_obs[rows].copy())
+
                 obs_tensor = torch.from_numpy(next_obs).float().reshape(-1, self.obs_dim).to(self.device)
                 done_tensor = torch.from_numpy(dones).float().flatten().to(self.device)
 
             # 3. Generalized Advantage Estimation (GAE)
             with torch.no_grad():
-                next_value = self.agent.get_value(obs_tensor).reshape(1, -1)
+                # Time-limit bootstrapping. A truncated episode has a real future that the
+                # reset threw away, so credit it with gamma * V(s_terminal) folded into the
+                # reward at that step. Doing it through the reward rather than by holding
+                # nextnonterminal at 1.0 matters: the environment auto-resets in place, so
+                # the observation at t+1 already belongs to a FRESH episode. Bootstrapping
+                # against that would value a finished play by whatever scenario replaced it,
+                # and would let GAE leak advantage backwards across the episode boundary.
+                # Keeping the boundary hard and paying the terminal value as reward is exact.
+                if trunc_flat_idx:
+                    term_batch = torch.from_numpy(np.concatenate(trunc_term_obs, axis=0)).float().to(self.device)
+                    term_v = self._denormalize_values(self.agent.get_value(term_batch).flatten())
+                    idx = torch.tensor(trunc_flat_idx, dtype=torch.long, device=self.device)
+                    rew_flat = rew_buf.view(-1)
+                    rew_flat[idx] += self.gamma * term_v
+
+                # The critic predicts standardized values; GAE runs in real reward units.
+                val_real = self._denormalize_values(val_buf)
+                next_value = self._denormalize_values(self.agent.get_value(obs_tensor).flatten()).reshape(1, -1)
                 advantages = torch.zeros_like(rew_buf)
                 lastgaelam = 0
                 for t in reversed(range(self.num_steps)):
@@ -928,10 +1097,23 @@ class PPOTrainer:
                         nextvalues = next_value
                     else:
                         nextnonterminal = 1.0 - done_buf[t + 1]
-                        nextvalues = val_buf[t + 1]
-                    delta = rew_buf[t] + self.gamma * nextvalues * nextnonterminal - val_buf[t]
+                        nextvalues = val_real[t + 1]
+                    delta = rew_buf[t] + self.gamma * nextvalues * nextnonterminal - val_real[t]
                     advantages[t] = lastgaelam = delta + self.gamma * self.gae_lambda * nextnonterminal * lastgaelam
-                returns = advantages + val_buf
+                returns = advantages + val_real
+
+                # Refresh the return statistics on this rollout, then express the critic's
+                # targets and its old predictions in the resulting space. Order matters on a
+                # resume: the loaded critic was read above under the OLD statistics, so the
+                # head is rescaled only after the new ones are in.
+                if self.normalize_returns:
+                    prev_mean, prev_std = self.ret_rms.mean, self.ret_rms.std
+                    self.ret_rms.update(returns)
+                    if self._needs_value_norm_migration:
+                        self._migrate_critic_to_normalized_values(prev_mean, prev_std)
+                        self._needs_value_norm_migration = False
+                returns_norm = self._normalize_returns(returns)
+                values_norm = self._normalize_returns(val_real)
 
             # Flatten rollout tensors for mini-batch updates
             b_obs = obs_buf.reshape(-1, self.obs_dim)
@@ -940,8 +1122,8 @@ class PPOTrainer:
             if not self.continuous_actions:
                 b_actions = b_actions.squeeze(-1)
             b_advantages = advantages.reshape(-1)
-            b_returns = returns.reshape(-1)
-            b_values = val_buf.reshape(-1)
+            b_returns = returns_norm.reshape(-1)
+            b_values = values_norm.reshape(-1)
 
             # Filter only policy learner actors (excludes heuristic baseline bot trajectories)
             learner_mask_1d = self.env.get_learner_mask()
@@ -1002,16 +1184,22 @@ class PPOTrainer:
                     pg_loss2 = -norm_adv * torch.clamp(ratio, 1 - self.clip_range, 1 + self.clip_range)
                     pg_loss = torch.max(pg_loss1, pg_loss2).mean()
 
-                    # Value loss
+                    # Value loss. Targets are standardized (see RunningMeanStd), so the
+                    # unclipped objective is well-scaled and vf_coef means what it says.
+                    # The clipped variant is opt-in via vf_clip_range and no longer borrows
+                    # the policy's clip_range.
                     newvalue = newvalue.view(-1)
                     v_loss_unclipped = (newvalue - aug_ret) ** 2
-                    v_clipped = aug_val + torch.clamp(
-                        newvalue - aug_val,
-                        -self.clip_range,
-                        self.clip_range,
-                    )
-                    v_loss_clipped = (v_clipped - aug_ret) ** 2
-                    v_loss = 0.5 * torch.max(v_loss_unclipped, v_loss_clipped).mean()
+                    if self.vf_clip_range is not None:
+                        v_clipped = aug_val + torch.clamp(
+                            newvalue - aug_val,
+                            -self.vf_clip_range,
+                            self.vf_clip_range,
+                        )
+                        v_loss_clipped = (v_clipped - aug_ret) ** 2
+                        v_loss = 0.5 * torch.max(v_loss_unclipped, v_loss_clipped).mean()
+                    else:
+                        v_loss = 0.5 * v_loss_unclipped.mean()
 
                     # Entropy loss (normalized per-channel for continuous Gaussian actions)
                     dim_scale = float(self.act_dim) if self.continuous_actions else 1.0
@@ -1148,6 +1336,9 @@ class PPOTrainer:
                 self.writer.add_scalar("losses/value_loss", mean_v_loss, self.global_step)
                 self.writer.add_scalar("losses/entropy", mean_entropy, self.global_step)
                 self.writer.add_scalar("charts/sps", sps, self.global_step)
+                self.writer.add_scalar("charts/truncations", rollout_truncations, self.global_step)
+                self.writer.add_scalar("charts/return_mean", self.ret_rms.mean, self.global_step)
+                self.writer.add_scalar("charts/return_std", self.ret_rms.std, self.global_step)
 
             # Console output
             print(

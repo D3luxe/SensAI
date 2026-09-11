@@ -2377,56 +2377,190 @@ class JumpBridgeReward(BaseReward):
 # ==============================================================================
 # 8. BOOST RETENTION & ECONOMY (Necto Sqrt-Potential Engine)
 # ==============================================================================
+def _nearest_active_pad_dist(active, poses, cpx: float, cpy: float, radius: float):
+    """
+    Planar distance to the nearest ACTIVE pad within `radius`, or None if there is none.
+
+    Ignores respawning pads deliberately: a pad on cooldown is not boost, so steering at one
+    should not read as progress.
+    """
+    best2 = radius * radius
+    found = False
+    for i in range(len(active)):
+        if not active[i]:
+            continue
+        dx = float(poses[i, 0]) - cpx
+        dy = float(poses[i, 1]) - cpy
+        d2 = dx * dx + dy * dy
+        if d2 < best2:
+            best2 = d2
+            found = True
+    return math.sqrt(best2) if found else None
+
+
 class BoostReward(BaseReward):
     """
-    Necto Potential-Based Boost Conservation & Pad Collection.
-    Uses sqrt(boost) to weight low boost levels heavily, and gates ground-burning waste
-    without penalizing aerial flight.
+    Potential-Based Boost Conservation & Pad Collection.
+
+    The conservation term is an exact potential difference, charged at the same rate in
+    both directions, so any path that returns to the boost level it started from sums to
+    zero. What survives is a pure function of the boost the car ended up holding.
+
+    On top of that sit situational waste penalties (supersonic burn, ceiling climbs,
+    reverse-momentum airbraking, off-axis orbiting) scaled by lose_weight, and a transit
+    shaping stream for routing through pads while low, scaled by gain_weight.
     """
     def __init__(self, gain_weight: float = 0.6, lose_weight: float = 0.3):
         super().__init__(gain_weight)
         self.gain_weight = gain_weight
         self.lose_weight = lose_weight
         self._prev_boost: Dict[int, float] = {}
+        self._prev_transit: Dict[int, float] = {}
+
+    @staticmethod
+    def _potential(b: float) -> float:
+        """
+        Phi(b) = 3*sqrt(b) - (2/3)*b^1.5, for b in [0, 1].
+
+        This is the exact antiderivative of the hunger-weighted sqrt shaping this class
+        used to pay only on the way up. That term was `(1 + 2*(1 - b)) * d(sqrt(b))`,
+        while the way down was charged a different and smaller expression at a different
+        weight, so a burn-and-refill cycle closed net positive and could be repeated for
+        the whole episode. Substituting u = sqrt(b) turns the differential into
+        (3 - 2*u^2) du, which integrates to 3u - (2/3)u^3.
+
+        Charging Phi(curr) - Phi(prev) in both directions reproduces the identical
+        low-boost hunger gradient -- the slope is still steepest near empty -- while
+        telescoping exactly. Phi(0) = 0 and Phi(1) = 7/3, so the conservation term over
+        an entire episode is bounded by (7/3) * gain_weight no matter how many pads the
+        car drives through.
+        """
+        u = math.sqrt(max(0.0, min(1.0, b)))
+        return 3.0 * u - (2.0 / 3.0) * u * u * u
 
     def reset(self, initial_state: RocketSimArena):
         self._prev_boost = {car.id: _clip(car.boost / 100.0, 0.0, 1.0) for car in initial_state.cars}
+        self._prev_transit = {car.id: self._transit_potential(car, initial_state) for car in initial_state.cars}
+
+    def _transit_potential(self, car: CarState, arena: RocketSimArena) -> float:
+        """
+        Psi(s): how well placed the car is to pick up boost it needs, as a pure function of
+        state -- distance to the nearest active pad, scaled by how empty the tank is.
+
+        This replaces a per-step INCOME stream. The old term paid
+        `0.40 * hunger * align * prox * speed` on every step the car was closing on a pad,
+        which had no counterpart when it turned away, so circling in and out of pad range
+        while low on boost paid roughly 3.0 per approach and could be repeated all episode.
+
+        Charging the DIFFERENCE in Psi instead preserves exactly the behaviour that term was
+        bought for -- routing through pads rather than skipping them still pays, step by
+        step, in proportion to distance actually closed -- while making it a guide with zero
+        net payout. Approaching a pad and turning away refunds precisely what it paid, and
+        collecting one zeroes Psi (the pad goes inactive and the tank is full), which cancels
+        the approach. All the durable value then comes from Phi, where it belongs.
+
+        The explicit alignment and speed gates the rate term needed are gone: a potential
+        difference already measures alignment times speed, because that is what closing
+        distance is. The height taper stays, and in this form its old hazard is gone too --
+        jumping near a pad costs Psi but landing refunds it, so there is no longer a standing
+        opportunity cost for leaving the turf.
+        """
+        if self.gain_weight <= 1e-6:
+            return 0.0
+        # Only shaped near the turf; decays to zero by 250 uu so it never rewards an aerial
+        # "pad approach" the car cannot actually complete.
+        cz = float(car.pos[2])
+        if not (car.on_ground or cz < 250.0):
+            return 0.0
+        air_taper = 1.0 if car.on_ground else max(0.0, 1.0 - (cz - 17.0) / 233.0)
+
+        cpx, cpy = float(car.pos[0]), float(car.pos[1])
+        best = 0.0
+
+        # Big orbs: worth going further out of the way for, so a wider search radius.
+        if car.boost < 50.0 and hasattr(arena, "_big_pad_pos_3d") and hasattr(arena, "_big_pad_active"):
+            # Urgency below 20 boost ramps in continuously rather than switching on at the
+            # threshold. As a rate term the old `if boost < 20: hunger *= 1.3` was merely a
+            # step in the income; as a potential it became a payment for crossing 20 going
+            # down, which made the combined potential non-monotone in boost right there --
+            # burning a sliver of boost next to a pad paid 0.074. The ramp reaches the same
+            # 1.3x at empty with no discontinuity anywhere.
+            hunger = (50.0 - car.boost) / 50.0
+            hunger *= 1.0 + 0.3 * _clip((20.0 - car.boost) / 20.0, 0.0, 1.0)
+            hunger = min(1.5, hunger)
+            d = _nearest_active_pad_dist(arena._big_pad_active, arena._big_pad_pos_3d, cpx, cpy, 1200.0)
+            if d is not None:
+                best = max(best, 0.40 * hunger * (1.0 - d / 1200.0))
+
+        if car.boost < 65.0 and hasattr(arena, "_small_pad_pos_3d") and hasattr(arena, "_small_pad_active"):
+            hunger = (65.0 - car.boost) / 65.0
+            d = _nearest_active_pad_dist(arena._small_pad_active, arena._small_pad_pos_3d, cpx, cpy, 550.0)
+            if d is not None:
+                best = max(best, 0.20 * hunger * (1.0 - d / 550.0))
+
+        return float(self.gain_weight * best * air_taper)
 
     def get_reward(self, car: CarState, arena: RocketSimArena, action: np.ndarray, is_goal: bool, scoring_team: Optional[int]) -> float:
         prev = self._prev_boost.get(car.id, _clip(car.boost / 100.0, 0.0, 1.0))
         curr = _clip(car.boost / 100.0, 0.0, 1.0)
         self._prev_boost[car.id] = curr
 
-        # Suspend all boost collection rewards and usage penalties during active kickoff (until ball is first touched/moving)
-        is_kickoff = bool(abs(arena.ball.pos[0]) < 50.0 and abs(arena.ball.pos[1]) < 50.0 and arena.ball.pos[2] < 120.0 and _norm3(arena.ball.vel) < 100.0)
-        if is_kickoff:
-            return 0.0
+        # Transit potential advances on EVERY step, including kickoff and including steps
+        # where the tank did not change. Skipping the update on any step would drop that
+        # step's difference on the floor, and a shaping term that silently forgets an
+        # interval is no longer telescoping.
+        psi_now = self._transit_potential(car, arena)
+        psi_delta = psi_now - self._prev_transit.get(car.id, psi_now)
+        self._prev_transit[car.id] = psi_now
 
         boost_diff = math.sqrt(curr) - math.sqrt(prev)
 
-        if boost_diff > 1e-5:
-            # ── 1. Boost Pad Collection Event Bonus & Low-Boost Hunger ─────────
-            # Strictly gate: if gain_weight is zero, pad collection contributes 0.0
-            if self.gain_weight <= 1e-6:
-                return 0.0
-            # Heavy low-boost hunger: picking up pads when near zero boost is critical for mobility & defense
-            hunger_mult = 1.0 + 2.0 * max(0.0, 1.0 - prev)
-            base_gain = self.gain_weight * boost_diff * hunger_mult
+        # ── 1. Symmetric Boost Conservation Potential ────────────────────────
+        # Paid on gain and charged at exactly the same rate on loss, so burning boost and
+        # refilling it nets zero. Three things used to break that symmetry and each one is
+        # deliberately gone:
+        #   - the discrete pad pickup bonus, which was pure event income with no counterpart
+        #     on the way down (a big orb from empty paid 4.62, more than advancing the ball
+        #     the full length of the pitch). Phi already prices a big pad far above a small
+        #     one, because a big pad moves b much further, so the distinction survives.
+        #   - the low-boost hunger multiplier applied only to gains. It is now baked into the
+        #     shape of Phi and therefore applies in both directions.
+        #   - the height_factor discount on losses, which charged aerial boost at a fifth of
+        #     what refilling it paid. A successful aerial is still free in net terms: the
+        #     boost it spends costs exactly what refuelling refunds. Encouraging aerials is
+        #     AirRollRecoveryReward's job, not a discount on the fuel gauge.
+        # Gated on gain_weight alone. lose_weight now scales only the situational waste
+        # penalties below; letting it scale the conservation term at a different value from
+        # gain_weight is precisely what made cycling profitable.
+        if self.gain_weight <= 1e-6:
+            potential_delta = 0.0
+        else:
+            potential_delta = self.gain_weight * (self._potential(curr) - self._potential(prev))
 
-            # Discrete pad collection event bonus:
-            # Small pad (+12 boost): +0.45 * hunger
-            # Big orb (+100 boost): +1.20 * hunger
-            is_big_pad = bool((curr - prev) > 0.50)
-            pickup_bonus = (1.20 if is_big_pad else 0.45) * max(0.5, 1.0 - prev)
-            return float(base_gain + self.gain_weight * pickup_bonus)
+        # Everything shaped is now a potential difference, so the two are simply summed.
+        shaping = potential_delta + psi_delta
+
+        # The kickoff gate applies to the situational PENALTIES only. It used to suppress the
+        # whole term, which let the kickoff burn go uncharged while the refill afterwards was
+        # still paid -- worth about 1.76 of free reward per kickoff at the current weights.
+        # Neutrality already delivers what the gate was for: boost spent on a kickoff costs
+        # exactly what refuelling refunds, so there is nothing left to forgive.
+        is_kickoff = bool(
+            abs(arena.ball.pos[0]) < 50.0
+            and abs(arena.ball.pos[1]) < 50.0
+            and arena.ball.pos[2] < 120.0
+            and _norm3(arena.ball.vel) < 100.0
+        )
+
+        if boost_diff > 1e-5:
+            return float(shaping)
 
         elif boost_diff < -1e-5:
             # ── 2. Boost Usage, Waste & Negative Momentum Penalties ─────────────
-            # Strictly gate: if lose_weight is zero, boost usage penalties contribute 0.0
-            if self.lose_weight <= 1e-6:
-                return 0.0
-            height_factor = max(0.2, 1.0 - (car.pos[2] / GOAL_HEIGHT))
-            loss_rew = self.lose_weight * boost_diff * height_factor
+            # Strictly gate: if lose_weight is zero, only the potentials remain
+            if self.lose_weight <= 1e-6 or is_kickoff:
+                return float(shaping)
+            loss_rew = shaping
 
             # Supersonic boost waste penalty: burning boost when already at max speed (>= 2150 uu/s)
             speed = _norm3(car.vel)
@@ -2509,80 +2643,12 @@ class BoostReward(BaseReward):
 
             return loss_rew
         else:
-            # ── 3. Continuous Transit Pad Approach & Alignment Shaping ──────────
-            # When low on boost, reward steering toward and routing through active boost pads
-            # along the travel path, eliminating straight-line pad skipping.
-            # Height taper rather than a hard on_ground gate: a hard gate deleted up to
-            # ~0.56/step the instant the car left the turf, which is a standing opportunity
-            # cost for jumping. Decays to zero by 250 uu so it never rewards aerial "pad approach".
-            if car.on_ground or car.pos[2] < 250.0:
-                air_taper = 1.0 if car.on_ground else max(0.0, 1.0 - (float(car.pos[2]) - 17.0) / 233.0)
-                cpx, cpy = float(car.pos[0]), float(car.pos[1])
-                fwd = car.get_forward_vector()
-
-                # 3a. Strategic Big Orb Transit Shaping (gated at boost < 50.0, 1200 uu search radius)
-                if car.boost < 50.0 and hasattr(arena, "_big_pad_pos_3d") and hasattr(arena, "_big_pad_active"):
-                    bg_act = arena._big_pad_active
-                    bg_poses = arena._big_pad_pos_3d
-                    min_bg_d2 = 1200.0 * 1200.0
-                    min_bg_idx = -1
-                    for p_idx in range(len(bg_act)):
-                        if bg_act[p_idx]:
-                            dx = float(bg_poses[p_idx, 0]) - cpx
-                            dy = float(bg_poses[p_idx, 1]) - cpy
-                            d2 = dx * dx + dy * dy
-                            if d2 < min_bg_d2:
-                                min_bg_d2 = d2
-                                min_bg_idx = p_idx
-
-                    if min_bg_idx >= 0:
-                        pad_dist = math.sqrt(min_bg_d2)
-                        dx = float(bg_poses[min_bg_idx, 0]) - cpx
-                        dy = float(bg_poses[min_bg_idx, 1]) - cpy
-                        pad_dir_x = dx / max(1e-4, pad_dist)
-                        pad_dir_y = dy / max(1e-4, pad_dist)
-                        pad_align = fwd[0] * pad_dir_x + fwd[1] * pad_dir_y
-                        speed_to_pad = car.vel[0] * pad_dir_x + car.vel[1] * pad_dir_y
-
-                        if pad_align > 0.20 and speed_to_pad > 150.0:
-                            boost_hunger = (50.0 - car.boost) / 50.0
-                            if car.boost < 20.0:
-                                boost_hunger = min(1.5, boost_hunger * 1.3)
-                            prox = 1.0 - (pad_dist / 1200.0)
-                            speed_fac = min(1.0, speed_to_pad / 1000.0)
-                            return float(self.gain_weight * 0.40 * boost_hunger * pad_align * prox * speed_fac * air_taper)
-
-                # 3b. Transit Small Pad Shaping (gated at boost < 65.0, 550 uu search radius)
-                if car.boost < 65.0 and hasattr(arena, "_small_pad_pos_3d") and hasattr(arena, "_small_pad_active"):
-                    sm_act = arena._small_pad_active
-                    sm_poses = arena._small_pad_pos_3d
-                    min_sm_d2 = 550.0 * 550.0
-                    min_sm_idx = -1
-                    for p_idx in range(len(sm_act)):
-                        if sm_act[p_idx]:
-                            dx = float(sm_poses[p_idx, 0]) - cpx
-                            dy = float(sm_poses[p_idx, 1]) - cpy
-                            d2 = dx * dx + dy * dy
-                            if d2 < min_sm_d2:
-                                min_sm_d2 = d2
-                                min_sm_idx = p_idx
-
-                    if min_sm_idx >= 0:
-                        pad_dist = math.sqrt(min_sm_d2)
-                        dx = float(sm_poses[min_sm_idx, 0]) - cpx
-                        dy = float(sm_poses[min_sm_idx, 1]) - cpy
-                        pad_dir_x = dx / max(1e-4, pad_dist)
-                        pad_dir_y = dy / max(1e-4, pad_dist)
-                        pad_align = fwd[0] * pad_dir_x + fwd[1] * pad_dir_y
-                        speed_to_pad = car.vel[0] * pad_dir_x + car.vel[1] * pad_dir_y
-
-                        if pad_align > 0.25 and speed_to_pad > 150.0:
-                            boost_hunger = (65.0 - car.boost) / 65.0
-                            prox = 1.0 - (pad_dist / 550.0)
-                            speed_fac = min(1.0, speed_to_pad / 1000.0)
-                            return float(self.gain_weight * 0.20 * boost_hunger * pad_align * prox * speed_fac * air_taper)
-
-            return 0.0
+            # ── 3. Transit Pad Routing ─────────────────────────────────
+            # The tank did not change this step, so only the transit potential can have
+            # moved, and it is already folded into `shaping`. This branch used to carry a
+            # per-step income stream for closing on a pad; see _transit_potential for why
+            # that is now a difference instead.
+            return float(shaping)
 
 
 # ==============================================================================
