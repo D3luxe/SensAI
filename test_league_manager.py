@@ -1561,3 +1561,170 @@ class TestBenchmarkCounterPersistence(unittest.TestCase):
         with open(self.state_path, "w", encoding="utf-8") as f:
             json.dump({"version": "1.0", "benchmark_counter": "not a number"}, f)
         self.assertEqual(self._manager()._benchmark_counter, 0)
+
+
+class TestBenchmarkHistory(unittest.TestCase):
+    """
+    The benchmark reading has to become a curve, not just a latest value.
+
+    run_benchmarks replaces benchmark_results wholesale, and the per-iteration history
+    log is hundreds of megabytes of rows, far too coarse a haystack for a value that
+    fires once every few thousand iterations. A capped list on the league state is the
+    only thing that can answer "is this improving" rather than "where is it now".
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp(prefix="sensai_test_bmhist_")
+        self.leaderboard_path = os.path.join(self.tmp, "lb.json")
+        self.state_path = os.path.join(self.tmp, "state.json")
+        self.evaluator = TrueSkillEvaluator(leaderboard_path=self.leaderboard_path)
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def _manager(self, cap=300):
+        return LeagueManager(
+            evaluator=self.evaluator,
+            leaderboard_path=self.leaderboard_path,
+            config={"league_state_path": self.state_path, "benchmark_history_cap": cap}
+        )
+
+    @staticmethod
+    def _results(margin_source=(11, 20, 59)):
+        gf, ga, eps = margin_source
+        return {"Necto": {
+            "series": 8, "series_won": 0, "goals_for": gf, "goals_against": ga,
+            "episodes": eps, "margin_per_episode": round((gf - ga) / eps, 3),
+        }}
+
+    def test_an_event_is_keyed_on_training_iteration(self):
+        lm = self._manager()
+        lm._append_benchmark_history("checkpoints/checkpoint_iter_190000.pt", self._results())
+        self.assertEqual(len(lm.benchmark_history), 1)
+        entry = lm.benchmark_history[0]
+        self.assertEqual(entry["iteration"], 190000)
+        self.assertEqual(entry["results"]["Necto"]["episodes"], 59)
+        self.assertAlmostEqual(entry["results"]["Necto"]["margin_per_episode"], -0.153, places=3)
+
+    def test_a_subject_with_no_iteration_is_not_placed_on_the_axis(self):
+        """An anchor or latest_model has no iteration, so it cannot be a point on a curve."""
+        lm = self._manager()
+        lm._append_benchmark_history("checkpoints/necto-model.pt", self._results())
+        self.assertEqual(lm.benchmark_history, [])
+
+    def test_history_is_capped_keeping_the_newest(self):
+        lm = self._manager(cap=5)
+        for i in range(12):
+            lm._append_benchmark_history(f"checkpoints/checkpoint_iter_{1000 + i}.pt", self._results())
+        self.assertEqual(len(lm.benchmark_history), 5)
+        self.assertEqual([e["iteration"] for e in lm.benchmark_history], [1007, 1008, 1009, 1010, 1011])
+
+    def test_history_survives_a_rebuild_from_disk(self):
+        first = self._manager()
+        first._append_benchmark_history("checkpoints/checkpoint_iter_188000.pt", self._results())
+        first._append_benchmark_history("checkpoints/checkpoint_iter_190000.pt", self._results((20, 11, 59)))
+        first.save_league_state()
+
+        second = self._manager()
+        self.assertEqual([e["iteration"] for e in second.benchmark_history], [188000, 190000])
+        self.assertEqual(second.benchmark_history[-1]["results"]["Necto"]["goals_for"], 20)
+
+    def test_malformed_history_entries_are_dropped_on_load(self):
+        with open(self.state_path, "w", encoding="utf-8") as f:
+            json.dump({"version": "1.0", "benchmark_history": [
+                {"iteration": 1, "results": {"Necto": {"episodes": 4}}},
+                {"iteration": 2},          # no results
+                "not a dict",
+                {"results": {}},           # no iteration, still shaped correctly
+            ]}, f)
+        lm = self._manager()
+        self.assertEqual(len(lm.benchmark_history), 2)
+
+    def test_a_state_file_written_before_history_existed_still_loads(self):
+        with open(self.state_path, "w", encoding="utf-8") as f:
+            json.dump({"version": "1.0", "contender_queue": [], "elite_pool": []}, f)
+        self.assertEqual(self._manager().benchmark_history, [])
+
+
+class TestBenchmarkChartRendering(unittest.TestCase):
+    """The chart is server-rendered SVG, so its shape is testable without a browser."""
+
+    @classmethod
+    def setUpClass(cls):
+        # Imported here rather than at module scope, matching the other UI-touching tests
+        # in this file: ui.app pulls in Gradio, which is slow and not needed by the rest.
+        global _build_benchmark_chart, _build_pool_panel
+        from ui.app import _build_benchmark_chart, _build_pool_panel
+
+    @staticmethod
+    def _entry(iteration, gf, ga, eps=50, name="Necto"):
+        return {
+            "at": "2026-09-10T20:00:00", "iteration": iteration, "subject": f"checkpoint_iter_{iteration}",
+            "results": {name: {"series": 8, "series_won": 0, "goals_for": gf,
+                               "goals_against": ga, "episodes": eps}},
+        }
+
+    def test_a_single_reading_is_not_yet_a_curve(self):
+        html = _build_benchmark_chart({"benchmark_history": [self._entry(1000, 5, 20)]})
+        self.assertIn("a curve needs two", html)
+        self.assertNotIn("<svg", html)
+
+    def test_no_readings_explains_why_the_ladder_cannot_answer_this(self):
+        html = _build_benchmark_chart({})
+        self.assertIn("No benchmark has run yet", html)
+        self.assertIn("pool-relative", html)
+
+    def test_two_readings_plot_a_point_each_and_a_fitted_trend(self):
+        state = {"benchmark_history": [self._entry(1000, 5, 20), self._entry(2000, 15, 20)]}
+        html = _build_benchmark_chart(state)
+        self.assertIn("<svg", html)
+        self.assertIn("bm-mark", html)
+        # Two points cannot support a fit; the trend needs three.
+        self.assertNotIn("bm-trend", html)
+        self.assertIn("vs Necto", html)
+
+    def test_three_readings_add_the_least_squares_trend(self):
+        state = {"benchmark_history": [
+            self._entry(1000, 5, 20), self._entry(2000, 10, 20), self._entry(3000, 15, 20)
+        ]}
+        self.assertIn("bm-trend", _build_benchmark_chart(state))
+
+    def test_readings_without_an_episode_count_are_skipped(self):
+        """Entries written before the margin readout existed cannot be placed."""
+        state = {"benchmark_history": [self._entry(1000, 5, 20, eps=0), self._entry(2000, 5, 20, eps=0)]}
+        html = _build_benchmark_chart(state)
+        self.assertIn("no episode count", html)
+        self.assertNotIn("<svg", html)
+
+    def test_each_reference_gets_its_own_series_and_they_are_never_summed(self):
+        a = self._entry(1000, 5, 20, name="Necto")
+        a["results"]["Nexto"] = {"series": 8, "series_won": 4, "goals_for": 22,
+                                 "goals_against": 20, "episodes": 50}
+        b = self._entry(2000, 15, 20, name="Necto")
+        b["results"]["Nexto"] = {"series": 8, "series_won": 2, "goals_for": 12,
+                                 "goals_against": 20, "episodes": 50}
+        html = _build_benchmark_chart({"benchmark_history": [a, b]})
+        self.assertIn("vs Necto", html)
+        self.assertIn("vs Nexto", html)
+        self.assertIn("never combined", html)
+        # Distinct colour AND distinct marker shape, so the series survive a greyscale read.
+        self.assertIn("#a78bfa", html)
+        self.assertIn("#34d399", html)
+        self.assertIn("<circle", html)
+        self.assertIn("<rect", html)
+
+    def test_margin_is_clamped_to_the_fixed_axis(self):
+        """A shutout is +/-1 exactly; nothing may plot outside the axis."""
+        state = {"benchmark_history": [self._entry(1000, 50, 0, eps=50), self._entry(2000, 0, 50, eps=50)]}
+        html = _build_benchmark_chart(state)
+        self.assertIn("<svg", html)
+        self.assertIn("+1.00", html)
+
+    def test_the_panel_offers_both_faces_with_the_roster_showing_first(self):
+        evaluator = TrueSkillEvaluator(leaderboard_path=os.path.join(tempfile.mkdtemp(), "lb.json"))
+        html = _build_pool_panel({"benchmark_history": []}, evaluator)
+        self.assertIn('id="lbface-pool" checked', html)
+        self.assertIn('id="lbface-chart"', html)
+        self.assertNotIn('id="lbface-chart" checked', html)
+        self.assertIn("lb-face-pool", html)
+        self.assertIn("lb-face-chart", html)

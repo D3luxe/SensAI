@@ -199,6 +199,10 @@ class LeagueManager:
         # never run once, and benchmark_results was empty on every live board.
         self._benchmark_counter = 0
         self.benchmark_results: Dict[str, Any] = {}
+        # One entry per benchmark event, so the reading becomes a curve. Capped because
+        # this rides in the league state file, which the UI reloads on every refresh.
+        self.benchmark_history: List[Dict[str, Any]] = []
+        self.benchmark_history_cap = int(self.config.get("benchmark_history_cap", 300))
 
         # Opponents a gauntlet trial is split across. More than one because a long run
         # against a single opponent measures the pair rather than the population.
@@ -533,6 +537,7 @@ class LeagueManager:
             "contenders": self.get_contender_queue_details(),
             "benchmark_counter": self._benchmark_counter,
             "benchmark_results": self.benchmark_results,
+            "benchmark_history": self.benchmark_history[-self.benchmark_history_cap:],
         }
         try:
             with open(tmp_path, "w", encoding="utf-8") as f:
@@ -574,6 +579,12 @@ class LeagueManager:
             loaded_bench = data.get("benchmark_results")
             if isinstance(loaded_bench, dict):
                 self.benchmark_results = loaded_bench
+            loaded_hist = data.get("benchmark_history")
+            if isinstance(loaded_hist, list):
+                self.benchmark_history = [
+                    e for e in loaded_hist
+                    if isinstance(e, dict) and isinstance(e.get("results"), dict)
+                ][-self.benchmark_history_cap:]
         except Exception as e:
             print(f"[League Manager] Warning: Could not load league state from {target_path}: {e}")
 
@@ -779,7 +790,7 @@ class LeagueManager:
             try:
                 a = create_opponent_bot(subject, continuous_actions=True)
                 b = create_opponent_bot(opp, continuous_actions=True)
-                wins = goals_for = goals_against = 0
+                wins = goals_for = goals_against = episodes = 0
                 for _ in range(max(1, self.benchmark_series)):
                     r = simulate_headless_series(
                         a, b,
@@ -791,12 +802,23 @@ class LeagueManager:
                     wins += 1 if r.get("winner") == "a" else 0
                     goals_for += int(r.get("a_score", 0))
                     goals_against += int(r.get("b_score", 0))
+                    episodes += int(r.get("episodes_played", 0))
                 played = max(1, self.benchmark_series)
                 results[get_model_display_name(opp)] = {
                     "series": played,
                     "series_won": wins,
                     "points_rate": round(100.0 * wins / played, 1),
                     "goals": f"{goals_for}-{goals_against}",
+                    # Goal margin per episode is the readout that carries a gradient.
+                    # Series win rate against these references is pinned at the rails --
+                    # checkpoints take 100% off the heuristic and the BC baseline and won
+                    # 9 of 96 off Necto across iterations 160000-190200 -- while the
+                    # margin over that same span moved -0.64 to -0.25. Recording the
+                    # episode count is what makes the margin recoverable later.
+                    "goals_for": goals_for,
+                    "goals_against": goals_against,
+                    "episodes": episodes,
+                    "margin_per_episode": round((goals_for - goals_against) / episodes, 3) if episodes else 0.0,
                     "subject": get_model_display_name(subject),
                     "at": datetime.datetime.now().isoformat(),
                 }
@@ -804,7 +826,47 @@ class LeagueManager:
                 print(f"[League Manager] Benchmark against {opp} failed: {e}")
         if results:
             self.benchmark_results = results
+            self._append_benchmark_history(subject, results)
         return results
+
+    def _append_benchmark_history(self, subject: str, results: Dict[str, Any]):
+        """
+        Keeps one entry per benchmark event so the score becomes a curve.
+
+        Without this the benchmark is a single latest reading: run_benchmarks replaces
+        benchmark_results wholesale, and the per-iteration history log is 327 MB of
+        per-iteration rows, far too coarse a haystack to recover a value that fires once
+        every few thousand iterations. A capped list on the league state is small, is
+        already loaded by the UI on every refresh, and is the only thing that can answer
+        "is this improving" rather than "where is it now".
+
+        Keyed on training iteration rather than wall clock, because restarts and pauses
+        make elapsed time a poor x axis for a training curve.
+        """
+        iteration = self._checkpoint_iteration(subject)
+        entry = {
+            "at": datetime.datetime.now().isoformat(),
+            "iteration": iteration,
+            "subject": get_model_display_name(subject),
+            "results": {
+                name: {
+                    "series": res.get("series", 0),
+                    "series_won": res.get("series_won", 0),
+                    "goals_for": res.get("goals_for", 0),
+                    "goals_against": res.get("goals_against", 0),
+                    "episodes": res.get("episodes", 0),
+                    "margin_per_episode": res.get("margin_per_episode", 0.0),
+                }
+                for name, res in results.items()
+            },
+        }
+        # An entry with no iteration cannot be placed on the axis, so it is reported in
+        # benchmark_results but kept out of the series.
+        if iteration is None:
+            return
+        self.benchmark_history.append(entry)
+        if len(self.benchmark_history) > self.benchmark_history_cap:
+            self.benchmark_history = self.benchmark_history[-self.benchmark_history_cap:]
 
     def _nearest_anchor(self, rec: Optional[ModelRating], exclude: str = "") -> Optional[str]:
         """

@@ -624,6 +624,55 @@ button.primary-btn {
     border: 1px dashed #2b3a52; border-radius: 8px; margin: 12px 16px;
 }
 
+/* ---- Elite Pool / Benchmark flip ------------------------------------
+   Two faces of one panel. Two radios rather than one checkbox, so clicking the
+   tab you are already on is a no-op instead of flipping away. Sibling selectors
+   rather than :has() so this holds on the older webviews Gradio embeds. The flip
+   is pure CSS, so it costs no server round trip; a re-render returns the card to
+   the roster face, which happens only when the leaderboard or league state
+   changes on disk. */
+
+.lb-flip-input { position: absolute; opacity: 0; pointer-events: none; width: 0; height: 0; }
+
+.lb-flip-tabs { display: inline-flex; gap: 2px; padding: 2px; border-radius: 7px;
+    background: rgba(15, 23, 42, 0.75); border: 1px solid #22304a; }
+
+.lb-flip-tab {
+    cursor: pointer; user-select: none;
+    font-size: 0.72em; font-weight: 700; letter-spacing: 0.6px; text-transform: uppercase;
+    padding: 4px 10px; border-radius: 5px; color: #7c8ba1;
+    transition: background 0.18s ease, color 0.18s ease;
+}
+.lb-flip-tab:hover { color: #cbd5e1; }
+
+.lb-flip-face { display: none; }
+#lbface-pool:checked  ~ .lb-face-pool  { display: block; }
+#lbface-chart:checked ~ .lb-face-chart { display: block; }
+#lbface-pool:checked  ~ .lb-panel-head .lb-flip-tab-pool,
+#lbface-chart:checked ~ .lb-panel-head .lb-flip-tab-chart {
+    background: rgba(56, 189, 248, 0.16); color: #7dd3fc;
+}
+
+.lb-face-note { padding: 8px 16px 0; font-size: 0.78em; color: #7c8ba1; letter-spacing: 0.3px; }
+.lb-face-note b { color: #38bdf8; }
+
+/* ---- Benchmark scatter ---------------------------------------------- */
+
+.bm-chart { padding: 14px 16px 10px; }
+.bm-svg { width: 100%; height: auto; display: block; overflow: visible; }
+.bm-grid { stroke: rgba(51, 65, 85, 0.45); stroke-width: 1; }
+.bm-zero { stroke: rgba(148, 163, 184, 0.7); stroke-width: 1.2; }
+.bm-axis-label { fill: #64748b; font-size: 9.5px; font-family: ui-monospace, monospace; }
+.bm-axis-title { fill: #7c8ba1; font-size: 9.5px; letter-spacing: 0.5px; }
+.bm-trend { fill: none; stroke-width: 1.5; opacity: 0.5; stroke-dasharray: 5 4; }
+.bm-mark { stroke: #0b1220; stroke-width: 1; }
+.bm-legend { display: flex; gap: 14px; flex-wrap: wrap; align-items: center;
+    padding: 0 16px 12px; font-size: 0.78em; color: #94a3b8; }
+.bm-legend-item { display: inline-flex; align-items: center; gap: 6px; }
+.bm-legend-swatch { width: 9px; height: 9px; border-radius: 2px; display: inline-block; }
+.bm-note { padding: 0 16px 14px; font-size: 0.76em; color: #64748b; line-height: 1.5; }
+.bm-note b { color: #94a3b8; font-weight: 600; }
+
 @media (max-width: 900px) {
     /* Drops the sigma, record and games columns; the remaining six keep their order,
        so the header and the body rows stay aligned at every width. */
@@ -1518,6 +1567,179 @@ def _build_gauntlet_trials(state: Dict[str, Any], evaluator: TrueSkillEvaluator)
     """
 
 
+# Marker shape and colour per reference. Shape carries the distinction as well as
+# colour, so the series stay separable for a colour-blind reader and in a screenshot.
+_BM_SERIES_STYLE = [
+    ("#a78bfa", "circle"),    # violet
+    ("#34d399", "square"),    # emerald
+    ("#fb7185", "triangle"),  # rose
+    ("#38bdf8", "diamond"),   # sky
+]
+
+
+def _bm_marker(shape: str, x: float, y: float, color: str, tip: str) -> str:
+    """One data point. The radius is deliberately small; these plots get dense over a long run."""
+    r = 3.4
+    if shape == "square":
+        return (f'<rect x="{x - r:.1f}" y="{y - r:.1f}" width="{2 * r:.1f}" height="{2 * r:.1f}" '
+                f'rx="0.8" fill="{color}" class="bm-mark"><title>{tip}</title></rect>')
+    if shape == "triangle":
+        pts = f"{x:.1f},{y - r - 0.6:.1f} {x + r + 0.4:.1f},{y + r:.1f} {x - r - 0.4:.1f},{y + r:.1f}"
+        return f'<polygon points="{pts}" fill="{color}" class="bm-mark"><title>{tip}</title></polygon>'
+    if shape == "diamond":
+        pts = (f"{x:.1f},{y - r - 0.7:.1f} {x + r + 0.7:.1f},{y:.1f} "
+               f"{x:.1f},{y + r + 0.7:.1f} {x - r - 0.7:.1f},{y:.1f}")
+        return f'<polygon points="{pts}" fill="{color}" class="bm-mark"><title>{tip}</title></polygon>'
+    return (f'<circle cx="{x:.1f}" cy="{y:.1f}" r="{r:.1f}" fill="{color}" '
+            f'class="bm-mark"><title>{tip}</title></circle>')
+
+
+def _build_benchmark_chart(state: Dict[str, Any]) -> str:
+    """
+    Goal margin per episode against each fixed reference, over training iteration.
+
+    Why margin rather than series wins: series win rate against these references is
+    pinned at the rails and has no gradient left. Checkpoints take 100% of series off
+    the heuristic and the BC baseline, and won 9 of 96 off Necto across iterations
+    160000-190200 both before and after a real improvement. The margin over that same
+    span moved -0.64 to -0.25, a 4.7 sigma change the series record shows as flat.
+
+    Why one line per reference and never a combined score: the reference set holds a
+    closed cycle. Nexto beats Necto every series, loses to every checkpoint measured,
+    and Necto beats those same checkpoints. No scalar spans that, so averaging the
+    columns would invent a transitivity that does not exist. The chart plots each
+    reference on its own and says so underneath.
+    """
+    history = [
+        e for e in (state.get("benchmark_history") or [])
+        if isinstance(e, dict) and e.get("iteration") is not None and isinstance(e.get("results"), dict)
+    ]
+
+    if len(history) < 2:
+        waiting = ("One reading so far, and a curve needs two."
+                   if len(history) == 1 else "No benchmark has run yet.")
+        return f"""
+        <div class="lb-empty">
+            &#128202; <b>{waiting}</b><br>
+            Fixed references play on the <code>benchmark_interval</code> schedule and change no
+            rating. They are the only measure that compares across checkpoints, because the
+            ladder is pool-relative and cannot see a gain the whole field shares.
+        </div>
+        """
+
+    history.sort(key=lambda e: e["iteration"])
+
+    # Series order is fixed by first appearance, so a colour never migrates between
+    # references as readings accumulate.
+    names: List[str] = []
+    for e in history:
+        for name in e["results"]:
+            if name not in names:
+                names.append(name)
+
+    points: Dict[str, List[Tuple[int, float, Dict[str, Any]]]] = {n: [] for n in names}
+    for e in history:
+        for name, res in e["results"].items():
+            eps = int(res.get("episodes", 0) or 0)
+            if eps <= 0:
+                continue  # written before the episode count was recorded
+            gf = int(res.get("goals_for", 0) or 0)
+            ga = int(res.get("goals_against", 0) or 0)
+            points[name].append((int(e["iteration"]), (gf - ga) / eps, res))
+    points = {n: p for n, p in points.items() if p}
+
+    if not points:
+        return """
+        <div class="lb-empty">
+            &#128202; <b>Readings exist but carry no episode count.</b><br>
+            They predate the margin readout. The next benchmark records it.
+        </div>
+        """
+
+    W, H = 720.0, 232.0
+    PAD_L, PAD_R, PAD_T, PAD_B = 44.0, 12.0, 12.0, 30.0
+    iters = [it for p in points.values() for it, _, _ in p]
+    x_lo, x_hi = min(iters), max(iters)
+    x_span = max(x_hi - x_lo, 1)
+
+    def sx(it: int) -> float:
+        return PAD_L + (W - PAD_L - PAD_R) * (it - x_lo) / x_span
+
+    def sy(margin: float) -> float:
+        # Margin per episode is bounded by +/-1, so the axis is fixed rather than fitted.
+        # A fixed axis keeps the zero line in one place between refreshes, which is what
+        # makes the chart readable at a glance instead of rescaling under the reader.
+        clamped = max(-1.0, min(1.0, margin))
+        return PAD_T + (H - PAD_T - PAD_B) * (1.0 - (clamped + 1.0) / 2.0)
+
+    parts: List[str] = []
+    for val, label in ((1.0, "+1"), (0.5, "+0.5"), (0.0, "0"), (-0.5, "-0.5"), (-1.0, "-1")):
+        y = sy(val)
+        cls = "bm-zero" if val == 0.0 else "bm-grid"
+        parts.append(f'<line x1="{PAD_L:.0f}" y1="{y:.1f}" x2="{W - PAD_R:.0f}" y2="{y:.1f}" class="{cls}" />')
+        parts.append(f'<text x="{PAD_L - 6:.0f}" y="{y + 3:.1f}" text-anchor="end" class="bm-axis-label">{label}</text>')
+
+    tick_iters = (x_lo, (x_lo + x_hi) // 2, x_hi) if x_hi > x_lo else (x_lo,)
+    for it in tick_iters:
+        parts.append(f'<text x="{sx(it):.1f}" y="{H - PAD_B + 14:.0f}" text-anchor="middle" '
+                     f'class="bm-axis-label">{it:,}</text>')
+    mid_x = (PAD_L + W - PAD_R) / 2.0
+    mid_y = (PAD_T + H - PAD_B) / 2.0
+    parts.append(f'<text x="{mid_x:.0f}" y="{H - 2:.0f}" text-anchor="middle" '
+                 f'class="bm-axis-title">TRAINING ITERATION</text>')
+    parts.append(f'<text x="11" y="{mid_y:.0f}" class="bm-axis-title" text-anchor="middle" '
+                 f'transform="rotate(-90 11 {mid_y:.0f})">GOAL MARGIN / EPISODE</text>')
+
+    legend: List[str] = []
+    for idx, name in enumerate(n for n in names if n in points):
+        color, shape = _BM_SERIES_STYLE[idx % len(_BM_SERIES_STYLE)]
+        series = points[name]
+        # A least-squares fit rather than a line through every point. Joining the dots on
+        # a noisy series draws a zigzag that reads as structure when it is sampling error:
+        # adjacent readings against Nexto differ by a full point, which is the matchup
+        # moving rather than the policy. The fit shows the direction and leaves the spread
+        # visible in the markers themselves.
+        if len(series) > 2:
+            n = float(len(series))
+            mean_x = sum(it for it, _, _ in series) / n
+            mean_y = sum(m for _, m, _ in series) / n
+            denom = sum((it - mean_x) ** 2 for it, _, _ in series)
+            if denom > 0:
+                slope = sum((it - mean_x) * (m - mean_y) for it, m, _ in series) / denom
+                x0, x1 = series[0][0], series[-1][0]
+                parts.append(
+                    f'<line x1="{sx(x0):.1f}" y1="{sy(mean_y + slope * (x0 - mean_x)):.1f}" '
+                    f'x2="{sx(x1):.1f}" y2="{sy(mean_y + slope * (x1 - mean_x)):.1f}" '
+                    f'class="bm-trend" stroke="{color}" />'
+                )
+        for it, m, res in series:
+            tip = (f"{name} &#183; iter {it:,} &#183; margin {m:+.2f}/ep &#183; goals "
+                   f"{res.get('goals_for', 0)}-{res.get('goals_against', 0)} over "
+                   f"{res.get('episodes', 0)} episodes &#183; "
+                   f"{res.get('series_won', 0)}/{res.get('series', 0)} series")
+            parts.append(_bm_marker(shape, sx(it), sy(m), color, tip))
+        legend.append(f'<span class="bm-legend-item">'
+                      f'<span class="bm-legend-swatch" style="background: {color};"></span>'
+                      f'vs {name} <span class="lb-muted">{series[-1][1]:+.2f}</span></span>')
+
+    return f"""
+    <div class="bm-chart">
+        <svg class="bm-svg" viewBox="0 0 {W:.0f} {H:.0f}" role="img"
+             aria-label="Goal margin per episode against each fixed reference, by training iteration">
+            {''.join(parts)}
+        </svg>
+    </div>
+    <div class="bm-legend"><span class="lb-muted">Latest</span>{''.join(legend)}</div>
+    <div class="bm-note">
+        Above the zero line the checkpoint outscores the reference. Each reference is its own
+        scale and they are <b>never combined</b>: Nexto beats Necto every series, loses to every
+        checkpoint, and Necto beats those same checkpoints, so no single ordering holds. Read one
+        line for progress and a <b>divergence between them as a style shift</b>. Nothing here
+        moves a rating.
+    </div>
+    """
+
+
 def _build_elite_standings(state: Dict[str, Any], evaluator: TrueSkillEvaluator) -> str:
     """
     The Elite Pool as a standings table rather than a card grid.
@@ -1557,10 +1779,7 @@ def _build_elite_standings(state: Dict[str, Any], evaluator: TrueSkillEvaluator)
 
     if not items:
         return """
-        <div class="lb-panel">
-            <div class="lb-panel-head"><span class="lb-panel-title">&#128737;&#65039; Elite Pool</span></div>
-            <div class="lb-empty">&#128737;&#65039; <b>Pool initialising.</b> Models appear here as checkpoints are graded.</div>
-        </div>
+        <div class="lb-empty">&#128737;&#65039; <b>Pool initialising.</b> Models appear here as checkpoints are graded.</div>
         """
 
     # At cold start the pool holds nothing but anchors and the league is running pure
@@ -1649,24 +1868,61 @@ def _build_elite_standings(state: Dict[str, Any], evaluator: TrueSkillEvaluator)
         """)
 
     return f"""
+    <div class="lb-face-note">{roster_note}</div>
+    <div class="lb-standings">{head}{"".join(rows)}</div>
+    """
+
+
+def _build_pool_panel(state: Dict[str, Any], evaluator: TrueSkillEvaluator) -> str:
+    """
+    One panel, two faces: the sparring roster and the benchmark curve.
+
+    They share a card because they answer the same question from the two directions the
+    league has available, and showing both at once would double the height of the board
+    for a reader who only ever wants one of them. The roster is where each model sits
+    relative to the others. The curve is where the field sits against a fixed opponent,
+    which is the only thing that can see a gain the whole pool shares -- pool-relative
+    ratings cannot, and the reward scale moves whenever the reward function is edited.
+
+    The toggle is a pair of radio inputs driving sibling CSS selectors, so switching
+    faces is instant and costs no server round trip. A re-render returns the card to the
+    roster face, which happens only when the leaderboard or league state file changes.
+    """
+    roster = _build_elite_standings(state, evaluator)
+    chart = _build_benchmark_chart(state)
+    readings = len([
+        e for e in (state.get("benchmark_history") or [])
+        if isinstance(e, dict) and e.get("iteration") is not None
+    ])
+    count_chip = f' <span class="lb-muted">{readings}</span>' if readings else ""
+
+    return f"""
     <div class="lb-panel">
+        <input class="lb-flip-input" type="radio" name="lbface" id="lbface-pool" checked>
+        <input class="lb-flip-input" type="radio" name="lbface" id="lbface-chart">
         <div class="lb-panel-head">
-            <span class="lb-panel-title">&#128737;&#65039; Elite Pool &middot; Sparring Roster</span>
-            <span class="lb-panel-meta">{roster_note}</span>
+            <span class="lb-panel-title">&#128737;&#65039; Elite Pool</span>
+            <span class="lb-flip-tabs">
+                <label for="lbface-pool" class="lb-flip-tab lb-flip-tab-pool"
+                       title="Ratings relative to the rest of the pool">Roster</label>
+                <label for="lbface-chart" class="lb-flip-tab lb-flip-tab-chart"
+                       title="Goal margin against the fixed references, which no rating uses">Benchmarks{count_chip}</label>
+            </span>
         </div>
-        <div class="lb-standings">{head}{"".join(rows)}</div>
+        <div class="lb-flip-face lb-face-pool">{roster}</div>
+        <div class="lb-flip-face lb-face-chart">{chart}</div>
     </div>
     """
 
 
 def build_league_wire_and_queue_html(evaluator: TrueSkillEvaluator, league_state: Optional[Dict[str, Any]] = None) -> str:
-    """Renders the full league board: Gauntlet wire, active trials, Elite Pool standings."""
+    """Renders the full league board: Gauntlet wire, active trials, Elite Pool roster and benchmarks."""
     state = league_state if league_state is not None else load_league_state_safely()
     return (
         '<div class="league-board">'
         + _build_gauntlet_ticker(state)
         + _build_gauntlet_trials(state, evaluator)
-        + _build_elite_standings(state, evaluator)
+        + _build_pool_panel(state, evaluator)
         + '</div>'
     )
 
