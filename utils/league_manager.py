@@ -191,6 +191,12 @@ class LeagueManager:
         ]
         self.benchmark_interval = int(self.config.get("benchmark_interval", 25))
         self.benchmark_series = int(self.config.get("benchmark_series", 2))
+        # Both of these are restored from the league state file by load_league_state.
+        # The counter has to survive the process boundary: grading runs in a fresh child
+        # process per checkpoint (see agent.ppo._grade_in_subprocess), which rebuilds this
+        # manager from disk, so a counter that lived only in memory was always 1 when it
+        # reached the interval check and `1 % 25` never fired. Benchmarks had therefore
+        # never run once, and benchmark_results was empty on every live board.
         self._benchmark_counter = 0
         self.benchmark_results: Dict[str, Any] = {}
 
@@ -524,7 +530,9 @@ class LeagueManager:
             "contender_queue": self.contender_queue,
             "contender_consecutive_losses": self.contender_consecutive_losses,
             "event_history": self.event_history[-30:],
-            "contenders": self.get_contender_queue_details()
+            "contenders": self.get_contender_queue_details(),
+            "benchmark_counter": self._benchmark_counter,
+            "benchmark_results": self.benchmark_results,
         }
         try:
             with open(tmp_path, "w", encoding="utf-8") as f:
@@ -559,6 +567,13 @@ class LeagueManager:
             self.contender_consecutive_losses = data.get("contender_consecutive_losses", {})
             self.event_history = data.get("event_history", [])[-30:]
             self.previous_king_of_the_hill = data.get("king_of_the_hill", None)
+            try:
+                self._benchmark_counter = int(data.get("benchmark_counter", 0))
+            except (TypeError, ValueError):
+                self._benchmark_counter = 0
+            loaded_bench = data.get("benchmark_results")
+            if isinstance(loaded_bench, dict):
+                self.benchmark_results = loaded_bench
         except Exception as e:
             print(f"[League Manager] Warning: Could not load league state from {target_path}: {e}")
 
@@ -1294,6 +1309,9 @@ class LeagueManager:
                     f"{res['series_won']}/{res['series']} series, goals {res['goals']} "
                     f"(reported only, no rating changed)"
                 )
+        # Persist the counter even when no benchmark ran, so the next child process picks
+        # up where this one left off rather than restarting the interval.
+        self.save_league_state()
 
         king_name = get_model_display_name(self.king_of_the_hill) if self.king_of_the_hill else "None"
         print(f"[League Manager] Grading complete for {rec.name}: mu={rec.mu:.2f} (Score: {rec.conservative_rating:.2f}). King of the Hill: {king_name}")
