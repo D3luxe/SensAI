@@ -58,8 +58,17 @@ def main(path: str, bin_rates=None):
         # How far the channel sits above the floor, as a fraction of its band.
         band = ceil - floor
         frac = (ls - floor) / band if band > 0 else 0.0
-        if ls <= floor + 0.05:
-            state = "AT FLOOR - collapsed"
+        # Distinguish a parameter held AT its bound from one latched UNDER it. clamped_log_std()
+        # cuts the gradient only once the parameter passes the bound, so a channel resting a hair
+        # above its floor is in a live equilibrium -- the entropy bonus is still reaching it and
+        # can lift it the moment the policy gradient eases off. A channel below the floor reads as
+        # the floor in the forward pass while its raw parameter is unreachable, which is the
+        # failure that went unnoticed for thousands of iterations. Proximity alone cannot tell
+        # them apart, and calling both "collapsed" is what made the working state look broken.
+        if ls < floor - 1e-4:
+            state = f"LATCHED {floor - ls:.3f} BELOW FLOOR - gradient cut"
+        elif ls <= floor + 0.05:
+            state = "resting on floor - bounded, gradient live"
         elif ls >= ceil - 0.05:
             state = "at ceiling - anneal/entropy bound"
         elif frac < 0.25:

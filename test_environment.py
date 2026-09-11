@@ -143,12 +143,60 @@ class TestRocketLeagueEnvironment(unittest.TestCase):
         targets = {"powerslide_weight": 0.0}
         stub = self._anneal_stub(targets, base, decay_steps=400_000_000, global_step=2_161_983_488)
 
-        stub._load_reward_anneal_clocks({"reward_anneal_start_step": 1_693_417_472})
+        stub._load_reward_anneal_clocks({
+            "reward_anneal_start_step": 1_693_417_472,
+            "config": {"reward_annealing": {"targets": {"powerslide_weight": 0.0}}},
+        })
         self.assertEqual(stub._reward_anneal_start_steps, {"powerslide_weight": 1_693_417_472})
 
         stub._apply_reward_annealing()
         self.assertAlmostEqual(stub.pushed[-1]["powerslide_weight"], 0.0, places=6,
                                msg="a schedule that had already elapsed must not restart on resume")
+
+    def test_legacy_clock_does_not_backdate_a_target_it_never_covered(self):
+        """
+        Guarantees the legacy shared clock is applied only to the targets the checkpoint was
+        actually annealing, named by its own saved config.
+
+        This is the bug that shipped: two targets added in the same release as the migration were
+        seeded from a clock that had already run out, so both jumped to their final weights on the
+        first iteration after the resume and per-step reward halved. A restarted ramp is cheap; a
+        cliff is not, so an unprovable target gets a fresh clock.
+        """
+        base = {"powerslide_weight": 0.2, "jump_bridge_weight": 0.55, "player_to_ball_weight": 0.6}
+        targets = {"powerslide_weight": 0.0, "jump_bridge_weight": 0.15, "player_to_ball_weight": 0.25}
+        stub = self._anneal_stub(targets, base, decay_steps=400_000_000, global_step=2_190_344_192)
+
+        stub._load_reward_anneal_clocks({
+            "reward_anneal_start_step": 1_693_417_472,
+            # The checkpoint was annealing powerslide alone; the other two are new.
+            "config": {"reward_annealing": {"targets": {"powerslide_weight": 0.0}}},
+        })
+        self.assertEqual(stub._reward_anneal_start_steps, {"powerslide_weight": 1_693_417_472},
+                         "only the target the checkpoint was annealing may inherit the legacy clock")
+
+        stub._apply_reward_annealing()
+        pushed = stub.pushed[-1]
+        self.assertAlmostEqual(pushed["powerslide_weight"], 0.0, places=6)
+        self.assertAlmostEqual(pushed["jump_bridge_weight"], 0.55, places=6,
+                               msg="a target the legacy clock never covered must start at its base weight")
+        self.assertAlmostEqual(pushed["player_to_ball_weight"], 0.6, places=6,
+                               msg="a target the legacy clock never covered must start at its base weight")
+
+    def test_legacy_clock_without_a_saved_config_starts_every_clock_fresh(self):
+        """
+        Guarantees the unprovable case fails toward a restarted ramp rather than a cliff.
+        """
+        base = {"powerslide_weight": 0.2}
+        targets = {"powerslide_weight": 0.0}
+        stub = self._anneal_stub(targets, base, decay_steps=400_000_000, global_step=2_000_000_000)
+
+        stub._load_reward_anneal_clocks({"reward_anneal_start_step": 1_000_000_000})
+        self.assertEqual(stub._reward_anneal_start_steps, {})
+
+        stub._apply_reward_annealing()
+        self.assertAlmostEqual(stub.pushed[-1]["powerslide_weight"], 0.2, places=6,
+                               msg="with nothing to prove coverage, the ramp restarts instead of cliffing")
 
     def test_mini_ppo_training_run(self):
         import tempfile

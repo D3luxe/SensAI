@@ -429,9 +429,15 @@ class PPOTrainer:
         Restore the per-target anneal clocks from a checkpoint.
 
         Checkpoints written before the clocks were split carry a single scalar
-        reward_anneal_start_step. Seed every currently configured target from it, so a term whose
-        schedule had already elapsed under the shared clock stays elapsed instead of silently
-        restarting its ramp and handing the policy back a bootstrap reward it had grown out of.
+        reward_anneal_start_step. It applies only to the targets that were configured when that
+        checkpoint was written, which the checkpoint's own saved config names, so a term whose
+        schedule had already elapsed stays elapsed while a term added since starts fresh.
+
+        Seeding every *currently* configured target from the scalar instead is what went wrong the
+        first time: two targets added in the same release as this migration were backdated to a
+        clock that had long since run out, so both snapped to their final weights on the next
+        iteration and per-step reward halved. Any target the scalar cannot be proven to cover
+        starts its own clock, since a ramp that restarts costs far less than a cliff.
         """
         saved = checkpoint.get("reward_anneal_start_steps")
         if isinstance(saved, dict):
@@ -442,9 +448,15 @@ class PPOTrainer:
         if legacy is None:
             self._reward_anneal_start_steps = {}
             return
+
+        covered = (checkpoint.get("config") or {}).get("reward_annealing", {}).get("targets") or {}
         self._reward_anneal_start_steps = {
-            str(k): int(legacy) for k in self.reward_anneal_targets
+            str(k): int(legacy) for k in self.reward_anneal_targets if k in covered
         }
+        fresh = [k for k in self.reward_anneal_targets if k not in covered]
+        if fresh:
+            print(f"[PPO Trainer] Reward anneal: starting fresh clocks for {', '.join(sorted(fresh))} "
+                  f"(not covered by the legacy shared clock)")
 
     def _reward_anneal_progress(self, key: str) -> float:
         """
