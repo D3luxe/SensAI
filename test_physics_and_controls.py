@@ -6,6 +6,7 @@ Guarantees 100% alignment between neural network actions, RocketSim physics, and
 import math
 import unittest
 import numpy as np
+import io
 import torch
 import torch.nn as nn
 import RocketSim as rsim
@@ -685,17 +686,54 @@ class TestPhysicsAndControls(unittest.TestCase):
         for idx, name in [(1, "steer"), (3, "yaw"), (4, "roll")]:
             self.assertAlmostEqual(raw[idx], -2.0, places=5,
                                    msg=f"{name} must be lifted to its floor, not left latched below it")
-        for idx, name in [(0, "throttle"), (2, "pitch")]:
-            self.assertAlmostEqual(raw[idx], -2.5, places=5,
-                                   msg=f"{name} keeps the tighter floor and must not be lifted")
+        self.assertAlmostEqual(raw[2], -1.7, places=5,
+                               msg="pitch carries the highest floor and must be lifted furthest")
+        self.assertAlmostEqual(raw[0], -2.5, places=5,
+                               msg="throttle keeps the tightest floor and must not be lifted")
 
         # The whole point of lifting the parameter: gradient must flow again.
         model.zero_grad()
         model.clamped_log_std().sum().backward()
         grad = model.actor_log_std.grad.flatten().tolist()
-        for idx, name in [(1, "steer"), (3, "yaw"), (4, "roll")]:
+        for idx, name in [(1, "steer"), (2, "pitch"), (3, "yaw"), (4, "roll")]:
             self.assertAlmostEqual(grad[idx], 1.0, places=5,
                                    msg=f"{name} must be free to move after the lift, not gradient-latched")
+
+    def test_pitch_floor_matches_the_reload_time_guarantee(self):
+        """
+        Guarantees the pitch floor enforced every training step is no lower than the one
+        debias_symmetric_actions applies on load.
+
+        These disagreed by 0.8 nats. The load path promised pitch >= ceiling_rot - 0.3 to keep
+        flip exploration alive, while the training floor of -2.5 let the optimizer walk pitch
+        down to sigma 0.083 between reloads -- so the guarantee held for exactly one step after
+        every resume and the logs showed a protected axis that was in fact collapsed.
+
+        Checked at the annealed ceiling, since that is the steady state a mature run sits in and
+        the state the collapse was observed in. Early in a run the ceiling is still high and the
+        reload guarantee saturates at its own -1.0 cap, which no training floor needs to match.
+        """
+        model = ActorCritic(obs_dim=OBS_DIM, act_dim=8, continuous_actions=True)
+        model.set_log_std_floor(LOG_STD_FLOOR_DEFAULT)
+        import yaml
+        with io.open("config/default_config.yaml", encoding="utf-8") as fh:
+            hp = yaml.safe_load(fh).get("hyperparameters", {})
+        # Sourced from config rather than hardcoded, so lowering the final ceiling without
+        # lowering the pitch floor alongside it fails here instead of in a week of training.
+        model.set_rot_log_std_ceiling(float(hp.get("rot_log_std_ceiling_final", -1.4)))
+
+        # Sink pitch, then load-path debias, which is where the reload guarantee is applied.
+        with torch.no_grad():
+            model.actor_log_std.data[0, 2] = -4.0
+        model.debias_symmetric_actions()
+
+        reload_floor = float(model.actor_log_std.data[0, 2])
+        training_floor = float(model.log_std_min.flatten()[2])
+        self.assertGreaterEqual(
+            training_floor + 1e-6, reload_floor,
+            "training must not permit a tighter pitch than the reload path guarantees, "
+            f"else pitch decays from {reload_floor:.3f} to {training_floor:.3f} after every resume",
+        )
 
     def test_per_step_guard_keeps_axes_on_their_floor_not_under_it(self):
         """

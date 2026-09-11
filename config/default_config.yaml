@@ -16,7 +16,7 @@ hyperparameters:
   log_std_floor:
   - -2.5
   - -2.0
-  - -2.5
+  - -1.7
   - -2.0
   - -2.0
   mini_batch_size: 1024
