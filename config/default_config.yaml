@@ -78,6 +78,18 @@ reward_annealing:
   decay_steps: 400000000
   enabled: true
   targets:
+    # Measured over 10k steps of the policy at iteration 215360, shaping terms were 82% of net
+    # reward per step and scoring was 12%: the flip reward alone paid 2.5x what goals paid. Each
+    # target below runs its own clock, so these ramp from wherever the policy sits today rather
+    # than inheriting powerslide's elapsed schedule.
+    #
+    # jump_bridge pays at the takeoff instant on context, and nothing charges for the landing.
+    # Not to zero: it is the only term that pays for a wall takeoff at all.
+    jump_bridge_weight: 0.15
+    # player_to_ball is the approach potential, largest single earner at 34% of net. Bootstrap
+    # value is spent once the policy reliably arrives; keeping it high prices chasing above
+    # finishing. Held well above zero since it also carries turn-radius learning for powerslide.
+    player_to_ball_weight: 0.25
     powerslide_weight: 0.0
 rewards:
   air_roll_recovery_weight: 0.4
