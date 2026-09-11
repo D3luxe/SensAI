@@ -3,7 +3,7 @@
 name = "SensAI_Diagnostic"
 loadout_file = "loadout.toml"
 root_dir = ""
-run_command = "python bot_diagnostic.py"
+run_command = "C:/Users/coryf/AppData/Local/RLBotGUIX/Python311/python.exe bot_diagnostic.py"
 run_command_linux = "python3 bot_diagnostic.py"
 agent_id = "antigravity/sensai_diagnostic"
 logo_file = ""

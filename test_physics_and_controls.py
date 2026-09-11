@@ -697,6 +697,64 @@ class TestPhysicsAndControls(unittest.TestCase):
             self.assertAlmostEqual(grad[idx], 1.0, places=5,
                                    msg=f"{name} must be free to move after the lift, not gradient-latched")
 
+    def test_per_step_guard_keeps_axes_on_their_floor_not_under_it(self):
+        """
+        Guarantees the post-optimizer-step guard respects the per-channel band.
+
+        This is the gap that actually bit: the guard in the training loop clamped to a hardcoded
+        (-2.5, -0.5), which is wider than the -2.0 floor steer, yaw and roll carry. Every step the
+        policy gradient pushed those axes a little lower, the guard permitted it, and once they
+        passed -2.0 clamped_log_std() cut the gradient and left them latched at sigma 0.135 with
+        the entropy bonus disconnected. In a real run they sat at -2.003 for thousands of
+        iterations, and no ent_coef could have moved them.
+        """
+        model = ActorCritic(obs_dim=OBS_DIM, act_dim=8, continuous_actions=True)
+        model.set_log_std_floor(LOG_STD_FLOOR_DEFAULT)
+
+        # An optimizer step nudges every axis just past its floor, as the real run did.
+        with torch.no_grad():
+            model.actor_log_std.data.copy_(model.log_std_min - 0.003)
+
+        model.enforce_log_std_bounds()
+
+        raw = model.actor_log_std.detach().flatten().tolist()
+        floors = model.log_std_min.flatten().tolist()
+        for idx, name in enumerate(["throttle", "steer", "pitch", "yaw", "roll"]):
+            self.assertGreaterEqual(
+                raw[idx], floors[idx] - 1e-6,
+                msg=f"{name} must not be left below its own floor of {floors[idx]}"
+            )
+
+        # Sitting exactly on the boundary is what keeps the entropy bonus connected.
+        model.zero_grad()
+        model.clamped_log_std().sum().backward()
+        grad = model.actor_log_std.grad.flatten().tolist()
+        for idx, name in enumerate(["throttle", "steer", "pitch", "yaw", "roll"]):
+            self.assertAlmostEqual(
+                grad[idx], 1.0, places=5,
+                msg=f"{name} is gradient-latched: the entropy bonus cannot reach it"
+            )
+
+    def test_per_step_guard_respects_the_annealed_rotational_ceiling(self):
+        """
+        The same hardcoded guard allowed -0.5, above the annealed rotational ceiling.
+
+        An axis parked above its ceiling is latched in the other direction, so the anneal that
+        deliberately tightened aerial exploration could be undone by drift.
+        """
+        model = ActorCritic(obs_dim=OBS_DIM, act_dim=8, continuous_actions=True)
+        model.set_rot_log_std_ceiling(-1.4)
+
+        with torch.no_grad():
+            model.actor_log_std.data.fill_(-0.5)
+
+        model.enforce_log_std_bounds()
+
+        raw = model.actor_log_std.detach().flatten().tolist()
+        for idx, name in [(2, "pitch"), (3, "yaw"), (4, "roll")]:
+            self.assertLessEqual(raw[idx], -1.4 + 1e-6,
+                                 msg=f"{name} must be held at the annealed ceiling, not above it")
+
     def test_log_std_floor_is_honoured_by_debias_and_survives_reload(self):
         """
         Guarantees the configured floor is the single source of truth for how tight an axis

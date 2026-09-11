@@ -8,7 +8,7 @@ loadout_file = "loadout.toml"
 # and reads checkpoints/latest_model.pt, so it must run from the repo root.
 root_dir = ""
 # The command RLBot calls to start the bot
-run_command = "python bot.py"
+run_command = "C:/Users/coryf/AppData/Local/RLBotGUIX/Python311/python.exe bot.py"
 run_command_linux = "python3 bot.py"
 # Unique identifier for this bot; must match AGENT_ID in bot.py
 agent_id = "antigravity/sensai"

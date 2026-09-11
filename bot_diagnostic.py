@@ -343,4 +343,16 @@ class DiagnosticBot(Bot):
 
 
 if __name__ == "__main__":
+    if not RLBOT_AVAILABLE:
+        import sys
+        print(
+            f"[SensAI Diagnostic Error] RLBot v5 python interface ('rlbot>=2.0.0') is not available in the current Python runtime:\n"
+            f"  Executable: {sys.executable}\n"
+            f"  Version: {sys.version}\n"
+            f"Please run the bot using the Python environment with rlbot installed, for example:\n"
+            f"  C:/Users/coryf/AppData/Local/RLBotGUIX/Python311/python.exe bot_diagnostic.py\n",
+            file=sys.stderr
+        )
+        sys.exit(1)
+
     DiagnosticBot(agent_id=AGENT_ID).run()

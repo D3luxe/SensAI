@@ -1001,9 +1001,13 @@ class PPOTrainer:
                     nn.utils.clip_grad_norm_(self.agent.parameters(), self.max_grad_norm)
                     self.optimizer.step()
 
-                    # In-place guard for exploration standard deviation parameter
-                    if self.continuous_actions and hasattr(self.agent, "actor_log_std"):
-                        self.agent.actor_log_std.data.clamp_(min=-2.5, max=-0.5)
+                    # In-place guard for exploration standard deviation parameter. Defers to the
+                    # per-channel log_std_min/log_std_max buffers: a hardcoded band here let the
+                    # tighter-floored axes (steer, yaw, roll) settle below their own floor, where
+                    # clamped_log_std() cuts the gradient and the entropy bonus can no longer
+                    # reach them.
+                    if self.continuous_actions:
+                        self.agent.enforce_log_std_bounds()
 
                     pg_losses.append(pg_loss.item())
                     v_losses.append(v_loss.item())

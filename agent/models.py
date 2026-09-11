@@ -201,6 +201,31 @@ class ActorCritic(nn.Module):
             self.actor_log_std.data.clamp_(min=self.log_std_min)
         return [round(float(v), 4) for v in self.log_std_min.flatten()]
 
+    def enforce_log_std_bounds(self):
+        """
+        Hold actor_log_std inside its per-channel band. Call after every optimizer step.
+
+        clamped_log_std() bounds the value used for sampling, but it cuts the gradient once the
+        raw parameter passes a bound, so a parameter left sitting outside its band is latched
+        there: the entropy bonus has no path back to it and no value of ent_coef can lift it.
+        Restoring it to the boundary itself keeps the gradient live, because the comparison there
+        is strict.
+
+        This used to be a hardcoded clamp to (-2.5, -0.5) in the training loop, which predated the
+        per-channel floor and ceiling and silently overrode both. Steer, yaw and roll have a floor
+        of -2.0, so that guard let them slip underneath it and freeze at sigma 0.135 with the
+        entropy bonus disconnected -- the same failure the hardcoded -2.2 in
+        debias_symmetric_actions caused on reload. Defer to the buffers so the configured band is
+        the single source of truth.
+        """
+        if not self.continuous_actions or getattr(self, "actor_log_std", None) is None:
+            return
+        with torch.no_grad():
+            self.actor_log_std.data.clamp_(
+                min=self.log_std_min.to(self.actor_log_std.device),
+                max=self.log_std_max.to(self.actor_log_std.device),
+            )
+
     def debias_symmetric_actions(self):
         """
         Re-centers the actor output layer biases for antisymmetric action axes (steer, yaw, roll)

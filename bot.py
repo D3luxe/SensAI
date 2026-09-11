@@ -660,6 +660,18 @@ class SenseiRLBot(Bot):
 
 
 if __name__ == "__main__":
+    if not RLBOT_AVAILABLE:
+        import sys
+        print(
+            f"[SensAI Error] RLBot v5 python interface ('rlbot>=2.0.0') is not available in the current Python runtime:\n"
+            f"  Executable: {sys.executable}\n"
+            f"  Version: {sys.version}\n"
+            f"Please run the bot using the Python environment with rlbot installed, for example:\n"
+            f"  C:/Users/coryf/AppData/Local/RLBotGUIX/Python311/python.exe bot.py\n",
+            file=sys.stderr
+        )
+        sys.exit(1)
+
     # Passing the agent id here lets the bot be started by hand for development; when the
     # framework launches it, RLBOT_AGENT_ID takes precedence.
     SenseiRLBot(agent_id=AGENT_ID).run()
