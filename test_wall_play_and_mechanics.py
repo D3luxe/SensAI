@@ -41,7 +41,7 @@ class TestWallPlayMechanics(unittest.TestCase):
         action = np.array([1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0], dtype=np.float32)
         car_ground.pos[0] += 50.0
         r1 = reward_fn.get_reward(car_ground, arena1, action, False, None)
-        self.assertGreater(r1, 0.05, f"Car approaching sidewall ball should receive positive reward, got {r1}")
+        self.assertGreater(r1, 0.015, f"Car approaching sidewall ball should receive positive reward, got {r1}")
 
         # 2. Backboard ball above crossbar (Y=4900, Z=800, X=0): On backboard wall
         ball_backboard = BallState(pos=np.array([0.0, 4900.0, 800.0], dtype=np.float32))
@@ -55,7 +55,7 @@ class TestWallPlayMechanics(unittest.TestCase):
         reward_fn.reset(arena2)
         car2.pos[1] += 50.0
         r2 = reward_fn.get_reward(car2, arena2, action, False, None)
-        self.assertGreater(r2, 0.05, f"Car approaching backboard ball should receive positive reward, got {r2}")
+        self.assertGreater(r2, 0.015, f"Car approaching backboard ball should receive positive reward, got {r2}")
 
     def test_car_climbing_wall_rewarded(self):
         reward_fn = PlayerToBallVelocityReward(weight=1.0)
@@ -74,7 +74,11 @@ class TestWallPlayMechanics(unittest.TestCase):
         car_wall.pos[2] += 50.0
         action = np.array([1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0], dtype=np.float32)
         r = reward_fn.get_reward(car_wall, arena, action, False, None)
-        self.assertGreater(r, 0.045, f"Car climbing wall toward wall ball must receive positive reward, got {r}")
+        self.assertGreater(r, 0.008,
+                          f"Car climbing wall toward wall ball must receive positive reward, got {r}")
+        # Threshold was 0.045 when a separate vel_toward_ball stream paid up to 0.40/step for
+        # moving at the ball. That stream is gone; climbing is now paid only through the
+        # distance potential, so the magnitude is roughly a quarter and the sign is what matters.
 
         # Downfield wall climb (dist > 500 uu):
         ball_far = BallState(pos=np.array([4000.0, 500.0, 1100.0], dtype=np.float32))
@@ -82,7 +86,8 @@ class TestWallPlayMechanics(unittest.TestCase):
         reward_fn.reset(arena_far)
         car_wall.pos[2] += 50.0
         r_far = reward_fn.get_reward(car_wall, arena_far, action, False, None)
-        self.assertGreater(r_far, 0.10, f"Downfield wall climb must receive strong velocity & distance reward, got {r_far}")
+        self.assertGreater(r_far, 0.008,
+                          f"Downfield wall climb must still close distance, got {r_far}")
 
     def test_wall_riding_dampening_when_ball_infield(self):
         reward_fn = PlayerToBallVelocityReward(weight=1.0)

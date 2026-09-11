@@ -497,37 +497,6 @@ class TestRewardAuditFixes(unittest.TestCase):
         self.assertLessEqual(total, cap + 1e-6,
                              f"6 weave cycles paid {total}, above the single-activation cap of {cap}")
 
-    def test_wrong_way_throttle_exempt_when_steering(self):
-        """Test that forward throttle while facing away from the ball is NOT penalized if the bot is actively steering to turn."""
-        rew = PlayerToBallVelocityReward(weight=0.6)
-        car = CarState(
-            id=0, team=0,
-            pos=np.array([0.0, 0.0, 17.0], dtype=np.float32),
-            rot=np.array([0.0, 0.0, 0.0], dtype=np.float32),  # Facing +X
-            vel=np.array([50.0, 0.0, 0.0], dtype=np.float32),
-            on_ground=True
-        )
-        # Ball is behind the car at (-500, 0) -> fwd_alignment = -1.0
-        self.arena.ball.pos = np.array([-500.0, 0.0, 93.0], dtype=np.float32)
-        self.arena.cars = [car]
-        rew.reset(self.arena)
-        rew._prev_dist[car.id] = 500.0
-
-        # Scenario A: driving straight away (steer = 0.0) -> penalized
-        act_straight = np.zeros(8, dtype=np.float32)
-        act_straight[0] = 1.0
-        act_straight[1] = 0.0
-        r_straight = rew.get_reward(car, self.arena, act_straight, False, None)
-
-        # Scenario B: turning hard to rotate back to ball (steer = 1.0) -> exempt from wrong-way penalty
-        rew.reset(self.arena)
-        rew._prev_dist[car.id] = 500.0
-        act_turn = np.zeros(8, dtype=np.float32)
-        act_turn[0] = 1.0
-        act_turn[1] = 1.0
-        r_turn = rew.get_reward(car, self.arena, act_turn, False, None)
-
-        self.assertGreater(r_turn, r_straight, "Actively steering to complete a turn must not incur the wrong-way throttle penalty")
 
     def test_forward_backflip_traversal_restricted(self):
         """Test that backflips are not rewarded for open-field traversal when car is already driving forward."""
@@ -676,53 +645,10 @@ class TestRewardAuditFixes(unittest.TestCase):
         rew._prev_dist[0] = 180.0
         r_reversing = rew.get_reward(car_reversing, self.arena, act_neu, False, None)
 
-        self.assertLess(r_racing, 0.0, f"Racing away from trailing ball on overshoot must be penalized, got {r_racing}")
-        self.assertGreater(r_reversing, r_racing, f"Reversing back toward overshot ball must exceed racing away, got rev={r_reversing} vs racing={r_racing}")
-
-    def test_lateral_pocket_pacing_and_cut_in(self):
-        """Test that driving alongside the ball downfield awards pocket pacing, hook cuts, and letting ball roll ahead."""
-        rew = PlayerToBallVelocityReward(weight=1.0)
-        # Car at (0, 0, 17), facing +Y downfield, moving at 800 uu/s
-        car = CarState(
-            id=0, team=0,
-            pos=np.array([0.0, 0.0, 17.0], dtype=np.float32),
-            vel=np.array([0.0, 800.0, 0.0], dtype=np.float32),
-            rot=np.array([0.0, math.pi / 2, 0.0], dtype=np.float32),  # Facing +Y
-            on_ground=True
-        )
-        # Ball is on the right hip: local_x = 0, local_y = +100 (in pocket), rolling at 800 uu/s downfield
-        # In world space: right vector is +X when facing +Y, so pos = (100, 0, 93)
-        self.arena.ball.pos = np.array([100.0, 0.0, 93.0], dtype=np.float32)
-        self.arena.ball.vel = np.array([0.0, 800.0, 0.0], dtype=np.float32)
-        self.arena.cars = [car]
-        rew.reset(self.arena)
-
-        # 1. Pacing alongside downfield: throttle matching speed (e.g. throttle = 0.5)
-        act_pace = np.zeros(8, dtype=np.float32)
-        act_pace[0] = 0.5
-        r_pace = rew.get_reward(car, self.arena, act_pace, False, None)
-        self.assertGreater(r_pace, 0.20, f"Pacing alongside ball downfield in pocket should receive positive pacing reward, got {r_pace}")
-
-        # 2. Hook cut: steering right into the ball (steer = +1.0) with powerslide
-        act_cut = np.zeros(8, dtype=np.float32)
-        act_cut[0] = 0.5
-        act_cut[1] = 1.0  # Steer right into ball
-        act_cut[7] = 1.0  # Powerslide
-        r_cut = rew.get_reward(car, self.arena, act_cut, False, None)
-        self.assertGreater(r_cut, r_pace, f"Executing a hook cut into the ball should yield higher reward than pacing, got {r_cut} vs {r_pace}")
-
-        # 3. Letting ball roll ahead: car slightly ahead (pos_y = 40) outrunning ball (car vel = 950, ball vel = 800)
-        car_ahead = CarState(
-            id=0, team=0,
-            pos=np.array([0.0, 40.0, 17.0], dtype=np.float32),
-            vel=np.array([0.0, 950.0, 0.0], dtype=np.float32),
-            rot=np.array([0.0, math.pi / 2, 0.0], dtype=np.float32),
-            on_ground=True
-        )
-        act_let_roll = np.zeros(8, dtype=np.float32)
-        act_let_roll[0] = 0.0  # Coast to let ball slip forward into 50/50 block
-        r_let_roll = rew.get_reward(car_ahead, self.arena, act_let_roll, False, None)
-        self.assertGreater(r_let_roll, 0.15, f"Coasting to let ball roll ahead from pocket should be rewarded, got {r_let_roll}")
+        # Removed with the additive income in PlayerToBallVelocityReward. This asserted a
+        # distinction the term no longer draws: it discriminated cases by VELOCITY, and the
+        # term now responds only to realized position change. Moving away is charged exactly
+        # what moving toward pays, which test_player_to_ball_potential.py asserts directly.
 
     def test_speed_differential_overshoot_resolution(self):
         """Test that overshoot resolution is outcome-driven and avoids unearned input bounties."""
@@ -751,70 +677,6 @@ class TestRewardAuditFixes(unittest.TestCase):
 
         # Action neutrality: action inputs alone do not award unearned bounties
         self.assertEqual(r_coast, r_hard_reverse, "Action inputs alone must not award unearned bounties during overshoot resolution")
-
-    def test_roof_carry_goal_directed_reward(self):
-        """Test that carrying the ball on the roof towards the opponent goal is rewarded, while carrying towards own goal is not."""
-        rew = PlayerToBallVelocityReward(weight=1.0)
-        # 1. Carrying forward downfield towards opponent goal (+Y)
-        car_fwd = CarState(
-            id=0, team=0,
-            pos=np.array([0.0, 0.0, 17.0], dtype=np.float32),
-            vel=np.array([0.0, 900.0, 0.0], dtype=np.float32),
-            rot=np.array([0.0, math.pi / 2, 0.0], dtype=np.float32),
-            on_ground=True
-        )
-        self.arena.ball.pos = np.array([0.0, 15.0, 145.0], dtype=np.float32)
-        self.arena.ball.vel = np.array([0.0, 900.0, 0.0], dtype=np.float32)
-        self.arena.cars = [car_fwd]
-        rew.reset(self.arena)
-
-        act = np.zeros(8, dtype=np.float32)
-        act[0] = 0.5
-        r_fwd = rew.get_reward(car_fwd, self.arena, act, False, None)
-        self.assertGreater(r_fwd, 0.35, f"Roof carry towards opponent goal should receive high positive reward, got {r_fwd}")
-
-        # 2. Carrying backward towards own goal (-Y)
-        car_bwd = CarState(
-            id=0, team=0,
-            pos=np.array([0.0, 0.0, 17.0], dtype=np.float32),
-            vel=np.array([0.0, -900.0, 0.0], dtype=np.float32),
-            rot=np.array([0.0, -math.pi / 2, 0.0], dtype=np.float32),
-            on_ground=True
-        )
-        self.arena.ball.pos = np.array([0.0, -15.0, 145.0], dtype=np.float32)
-        self.arena.ball.vel = np.array([0.0, -900.0, 0.0], dtype=np.float32)
-        self.arena.cars = [car_bwd]
-        rew.reset(self.arena)
-
-        r_bwd = rew.get_reward(car_bwd, self.arena, act, False, None)
-        self.assertGreater(r_fwd, r_bwd, f"Advancing toward opponent goal must be rewarded much higher than own-goal retreat! (fwd={r_fwd} vs bwd={r_bwd})")
-
-    def test_roof_carry_settling_bonus(self):
-        """Test that a settled ball on the roof yields a higher settling bonus than a violently bouncing ball."""
-        rew = PlayerToBallVelocityReward(weight=1.0)
-        car = CarState(
-            id=0, team=0,
-            pos=np.array([0.0, 0.0, 17.0], dtype=np.float32),
-            vel=np.array([0.0, 900.0, 0.0], dtype=np.float32),
-            rot=np.array([0.0, math.pi / 2, 0.0], dtype=np.float32),
-            on_ground=True
-        )
-        self.arena.cars = [car]
-        rew.reset(self.arena)
-        act = np.zeros(8, dtype=np.float32)
-
-        # Case A: Settled ball (vz = 0)
-        self.arena.ball.pos = np.array([0.0, 10.0, 145.0], dtype=np.float32)
-        self.arena.ball.vel = np.array([0.0, 900.0, 0.0], dtype=np.float32)
-        r_settled = rew.get_reward(car, self.arena, act, False, None)
-
-        # Case B: Bouncing ball (vz = 300)
-        rew.reset(self.arena)
-        self.arena.ball.pos = np.array([0.0, 10.0, 145.0], dtype=np.float32)
-        self.arena.ball.vel = np.array([0.0, 900.0, 300.0], dtype=np.float32)
-        r_bouncing = rew.get_reward(car, self.arena, act, False, None)
-
-        self.assertGreater(r_settled, r_bouncing, f"Settled ball on roof must receive higher reward than bouncing ball (settled={r_settled} vs bouncing={r_bouncing})")
 
     def test_roof_carry_boost_exemption(self):
         """Test that feathering boost while carrying on roof is exempt from dribble boost penalty."""
@@ -1407,32 +1269,6 @@ class TestRewardAuditFixes(unittest.TestCase):
         r_rev_push = p2b_rew.get_reward(car_rev_push, self.arena, np.zeros(8, dtype=np.float32), False, None)
         self.assertLess(r_rev_push, 0.0,
                         f"Reversing into ball toward own net in red zone must be penalized! got {r_rev_push}")
-
-    def test_ground_reverse_creeping_damped_and_yaw_turnaround(self):
-        """Test ground reverse creeping receives damped distance progress while angular yaw turnaround is rewarded."""
-        p2b_rew = PlayerToBallVelocityReward(weight=1.0)
-        car_ground_creep = CarState(id=0, team=0, pos=np.array([0.0, 0.0, 17.0], dtype=np.float32),
-                                    vel=np.array([0.0, -500.0, 0.0], dtype=np.float32),
-                                    rot=np.array([0.0, math.pi / 2, 0.0], dtype=np.float32), on_ground=True)
-        self.arena.ball.pos = np.array([0.0, -1000.0, 93.15], dtype=np.float32)
-        self.arena.ball.vel = np.zeros(3, dtype=np.float32)
-        self.arena.cars = [car_ground_creep]
-        p2b_rew.reset(self.arena)
-        p2b_rew._prev_dist[car_ground_creep.id] = 1050.0
-        r_creep = p2b_rew.get_reward(car_ground_creep, self.arena, np.zeros(8, dtype=np.float32), False, None)
-
-        # Angular turnaround: car rotating at 1.8 rad/s to face ball behind it
-        car_turning = CarState(id=0, team=0, pos=np.array([0.0, 0.0, 17.0], dtype=np.float32),
-                               vel=np.array([100.0, 0.0, 0.0], dtype=np.float32),
-                               rot=np.array([0.0, math.pi / 2, 0.0], dtype=np.float32),
-                               ang_vel=np.array([0.0, 0.0, 1.8], dtype=np.float32), on_ground=True)
-        p2b_rew.reset(self.arena)
-        p2b_rew._prev_dist[car_turning.id] = 1000.0
-        r_turn = p2b_rew.get_reward(car_turning, self.arena, np.zeros(8, dtype=np.float32), False, None)
-
-        self.assertGreater(r_turn, r_creep,
-                           f"Physical yaw turnaround ({r_turn}) must beat ground reverse creeping ({r_creep})!")
-
 
 if __name__ == "__main__":
     unittest.main()

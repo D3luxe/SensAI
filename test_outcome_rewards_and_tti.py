@@ -138,7 +138,10 @@ class TestOutcomeRewardsAndTTI(unittest.TestCase):
         act = np.array([0.3, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0], dtype=np.float32)
         r_matched = rew.get_reward(car_matched, arena, act, False, None)
         # Avoids pacing penalty and earns positive progress
-        self.assertGreater(r_matched, 0.0)
+        # Removed with the additive income in PlayerToBallVelocityReward. This asserted a
+        # distinction the term no longer draws: it discriminated cases by VELOCITY, and the
+        # term now responds only to realized position change. Moving away is charged exactly
+        # what moving toward pays, which test_player_to_ball_potential.py asserts directly.
 
         # Overspeed car (1200 uu/s) closing fast on slower ball (200 uu/s) inside 0.40s
         car_overspeed = CarState(

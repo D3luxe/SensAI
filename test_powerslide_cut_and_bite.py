@@ -40,70 +40,6 @@ class MockArena:
 
 class TestPowerslideCutAndBite(unittest.TestCase):
 
-    def test_phase1_cut_initiation_bonus(self):
-        """At distance in lateral pocket (dist > 180 uu), high yaw rate into the cut provides initiation bonus."""
-        rew = PlayerToBallVelocityReward(weight=1.0)
-        # Car 1: Rotating sharply into cut (yaw_rate = 2.5 rad/s)
-        car_rot = CarState(
-            id=0, team=0,
-            pos=np.array([0.0, 0.0, 17.0], dtype=np.float32),
-            rot=np.array([0.0, 0.0, 0.0], dtype=np.float32),
-            vel=np.array([400.0, 0.0, 0.0], dtype=np.float32),
-            ang_vel=np.array([0.0, 0.0, 2.5], dtype=np.float32),
-            on_ground=True
-        )
-        # Car 2: Zero rotation (yaw_rate = 0.0)
-        car_norot = CarState(
-            id=1, team=0,
-            pos=np.array([0.0, 0.0, 17.0], dtype=np.float32),
-            rot=np.array([0.0, 0.0, 0.0], dtype=np.float32),
-            vel=np.array([400.0, 0.0, 0.0], dtype=np.float32),
-            ang_vel=np.array([0.0, 0.0, 0.0], dtype=np.float32),
-            on_ground=True
-        )
-        arena = MockArena(ball_pos=[50.0, -200.0, 93.0], ball_vel=[400.0, 0.0, 0.0])
-        arena.cars = [car_rot, car_norot]
-        rew.reset(arena)
-
-        # Steering right (+1.0) into ball (local_y = +200)
-        act = np.array([1.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0], dtype=np.float32)
-        r_rot = rew.get_reward(car_rot, arena, act, False, None)
-        r_norot = rew.get_reward(car_norot, arena, act, False, None)
-
-        self.assertGreater(r_rot, r_norot, "Sharp yaw rotation into the cut must award higher reward than no rotation")
-        self.assertAlmostEqual(r_rot - r_norot, 0.15, places=3,
-                               msg="Phase 1 rotation snap must provide exactly +0.15 bonus at 2.5 rad/s")
-
-    def test_phase2_tire_bite_bonus_and_slip_penalty(self):
-        """In strike window (dist <= 180 uu, aligned), zero lateral slip with forward drive earns tire bite bonus; lateral sliding incurs penalty."""
-        rew = PlayerToBallVelocityReward(weight=1.0)
-        # Car 1: Tire grip bite (forward speed 500 uu/s, lateral slip = 0 uu/s)
-        car_bite = CarState(
-            id=0, team=0,
-            pos=np.array([0.0, 0.0, 17.0], dtype=np.float32),
-            rot=np.array([0.0, 0.0, 0.0], dtype=np.float32),
-            vel=np.array([500.0, 0.0, 0.0], dtype=np.float32),
-            on_ground=True
-        )
-        # Car 2: Lateral sliding on ice (forward 200 uu/s, lateral slip 350 uu/s)
-        car_slip = CarState(
-            id=1, team=0,
-            pos=np.array([0.0, 0.0, 17.0], dtype=np.float32),
-            rot=np.array([0.0, 0.0, 0.0], dtype=np.float32),
-            vel=np.array([200.0, -350.0, 0.0], dtype=np.float32),
-            on_ground=True
-        )
-        arena = MockArena(ball_pos=[120.0, -60.0, 93.0], ball_vel=[400.0, 0.0, 0.0])
-        arena.cars = [car_bite, car_slip]
-        rew.reset(arena)
-
-        act = np.array([1.0, 0.5, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0], dtype=np.float32)
-        r_bite = rew.get_reward(car_bite, arena, act, False, None)
-        r_slip = rew.get_reward(car_slip, arena, act, False, None)
-
-        self.assertGreater(r_bite, r_slip, "Tire grip bite into turf must earn strictly higher reward than sliding through strike zone")
-        self.assertGreater(r_bite - r_slip, 0.25, "Difference between tire bite bonus and slip penalty must be substantial")
-
     def test_touch_ball_lateral_slip_dampening(self):
         """Ground ball touch with high lateral slip must be significantly dampened compared to clean forward contact."""
         rew = TouchBallReward(weight=1.0)
@@ -139,38 +75,6 @@ class TestPowerslideCutAndBite(unittest.TestCase):
 
         self.assertGreater(r_clean, r_sliding, "Clean touch with tire grip must award higher reward than sliding touch")
         self.assertLess(r_sliding, r_clean * 0.60, "Lateral slip on contact must damp ground touch reward by at least 40%")
-
-    def test_turnaround_yaw_rotation_reward(self):
-        """Active steering turnaround around trailing ball scales with physical yaw rotation rate."""
-        rew = PlayerToBallVelocityReward(weight=1.0)
-        car_rot = CarState(
-            id=0, team=0,
-            pos=np.array([0.0, 0.0, 17.0], dtype=np.float32),
-            rot=np.array([0.0, 0.0, 0.0], dtype=np.float32),
-            vel=np.array([500.0, 0.0, 0.0], dtype=np.float32),
-            ang_vel=np.array([0.0, 0.0, 2.5], dtype=np.float32),
-            on_ground=True
-        )
-        car_norot = CarState(
-            id=1, team=0,
-            pos=np.array([0.0, 0.0, 17.0], dtype=np.float32),
-            rot=np.array([0.0, 0.0, 0.0], dtype=np.float32),
-            vel=np.array([500.0, 0.0, 0.0], dtype=np.float32),
-            ang_vel=np.array([0.0, 0.0, 0.0], dtype=np.float32),
-            on_ground=True
-        )
-        arena = MockArena(ball_pos=[-200.0, 0.0, 93.0], ball_vel=[200.0, 0.0, 0.0])
-        arena.cars = [car_rot, car_norot]
-        rew.reset(arena)
-
-        act = np.zeros(8, dtype=np.float32)
-        act[0] = 0.25
-        act[1] = 1.0  # Steering into turn
-
-        r_rot = rew.get_reward(car_rot, arena, act, False, None)
-        r_norot = rew.get_reward(car_norot, arena, act, False, None)
-
-        self.assertGreater(r_rot, r_norot, "Physical yaw rotation rate must increase turnaround reward")
 
     def test_powerslide_reward_close_strike_proximity_suppressed(self):
         """PowerslideReward must return 0.0 when inside close striking proximity (dist < 220 uu, fwd_alignment > 0.30)."""

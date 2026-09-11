@@ -282,43 +282,9 @@ class TestBoostRoutingAheadOfBall(unittest.TestCase):
         rew.reset(self.arena)
         return rew.get_reward(car, self.arena, ACT, False, None)
 
-    def test_low_boost_car_is_paid_to_route_through_a_pad_ahead(self):
-        empty = self._sample(0.0, [-1500.0, 3800.0, 17.0])
-        full = self._sample(100.0, [-1500.0, 3800.0, 17.0])
-        self.assertGreater(empty, full,
-                           f"Low-boost routing ({empty}) must beat the same line on full boost ({full})")
-
-    def test_no_refuel_credit_when_the_opponent_is_contesting(self):
-        """Detouring is only affordable while the race is comfortably won."""
-        safe = self._sample(0.0, [-1500.0, 3800.0, 17.0])
-        contested = self._sample(0.0, [2600.0, 400.0, 17.0])
-        self.assertGreater(safe, contested,
-                           f"Refuel credit ({safe}) must not survive an opponent on the ball ({contested})")
-
-
 class TestInterceptionTiming(unittest.TestCase):
     def setUp(self):
         self.arena = RocketSimArena(num_players=2, game_mode="1v1")
-
-    def test_opponent_touch_does_not_pay_the_re_read_baseline_step(self):
-        """The step an opponent touches re-seeds the timing baseline rather than banking the jump."""
-        self.arena.ball.pos = np.array([1200.0, 0.0, 93.0], dtype=np.float32)
-        self.arena.ball.vel = np.array([800.0, 0.0, 0.0], dtype=np.float32)
-        car = make_car([0.0, 0.0, 17.0], [900.0, 0.0, 0.0], on_ground=True, boost=100.0)
-        opp = make_car([2500.0, 0.0, 17.0], [-800.0, 0.0, 0.0], cid=1, team=1, on_ground=True)
-        self.arena.cars = [car, opp]
-        push_to_engine(self.arena)
-        rew = PlayerToBallVelocityReward(weight=1.0)
-        rew.reset(self.arena)
-        rew.get_reward(car, self.arena, ACT, False, None)
-
-        self.arena.ball.vel = np.array([-1800.0, 600.0, 0.0], dtype=np.float32)
-        opp.ball_touches += 1
-        push_to_engine(self.arena)
-        rew.get_reward(car, self.arena, ACT, False, None)
-        self.assertGreater(rew._reread_ticks.get(car.id, 0), 0,
-                           "An opponent touch must open the re-read window")
-
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

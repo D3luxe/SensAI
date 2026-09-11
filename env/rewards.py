@@ -1030,6 +1030,11 @@ class PlayerToBallVelocityReward(BaseReward):
             ball_travel_budget = _norm3(arena.ball.vel) * step_dt + 60.0
             target_motion_delta = _clip(target_motion_delta, -ball_travel_budget, ball_travel_budget)
 
+            # Both halves are kept deliberately. Crediting only the car's motion against the
+            # CURRENT target was tried and is worse: a car following a fleeing ball at a fixed
+            # gap would then be paid every step for ground it never gained. With both terms a
+            # car and ball moving together cancel to exactly zero, which is the correct price
+            # for a carry.
             prev_dist = curr_dist + car_motion_delta + target_motion_delta
 
         prev_t = self._prev_touches.get(car.id, car.ball_touches)
@@ -1147,52 +1152,21 @@ class PlayerToBallVelocityReward(BaseReward):
         delta_dist = raw_delta_dist * strike_pacing
 
         # Kinematic TTI-Detour Pathing Gate with Continuous Boost Urgency Gradient:
-        # When low on boost and pathing through an active pad along the travel corridor,
-        # relax the negative distance-delta penalty if the detour adds minimal arrival time
-        # and the bot has ample time cushion over the opponent.
-        thresh = getattr(self, "boost_pathing_threshold", 50.0)
-        urgency = max(0.0, 1.0 - (float(car.boost) / max(1.0, thresh))) if thresh > 0.0 else 0.0
-
-        if urgency > 0.0 and not is_kickoff and raw_delta_dist < 0.0 and eff_dist > 600.0:
-            is_threat, threat_intensity, _ = arena.get_shot_threat(car.team) if hasattr(arena, "get_shot_threat") else (False, 0.0, 0.0)
-            # The detour budget does not depend on which pad we pick, so size it before scanning.
-            # It also dims with the threat, and a fully extinguished budget can afford no detour at
-            # all, which keeps the pad scan off the hot path when we are under real pressure.
-            max_detour_budget = 0.45 * urgency * threat_safety_multiplier(threat_intensity)
-            if max_detour_budget > 0.0:
-                car_xy = car.pos[:2]
-                ball_xy = arena.ball.pos[:2]
-                all_pad_pos = getattr(arena, "_all_pad_pos_2d", None)
-                all_pad_act = getattr(arena, "_all_pad_active", None)
-                if all_pad_pos is not None and all_pad_act is not None and np.any(all_pad_act):
-                    active_poses = all_pad_pos[all_pad_act]
-                    d_cp = np.linalg.norm(active_poses - car_xy, axis=1)
-                    close_mask = d_cp < 2500.0
-                    if np.any(close_mask):
-                        close_poses = active_poses[close_mask]
-                        d_close_cp = d_cp[close_mask]
-                        d_close_pb = np.linalg.norm(ball_xy - close_poses, axis=1)
-                        d_direct = _norm2(ball_xy - car_xy)
-                        excess_dist = (d_close_cp + d_close_pb) - d_direct
-                        min_excess = float(np.min(excess_dist))
-
-                        car_speed_h = max(1000.0, _norm2(car.vel))
-                        delta_t_detour = min_excess / car_speed_h
-
-                        # Budget check first: it is a float comparison, while the race against the
-                        # opponent costs an arrival-time solve per body. Both conditions were
-                        # already required together, so ordering them by cost changes nothing but
-                        # the work spent on the common rejection -- which the threat dimmer made
-                        # the usual outcome whenever a shot is developing.
-                        if delta_t_detour <= max_detour_budget:
-                            threats = compute_opponent_threats(car, arena)
-                            opp_arr = threats[0].arrival_time if threats else 999.0
-                            self_arr, _, _ = compute_trajectory_arrival_time(car.pos, car.vel, arena.ball.pos, arena.ball.vel)
-                            time_cushion = opp_arr - self_arr
-
-                            if time_cushion > delta_t_detour or opp_arr > 1.8:
-                                penalty_relief = urgency * 0.85
-                                delta_dist = delta_dist * (1.0 - penalty_relief)
+        # The boost-pathing penalty relief that used to live here is gone.
+        #
+        # It cut the charge for moving AWAY from the ball by up to 85% whenever the car was
+        # low on boost, which broke the one property this term depends on. Approaching paid
+        # full and retreating charged a fraction, so oscillating toward and away from the ball
+        # closed net positive and could be repeated all episode. Measured on the policy at
+        # iteration 2320 the term paid 0.0628/step and charged 0.0154/step, a 4:1 ratio, worth
+        # about 22 per episode against a goal's 30 -- while ball_to_goal, which telescopes
+        # properly, netted 2.3. The relief was active nearly always, because the policy had
+        # learned to stop boosting (2.2% of steps) and so was permanently 'low on boost'.
+        #
+        # The intent was to avoid punishing a detour through a boost pad. That belongs in the
+        # boost potential, which now prices pad routing symmetrically and telescopes, so there
+        # is nothing left for this to forgive. Distance shaping is now strictly symmetric:
+        # ground gained and ground lost cost exactly the same.
 
         # Wall-Crawling & Wall Pursuit Dynamics:
         # 1. When ball has bounced away from the wall into the infield (lateral separation), heavily dampen wall driving.
@@ -1301,7 +1275,12 @@ class PlayerToBallVelocityReward(BaseReward):
             # 3a. Forward Strike-Zone Velocity Matching & Arrival Pacing
             if fwd_alignment > 0.2 and not (is_wrong_side and car_vy_defend > 100.0):
                 if not is_ground_pushing and not is_roof_carry and effective_ball_speed > 250.0 and effective_car_speed > 200.0:
-                    vel_matching_bonus = 0.30 * max(0.0, 1.0 - (effective_rel_speed / 700.0))
+                    # vel_matching_bonus removed with the rest of the additive income.
+                    # It paid up to 0.30/step for matching the ball's speed inside the strike
+                    # zone, which is the shape that rewards shadowing a ball instead of
+                    # hitting it. The pacing and overshoot penalties below still discourage
+                    # barrelling through it, and they only subtract.
+                    pass
 
                 # Kinetic Arrival Velocity Pacing Envelope:
                 # When closing toward the ball on the ground, evaluate required approach pacing:
@@ -1366,307 +1345,42 @@ class PlayerToBallVelocityReward(BaseReward):
                 dribble_boost_penalty *= scale
                 wrong_side_push_penalty *= scale
 
-        # 4. Projected Velocity Toward Ball (Airborne Climbing vs Ground Traversal)
-        vel_toward_ball = 0.0
-        if is_elevated_aerial:
-            if not car.on_ground:
-                # Airborne flight: Evaluate true 3D closing velocity toward high ball relative to ball motion
-                car_closing_proj = float(np.dot(car.vel, unit_to_ball))
-                rel_closing_proj = float(np.dot(car.vel - arena.ball.vel, unit_to_ball))
-                ball_proj = float(np.dot(arena.ball.vel, unit_to_ball))
-
-                # When ball is moving away along line of sight (ball_proj > 100), car must outpace it to close distance:
-                if ball_proj > 100.0:
-                    effective_air_speed = max(0.0, rel_closing_proj)
-                else:
-                    # Floating or incoming ball: reward flight momentum toward intercept, guided by relative closure
-                    effective_air_speed = max(0.0, car_closing_proj) if rel_closing_proj >= 0.0 else max(0.0, rel_closing_proj)
-
-                if effective_air_speed > 0.0:
-                    vel_toward_ball = (effective_air_speed / 2300.0) * 0.40 * max(0.0, fwd_alignment)
-                elif car_closing_proj < -100.0 and curr_dist > 300.0:
-                    # Penalize actively flying away from elevated aerial ball in mid-air
-                    vel_toward_ball = (car_closing_proj / 2300.0) * 0.25
-            else:
-                vel_toward_ball = 0.0
-        else:
-            # Grounded, low, or wall ball: Gate downfield rush when pushing towards defending goal
-            if not (is_wrong_side and car_vy_defend > 100.0):
-                fwd_speed_to_ball = max(0.0, float(np.dot(car.vel, unit_to_ball)))
-                eff_ball_spd = _norm2(arena.ball.vel) if car.on_ground else _norm3(arena.ball.vel)
-                # Prevent nose-push and roof-carry overdriving when already in control:
-                if (is_ground_pushing and fwd_speed_to_ball <= eff_ball_spd + 50.0) or is_roof_carry:
-                    vel_toward_ball = 0.0
-                else:
-                    speed_taper = min(1.0, max(0.35, (eff_dist - 180.0) / 320.0))
-                    effective_alignment = max(fwd_alignment, travel_align_to_ball) if (is_dodging_toward_ball or is_airborne_half_flip or is_forward_traveling) else max(0.0, fwd_alignment)
-                    vel_toward_ball = (fwd_speed_to_ball / 2300.0) * 0.20 * max(0.0, effective_alignment) * speed_taper
-                    if is_on_wall and (is_ball_infield or is_car_above_ball):
-                        vel_toward_ball *= 0.15
-                    elif is_ball_on_wall and fwd_alignment > 0.20:
-                        # Wall Pursuit Multiplier: Accelerate climbing up the wall toward the ball
-                        wall_climb_mult = 1.35 if is_on_wall else 1.20
-                        vel_toward_ball *= wall_climb_mult
-
-        # 5. Turnaround Incentive, Lateral Flank Pocket, and Overshoot Resolution
-        turnaround_reward = 0.0
-        roof_carry_reward = 0.0
-        if car.on_ground:
-            fwd_vec = car.get_forward_vector()
-            right_vec = car.get_right_vector()
-            fwd_h = unit_horiz(fwd_vec)
-            local_x = float(np.dot(car_to_ball[:2], fwd_h))
-            local_y = float(np.dot(car_to_ball[:2], unit_horiz(right_vec)))
-            car_fwd_speed = float(np.dot(car.vel[:2], fwd_h))
-            ball_fwd_speed = float(np.dot(arena.ball.vel[:2], fwd_h))
-            rel_fwd_speed = car_fwd_speed - ball_fwd_speed
-
-            steer = float(action[1])
-
-            # A. Lateral Flank / Pocket Control (ball rolling alongside car: doors / fenders):
-            is_lateral_pocket = bool(
-                curr_dist < 320.0 and
-                abs(local_x) < 140.0 and
-                50.0 < abs(local_y) < 240.0 and
-                ball_z < 200.0
-            )
-
-            lateral_slip = abs(float(np.dot(car.vel[:2], right_vec[:2])))
-            forward_strike_vel = float(np.dot(car.vel[:2], fwd_vec[:2]))
-            yaw_rate = abs(float(car.ang_vel[2])) if hasattr(car, "ang_vel") else 0.0
-
-            if is_lateral_pocket:
-                # 1. Hook Cut / Lateral Pop: Steering directly into the ball
-                steer_into_ball = bool(steer * local_y > 0.15)
-                if steer_into_ball:
-                    # Pure Physics-Driven Two-Stage Cut Mechanic:
-                    # Phase 1: Initiation Angular Redirection (dist > 180 uu or off-angle fwd_alignment < 0.65)
-                    # Phase 2: Tire Bite & Strike Drive (dist <= 180 uu and fwd_alignment >= 0.65)
-                    is_strike_window = bool(curr_dist <= 180.0 and fwd_alignment >= 0.65)
-                    if is_strike_window:
-                        if lateral_slip < 80.0 and forward_strike_vel > 250.0:
-                            # Tires gripping turf with forward momentum: loads suspension for solid pop
-                            grip_factor = 1.0 - (lateral_slip / 80.0)
-                            fwd_factor = min(1.0, forward_strike_vel / 1200.0)
-                            cut_bonus = 0.30 * min(1.0, abs(steer)) + 0.25 * grip_factor * fwd_factor
-                        elif lateral_slip > 150.0:
-                            # Drifting sideways into the ball on ice: penalize lateral tire slip
-                            cut_bonus = -0.20 * min(1.0, (lateral_slip - 100.0) / 400.0)
-                        else:
-                            cut_bonus = 0.20 * min(1.0, abs(steer))
-                    else:
-                        # Initiation: Reward rapid angular yaw rotation toward the ball
-                        yaw_bonus = 0.15 * min(1.0, yaw_rate / 2.5)
-                        cut_bonus = 0.30 * min(1.0, abs(steer)) + yaw_bonus
-                    turnaround_reward += cut_bonus
-
-                # 2. Downfield Speed Matching / Escort in Pocket:
-                # Both moving downfield: reward matching the ball's pace so the bot can carry it on its hip
-                if car_fwd_speed > 150.0 and ball_fwd_speed > 150.0:
-                    pacing_bonus = 0.25 * max(0.0, 1.0 - min(1.0, abs(rel_fwd_speed) / 400.0))
-                    turnaround_reward += pacing_bonus
-
-                # 3. Penalize racing ahead and abandoning pocket without cutting:
-                if rel_fwd_speed > 250.0 and forward_strike_vel > 200.0 and not steer_into_ball:
-                    turnaround_reward -= 0.25 * min(1.0, (rel_fwd_speed - 250.0) / 400.0)
-
-            # B. Close-Proximity Overshoot & Rear Bumper Resolution (ball behind center of mass on turf or bounce, not in pocket or on roof):
-            elif not is_roof_carry and (curr_dist < 300.0 or (horiz_ball_dist < 300.0 and ball_z < 650.0)) and local_x < 0.0 and ball_z < 650.0:
-                # Speed-Differential Aware Overshoot Resolution:
-                # 1. Car outrunning trailing ball downfield:
-                # Penalize widening the gap away from the trailing ball downfield:
-                if rel_fwd_speed > 150.0 and car_fwd_speed > 150.0:
-                    turnaround_reward = -0.25 * min(1.0, (rel_fwd_speed - 150.0) / 400.0)
-
-                # Active steering or rotation to swing around the ball:
-                # Gate: require actual vehicle speed > 100 to prevent stationary spinning exploits
-                # Rewarded for physical yaw rotation rate, scaled by steering deflection
-                car_speed_for_steer = _norm2(car.vel)
-                steer_mag = abs(steer)
-                if car_speed_for_steer > 100.0 and steer_mag > 0.15:
-                    rot_mult = 0.5 + 0.5 * min(1.0, yaw_rate / 2.5)
-                    turnaround_reward += +0.25 * rot_mult * steer_mag
-
-            elif fwd_alignment < -0.25:
-                # Downfield ball-behind: reward physical angular yaw rotation rate to reorient toward ball
-                steer_mag = abs(steer)
-                if yaw_rate > 0.6 or steer_mag > 0.20:
-                    rot_mult = 0.5 + 0.5 * min(1.0, yaw_rate / 2.5)
-                    steer_factor = max(0.5, steer_mag) if steer_mag > 0.20 else min(1.0, yaw_rate / 2.0)
-                    turnaround_reward += +0.20 * rot_mult * steer_factor
-
-            # D. Defensive Low 50/50 Challenge Block:
-            # In the defensive box when an opponent is actively challenging:
-            # Staying on wheels with a low ball in front of the bumper (local_z < 95, 10 < local_x < 150, |local_y| < 65),
-            # with the car nose squared up toward the incoming challenger, acts as a solid physical 50/50 block.
-            dist_to_defend_net = abs(arena.ball.pos[1] - defend_goal_y)
-            is_in_defensive_box = bool(dist_to_defend_net < 1800.0 and abs(arena.ball.pos[0]) < 1400.0)
-            if is_in_defensive_box and is_opponent_challenging and threats:
-                opp = threats[0].opp
-                car_to_opp = opp.pos - car.pos
-                d_opp = _norm3(car_to_opp)
-                unit_to_opp = (car_to_opp / max(1e-4, d_opp)) if d_opp > 1e-4 else fwd_vec
-                facing_opp = float(np.dot(fwd_vec, unit_to_opp))
-                is_low_5050_posture = bool(local_z < 95.0 and 10.0 <= local_x <= 150.0 and abs(local_y) < 65.0 and facing_opp > 0.20)
-                if is_low_5050_posture:
-                    turnaround_reward += 0.50 * facing_opp
-
-            # C. Roof Dribble Carry & Velcro Settling (Seer/Nexto Architecture):
-            if is_roof_carry:
-                # Dunk Hazard & Defensive Contested Carry Gate:
-                if is_in_defensive_box and is_opponent_challenging:
-                    is_moving_across_net = abs(car.vel[0]) > 180.0
-                    if is_moving_across_net:
-                        roof_carry_reward = -0.40  # Dunk hazard penalty!
-                    else:
-                        roof_carry_reward = 0.0   # Taper carry to zero; must challenge/clear
-                else:
-                    target_goal_y = ARENA_EXTENT_Y if car.team == 0 else -ARENA_EXTENT_Y
-                    target_goal_dir = np.array([0.0, 1.0 if car.team == 0 else -1.0, 0.0], dtype=np.float32)
-                    car_to_goal_vel = float(np.dot(car.vel[:2], target_goal_dir[:2]))
-
-                    # Anti-Circling Goal Projection (Seer/Nexto Guard):
-                    # Only reward carrying the ball when advancing downfield toward the opponent net
-                    if car_to_goal_vel > 50.0:
-                        goal_progress = min(1.0, max(0.2, car_to_goal_vel / 1400.0))
-                        # Grace Positioning Pocket (Multi-Flick Setup Architecture):
-                        # Plateaus at 1.0 throughout the entire active flick setup zone:
-                        excess_x = max(0.0, -22.0 - local_x, local_x - 32.0)
-                        excess_y = max(0.0, abs(local_y) - 25.0)
-                        center_score = max(0.0, 1.0 - (excess_x / 25.0 * 0.5 + excess_y / 25.0 * 0.5))
-
-                        # Velcro Settling Bonus: dampening vertical ball bounce on roof for stable flicks
-                        rel_vz = abs(float(arena.ball.vel[2] - car.vel[2]))
-                        velcro_bonus = 0.25 * max(0.0, 1.0 - (rel_vz / 120.0))
-
-                        # Velocity Synchronization
-                        rel_horiz_speed = _norm2(car.vel - arena.ball.vel)
-                        sync_bonus = 0.25 * max(0.0, 1.0 - (rel_horiz_speed / 250.0))
-
-                        dist_to_target_net = abs(target_goal_y - arena.ball.pos[1])
-                        gutter_taper = 0.40 if ((is_on_wall_curve or is_ball_on_curve) and dist_to_target_net < 3600.0) else 1.0
-
-                        if dist_to_target_net < 1800.0 and (opp_tti < 1.5 or any(abs(c.pos[1] - target_goal_y) < 1200.0 for c in arena.cars if c.team != car.team and not c.demoed)):
-                            carry_taper = max(0.35, dist_to_target_net / 1800.0)
-                            roof_carry_reward = (0.40 * center_score * goal_progress + velcro_bonus + sync_bonus) * carry_taper * gutter_taper
-                        else:
-                            roof_carry_reward = (0.40 * center_score * goal_progress + velcro_bonus + sync_bonus) * gutter_taper
-
-        # -- 6. Interception Timing & Opponent-Touch Re-Read -------------------
-        # Closing the distance to an intercept point is not the same as arriving when the ball
-        # does. This term scores the arrival-time error directly: how far off the car's own
-        # time-to-arrive is from the time the ball reaches the meeting point. Rewarding the
-        # REDUCTION in that error makes both halves of a mistimed approach correctable -- a car
-        # that will arrive early is paid to slow down or take a wider line, one that will arrive
-        # late is paid to hurry -- where a pure distance term only ever says "closer is better".
+        # Sections 4, 5, the strike-timing term and the boost-ahead term used to live here.
+        # All four were removed: every one of them paid positive-only, per-step income on top
+        # of a distance potential that already measured the same thing symmetrically.
         #
-        # The same term carries the response to an opponent touch. A touch rewrites the ball's
-        # trajectory, so the intercept point and its timing jump; the baseline is re-seeded on
-        # that step (no free reward for the discontinuity) and the term is amplified afterwards,
-        # which is what pays for re-reading a deflection instead of continuing to drive at where
-        # the ball used to be going.
-        timing_reward = 0.0
-        reread = self._reread_ticks.get(car.id, 0)
-        if opp_touched:
-            self._reread_ticks[car.id] = 24
-        elif reread > 0:
-            self._reread_ticks[car.id] = reread - 1
-
-        ball_speed_now = _norm3(arena.ball.vel)
-        timing_active = bool(ball_speed_now > 300.0 and eff_dist > 300.0 and not is_on_ceiling)
-        if timing_active:
-            intercept_pos, intercept_t = cached_intercept_point(arena, car.id, car.pos, car.vel)
-            car_arrival, _, _ = compute_trajectory_arrival_time(car.pos, car.vel, intercept_pos)
-            timing_err = abs(car_arrival - intercept_t)
-            prev_err = self._prev_timing_err.get(car.id)
-            self._prev_timing_err[car.id] = timing_err
-            if prev_err is not None and not opp_touched:
-                # Bounded per-step credit: this is a shaping nudge, not a headline term.
-                err_delta = _clip(prev_err - timing_err, -0.20, 0.20)
-                reread_mult = 1.75 if self._reread_ticks.get(car.id, 0) > 0 else 1.0
-                timing_reward = err_delta * 0.75 * reread_mult
-        else:
-            self._prev_timing_err.pop(car.id, None)
-
-        # -- 7. Pre-Play Boost Routing Ahead of the Ball -----------------------
-        # The pathing gate earlier only ever makes a detour LESS negative, so following the ball
-        # always outscored leaving it to refuel -- which is why a car with no boost trails the
-        # ball up the wall instead of collecting the pad in front of it and meeting the ball on
-        # the way back down with enough boost to actually do something. This pays outright for
-        # routing through a pad that sits AHEAD of the ball along the ball's own travel direction.
+        #   vel_toward_ball    up to 0.40/step for moving at the ball, with nothing charged
+        #                      for moving away. This double-counted delta_dist: one symmetric
+        #                      copy that telescopes, one asymmetric copy that does not.
+        #   turnaround_reward  cut, pacing and rotation bonuses for executing a pivot.
+        #   roof_carry_reward  carry, velcro and sync bonuses for balancing the ball on the
+        #                      roof -- income for holding possession rather than using it,
+        #                      which prices dribbling above flicking or shooting.
+        #   timing_reward      strike-window arrival shaping.
+        #   boost_ahead_reward a second, non-telescoping copy of the boost-pathing incentive
+        #                      that BoostReward's transit potential already provides, and
+        #                      provides symmetrically.
         #
-        # Affordability is judged the same way the pathing gate judges it: against the race with
-        # the opponent, not against the ball. The meeting point is by construction the first spot
-        # the car can reach, so "will I beat the ball there" is always a tie and tells us nothing;
-        # "how much longer can I take and still get there before they do" is the real budget.
-        boost_ahead_reward = 0.0
-        pad_thresh = getattr(self, "boost_pathing_threshold", 50.0)
-        if (
-            car.on_ground and not is_kickoff and float(car.boost) < pad_thresh
-            and ball_speed_now > 300.0 and eff_dist > 900.0
-        ):
-            all_pad_pos = getattr(arena, "_all_pad_pos_2d", None)
-            all_pad_act = getattr(arena, "_all_pad_active", None)
-            all_pad_big = getattr(arena, "_all_pad_is_big", None)
-            _, threat_intensity, _ = arena.get_shot_threat(car.team) if hasattr(arena, "get_shot_threat") else (False, 0.0, 0.0)
-            safety = threat_safety_multiplier(threat_intensity)
+        # Measured on the policy at iteration 2320, this class paid about 18.5 per episode
+        # while a pure distance potential at this weight is bounded near 1.25, because a car
+        # cannot close more ground than the pitch is long. Roughly 93% of the term was these
+        # streams rather than distance.
+        #
+        # What remains is the distance potential plus the one-sided penalties below it, which
+        # cannot be farmed because they only ever subtract. The policy was seeded from human
+        # replays, so it already knows how to cut, dribble and strike; how it uses the ball is
+        # now decided by touch, ball_to_goal and goal rather than by hand-written per-step pay.
+        #
+        # The kickoff branch keeps its own vel_toward_ball term and its own early return. It
+        # is bounded to the opening seconds and kickoffs are the one phase already working.
 
-            if all_pad_pos is not None and all_pad_act is not None and np.any(all_pad_act) and safety > 0.0:
-                intercept_pos, _ = cached_intercept_point(arena, car.id, car.pos, car.vel)
-                car_arrival, _, _ = compute_trajectory_arrival_time(car.pos, car.vel, intercept_pos)
-                threats_ahead = compute_opponent_threats(car, arena, use_intercept=True)
-                opp_arrival = threats_ahead[0].arrival_time if threats_ahead else 999.0
-                # Time we can spend off the direct line and still win the ball.
-                cushion = opp_arrival - car_arrival
-
-                if cushion > 0.60:
-                    ball_dir = unit_horiz(arena.ball.vel)
-                    if _norm2(ball_dir) > 0.5:
-                        ball_xy = arena.ball.pos[:2]
-                        car_xy = car.pos[:2]
-                        icept_xy = np.asarray(intercept_pos, dtype=np.float32)[:2]
-                        active = np.asarray(all_pad_act, dtype=bool)
-                        poses = np.asarray(all_pad_pos, dtype=np.float32)[active]
-                        if len(poses) > 0:
-                            # "Ahead of the ball": downrange along the ball's own heading, and
-                            # near enough to the meeting point to still be on the way there.
-                            downrange = (poses - ball_xy) @ ball_dir
-                            to_icept = np.linalg.norm(poses - icept_xy, axis=1)
-                            from_car = np.linalg.norm(poses - car_xy, axis=1)
-                            direct = max(1.0, _norm2(icept_xy - car_xy))
-                            # Detour cost in seconds at a realistic ground cruising speed. The
-                            # share of the cushion we are willing to spend dims with the threat.
-                            detour_time = (from_car + to_icept - direct) / max(1000.0, _norm2(car.vel))
-                            detour_allowance = 0.60 * cushion * safety
-                            usable = (
-                                (downrange > 200.0) & (downrange < 5000.0)
-                                & (to_icept < 3000.0) & (from_car < 3000.0)
-                                & (detour_time < detour_allowance)
-                            )
-                            if np.any(usable):
-                                if all_pad_big is not None:
-                                    big = np.asarray(all_pad_big, dtype=bool)[active]
-                                else:
-                                    big = np.zeros(len(poses), dtype=bool)
-                                # Prefer the pad costing the least detour, valuing big orbs.
-                                cost = np.where(usable, detour_time - np.where(big, 0.35, 0.0), np.inf)
-                                pick = int(np.argmin(cost))
-                                pad_vec = poses[pick] - car_xy
-                                pad_dist = _norm2(pad_vec)
-                                if pad_dist > 1e-4:
-                                    speed_to_pad = float(np.dot(car.vel[:2], pad_vec / pad_dist))
-                                    if speed_to_pad > 150.0:
-                                        hunger = min(1.5, max(0.0, (pad_thresh - float(car.boost)) / max(1.0, pad_thresh)))
-                                        # Cheaper detours and larger cushions are worth more.
-                                        afford = min(1.0, max(0.0, 1.0 - (float(detour_time[pick]) / max(1e-4, 0.60 * cushion))))
-                                        speed_factor = min(1.0, speed_to_pad / 1200.0)
-                                        value = 1.6 if bool(big[pick]) else 1.0
-                                        boost_ahead_reward = 0.30 * hunger * afford * speed_factor * value
-
+        # The distance potential, plus penalties that can only subtract. Nothing here pays
+        # positive income per step, so the term telescopes: over any path that returns to its
+        # starting distance the delta sums to zero, and what survives is ground actually
+        # gained. That bounds the whole class near 1.25 per episode at weight 0.5.
         total_reward = self.weight * (
-            delta_dist + vel_toward_ball + vel_matching_bonus + pacing_penalty + dribble_boost_penalty +
-            overshoot_penalty + ceiling_penalty + wrong_side_push_penalty + turnaround_reward + roof_carry_reward +
-            timing_reward + boost_ahead_reward
+            delta_dist + pacing_penalty + dribble_boost_penalty +
+            overshoot_penalty + ceiling_penalty + wrong_side_push_penalty
         )
         return float(total_reward)
 
@@ -1956,6 +1670,21 @@ class JumpBridgeReward(BaseReward):
         self._prev_ball_vel = {car.id: initial_state.ball.vel.copy() for car in initial_state.cars}
 
     def get_reward(self, car: CarState, arena: RocketSimArena, action: np.ndarray, is_goal: bool, scoring_team: Optional[int]) -> float:
+        # Strict zero gate. Every payout below is `self.weight * multiplier`, so a zero weight
+        # already yields zero, but this term is the most expensive reward in the set: it solves
+        # opponent arrival times and runs several flip classifiers on every step for every car.
+        # Returning early keeps that off the hot path once the weight is annealed or zeroed,
+        # rather than computing a full analysis and multiplying the answer by nothing.
+        if self.weight <= 1e-6:
+            self._prev_on_ground[car.id] = car.on_ground
+            self._prev_has_flip[car.id] = car.has_flip
+            self._prev_has_double_jumped[car.id] = getattr(car, "has_double_jumped", False)
+            self._prev_touches[car.id] = car.ball_touches
+            self._prev_vel[car.id] = car.vel.copy()
+            self._prev_pos_z[car.id] = float(car.pos[2])
+            self._prev_ball_vel[car.id] = arena.ball.vel.copy()
+            return 0.0
+
         prev_ground = self._prev_on_ground.get(car.id, car.on_ground)
         self._prev_on_ground[car.id] = car.on_ground
 
