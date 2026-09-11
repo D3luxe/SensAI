@@ -94,12 +94,16 @@ def _worker_main(remote, env_kwargs, specs, start, end, project_root):
     done_b = _attach(specs["done"])
     act_b = _attach(specs["act"])
     touch_b = _attach(specs["touch"])
+    term_obs_b = _attach(specs["term_obs"])
+    trunc_b = _attach(specs["trunc"])
 
     obs_v = obs_b.array[start:end]
     rew_v = rew_b.array[start:end]
     done_v = done_b.array[start:end]
     act_v = act_b.array[start:end]
     touch_v = touch_b.array[start:end]
+    term_obs_v = term_obs_b.array[start:end]
+    trunc_v = trunc_b.array[start:end]
 
     kwargs = dict(env_kwargs)
     kwargs["num_envs"] = n_local
@@ -111,6 +115,8 @@ def _worker_main(remote, env_kwargs, specs, start, end, project_root):
     vec._obs_buffer = obs_v
     vec._rew_buffer = rew_v
     vec._done_buffer = done_v
+    vec._term_obs_buffer = term_obs_v
+    vec._trunc_buffer = trunc_v
 
     try:
         while True:
@@ -231,12 +237,18 @@ class SubprocVectorizedRocketEnv:
         self._done_b = _SharedBlock(None, (num_envs, P), np.bool_, create=True)
         self._act_b = _SharedBlock(None, act_shape, np.float32, create=True)
         self._touch_b = _SharedBlock(None, (num_envs,), np.int32, create=True)
+        # Time-limit bootstrapping channel. The terminal observation is bulk data, so it
+        # rides shared memory like the rest rather than being pickled over the pipes.
+        self._term_obs_b = _SharedBlock(None, (num_envs, P, self.obs_dim), np.float32, create=True)
+        self._trunc_b = _SharedBlock(None, (num_envs, P), np.bool_, create=True)
 
         self._obs = self._obs_b.array
         self._rew = self._rew_b.array
         self._done = self._done_b.array
         self._act = self._act_b.array
         self._touch = self._touch_b.array
+        self._term_obs = self._term_obs_b.array
+        self._trunc = self._trunc_b.array
 
         specs = {
             "obs": _spec(self._obs_b),
@@ -244,6 +256,8 @@ class SubprocVectorizedRocketEnv:
             "done": _spec(self._done_b),
             "act": _spec(self._act_b),
             "touch": _spec(self._touch_b),
+            "term_obs": _spec(self._term_obs_b),
+            "trunc": _spec(self._trunc_b),
         }
 
         env_kwargs = dict(
@@ -333,6 +347,13 @@ class SubprocVectorizedRocketEnv:
 
         return self._obs, self._rew, self._done, infos
 
+    def get_truncation(self) -> Tuple[np.ndarray, np.ndarray]:
+        """
+        Time-limit bootstrapping channel for the most recent step, flattened to
+        (num_envs * P,) and (num_envs * P, obs_dim). See VectorizedRocketEnv.get_truncation.
+        """
+        return self._trunc.reshape(-1), self._term_obs.reshape(-1, self.obs_dim)
+
     def get_learner_mask(self) -> np.ndarray:
         P = self.num_players_per_env
         mask = np.ones((self.num_envs, P), dtype=bool)
@@ -384,7 +405,8 @@ class SubprocVectorizedRocketEnv:
             p.join(timeout=5.0)
             if p.is_alive():
                 p.terminate()
-        for b in (self._obs_b, self._rew_b, self._done_b, self._act_b, self._touch_b):
+        for b in (self._obs_b, self._rew_b, self._done_b, self._act_b, self._touch_b,
+                  self._term_obs_b, self._trunc_b):
             b.close()
 
     def __del__(self):

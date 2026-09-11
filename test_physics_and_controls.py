@@ -529,16 +529,25 @@ class TestPhysicsAndControls(unittest.TestCase):
         rew_prog = b2g_fn.get_reward(car, MockArena(ball_fwd, [car]), np.zeros(8), False, None)
         self.assertGreater(rew_prog, 0.0, "Ball moving toward opponent net must yield positive BallToGoal reward!")
 
-        # 3. Necto Sqrt Boost Potential
+        # 3. Symmetric Boost Conservation Potential
         boost_fn = BoostReward(gain_weight=1.0, lose_weight=0.5)
         boost_fn.reset(MockArena(ball_fwd, [car]))
         # Collect pad: 10% -> 22% (0.10 -> 0.22)
         car.boost = 22.0
         rew_boost = boost_fn.get_reward(car, MockArena(ball_fwd, [car]), np.zeros(8), False, None)
-        hunger = 1.0 + 2.0 * (1.0 - 0.10)
-        pickup_bonus = 0.45 * (1.0 - 0.10)
-        expected_diff = (math.sqrt(0.22) - math.sqrt(0.10)) * hunger + pickup_bonus
-        self.assertAlmostEqual(rew_boost, expected_diff, places=4, msg="Boost gain must match sqrt(curr) - sqrt(prev) with hunger and pickup bonus!")
+        phi = BoostReward._potential
+        expected_diff = phi(0.22) - phi(0.10)
+        self.assertAlmostEqual(rew_boost, expected_diff, places=4, msg="Boost gain must be the potential difference Phi(curr) - Phi(prev)!")
+        self.assertGreater(rew_boost, 0.0, "Collecting boost must still pay.")
+
+        # The low-boost hunger gradient survives: the same 12% of tank is worth more when
+        # the car is nearly empty than when it is nearly full.
+        self.assertGreater(phi(0.22) - phi(0.10), phi(0.92) - phi(0.80),
+                           "Phi must stay steepest near empty, preserving low-boost hunger.")
+
+        # A big orb must still dominate a small pad.
+        self.assertGreater(phi(1.0) - phi(0.0), 4.0 * (phi(0.22) - phi(0.10)),
+                           "A full big orb must far outweigh a single small pad.")
 
         # 4. Zero-Sum Goal Reward
         goal_fn = GoalReward(goal_weight=10.0, concede_weight=-10.0)

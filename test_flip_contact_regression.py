@@ -282,12 +282,19 @@ class TestFlipContactRegression(unittest.TestCase):
             "A messy landing that concludes a close ball challenge must not be charged the "
             "full crash penalty while its in-flight recovery reward is suppressed.")
 
-    # ── 8. Ground-only shaping cliff ──────────────────────────────────────────
+    # -- 8. Ground-only shaping cliff -----------------------------------------
     def test_boost_transit_shaping_has_no_liftoff_cliff(self):
-        def shaping(car_z, on_ground):
+        """Leaving the turf must not be a standing opportunity cost.
+
+        Pad-transit shaping used to be a per-step income stream, so a hard on_ground gate
+        deleted that income the instant the car jumped, and this test asserted the height
+        taper preserved most of it. The term is now a potential difference, which answers
+        the same concern more strongly: the taper must still be continuous at liftoff, AND
+        a hop that returns to the turf must cost exactly nothing in total.
+        """
+        def fixture(car_z, on_ground):
             arena = RocketSimArena(); arena.reset()
             car = arena.cars[0]
-            car.rot_mat = NOSE_PLUS_Y.copy()
             # Heading +X toward the big pad at (3584, 0), ~980 uu away.
             car.rot_mat = np.array([[1, 0, 0], [0, 1, 0], [0, 0, 1]], dtype=np.float32)
             car.pos = np.array([2600.0, 0.0, car_z], dtype=np.float32)
@@ -297,15 +304,29 @@ class TestFlipContactRegression(unittest.TestCase):
             arena.ball.pos = np.array([0.0, 3000.0, 93.0], dtype=np.float32)
             br = BoostReward(gain_weight=1.4, lose_weight=0.6)
             br.reset(arena)
-            return br.get_reward(car, arena, np.zeros(8, dtype=np.float32), False, None)
+            return br, arena, car
 
-        grounded = shaping(17.0, True)
-        just_airborne = shaping(30.0, False)
+        # a. The taper is continuous: a 13 uu hop must not step the potential off a cliff.
+        br, arena, car = fixture(17.0, True)
+        grounded = br._transit_potential(car, arena)
+        br, arena, car = fixture(30.0, False)
+        just_airborne = br._transit_potential(car, arena)
         self.assertGreater(grounded, 0.0, "Fixture must actually produce pad-transit shaping.")
         self.assertGreater(
             just_airborne, 0.5 * grounded,
-            "Leaving the turf must not instantly delete the pad-transit shaping stream; "
-            "that is a standing opportunity cost for jumping.")
+            "Leaving the turf must not instantly delete the pad-transit potential.")
+
+        # b. The round trip is free. That is what the opportunity cost really amounted to.
+        br, arena, car = fixture(17.0, True)
+        act = np.zeros(8, dtype=np.float32)
+        total = 0.0
+        for z, on_gnd in [(17.0, True), (30.0, False), (140.0, False), (30.0, False), (17.0, True)]:
+            car.pos = np.array([2600.0, 0.0, z], dtype=np.float32)
+            car.on_ground = on_gnd
+            total += br.get_reward(car, arena, act, False, None)
+        self.assertAlmostEqual(
+            total, 0.0, places=6,
+            msg="a hop that lands where it started must net zero, got {}".format(total))
 
 
 if __name__ == "__main__":

@@ -6,12 +6,10 @@ environment:
   tick_skip: 8
 hyperparameters:
   batch_size: 16384
-  bc_decay_steps: 500000000
-  bc_regularization_weight: 0.02
   clip_range: 0.2
   ent_coef: 0.01
-  gae_lambda: 0.95
-  gamma: 0.99
+  gae_lambda: 0.98
+  gamma: 0.995
   learning_rate: 0.0003
   log_std_floor:
   - -2.5
@@ -20,9 +18,11 @@ hyperparameters:
   - -2.0
   - -2.0
   mini_batch_size: 1024
-  n_epochs: 2
+  n_epochs: 4
+  normalize_returns: true
   rot_log_std_anneal_iters: 4000
   rot_log_std_ceiling_final: -1.4
+  vf_clip_range: null
 league:
   benchmark_interval: 15
   benchmark_opponents:
@@ -78,17 +78,7 @@ reward_annealing:
   decay_steps: 400000000
   enabled: true
   targets:
-    # Measured over 10k steps of the policy at iteration 215360, shaping terms were 82% of net
-    # reward per step and scoring was 12%: the flip reward alone paid 2.5x what goals paid. Each
-    # target below runs its own clock, so these ramp from wherever the policy sits today rather
-    # than inheriting powerslide's elapsed schedule.
-    #
-    # jump_bridge pays at the takeoff instant on context, and nothing charges for the landing.
-    # Not to zero: it is the only term that pays for a wall takeoff at all.
     jump_bridge_weight: 0.15
-    # player_to_ball is the approach potential, largest single earner at 34% of net. Bootstrap
-    # value is spent once the policy reliably arrives; keeping it high prices chasing above
-    # finishing. Held well above zero since it also carries turn-radius learning for powerslide.
     player_to_ball_weight: 0.25
     powerslide_weight: 0.0
 rewards:
@@ -98,8 +88,8 @@ rewards:
   boost_lose_weight: 0.6
   concede_weight: -30.0
   goal_weight: 30.0
-  jump_bridge_weight: 0.55
-  player_to_ball_weight: 0.6
+  jump_bridge_weight: 0.5
+  player_to_ball_weight: 0.5
   powerslide_weight: 0.2
   save_weight: 6.0
   touch_weight: 0.5

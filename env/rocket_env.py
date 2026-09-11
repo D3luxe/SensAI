@@ -102,7 +102,8 @@ class RocketLeagueEnv:
         out_obs: Optional[np.ndarray] = None,
         out_rews: Optional[np.ndarray] = None,
         include_breakdown: bool = False,
-        opponent_action: Optional[np.ndarray] = None
+        opponent_action: Optional[np.ndarray] = None,
+        out_term_obs: Optional[np.ndarray] = None
     ) -> Tuple[np.ndarray, np.ndarray, np.ndarray, Dict[str, Any]]:
         """
         Step simulation by tick_skip sub-ticks.
@@ -206,8 +207,18 @@ class RocketLeagueEnv:
         )
         dones = np.array([done] * self.num_players, dtype=bool)
 
+        # A goal is the only exit that carries a genuine terminal value of zero. Every other
+        # exit here is a TRUNCATION: the clock ran out, or a scenario was declared resolved.
+        # Treating those as terminations teaches the critic that the future is worthless
+        # whenever a timer the car cannot observe happens to expire -- and the observation
+        # vector carries no clock at all, so that signal is pure noise to it. The trainer
+        # bootstraps V(s) across these instead, which is why the pre-reset observation has
+        # to survive the auto-reset below.
+        is_truncated = bool(done and not is_goal)
+
         info = {
             "is_goal": is_goal,
+            "truncated": is_truncated,
             "scoring_team": scoring_team,
             "step": self.current_step,
             "step_touches": step_touches,
@@ -220,9 +231,15 @@ class RocketLeagueEnv:
             "scenario": self.current_scenario,
         }
 
-        # Auto-reset on goal/max steps/stalled kickoff
+        # Auto-reset on goal/max steps/stalled kickoff. The observation the agent actually
+        # arrived at is overwritten by the reset, so capture it first: bootstrapping a
+        # truncation against the post-reset observation would value a finished play by the
+        # fresh scenario that replaced it.
         if done:
-            info["terminal_observation"] = out_obs.copy()
+            if out_term_obs is not None:
+                out_term_obs[:] = out_obs
+            else:
+                info["terminal_observation"] = out_obs.copy()
             reset_obs = self.reset()
             out_obs[:] = reset_obs[:]
 
@@ -280,6 +297,11 @@ class VectorizedRocketEnv:
         self._obs_buffer = np.zeros((num_envs, self.num_players_per_env, self.obs_dim), dtype=np.float32)
         self._rew_buffer = np.zeros((num_envs, self.num_players_per_env), dtype=np.float32)
         self._done_buffer = np.zeros((num_envs, self.num_players_per_env), dtype=bool)
+        # Time-limit bootstrapping channel: the observation each environment actually reached
+        # before its auto-reset, plus a flag marking which of those exits were truncations
+        # rather than goals. Only rows flagged in _trunc_buffer hold meaningful data.
+        self._term_obs_buffer = np.zeros((num_envs, self.num_players_per_env, self.obs_dim), dtype=np.float32)
+        self._trunc_buffer = np.zeros((num_envs, self.num_players_per_env), dtype=bool)
 
         # Opponent batched inference engine state
         self._opponent_prev_actions = np.zeros((num_envs, 8), dtype=np.float32)
@@ -401,6 +423,20 @@ class VectorizedRocketEnv:
                     env.baseline_bot = create_opponent_bot(opp_spec, continuous_actions=self.continuous_actions)
         self._build_opponent_groups()
 
+    def get_truncation(self) -> Tuple[np.ndarray, np.ndarray]:
+        """
+        Time-limit bootstrapping channel for the most recent step.
+
+        Returns (truncated, terminal_obs), flattened to (num_envs * num_players,) and
+        (num_envs * num_players, obs_dim). `truncated` marks the actors whose episode ended
+        on a clock or a resolved-scenario check rather than on a goal; `terminal_obs` holds
+        the observation they reached before the auto-reset. Rows not flagged are stale.
+        """
+        return (
+            self._trunc_buffer.reshape(-1),
+            self._term_obs_buffer.reshape(-1, self.obs_dim),
+        )
+
     def get_learner_mask(self) -> np.ndarray:
         """
         Returns boolean mask of shape (num_envs * num_players_per_env,)
@@ -424,6 +460,7 @@ class VectorizedRocketEnv:
 
     def reset(self) -> np.ndarray:
         self._opponent_prev_actions.fill(0.0)
+        self._trunc_buffer.fill(False)
         for i, env in enumerate(self.envs):
             obs = env.reset()
             self._obs_buffer[i] = obs
@@ -436,15 +473,19 @@ class VectorizedRocketEnv:
         """
         self._batch_evaluate_opponents()
 
+        self._trunc_buffer.fill(False)
         all_infos = []
         for i, env in enumerate(self.envs):
             _, _, dones, info = env.step(
                 actions[i],
                 out_obs=self._obs_buffer[i],
                 out_rews=self._rew_buffer[i],
-                opponent_action=self._batched_opp_actions[i]
+                opponent_action=self._batched_opp_actions[i],
+                out_term_obs=self._term_obs_buffer[i]
             )
             self._done_buffer[i] = dones
+            if info.get("truncated", False):
+                self._trunc_buffer[i] = dones
             if dones[0]:
                 self._opponent_prev_actions[i].fill(0.0)
             all_infos.append(info)
