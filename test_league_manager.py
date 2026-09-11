@@ -1494,3 +1494,70 @@ class TestRatingLock(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestBenchmarkCounterPersistence(unittest.TestCase):
+    """
+    The benchmark interval has to survive the process boundary.
+
+    Grading runs in a fresh child process per checkpoint, which rebuilds the manager from
+    disk. With the counter held only in memory it was always 1 at the interval check, so
+    `1 % 25` never fired and the fixed references were never played. Nexto is the one
+    reference that cannot be rated (it beats Necto every series, loses to every checkpoint,
+    and Necto beats those same checkpoints, a closed cycle), so the benchmark path is the
+    only place its score is recorded at all.
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp(prefix="sensai_test_bench_")
+        self.leaderboard_path = os.path.join(self.tmp, "lb.json")
+        self.state_path = os.path.join(self.tmp, "state.json")
+        self.evaluator = TrueSkillEvaluator(leaderboard_path=self.leaderboard_path)
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def _manager(self):
+        return LeagueManager(
+            evaluator=self.evaluator,
+            leaderboard_path=self.leaderboard_path,
+            config={"league_state_path": self.state_path, "benchmark_interval": 25}
+        )
+
+    def test_counter_survives_a_rebuild_from_disk(self):
+        first = self._manager()
+        first._benchmark_counter = 7
+        first.save_league_state()
+
+        second = self._manager()
+        self.assertEqual(second._benchmark_counter, 7)
+
+    def test_interval_is_reached_across_separate_processes(self):
+        """Twenty-five single-grading processes must fire the benchmark exactly once."""
+        fired = []
+        for _ in range(25):
+            lm = self._manager()
+            lm._benchmark_counter += 1
+            if lm.benchmark_interval > 0 and lm._benchmark_counter % lm.benchmark_interval == 0:
+                fired.append(lm._benchmark_counter)
+            lm.save_league_state()
+        self.assertEqual(fired, [25])
+
+    def test_results_survive_a_rebuild_so_the_ui_keeps_the_last_score(self):
+        first = self._manager()
+        first.benchmark_results = {"Nexto": {"series": 2, "series_won": 1, "goals": "7-6"}}
+        first.save_league_state()
+
+        self.assertEqual(self._manager().benchmark_results["Nexto"]["goals"], "7-6")
+
+    def test_a_state_file_written_before_this_existed_still_loads(self):
+        with open(self.state_path, "w", encoding="utf-8") as f:
+            json.dump({"version": "1.0", "contender_queue": [], "elite_pool": []}, f)
+        lm = self._manager()
+        self.assertEqual(lm._benchmark_counter, 0)
+        self.assertEqual(lm.benchmark_results, {})
+
+    def test_a_corrupt_counter_falls_back_to_zero(self):
+        with open(self.state_path, "w", encoding="utf-8") as f:
+            json.dump({"version": "1.0", "benchmark_counter": "not a number"}, f)
+        self.assertEqual(self._manager()._benchmark_counter, 0)
