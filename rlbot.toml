@@ -1,0 +1,36 @@
+#:schema https://rlbot.org/schemas/match.json
+# Match description for launch_ingame.py. Every key here is one the v5 config loader reads.
+
+[rlbot]
+# "Steam", "Epic", "Custom", "NoLaunch"
+launcher = "Steam"
+# Let RLBot start each agent process using the run_command in its own toml.
+auto_start_agents = true
+wait_for_agents = true
+
+[match]
+game_mode = "Soccer"
+game_map_upk = "Stadium_P"
+skip_replays = false
+# Skip the 3-2-1 countdown.
+instant_start = false
+# "RestartIfDifferent", "Restart", "ContinueAndSpawn"
+existing_match_behavior = "Restart"
+# The diagnostic bot draws a HUD, so leave rendering available.
+enable_rendering = true
+enable_state_setting = true
+freeplay = false
+
+[mutators]
+match_length = "FiveMinutes"
+
+[[cars]]
+# The trained policy. Team 0 is blue, 1 is orange.
+config_file = "bot.toml"
+team = 0
+
+[[cars]]
+type = "psyonix"
+# "Beginner", "Rookie", "Pro", "AllStar"
+skill = "AllStar"
+team = 1

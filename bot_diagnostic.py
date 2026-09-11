@@ -11,12 +11,13 @@ import math
 import numpy as np
 
 try:
-    from rlbot.agents.base_agent import BaseAgent, SimpleControllerState
-    from rlbot.utils.structures.game_data_struct import GameTickPacket
+    from rlbot.flat import AirState, ControllerState, GamePacket, MatchPhase
+    from rlbot.managers import Bot
     RLBOT_AVAILABLE = True
 except ImportError:
     RLBOT_AVAILABLE = False
-    class SimpleControllerState:
+
+    class ControllerState:
         def __init__(self):
             self.steer = 0.0
             self.throttle = 0.0
@@ -27,12 +28,34 @@ except ImportError:
             self.boost = False
             self.handbrake = False
             self.use_item = False
-    BaseAgent = object
-    GameTickPacket = object
+
+    class AirState:
+        OnGround = 0
+        Jumping = 1
+        DoubleJumping = 2
+        Dodging = 3
+        InAir = 4
+
+    class MatchPhase:
+        Inactive = 0
+        Countdown = 1
+        Kickoff = 2
+        Active = 3
+        GoalScored = 4
+        Replay = 5
+        Paused = 6
+        Ended = 7
+
+    Bot = object
+    GamePacket = object
+
+AGENT_ID = "antigravity/sensai_diagnostic"
 
 
-class DiagnosticBot(BaseAgent):
-    def __init__(self, name, team, index):
+class DiagnosticBot(Bot):
+    def __init__(self, name: str = "SensAI_Diagnostic", team: int = 0, index: int = 0, agent_id: str = AGENT_ID):
+        if RLBOT_AVAILABLE:
+            super().__init__(agent_id)
         self.name = name
         self.team = team
         self.index = index
@@ -55,26 +78,27 @@ class DiagnosticBot(BaseAgent):
             "5. AUTONOMOUS BALL TRACKING (Observation Check)"
         ]
 
-        if RLBOT_AVAILABLE:
-            super().__init__(name, team, index)
-
-    def get_output(self, packet: GameTickPacket) -> SimpleControllerState:
-        controller = SimpleControllerState()
+    def get_output(self, packet: GamePacket) -> ControllerState:
+        controller = ControllerState()
         self.tick_count += 1
-        
-        my_car = packet.game_cars[self.index]
-        ball = packet.game_ball
+
+        if len(packet.players) <= self.index or not packet.balls:
+            return controller
+
+        my_car = packet.players[self.index]
+        ball = packet.balls[0]
         car_pos = my_car.physics.location
         car_vel = my_car.physics.velocity
         car_rot = my_car.physics.rotation
-        is_on_ground = bool(my_car.has_wheel_contact)
+        is_on_ground = my_car.air_state == AirState.OnGround
         speed = math.sqrt(car_vel.x ** 2 + car_vel.y ** 2 + car_vel.z ** 2)
 
         # ─────────────────────────────────────────────────────────────────────
         # 1. KICKOFF COUNTDOWN DETECTION (Wait for "GO!")
         # ─────────────────────────────────────────────────────────────────────
-        is_kickoff_pause = getattr(packet.game_info, "is_kickoff_pause", False)
-        is_round_active = getattr(packet.game_info, "is_round_active", True)
+        match_phase = getattr(packet.match_info, "match_phase", MatchPhase.Active)
+        is_kickoff_pause = match_phase in (MatchPhase.Countdown, MatchPhase.Kickoff)
+        is_round_active = match_phase == MatchPhase.Active
 
         if is_kickoff_pause or not is_round_active:
             controller.throttle = 1.0
@@ -288,31 +312,35 @@ class DiagnosticBot(BaseAgent):
             try:
                 self.renderer.begin_rendering("DiagnosticBot_HUD")
                 y = 60
-                w = self.renderer.white()
-                yell = self.renderer.yellow()
-                c = self.renderer.cyan()
-                g = self.renderer.green()
-                red = self.renderer.red()
+                w = self.renderer.white
+                yell = self.renderer.yellow
+                c = self.renderer.cyan
+                g = self.renderer.green
+                red = self.renderer.red
 
-                self.renderer.draw_string_2d(20, y, 2, 2, "SensAI Hardware & Control Diagnostic Bot", yell)
+                self.renderer.draw_string_2d("SensAI Hardware & Control Diagnostic Bot", 20, y, 2, yell)
                 y += 35
                 if countdown:
-                    self.renderer.draw_string_2d(20, y, 2, 2, f"KICKOFF: {countdown}", red)
+                    self.renderer.draw_string_2d(f"KICKOFF: {countdown}", 20, y, 2, red)
                 elif self.state == "COOLDOWN":
-                    self.renderer.draw_string_2d(20, y, 2, 2, f"STATE: {status_msg}", yell)
+                    self.renderer.draw_string_2d(f"STATE: {status_msg}", 20, y, 2, yell)
                 else:
-                    self.renderer.draw_string_2d(20, y, 2, 2, f"Active Test: {self.test_names[self.current_test]}", c)
-                
+                    self.renderer.draw_string_2d(f"Active Test: {self.test_names[self.current_test]}", 20, y, 2, c)
+
                 y += 30
-                self.renderer.draw_string_2d(20, y, 1, 1, f"Phase: {status_msg}", g)
+                self.renderer.draw_string_2d(f"Phase: {status_msg}", 20, y, 1, g)
                 y += 25
-                self.renderer.draw_string_2d(20, y, 1, 1,
+                self.renderer.draw_string_2d(
                     f"Controls: thr={controller.throttle:+.2f} str={controller.steer:+.2f} "
                     f"pit={controller.pitch:+.2f} yaw={controller.yaw:+.2f} rol={controller.roll:+.2f} "
-                    f"jmp={int(controller.jump)} bst={int(controller.boost)} hnd={int(controller.handbrake)}", w)
+                    f"jmp={int(controller.jump)} bst={int(controller.boost)} hnd={int(controller.handbrake)}", 20, y, 1, w)
                 y += 20
-                self.renderer.draw_string_2d(20, y, 1, 1,
-                    f"Telemetry: Speed={speed:.0f} uu/s | Pos=({car_pos.x:.0f}, {car_pos.y:.0f}, {car_pos.z:.0f}) | OnGround={is_on_ground}", w)
+                self.renderer.draw_string_2d(
+                    f"Telemetry: Speed={speed:.0f} uu/s | Pos=({car_pos.x:.0f}, {car_pos.y:.0f}, {car_pos.z:.0f}) | OnGround={is_on_ground}", 20, y, 1, w)
                 self.renderer.end_rendering()
             except Exception:
                 pass
+
+
+if __name__ == "__main__":
+    DiagnosticBot(agent_id=AGENT_ID).run()

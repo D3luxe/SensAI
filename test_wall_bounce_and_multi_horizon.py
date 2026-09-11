@@ -13,7 +13,10 @@ import RocketSim as rsim
 from env.physics_engine import (
     RocketSimArena, CarState, BallState,
     ARENA_EXTENT_X, ARENA_EXTENT_Y, ARENA_HEIGHT_Z,
-    WALL_BOUNCE_VX_THRESHOLD, WALL_BOUNCE_VY_THRESHOLD
+    WALL_BOUNCE_VX_THRESHOLD, WALL_BOUNCE_VY_THRESHOLD,
+    BALL_PRED_SHORT_TICKS, BALL_PRED_MEDIUM_TICKS,
+    PREDICTION_HORIZON_TICKS, PREDICTION_SLICE_COUNT,
+    SHOT_THREAT_HORIZON_TICKS, SHOT_THREAT_HORIZON_S
 )
 from env.observations import (
     OBS_DIM,
@@ -218,6 +221,100 @@ class TestWallBounceAndMultiHorizon(unittest.TestCase):
         self.assertEqual(action.shape, (8, 8))
         self.assertEqual(value.shape[0], 8)
         self.assertFalse(torch.isnan(action).any())
+
+
+class TestTrainingAndLiveHorizonParity(unittest.TestCase):
+    """
+    The live bot and the training arena must agree on what a prediction index means.
+
+    Before the v5 migration they did not. The bot halved every index to suit RLBot v4's 60 Hz
+    prediction while decaying shot-threat intensity over a hardcoded 120, so the same shot read
+    one intensity in training and a different one in a real match, and the 0.5s and 1.5s
+    observations were really 0.25s and 0.75s.
+    """
+
+    SCENARIOS = [
+        ((200.0, -1500.0, 300.0), (-60.0, -1800.0, 120.0), 0, "direct shot at blue net"),
+        ((0.0, 2000.0, 500.0), (100.0, 1600.0, -50.0), 1, "lofted shot at orange net"),
+        ((3500.0, -1000.0, 600.0), (900.0, 600.0, 200.0), 0, "corner wall rebound"),
+        ((-1500.0, -800.0, 93.0), (700.0, -900.0, 300.0), 0, "slow angled roll"),
+    ]
+
+    def _arena_pair(self, pos, vel):
+        """A training arena and a live MockArena fed the same trajectory."""
+        import rlbot_fakes
+        from bot import MockArena, PredictionIndexer
+
+        arena = RocketSimArena()
+        arena.reset()
+        bs = rsim.BallState()
+        bs.pos = rsim.Vec(*pos)
+        bs.vel = rsim.Vec(*vel)
+        arena._rsim_arena.ball.set_state(bs)
+        arena._sync_from_rsim()
+
+        # The live side sees the same trajectory as an RLBot v5 prediction: 720 slices at 120 Hz.
+        slices = arena._rsim_arena.get_ball_prediction(720)
+        fake = rlbot_fakes.ball_prediction([(s.pos.x, s.pos.y, s.pos.z) for s in slices])
+        live = MockArena(
+            BallState(pos=np.array(pos, dtype=np.float32), vel=np.array(vel, dtype=np.float32)),
+            [], predictor=PredictionIndexer(fake.slices)
+        )
+        return arena, live
+
+    def test_shot_threat_matches_between_training_and_live(self):
+        for pos, vel, team, label in self.SCENARIOS:
+            with self.subTest(label):
+                arena, live = self._arena_pair(pos, vel)
+                t_flag, t_int, t_z = arena.get_shot_threat(team)
+                l_flag, l_int, l_z = live.get_shot_threat(team)
+                self.assertEqual(t_flag, l_flag, f"threat detection disagrees for {label}")
+                self.assertAlmostEqual(t_int, l_int, places=4, msg=f"intensity disagrees for {label}")
+                self.assertAlmostEqual(t_z, l_z, places=4, msg=f"entry height disagrees for {label}")
+
+    def test_predicted_positions_match_at_every_horizon(self):
+        horizons = (BALL_PRED_SHORT_TICKS, BALL_PRED_MEDIUM_TICKS, PREDICTION_HORIZON_TICKS)
+        for pos, vel, _team, label in self.SCENARIOS:
+            with self.subTest(label):
+                arena, live = self._arena_pair(pos, vel)
+                for ticks in horizons:
+                    train_pos = arena.get_predicted_ball_pos(ticks)
+                    live_pos = live.get_predicted_ball_pos(ticks)
+                    self.assertLess(
+                        float(np.abs(train_pos - live_pos).max()), 1.0,
+                        f"{label}: tick {ticks} disagrees between training and live"
+                    )
+
+    def test_deepest_horizon_comes_from_the_engine(self):
+        """
+        The requested array must reach the deepest index any consumer asks for.
+
+        One slice short and that request falls out of range into the approximate pure-Python
+        simulator, whose state does not line up with the engine slices beside it.
+        """
+        self.assertGreater(PREDICTION_SLICE_COUNT, PREDICTION_HORIZON_TICKS)
+        self.assertGreaterEqual(PREDICTION_HORIZON_TICKS, BALL_PRED_MEDIUM_TICKS)
+        self.assertGreaterEqual(PREDICTION_HORIZON_TICKS, SHOT_THREAT_HORIZON_TICKS)
+
+        arena = RocketSimArena()
+        arena.reset()
+        bs = rsim.BallState()
+        bs.pos = rsim.Vec(1000.0, -2000.0, 800.0)
+        bs.vel = rsim.Vec(300.0, -400.0, 250.0)
+        arena._rsim_arena.ball.set_state(bs)
+        arena._sync_from_rsim()
+
+        arena.get_predicted_ball_pos(PREDICTION_HORIZON_TICKS)
+        self.assertIsNotNone(arena._cached_rsim_preds, "engine prediction was not consulted")
+        self.assertGreater(
+            len(arena._cached_rsim_preds), PREDICTION_HORIZON_TICKS,
+            "requested prediction is too short to answer the deepest horizon"
+        )
+
+    def test_shot_threat_horizon_is_three_seconds(self):
+        """The scan window and the intensity ramp must describe the same span of time."""
+        self.assertAlmostEqual(SHOT_THREAT_HORIZON_S, SHOT_THREAT_HORIZON_TICKS / 120.0, places=6)
+        self.assertAlmostEqual(SHOT_THREAT_HORIZON_S, 3.0, places=6)
 
 
 if __name__ == "__main__":

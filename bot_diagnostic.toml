@@ -1,0 +1,18 @@
+#:schema https://rlbot.org/schemas/agent.json
+[settings]
+name = "SensAI_Diagnostic"
+loadout_file = "loadout.toml"
+root_dir = ""
+run_command = "python bot_diagnostic.py"
+run_command_linux = "python3 bot_diagnostic.py"
+agent_id = "antigravity/sensai_diagnostic"
+logo_file = ""
+
+[details]
+description = """
+In-game diagnostic bot executing hardcoded action routines (steering, speedflips, aerials,
+wavedashes, and ball seeking).
+"""
+developer = "Antigravity RL"
+language = "Python"
+tags = ["1v1"]

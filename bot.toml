@@ -1,0 +1,25 @@
+#:schema https://rlbot.org/schemas/agent.json
+[settings]
+# The name that will be displayed in game
+name = "SensAI"
+# Path to loadout config, relative to this file
+loadout_file = "loadout.toml"
+# Working directory, relative to this file. The bot imports agent/ and env/ from the repo root
+# and reads checkpoints/latest_model.pt, so it must run from the repo root.
+root_dir = ""
+# The command RLBot calls to start the bot
+run_command = "python bot.py"
+run_command_linux = "python3 bot.py"
+# Unique identifier for this bot; must match AGENT_ID in bot.py
+agent_id = "antigravity/sensai"
+logo_file = ""
+
+[details]
+description = """
+Deep Reinforcement Learning PPO Rocket League bot trained with SensAI Studio.
+"""
+fun_fact = "Learns full aerials and ball mechanics via headless RocketSim simulation!"
+source_link = "https://github.com/D3luxe/SenseiBot"
+developer = "Antigravity RL"
+language = "Python"
+tags = ["1v1", "teamplay"]

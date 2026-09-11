@@ -48,6 +48,31 @@ GRAVITY = -650.0                 # GRAVITY (uu/s^2)
 WALL_BOUNCE_VX_THRESHOLD = 500.0
 WALL_BOUNCE_VY_THRESHOLD = 600.0
 
+# ── Ball Path Prediction Horizons ──────────────────────────────────────────────
+# Every slice index in this codebase is expressed in 120 Hz ticks. That is the RocketSim arena
+# tick rate and also the rate of the RLBot v5 ball prediction, so one index means the same amount
+# of future time in training and in a live match.
+#
+# RocketSim's get_ball_prediction defaults to 120 ticks (1.0s). Anything past the returned array
+# used to fall through to a separate pure-Python simulator whose state does not line up with the
+# slices around it, so a horizon beyond 1.0s was both approximate and discontinuous with its
+# neighbours. Request the full horizon we actually consume instead; the cost is ~20us per arena
+# step, paid once and cached.
+PREDICTION_TICK_RATE = 120.0
+BALL_PRED_SHORT_TICKS = 60                                          # 0.5s  short-term obs horizon
+BALL_PRED_MEDIUM_TICKS = 180                                        # 1.5s  wall-rebound obs horizon
+# How far a goalward trajectory is still treated as a threat, and the ramp over which threat
+# intensity decays to zero. Shared by the RocketSim scan, the ballistic fallback, and the live
+# RLBot scan so all three agree on what a given intensity means.
+SHOT_THREAT_HORIZON_TICKS = 360                                     # 3.0s
+SHOT_THREAT_HORIZON_S = SHOT_THREAT_HORIZON_TICKS / PREDICTION_TICK_RATE
+# A horizon of N ticks means indices 0..N inclusive, so the array requested from RocketSim is one
+# longer than the deepest index any consumer asks for. One slice short, and the deepest request
+# falls out of range into the approximate pure-Python path instead of the engine's own answer.
+PREDICTION_HORIZON_TICKS = max(BALL_PRED_MEDIUM_TICKS, SHOT_THREAT_HORIZON_TICKS)
+PREDICTION_HORIZON_S = PREDICTION_HORIZON_TICKS / PREDICTION_TICK_RATE
+PREDICTION_SLICE_COUNT = PREDICTION_HORIZON_TICKS + 1
+
 CAR_MAX_SPEED = 2300.0           # CAR_MAX_SPEED
 CAR_SUPERSONIC_SPEED = 2200.0    # SUPERSONIC_THRESHOLD
 CAR_MAX_ANG_VEL = 5.5            # CAR_MAX_ANG_VEL (rad/s)
@@ -635,7 +660,7 @@ class RocketSimArena:
         if self._use_rsim and self._rsim_arena is not None:
             try:
                 if self._cached_rsim_preds is None:
-                    self._cached_rsim_preds = self._rsim_arena.get_ball_prediction()
+                    self._cached_rsim_preds = self._rsim_arena.get_ball_prediction(PREDICTION_SLICE_COUNT)
                 preds = self._cached_rsim_preds
                 if preds and len(preds) > slice_idx:
                     pred_pos = preds[slice_idx].pos.as_numpy().astype(np.float32)
@@ -645,13 +670,15 @@ class RocketSimArena:
             pred_pos = self.ball_prediction_slice
 
         if pred_pos is None:
-            # Multi-substep pure-Python simulation for accurate multi-bounce trajectory across 1.5s+
+            # Multi-substep pure-Python simulation, used only when RocketSim is unavailable or the
+            # requested tick lies past PREDICTION_HORIZON_TICKS. Approximate: no arena corners, no
+            # ball spin, and its state does not line up with the RocketSim slices around it.
             #
             # Held in plain Python floats rather than 3-element numpy arrays: this loop runs up to
             # 90 sequential substeps per environment step and is one of the hottest paths in the
             # rollout, where per-op numpy dispatch overhead dwarfs the arithmetic itself. Python
             # floats are IEEE doubles, so the result is identical to the previous float64 arrays.
-            dt_total = slice_idx / 120.0
+            dt_total = slice_idx / PREDICTION_TICK_RATE
             substeps = max(1, int(round(dt_total * 60.0)))
             s_dt = dt_total / substeps
             bp = self.ball.pos
@@ -722,17 +749,18 @@ class RocketSimArena:
         if self._use_rsim and self._rsim_arena is not None:
             try:
                 if getattr(self, "_cached_rsim_preds", None) is None:
-                    self._cached_rsim_preds = self._rsim_arena.get_ball_prediction()
+                    self._cached_rsim_preds = self._rsim_arena.get_ball_prediction(PREDICTION_SLICE_COUNT)
                 preds = self._cached_rsim_preds
                 if preds:
-                    for i, s in enumerate(preds):
-                        pos = s.pos
+                    scan_len = min(len(preds), SHOT_THREAT_HORIZON_TICKS + 1)
+                    for i in range(scan_len):
+                        pos = preds[i].pos
                         if (team == 0 and pos.y <= -5120.0) or (team == 1 and pos.y >= 5120.0):
                             # Clean goal opening clearance inside posts and below crossbar
                             is_clean_entry = bool(abs(pos.x) <= EFFECTIVE_GOAL_HALF_WIDTH and BALL_RADIUS <= pos.z <= EFFECTIVE_GOAL_HEIGHT)
                             is_grazing_entry = bool(not is_clean_entry and abs(pos.x) <= GOAL_HALF_WIDTH and BALL_RADIUS <= pos.z <= GOAL_HEIGHT)
                             if is_clean_entry or is_grazing_entry:
-                                raw_intensity = max(0.1, 1.0 - (i / 120.0))
+                                raw_intensity = max(0.1, 1.0 - (i / SHOT_THREAT_HORIZON_TICKS))
                                 threat_intensity = raw_intensity if is_clean_entry else (raw_intensity * 0.45)
                                 entry_z_norm = min(1.0, max(0.0, pos.z / GOAL_HEIGHT))
                                 res = (True, threat_intensity, entry_z_norm)
@@ -746,13 +774,13 @@ class RocketSimArena:
         dy = defending_goal_y - self.ball.pos[1]
         if abs(ball_vy) > 1e-4:
             dt = dy / ball_vy
-            if 0.05 < dt < 3.0:
+            if 0.05 < dt < SHOT_THREAT_HORIZON_S:
                 pred_x = self.ball.pos[0] + self.ball.vel[0] * dt
                 pred_z = self.ball.pos[2] + self.ball.vel[2] * dt + 0.5 * (-650.0) * (dt ** 2)
                 is_clean_entry = bool(abs(pred_x) <= EFFECTIVE_GOAL_HALF_WIDTH and BALL_RADIUS <= pred_z <= EFFECTIVE_GOAL_HEIGHT)
                 is_grazing_entry = bool(not is_clean_entry and abs(pred_x) <= GOAL_HALF_WIDTH and BALL_RADIUS <= pred_z <= GOAL_HEIGHT)
                 if is_clean_entry or is_grazing_entry:
-                    raw_intensity = max(0.1, 1.0 - (dt / 3.0))
+                    raw_intensity = max(0.1, 1.0 - (dt / SHOT_THREAT_HORIZON_S))
                     threat_intensity = raw_intensity if is_clean_entry else (raw_intensity * 0.45)
                     entry_z_norm = min(1.0, max(0.0, pred_z / GOAL_HEIGHT))
                     res = (True, threat_intensity, entry_z_norm)

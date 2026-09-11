@@ -13,7 +13,8 @@ import RocketSim as rsim
 from env.physics_engine import RocketSimArena
 from env.observations import DefaultObservationBuilder, OBS_DIM, OBS_MIRROR_MASK_NP, ACT_MIRROR_MASK_NP
 from agent.models import ActorCritic, LOG_STD_FLOOR_DEFAULT
-from bot import SenseiRLBot
+from bot import SenseiRLBot, AirState, MatchPhase
+import rlbot_fakes
 
 
 class TestPhysicsAndControls(unittest.TestCase):
@@ -132,7 +133,7 @@ class TestPhysicsAndControls(unittest.TestCase):
                     setattr(self, k, v)
 
         car = Struct(
-            team=0, boost=33.3, has_wheel_contact=True, jumped=False, double_jumped=False,
+            team=0, boost=33.3, air_state=AirState.OnGround, has_jumped=False, has_double_jumped=False, has_dodged=False,
             physics=Struct(
                 location=Struct(x=0.0, y=-4608.0, z=17.0),
                 velocity=Struct(x=0.0, y=0.0, z=0.0),
@@ -141,12 +142,12 @@ class TestPhysicsAndControls(unittest.TestCase):
             )
         )
         ball = Struct(physics=Struct(location=Struct(x=500.0, y=1000.0, z=91.25), velocity=Struct(x=200.0, y=300.0, z=0.0), angular_velocity=Struct(x=0, y=0, z=0)))
-        packet = Struct(num_cars=1, game_cars=[car], game_ball=ball, game_info=Struct(is_match_ended=False))
+        packet = Struct(players=[car], balls=[ball], boost_pads=[], match_info=Struct(match_phase=MatchPhase.Active))
         # Test airborne controller pass-through: [throttle, steer, pitch, yaw, roll, jump, boost, handbrake]
         test_act = np.array([0.8, -0.7, -0.9, 0.6, -0.5, 0.0, 1.0, 0.0], dtype=np.float32)
         bot.prev_action = test_act
         bot.ticks_since_last_action = 0
-        car.has_wheel_contact = False
+        car.air_state = AirState.InAir
         ctrl = bot.get_output(packet)
 
         # In-Game Rocket League gamepad stick input mapping aligned with RocketSim physics engine:
@@ -159,7 +160,7 @@ class TestPhysicsAndControls(unittest.TestCase):
         self.assertFalse(ctrl.handbrake, msg="Airborne car must NEVER activate handbrake (Air Roll conflict)!")
 
         # Test Ground Handbrake Pure Pass-Through:
-        car.has_wheel_contact = True
+        car.air_state = AirState.OnGround
         # 1. Action with handbrake disabled (act[7] = -0.9 <= 0.0) -> Handbrake is False
         bot.prev_action = np.array([1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, -0.9], dtype=np.float32)
         ctrl_straight = bot.get_output(packet)
@@ -182,7 +183,7 @@ class TestPhysicsAndControls(unittest.TestCase):
                     setattr(self, k, v)
 
         car = Struct(
-            team=0, boost=50.0, has_wheel_contact=True, jumped=False, double_jumped=False,
+            team=0, boost=50.0, air_state=AirState.OnGround, has_jumped=False, has_double_jumped=False, has_dodged=False,
             physics=Struct(
                 location=Struct(x=0.0, y=-2000.0, z=17.0),
                 velocity=Struct(x=0.0, y=800.0, z=0.0),
@@ -191,7 +192,7 @@ class TestPhysicsAndControls(unittest.TestCase):
             )
         )
         ball = Struct(physics=Struct(location=Struct(x=0.0, y=1000.0, z=93.0), velocity=Struct(x=0.0, y=0.0, z=0.0), angular_velocity=Struct(x=0.0, y=0.0, z=0.0)))
-        packet = Struct(num_cars=1, game_cars=[car], game_ball=ball, game_info=Struct(is_match_ended=False, is_round_active=True))
+        packet = Struct(players=[car], balls=[ball], boost_pads=[], match_info=Struct(match_phase=MatchPhase.Active))
 
         ctrl = bot.get_output(packet)
         self.assertFalse(ctrl.jump, "bot.py must NOT force jump when act[5] <= 0.0, even when sprinting downfield toward ball!")
@@ -209,7 +210,7 @@ class TestPhysicsAndControls(unittest.TestCase):
                     setattr(self, k, v)
 
         car = Struct(
-            team=0, boost=30.0, has_wheel_contact=False, jumped=True, double_jumped=False,
+            team=0, boost=30.0, air_state=AirState.InAir, has_jumped=True, has_double_jumped=False, has_dodged=False,
             physics=Struct(
                 location=Struct(x=0.0, y=0.0, z=100.0),
                 velocity=Struct(x=0.0, y=500.0, z=0.0),  # Forward speed > 100
@@ -218,7 +219,7 @@ class TestPhysicsAndControls(unittest.TestCase):
             )
         )
         ball = Struct(physics=Struct(location=Struct(x=0.0, y=1000.0, z=93.0), velocity=Struct(x=0.0, y=0.0, z=0.0), angular_velocity=Struct(x=0.0, y=0.0, z=0.0)))
-        packet = Struct(num_cars=1, game_cars=[car], game_ball=ball, game_info=Struct(is_match_ended=False, is_round_active=True))
+        packet = Struct(players=[car], balls=[ball], boost_pads=[], match_info=Struct(match_phase=MatchPhase.Active))
 
         ctrl = bot.get_output(packet)
         self.assertTrue(ctrl.jump)
@@ -240,7 +241,7 @@ class TestPhysicsAndControls(unittest.TestCase):
 
         # Car facing +Y, location y=500, moving forward at +300 y
         car = Struct(
-            team=0, boost=30.0, has_wheel_contact=True, jumped=False, double_jumped=False,
+            team=0, boost=30.0, air_state=AirState.OnGround, has_jumped=False, has_double_jumped=False, has_dodged=False,
             physics=Struct(
                 location=Struct(x=0.0, y=500.0, z=17.0),
                 velocity=Struct(x=0.0, y=300.0, z=0.0),
@@ -250,7 +251,7 @@ class TestPhysicsAndControls(unittest.TestCase):
         )
         # Ball behind car at y=0 (local_x = -500)
         ball = Struct(physics=Struct(location=Struct(x=0.0, y=0.0, z=93.0), velocity=Struct(x=0.0, y=0.0, z=0.0), angular_velocity=Struct(x=0.0, y=0.0, z=0.0)))
-        packet = Struct(num_cars=1, game_cars=[car], game_ball=ball, game_info=Struct(is_match_ended=False, is_round_active=True))
+        packet = Struct(players=[car], balls=[ball], boost_pads=[], match_info=Struct(match_phase=MatchPhase.Active))
 
         ctrl = bot.get_output(packet)
         self.assertEqual(ctrl.steer, 0.0, "Steer must NOT be hijacked to force 180 turn!")
@@ -270,7 +271,7 @@ class TestPhysicsAndControls(unittest.TestCase):
                     setattr(self, k, v)
 
         car = Struct(
-            team=0, boost=50.0, has_wheel_contact=True, jumped=False, double_jumped=False,
+            team=0, boost=50.0, air_state=AirState.OnGround, has_jumped=False, has_double_jumped=False, has_dodged=False,
             physics=Struct(
                 location=Struct(x=0.0, y=0.0, z=17.0),
                 velocity=Struct(x=0.0, y=0.0, z=0.0),
@@ -279,7 +280,7 @@ class TestPhysicsAndControls(unittest.TestCase):
             )
         )
         ball = Struct(physics=Struct(location=Struct(x=0.0, y=500.0, z=93.0), velocity=Struct(x=0.0, y=0.0, z=0.0), angular_velocity=Struct(x=0.0, y=0.0, z=0.0)))
-        packet = Struct(num_cars=1, game_cars=[car], game_ball=ball, game_info=Struct(is_match_ended=False, is_round_active=True))
+        packet = Struct(players=[car], balls=[ball], boost_pads=[], match_info=Struct(match_phase=MatchPhase.Active))
 
         ctrl = bot.get_output(packet)
         self.assertFalse(ctrl.boost, "Boost must be False when commanding reverse throttle to prevent standstill cancel!")
@@ -293,12 +294,8 @@ class TestPhysicsAndControls(unittest.TestCase):
                 for k, v in kwargs.items():
                     setattr(self, k, v)
 
-        # Mock RLBot prediction struct (60 slices @ 60Hz)
-        slices = [Struct(physics=Struct(location=Struct(x=float(i * 10), y=float(i * 20), z=200.0))) for i in range(60)]
-        pred_struct = Struct(num_slices=60, slices=slices)
-
         car = Struct(
-            team=0, boost=30.0, has_wheel_contact=True, jumped=False, double_jumped=False,
+            team=0, boost=30.0, air_state=AirState.OnGround, has_jumped=False, has_double_jumped=False, has_dodged=False,
             physics=Struct(
                 location=Struct(x=0.0, y=0.0, z=17.0),
                 velocity=Struct(x=0.0, y=0.0, z=0.0),
@@ -307,18 +304,47 @@ class TestPhysicsAndControls(unittest.TestCase):
             )
         )
         ball = Struct(physics=Struct(location=Struct(x=0.0, y=500.0, z=93.0), velocity=Struct(x=0.0, y=0.0, z=0.0), angular_velocity=Struct(x=0.0, y=0.0, z=0.0)))
-        packet = Struct(num_cars=1, game_cars=[car], game_ball=ball, game_info=Struct(is_match_ended=False, is_round_active=True))
+        packet = Struct(players=[car], balls=[ball], boost_pads=[], match_info=Struct(match_phase=MatchPhase.Active))
 
-        bot.get_ball_prediction_struct = lambda: pred_struct
+        # v5 publishes the prediction at 120 Hz, so the 0.5s observation horizon is slice 60.
+        # One unit of x per slice makes the slice the observation actually read self-evident.
+        bot.ball_prediction = rlbot_fakes.ball_prediction(
+            [(float(i), float(i * 2), 200.0) for i in range(720)]
+        )
         bot.ticks_since_last_action = 8
         bot.get_output(packet)
 
-        # In MockArena, slice 60 (0.5s) maps to RLBot slice 30 (x=300, y=600, z=200)
         self.assertIsNotNone(bot.latest_obs)
-        # obs[31] = (fpx * inv) / ARENA_EXTENT_X -> 300 / 4096 ~= 0.0732
-        self.assertAlmostEqual(bot.latest_obs[31], 300.0 / 4096.0, places=3)
-        self.assertAlmostEqual(bot.latest_obs[32], 600.0 / 5120.0, places=3)
-        self.assertAlmostEqual(bot.latest_obs[33], 200.0 / 2044.0, places=3)
+        # obs[31..33] carry the 0.5s predicted ball position, normalised by arena extents.
+        self.assertAlmostEqual(bot.latest_obs[31], 60.0 / 4096.0, places=4)
+        self.assertAlmostEqual(bot.latest_obs[32], 120.0 / 5120.0, places=4)
+        self.assertAlmostEqual(bot.latest_obs[33], 200.0 / 2044.0, places=4)
+        # obs[34..36] carry the 1.5s horizon, slice 180.
+        self.assertAlmostEqual(bot.latest_obs[34], 180.0 / 4096.0, places=4)
+        self.assertAlmostEqual(bot.latest_obs[35], 360.0 / 5120.0, places=4)
+
+    def test_prediction_horizons_are_rate_independent(self):
+        """
+        The live horizons must be measured from the prediction, not assumed from its rate.
+
+        RLBot v4 published at 60 Hz and v5 publishes at 120 Hz. A hardcoded factor silently
+        halves every horizon on a rate change, which is what made the live 0.5s and 1.5s
+        observations read 0.25s and 0.75s under the previous code.
+        """
+        from bot import PredictionIndexer
+
+        # Ball travelling in a straight line at 1000 uu/s, sampled at three different rates.
+        for dt, count in ((1.0 / 120.0, 720), (1.0 / 60.0, 360), (1.0 / 30.0, 180)):
+            pred = rlbot_fakes.ball_prediction(
+                [(0.0, 1000.0 * i * dt, 93.0) for i in range(count)], dt=dt
+            )
+            indexer = PredictionIndexer(pred.slices)
+            for ticks, expected_t in ((60, 0.5), (180, 1.5), (360, 3.0)):
+                pos = indexer.pos_at_tick(ticks)
+                self.assertAlmostEqual(
+                    float(pos[1]), 1000.0 * expected_t, delta=1000.0 * dt,
+                    msg=f"tick {ticks} at dt={dt} should land near t={expected_t}s"
+                )
 
     def test_rear_quarter_scramble_state_setter(self):
         """Guarantees TurnaroundRecoverySetter spawns rear_quarter_scramble without error."""
@@ -531,7 +557,7 @@ class TestPhysicsAndControls(unittest.TestCase):
                     setattr(self, k, v)
 
         car = Struct(
-            team=0, boost=33.3, has_wheel_contact=True, jumped=False, double_jumped=False,
+            team=0, boost=33.3, air_state=AirState.OnGround, has_jumped=False, has_double_jumped=False, has_dodged=False,
             physics=Struct(
                 location=Struct(x=0.0, y=-4608.0, z=17.0),
                 velocity=Struct(x=0.0, y=500.0, z=0.0),
@@ -540,7 +566,7 @@ class TestPhysicsAndControls(unittest.TestCase):
             )
         )
         ball = Struct(physics=Struct(location=Struct(x=500.0, y=1000.0, z=91.25), velocity=Struct(x=200.0, y=0.0, z=0.0), angular_velocity=Struct(x=0, y=0, z=0)))
-        packet = Struct(num_cars=1, game_cars=[car], game_ball=ball, game_info=Struct(is_match_ended=False))
+        packet = Struct(players=[car], balls=[ball], boost_pads=[], match_info=Struct(match_phase=MatchPhase.Active))
 
         # 1. Driving on ground without jump (act[5] = -0.50 <= 0.0): pitch should be stabilized to 0.0
         bot.prev_action = np.array([1.0, 0.0, -1.0, 0.0, 0.0, -0.50, 0.0, 0.0], dtype=np.float32)
@@ -569,7 +595,7 @@ class TestPhysicsAndControls(unittest.TestCase):
                     setattr(self, k, v)
 
         car = Struct(
-            team=0, boost=33.3, has_wheel_contact=True, jumped=False, double_jumped=False,
+            team=0, boost=33.3, air_state=AirState.OnGround, has_jumped=False, has_double_jumped=False, has_dodged=False,
             physics=Struct(
                 location=Struct(x=0.0, y=-4608.0, z=17.0),
                 velocity=Struct(x=0.0, y=0.0, z=0.0),
@@ -579,7 +605,7 @@ class TestPhysicsAndControls(unittest.TestCase):
         )
         # Stationary center ball -> kickoff untouched
         ball = Struct(physics=Struct(location=Struct(x=0.0, y=0.0, z=91.25), velocity=Struct(x=0, y=0, z=0), angular_velocity=Struct(x=0, y=0, z=0)))
-        packet = Struct(num_cars=1, game_cars=[car], game_ball=ball, game_info=Struct(is_match_ended=False))
+        packet = Struct(players=[car], balls=[ball], boost_pads=[], match_info=Struct(match_phase=MatchPhase.Active))
 
         bot.prev_action = np.zeros(8, dtype=np.float32)
         bot.get_output(packet)
@@ -592,12 +618,12 @@ class TestPhysicsAndControls(unittest.TestCase):
 
         # Moving ball reinforces active play
         ball_moving = Struct(physics=Struct(location=Struct(x=500.0, y=1000.0, z=200.0), velocity=Struct(x=500, y=1200, z=0), angular_velocity=Struct(x=0, y=0, z=0)))
-        packet_moving = Struct(num_cars=1, game_cars=[car], game_ball=ball_moving, game_info=Struct(is_match_ended=False))
+        packet_moving = Struct(players=[car], balls=[ball_moving], boost_pads=[], match_info=Struct(match_phase=MatchPhase.Active))
         bot.get_output(packet_moving)
         self.assertTrue(bot.ball_touched_since_kickoff, "Fast moving ball must be marked as touched/active play")
 
         # Re-entering kickoff pause resets kickoff tracking
-        packet_pause = Struct(num_cars=1, game_cars=[car], game_ball=ball, game_info=Struct(is_match_ended=False, is_kickoff_pause=True))
+        packet_pause = Struct(players=[car], balls=[ball], boost_pads=[], match_info=Struct(match_phase=MatchPhase.Kickoff))
         bot.get_output(packet_pause)
         self.assertFalse(bot.ball_touched_since_kickoff, "Entering kickoff pause must reset ball_touched_since_kickoff")
         self.assertEqual(bot.kickoff_stagnation_ticks, 0, "Entering kickoff pause must reset kickoff stagnation ticks")
@@ -737,7 +763,7 @@ class TestPhysicsAndControls(unittest.TestCase):
                     setattr(self, k, v)
 
         car = Struct(
-            team=0, boost=33.3, has_wheel_contact=True, jumped=False, double_jumped=False,
+            team=0, boost=33.3, air_state=AirState.OnGround, has_jumped=False, has_double_jumped=False, has_dodged=False,
             physics=Struct(
                 location=Struct(x=0.0, y=-4608.0, z=17.0),
                 velocity=Struct(x=0.0, y=0.0, z=0.0),
@@ -746,7 +772,7 @@ class TestPhysicsAndControls(unittest.TestCase):
             )
         )
         ball = Struct(physics=Struct(location=Struct(x=0.0, y=0.0, z=91.25), velocity=Struct(x=0, y=0, z=0), angular_velocity=Struct(x=0, y=0, z=0)))
-        packet = Struct(num_cars=1, game_cars=[car], game_ball=ball, game_info=Struct(is_match_ended=False))
+        packet = Struct(players=[car], balls=[ball], boost_pads=[], match_info=Struct(match_phase=MatchPhase.Active))
 
         bot.ticks_since_last_action = 8
         bot.get_output(packet)

@@ -11,7 +11,8 @@ from typing import Dict, Any, List, Optional, Tuple
 from env.physics_engine import (
     CarState, BallState, RocketSimArena,
     CAR_MAX_SPEED, BALL_MAX_SPEED, GOAL_HALF_WIDTH, GOAL_HEIGHT, ARENA_EXTENT_X, ARENA_EXTENT_Y, ARENA_HEIGHT_Z,
-    WALL_BOUNCE_VX_THRESHOLD, WALL_BOUNCE_VY_THRESHOLD, BALL_RADIUS, GRAVITY
+    WALL_BOUNCE_VX_THRESHOLD, WALL_BOUNCE_VY_THRESHOLD, BALL_RADIUS, GRAVITY,
+    PREDICTION_HORIZON_TICKS, PREDICTION_HORIZON_S, PREDICTION_TICK_RATE
 )
 
 # Clean goal opening clearance thresholds accounting for physical ball sphere radius (91.25 uu)
@@ -273,6 +274,28 @@ SHADOW_OFFSET_Y = 700.0
 _TRUST_PROBE_TICKS = 30
 
 
+def threat_safety_multiplier(threat_intensity: float) -> float:
+    """
+    Fraction of a boost detour still affordable with a shot developing on our own net.
+
+    Both boost-pathing gates used to switch off at `threat_intensity < 0.40`, which had two
+    problems. A detour that was fully affordable one tick became entirely forbidden the next, and
+    the threshold's real meaning was silently tied to the threat decay ramp: widening that ramp
+    from 1.0s to 3.0s moved the cutoff from 0.6s to 1.8s of time-to-goal without anyone touching
+    the number.
+
+    Scaling the budget by the complement of intensity fixes both. The budget fades out smoothly as
+    the threat closes, and it is expressed in units of intensity rather than in units of the ramp,
+    so changing the horizon no longer retunes the gate behind your back.
+
+    Clamped at both ends. The lower clamp stops a maximal threat from turning the budget negative;
+    the upper one stops an out-of-range intensity from handing out a budget larger than the
+    unthreatened maximum, which is the only way this could ever loosen a gate rather than tighten
+    it.
+    """
+    return _clip(1.0 - float(threat_intensity), 0.0, 1.0)
+
+
 def predictions_trustworthy(arena: RocketSimArena) -> bool:
     """Whether the engine's ball trajectory actually describes the ball the rewards can see.
 
@@ -295,7 +318,7 @@ def predictions_trustworthy(arena: RocketSimArena) -> bool:
     if probe is None:
         trusted = False
     else:
-        probe_t = _TRUST_PROBE_TICKS / 120.0
+        probe_t = _TRUST_PROBE_TICKS / PREDICTION_TICK_RATE
         bp, bv = arena.ball.pos, arena.ball.vel
         dx = float(probe[0]) - (float(bp[0]) + float(bv[0]) * probe_t)
         dy = float(probe[1]) - (float(bp[1]) + float(bv[1]) * probe_t)
@@ -331,7 +354,7 @@ def solve_intercept_point(
     fallback_pos = arena.ball.pos
     fallback_t = 0.0
     for slice_ticks in ladder:
-        slice_t = slice_ticks / 120.0
+        slice_t = slice_ticks / PREDICTION_TICK_RATE
         pred = arena.ball.pos if slice_ticks == 0 else arena.get_predicted_ball_pos(slice_ticks)
         if pred is None:
             continue
@@ -442,7 +465,7 @@ def evaluate_clear_quality(
         pred_pos = arena.get_predicted_ball_pos(20)
         if pred_pos is not None:
             pred_disp = pred_pos - ball_pos
-            pred_dt = 20 / 120.0  # 20 ticks at 120Hz
+            pred_dt = 20 / PREDICTION_TICK_RATE  # 20 ticks at 120Hz
             pred_vel = pred_disp / max(1e-4, pred_dt)
             pred_vy_out = pred_vel[1] if car_team == 0 else -pred_vel[1]
             if pred_vy_out > 100.0:
@@ -579,11 +602,11 @@ class GoalReward(BaseReward):
 # carry their own copy of the same ballistic block, with the same gravity constant and the same
 # goal geometry, and disagree about what to do with the result.
 _ENDLINE_SCAN_STRIDE = 10
-# RocketSim's prediction array holds 120 slices, indices 0..119. Asking for index 120 falls
-# through get_predicted_ball_pos's out-of-range path into a separate pure-Python simulation,
-# whose state does not line up with the slices around it -- estimating a velocity across that
-# seam produced a continuation pointing somewhere the ball never goes. Stay inside the array.
-_ENDLINE_MAX_SLICE = 119
+# Asking for a tick past the end of the prediction array falls through get_predicted_ball_pos's
+# out-of-range path into a separate pure-Python simulation, whose state does not line up with the
+# slices around it -- estimating a velocity across that seam produced a continuation pointing
+# somewhere the ball never goes. Stay inside the array.
+_ENDLINE_MAX_SLICE = PREDICTION_HORIZON_TICKS
 # A shot missing the opening by more than this earns no placement bonus at all. Two ball radii
 # is the width of the graze band the old branch ladder covered, expressed once.
 ON_TARGET_FALLOFF = 2.0 * BALL_RADIUS
@@ -604,9 +627,9 @@ def project_ball_to_endline(arena: RocketSimArena, target_goal_y: float) -> Opti
     Walks the RocketSim predicted trajectory first. Rocket League is a cage, and a bare parabola
     has no ceiling at 2044 uu and no side walls at +/-4096 uu: a lob that bounces off the ceiling
     down into the net projects to an impact height above the arena, and an angled shot toward a
-    corner yields an impact x outside the world. The predictor models all of that. It only spans
-    one second, so beyond the horizon this continues ballistically from the last predicted slice,
-    which is safe because a ball more than a second from the endline is nowhere near the
+    corner yields an impact x outside the world. The predictor models all of that. It spans
+    PREDICTION_HORIZON_S, so beyond the horizon this continues ballistically from the last
+    predicted slice, which is safe because a ball that far from the endline is nowhere near the
     backboard and gravity dominates its arc.
     """
     sign = 1.0 if target_goal_y > 0.0 else -1.0
@@ -652,7 +675,7 @@ def project_ball_to_endline(arena: RocketSimArena, target_goal_y: float) -> Opti
 
             prev_prev = prev_pos
             prev_pos = np.asarray(pred, dtype=np.float32)
-            prev_t = s / 120.0
+            prev_t = s / PREDICTION_TICK_RATE
 
         if turned_back:
             # Deepest point reached is where it met the wall. That is the impact point.
@@ -662,7 +685,7 @@ def project_ball_to_endline(arena: RocketSimArena, target_goal_y: float) -> Opti
     # wherever the trajectory left off, using the velocity across the last two scanned slices so
     # the continuation starts from post-bounce state rather than the ball's launch velocity.
     if prev_t > 0.0:
-        vel = (prev_pos - prev_prev) / (_ENDLINE_SCAN_STRIDE / 120.0)
+        vel = (prev_pos - prev_prev) / (_ENDLINE_SCAN_STRIDE / PREDICTION_TICK_RATE)
     else:
         vel = arena.ball.vel
 
@@ -1132,7 +1155,11 @@ class PlayerToBallVelocityReward(BaseReward):
 
         if urgency > 0.0 and not is_kickoff and raw_delta_dist < 0.0 and eff_dist > 600.0:
             is_threat, threat_intensity, _ = arena.get_shot_threat(car.team) if hasattr(arena, "get_shot_threat") else (False, 0.0, 0.0)
-            if threat_intensity < 0.40:
+            # The detour budget does not depend on which pad we pick, so size it before scanning.
+            # It also dims with the threat, and a fully extinguished budget can afford no detour at
+            # all, which keeps the pad scan off the hot path when we are under real pressure.
+            max_detour_budget = 0.45 * urgency * threat_safety_multiplier(threat_intensity)
+            if max_detour_budget > 0.0:
                 car_xy = car.pos[:2]
                 ball_xy = arena.ball.pos[:2]
                 all_pad_pos = getattr(arena, "_all_pad_pos_2d", None)
@@ -1151,16 +1178,21 @@ class PlayerToBallVelocityReward(BaseReward):
 
                         car_speed_h = max(1000.0, _norm2(car.vel))
                         delta_t_detour = min_excess / car_speed_h
-                        max_detour_budget = 0.45 * urgency
 
-                        threats = compute_opponent_threats(car, arena)
-                        opp_arr = threats[0].arrival_time if threats else 999.0
-                        self_arr, _, _ = compute_trajectory_arrival_time(car.pos, car.vel, arena.ball.pos, arena.ball.vel)
-                        time_cushion = opp_arr - self_arr
+                        # Budget check first: it is a float comparison, while the race against the
+                        # opponent costs an arrival-time solve per body. Both conditions were
+                        # already required together, so ordering them by cost changes nothing but
+                        # the work spent on the common rejection -- which the threat dimmer made
+                        # the usual outcome whenever a shot is developing.
+                        if delta_t_detour <= max_detour_budget:
+                            threats = compute_opponent_threats(car, arena)
+                            opp_arr = threats[0].arrival_time if threats else 999.0
+                            self_arr, _, _ = compute_trajectory_arrival_time(car.pos, car.vel, arena.ball.pos, arena.ball.vel)
+                            time_cushion = opp_arr - self_arr
 
-                        if delta_t_detour <= max_detour_budget and (time_cushion > delta_t_detour or opp_arr > 1.8):
-                            penalty_relief = urgency * 0.85
-                            delta_dist = delta_dist * (1.0 - penalty_relief)
+                            if time_cushion > delta_t_detour or opp_arr > 1.8:
+                                penalty_relief = urgency * 0.85
+                                delta_dist = delta_dist * (1.0 - penalty_relief)
 
         # Wall-Crawling & Wall Pursuit Dynamics:
         # 1. When ball has bounced away from the wall into the infield (lateral separation), heavily dampen wall driving.
@@ -1577,8 +1609,9 @@ class PlayerToBallVelocityReward(BaseReward):
             all_pad_act = getattr(arena, "_all_pad_active", None)
             all_pad_big = getattr(arena, "_all_pad_is_big", None)
             _, threat_intensity, _ = arena.get_shot_threat(car.team) if hasattr(arena, "get_shot_threat") else (False, 0.0, 0.0)
+            safety = threat_safety_multiplier(threat_intensity)
 
-            if all_pad_pos is not None and all_pad_act is not None and np.any(all_pad_act) and threat_intensity < 0.40:
+            if all_pad_pos is not None and all_pad_act is not None and np.any(all_pad_act) and safety > 0.0:
                 intercept_pos, _ = cached_intercept_point(arena, car.id, car.pos, car.vel)
                 car_arrival, _, _ = compute_trajectory_arrival_time(car.pos, car.vel, intercept_pos)
                 threats_ahead = compute_opponent_threats(car, arena, use_intercept=True)
@@ -1601,12 +1634,14 @@ class PlayerToBallVelocityReward(BaseReward):
                             to_icept = np.linalg.norm(poses - icept_xy, axis=1)
                             from_car = np.linalg.norm(poses - car_xy, axis=1)
                             direct = max(1.0, _norm2(icept_xy - car_xy))
-                            # Detour cost in seconds at a realistic ground cruising speed.
+                            # Detour cost in seconds at a realistic ground cruising speed. The
+                            # share of the cushion we are willing to spend dims with the threat.
                             detour_time = (from_car + to_icept - direct) / max(1000.0, _norm2(car.vel))
+                            detour_allowance = 0.60 * cushion * safety
                             usable = (
                                 (downrange > 200.0) & (downrange < 5000.0)
                                 & (to_icept < 3000.0) & (from_car < 3000.0)
-                                & (detour_time < 0.60 * cushion)
+                                & (detour_time < detour_allowance)
                             )
                             if np.any(usable):
                                 if all_pad_big is not None:

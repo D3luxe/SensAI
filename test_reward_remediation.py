@@ -14,8 +14,10 @@ from env.rewards import (
     GoalReward, BallToGoalVelocityReward, PlayerToBallVelocityReward,
     TouchBallReward, JumpBridgeReward, BoostReward, PowerslideReward,
     AirRollRecoveryReward, CombinedReward, RewardManager,
-    compute_opponent_threats, evaluate_clear_quality, OpponentThreat
+    compute_opponent_threats, evaluate_clear_quality, OpponentThreat,
+    threat_safety_multiplier
 )
+from env.physics_engine import SHOT_THREAT_HORIZON_S
 
 
 class TestRewardRemediation(unittest.TestCase):
@@ -427,6 +429,65 @@ class TestRewardRemediation(unittest.TestCase):
 
         self.assertGreater(r_threat_retreat, r_passive_retreat,
                            f"Retreating under threat ({r_threat_retreat}) must incur less boost penalty than panic retreating without threat ({r_passive_retreat})")
+
+
+class TestThreatDimmedDetourBudget(unittest.TestCase):
+    """
+    Boost detours must fade out as a shot closes on our net, not switch off at a threshold.
+
+    The two boost-pathing gates previously stopped at `threat_intensity < 0.40`. That made a
+    detour flip from fully affordable to entirely forbidden across one tick, and it tied the real
+    cutoff to the threat decay ramp: widening the ramp moved the cutoff without the number
+    changing.
+    """
+
+    @staticmethod
+    def _intensity_at(seconds_to_goal: float) -> float:
+        """Threat intensity the engine reports for a clean shot that far out."""
+        return max(0.1, 1.0 - seconds_to_goal / SHOT_THREAT_HORIZON_S)
+
+    def test_no_threat_leaves_the_budget_untouched(self):
+        """With nothing incoming the budget must equal the old unthreatened value exactly."""
+        self.assertEqual(threat_safety_multiplier(0.0), 1.0)
+
+    def test_imminent_threat_extinguishes_the_budget(self):
+        self.assertEqual(threat_safety_multiplier(1.0), 0.0)
+
+    def test_multiplier_never_leaves_the_unit_range(self):
+        for intensity in (-0.5, 0.0, 0.1, 0.5, 1.0, 1.5):
+            with self.subTest(intensity=intensity):
+                value = threat_safety_multiplier(intensity)
+                self.assertGreaterEqual(value, 0.0)
+                self.assertLessEqual(value, 1.0)
+
+    def test_budget_shrinks_monotonically_as_the_threat_closes(self):
+        times = [3.0, 2.4, 1.8, 1.5, 1.0, 0.6, 0.4, 0.2]
+        budgets = [threat_safety_multiplier(self._intensity_at(t)) for t in times]
+        for earlier, later in zip(budgets, budgets[1:]):
+            self.assertGreater(earlier, later, "budget must fall as the shot gets closer")
+
+    def test_no_discontinuity_at_the_old_threshold(self):
+        """
+        Intensity 0.40 was the old cliff edge. Crossing it must now barely change the budget.
+
+        A hard gate produced a step of the entire budget here; the dimmer should move by roughly
+        the width of the step in intensity.
+        """
+        just_under = threat_safety_multiplier(0.399)
+        just_over = threat_safety_multiplier(0.401)
+        self.assertAlmostEqual(just_under, just_over, places=2)
+        self.assertGreater(just_over, 0.0, "the budget must not vanish on crossing 0.40")
+
+    def test_old_cutoff_time_is_still_heavily_suppressed(self):
+        """
+        At the time-to-goal the old gate shut, 0.6s, the budget must be nearly gone.
+
+        This is what preserves the old intent: a shot that close should not be leaving the direct
+        line to collect boost.
+        """
+        budget = threat_safety_multiplier(self._intensity_at(0.6))
+        self.assertLess(budget, 0.25)
+        self.assertGreater(budget, 0.0)
 
 
 if __name__ == "__main__":

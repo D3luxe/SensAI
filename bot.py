@@ -1,6 +1,11 @@
 """
 RLBot In-Game Agent Wrapper for SensAI.
-Converts live Rocket League GameTickPacket data into model observations and returns controller inputs.
+Converts live Rocket League GamePacket data into model observations and returns controller inputs.
+
+Targets the RLBot v5 python-interface. The v5 ball prediction runs at 120 Hz, the same rate as
+the RocketSim arena used in training, so a prediction index means the same amount of future time
+on both sides. Indices are still mapped through the slice spacing reported by the packet rather
+than assumed, so a future change of rate degrades accuracy instead of silently halving horizons.
 """
 
 from __future__ import annotations
@@ -8,6 +13,7 @@ import os
 import io
 import time
 import math
+from typing import Optional, Sequence
 import numpy as np
 import torch
 try:
@@ -16,12 +22,14 @@ except Exception:
     pass
 
 try:
-    from rlbot.agents.base_agent import BaseAgent, SimpleControllerState
-    from rlbot.utils.structures.game_data_struct import GameTickPacket
+    from rlbot.flat import AirState, ControllerState, GamePacket, MatchPhase
+    from rlbot.managers import Bot
     RLBOT_AVAILABLE = True
 except ImportError:
     RLBOT_AVAILABLE = False
-    class SimpleControllerState:
+
+    class ControllerState:
+        """Offline stand-in for rlbot.flat.ControllerState, used by tests and replay scripts."""
         def __init__(self):
             self.steer = 0.0
             self.throttle = 0.0
@@ -32,8 +40,26 @@ except ImportError:
             self.boost = False
             self.handbrake = False
             self.use_item = False
-    BaseAgent = object
-    GameTickPacket = object
+
+    class AirState:
+        OnGround = 0
+        Jumping = 1
+        DoubleJumping = 2
+        Dodging = 3
+        InAir = 4
+
+    class MatchPhase:
+        Inactive = 0
+        Countdown = 1
+        Kickoff = 2
+        Active = 3
+        GoalScored = 4
+        Replay = 5
+        Paused = 6
+        Ended = 7
+
+    Bot = object
+    GamePacket = object
 
 from agent.models import ActorCritic
 from env.observations import DefaultObservationBuilder, OBS_MIRROR_MASK_NP, ACT_MIRROR_MASK_NP
@@ -42,8 +68,13 @@ from env.physics_engine import (
     CarState, BallState, BoostPad,
     ARENA_EXTENT_X, ARENA_EXTENT_Y, ARENA_HEIGHT_Z,
     CAR_MAX_SPEED, BALL_MAX_SPEED, GOAL_HALF_WIDTH, GOAL_HEIGHT,
-    EFFECTIVE_GOAL_HALF_WIDTH, EFFECTIVE_GOAL_HEIGHT, BALL_RADIUS
+    EFFECTIVE_GOAL_HALF_WIDTH, EFFECTIVE_GOAL_HEIGHT, BALL_RADIUS,
+    PREDICTION_TICK_RATE, SHOT_THREAT_HORIZON_TICKS, SHOT_THREAT_HORIZON_S,
 )
+
+# Identifies this bot to the RLBot server when it is started manually rather than by the
+# framework, which would otherwise supply RLBOT_AGENT_ID.
+AGENT_ID = "antigravity/sensai"
 
 
 def rotation_to_rot_mat(pitch: float, yaw: float, roll: float) -> np.ndarray:
@@ -63,6 +94,55 @@ def rotation_to_rot_mat(pitch: float, yaw: float, roll: float) -> np.ndarray:
     return np.vstack([fwd, right, up]).astype(np.float32)
 
 
+class PredictionIndexer:
+    """
+    Maps a training-side slice index, in 120 Hz ticks, onto an index into an RLBot prediction.
+
+    The rate is measured from the slices themselves rather than assumed. RLBot v4 published the
+    prediction at 60 Hz and v5 publishes it at 120 Hz over the same 6 second span, so a hardcoded
+    factor silently halves or doubles every horizon the moment the framework changes. Reading the
+    spacing off `game_seconds` keeps the mapping correct under either rate, and keeps the live
+    horizons equal to the ones the policy was trained against.
+    """
+
+    __slots__ = ("slices", "t0", "dt", "count")
+
+    def __init__(self, slices: Optional[Sequence] = None):
+        self.slices = slices if slices else None
+        self.count = len(self.slices) if self.slices else 0
+        self.t0 = float(self.slices[0].game_seconds) if self.count else 0.0
+        # Two slices are enough to measure the spacing; fall back to the training rate when the
+        # prediction is too short to measure, or reports a non-increasing time.
+        dt = 1.0 / PREDICTION_TICK_RATE
+        if self.count >= 2:
+            measured = float(self.slices[1].game_seconds) - self.t0
+            if measured > 1e-6:
+                dt = measured
+        self.dt = dt
+
+    def __bool__(self) -> bool:
+        return self.count > 0
+
+    def index_at_tick(self, tick: int) -> int:
+        """Index of the slice closest to `tick` ticks of 120 Hz time ahead of the prediction start."""
+        idx = int(round((tick / PREDICTION_TICK_RATE) / self.dt))
+        if idx < 0:
+            return 0
+        return min(idx, self.count - 1)
+
+    def pos_at_tick(self, tick: int) -> Optional[np.ndarray]:
+        if not self.count:
+            return None
+        loc = self.slices[self.index_at_tick(tick)].physics.location
+        return np.array([loc.x, loc.y, loc.z], dtype=np.float32)
+
+    def horizon_ticks(self) -> int:
+        """How far the prediction actually reaches, in 120 Hz ticks."""
+        if self.count < 1:
+            return 0
+        return int(round((self.count - 1) * self.dt * PREDICTION_TICK_RATE))
+
+
 def log_debug(msg: str):
     try:
         bot_dir = os.path.dirname(os.path.abspath(__file__))
@@ -75,8 +155,96 @@ def log_debug(msg: str):
         pass
 
 
-class SenseiRLBot(BaseAgent):
-    def __init__(self, name, team, index):
+class MockArena:
+    """
+    Arena-shaped view of one live packet, for the observation builder and reward helpers.
+
+    The builder was written against the RocketSim arena used in training, so live play has to
+    present the same surface. Prediction lookups are answered from the RLBot prediction through a
+    PredictionIndexer, in the same 120 Hz tick units the training arena uses.
+    """
+    def __init__(self, ball, cars, predictor=None, game_boosts=None, boost_pad_mapping=None):
+        self.ball = ball
+        self.cars = cars
+        self._predictor = predictor
+        self.boost_pads = BoostPad.create_standard_pads()
+        self._sm_pad_indices = np.array([i for i, p in enumerate(self.boost_pads) if not p.is_big], dtype=int)
+        self._bg_pad_indices = np.array([i for i, p in enumerate(self.boost_pads) if p.is_big], dtype=int)
+        self._small_pad_pos_3d = np.array([self.boost_pads[i].pos for i in self._sm_pad_indices], dtype=np.float32)
+        self._big_pad_pos_3d = np.array([self.boost_pads[i].pos for i in self._bg_pad_indices], dtype=np.float32)
+        self._all_pad_pos_2d = np.array([p.pos[:2] for p in self.boost_pads], dtype=np.float32)
+
+        if game_boosts is not None and boost_pad_mapping is not None:
+            for std_idx, packet_idx in enumerate(boost_pad_mapping):
+                if packet_idx < len(game_boosts):
+                    self.boost_pads[std_idx].is_active = bool(game_boosts[packet_idx].is_active)
+                    self.boost_pads[std_idx].cooldown_timer = float(getattr(game_boosts[packet_idx], "timer", 0.0))
+
+        self._small_pad_active = np.array([self.boost_pads[i].is_active for i in self._sm_pad_indices], dtype=bool)
+        self._big_pad_active = np.array([self.boost_pads[i].is_active for i in self._bg_pad_indices], dtype=bool)
+        self._all_pad_active = np.array([p.is_active for p in self.boost_pads], dtype=bool)
+
+    def get_predicted_ball_pos(self, slice_idx: int = 60) -> Optional[np.ndarray]:
+        """
+        Position of the ball `slice_idx` ticks of 120 Hz time from now.
+
+        Returns None when no prediction is available, which lets the observation
+        builder fall back to its own ballistic extrapolation. Returning the live ball
+        position instead would tell the policy the ball is about to stand still.
+        """
+        if self._predictor is None:
+            return None
+        return self._predictor.pos_at_tick(slice_idx)
+
+    def get_shot_threat(self, team: int):
+        defending_goal_y = -ARENA_EXTENT_Y if team == 0 else ARENA_EXTENT_Y
+        ball_vy = self.ball.vel[1]
+        is_moving_to_net = (ball_vy < -100.0) if team == 0 else (ball_vy > 100.0)
+        if not is_moving_to_net:
+            return False, 0.0, 0.0
+
+        if self._predictor:
+            # Scan the same amount of future time the training scan covers, and decay
+            # intensity over the same ramp. Both are expressed in seconds here, so the
+            # publishing rate of the prediction cannot change what an intensity means.
+            pred = self._predictor
+            last = pred.index_at_tick(SHOT_THREAT_HORIZON_TICKS)
+            for i in range(last + 1):
+                loc = pred.slices[i].physics.location
+                if (team == 0 and loc.y <= -5120.0) or (team == 1 and loc.y >= 5120.0):
+                    is_clean_entry = bool(abs(loc.x) <= EFFECTIVE_GOAL_HALF_WIDTH and BALL_RADIUS <= loc.z <= EFFECTIVE_GOAL_HEIGHT)
+                    is_grazing_entry = bool(not is_clean_entry and abs(loc.x) <= GOAL_HALF_WIDTH and BALL_RADIUS <= loc.z <= GOAL_HEIGHT)
+                    if is_clean_entry or is_grazing_entry:
+                        t_ahead = i * pred.dt
+                        raw_intensity = max(0.1, 1.0 - (t_ahead / SHOT_THREAT_HORIZON_S))
+                        threat_intensity = raw_intensity if is_clean_entry else (raw_intensity * 0.45)
+                        entry_z_norm = min(1.0, max(0.0, loc.z / GOAL_HEIGHT))
+                        return True, threat_intensity, entry_z_norm
+
+        dy = defending_goal_y - self.ball.pos[1]
+        if abs(ball_vy) > 1e-4:
+            dt = dy / ball_vy
+            if 0.05 < dt < SHOT_THREAT_HORIZON_S:
+                pred_x = self.ball.pos[0] + self.ball.vel[0] * dt
+                pred_z = self.ball.pos[2] + self.ball.vel[2] * dt + 0.5 * (-650.0) * (dt ** 2)
+                is_clean_entry = bool(abs(pred_x) <= EFFECTIVE_GOAL_HALF_WIDTH and BALL_RADIUS <= pred_z <= EFFECTIVE_GOAL_HEIGHT)
+                is_grazing_entry = bool(not is_clean_entry and abs(pred_x) <= GOAL_HALF_WIDTH and BALL_RADIUS <= pred_z <= GOAL_HEIGHT)
+                if is_clean_entry or is_grazing_entry:
+                    raw_intensity = max(0.1, 1.0 - (dt / SHOT_THREAT_HORIZON_S))
+                    threat_intensity = raw_intensity if is_clean_entry else (raw_intensity * 0.45)
+                    entry_z_norm = min(1.0, max(0.0, pred_z / GOAL_HEIGHT))
+                    return True, threat_intensity, entry_z_norm
+
+        return False, 0.0, 0.0
+
+
+class SenseiRLBot(Bot):
+    def __init__(self, name: str = "SensAI", team: int = 0, index: int = 0, agent_id: str = AGENT_ID):
+        # The v5 base class only wires up sockets and handlers here; name, team and index arrive
+        # later over the connection and overwrite these defaults. They are still accepted as
+        # arguments so tests and the replay scripts can build a bot without a running match.
+        if RLBOT_AVAILABLE:
+            super().__init__(agent_id)
         self.name = name
         self.team = team
         self.index = index
@@ -97,8 +265,39 @@ class SenseiRLBot(BaseAgent):
         self.model: torch.nn.Module | None = None
         self.initialize_agent()
         log_debug(f"[INIT] SenseiRLBot init: name={name}, team={team}, index={index}, device={self.device}, tick_skip={self.tick_skip}")
-        if RLBOT_AVAILABLE:
-            super().__init__(name, team, index)
+
+    def initialize(self):
+        """Called by the v5 framework once name, team, index and field info are available."""
+        self.build_boost_pad_mapping()
+        log_debug(
+            f"[INIT] connected: name={self.name}, team={self.team}, index={self.index}, "
+            f"pads_mapped={self.boost_pad_mapping is not None}"
+        )
+
+    def build_boost_pad_mapping(self):
+        """
+        Match the field's boost pads onto this project's canonical pad order by position.
+
+        The packet orders pads by y then x, which is not the canonical order the observation
+        builder expects, and the order can differ per map.
+        """
+        if self.boost_pad_mapping is not None:
+            return
+        field_pads = getattr(getattr(self, "field_info", None), "boost_pads", None)
+        if not field_pads:
+            return
+        mapping = []
+        for std_pad in BoostPad.create_standard_pads():
+            best_idx = 0
+            min_dist = float("inf")
+            for b_i, pad in enumerate(field_pads):
+                loc = pad.location
+                d = math.hypot(loc.x - std_pad.pos[0], loc.y - std_pad.pos[1])
+                if d < min_dist:
+                    min_dist = d
+                    best_idx = b_i
+            mapping.append(best_idx)
+        self.boost_pad_mapping = mapping
 
     def get_latest_checkpoint(self) -> Optional[str]:
         bot_dir = os.path.dirname(os.path.abspath(__file__))
@@ -195,14 +394,18 @@ class SenseiRLBot(BaseAgent):
             self.model = ActorCritic(obs_dim=obs_dim, act_dim=act_dim, continuous_actions=self.continuous_actions).to(self.device)
             self.model.eval()
 
-    def get_output(self, packet: GameTickPacket) -> SimpleControllerState:
-        controller = SimpleControllerState()
+    def get_output(self, packet: GamePacket) -> ControllerState:
+        controller = ControllerState()
 
         # Guard: check match state (allow kickoff and freeplay play)
-        if getattr(packet.game_info, "is_match_ended", False):
+        match_phase = getattr(packet.match_info, "match_phase", MatchPhase.Active)
+        if match_phase == MatchPhase.Ended:
             return controller
-        if not getattr(packet.game_info, "is_round_active", True):
+        if match_phase in (MatchPhase.Inactive, MatchPhase.GoalScored, MatchPhase.Replay, MatchPhase.Paused):
             controller.throttle = 1.0
+            return controller
+        # Replays and some transitions publish no ball at all; nothing to observe.
+        if not packet.balls:
             return controller
 
         try:
@@ -217,11 +420,11 @@ class SenseiRLBot(BaseAgent):
             if self.model is None:
                 self.initialize_agent()
 
-            if packet.num_cars <= self.index:
+            if len(packet.players) <= self.index:
                 return controller
 
             # Extract ball
-            b_phys = packet.game_ball.physics
+            b_phys = packet.balls[0].physics
             ball_state = BallState(
                 pos=np.array([b_phys.location.x, b_phys.location.y, b_phys.location.z], dtype=np.float32),
                 vel=np.array([b_phys.velocity.x, b_phys.velocity.y, b_phys.velocity.z], dtype=np.float32),
@@ -229,8 +432,8 @@ class SenseiRLBot(BaseAgent):
             )
 
             # Match and Kickoff State Tracking:
-            # Detect new kickoff when is_kickoff_pause is True and ball is placed at center
-            is_kickoff_pause = getattr(packet.game_info, "is_kickoff_pause", False)
+            # Detect a new kickoff from the match phase plus the ball sitting at center
+            is_kickoff_pause = match_phase in (MatchPhase.Countdown, MatchPhase.Kickoff)
             ball_speed = float(np.linalg.norm(ball_state.vel))
             ball_dist_center = float(np.linalg.norm(ball_state.pos[:2]))
 
@@ -246,11 +449,11 @@ class SenseiRLBot(BaseAgent):
                     self.ball_touched_since_kickoff = True
 
             # Extract self car
-            my_car = packet.game_cars[self.index]
-            is_on_ground = bool(my_car.has_wheel_contact)
-            has_jump = is_on_ground or (not getattr(my_car, "jumped", False))
+            my_car = packet.players[self.index]
+            is_on_ground = my_car.air_state == AirState.OnGround
+            has_jump = is_on_ground or (not my_car.has_jumped)
             # Align with RocketSim training: has_flip is only True when airborne and flip is available
-            has_flip = bool((not is_on_ground) and (not getattr(my_car, "double_jumped", False)))
+            has_flip = bool((not is_on_ground) and (not my_car.has_double_jumped) and (not my_car.has_dodged))
 
             car_rot_mat = rotation_to_rot_mat(
                 my_car.physics.rotation.pitch,
@@ -273,98 +476,19 @@ class SenseiRLBot(BaseAgent):
                 ball_touches=1 if self.ball_touched_since_kickoff else 0
             )
 
-            # Extract future ball trajectory from RLBot
-            ball_prediction_slice = None
-            pred_struct = None
-            if hasattr(self, "get_ball_prediction_struct"):
-                try:
-                    pred_struct = self.get_ball_prediction_struct()
-                    if pred_struct is not None and getattr(pred_struct, "num_slices", 0) > 30:
-                        slice_idx = min(30, pred_struct.num_slices - 1)
-                        loc = pred_struct.slices[slice_idx].physics.location
-                        ball_prediction_slice = np.array([loc.x, loc.y, loc.z], dtype=np.float32)
-                except Exception:
-                    pass
-
-            # Build dummy arena struct for obs builder
-            class MockArena:
-                def __init__(self, ball, cars, ball_pred=None, raw_pred_struct=None, game_boosts=None, boost_pad_mapping=None):
-                    self.ball = ball
-                    self.cars = cars
-                    self.ball_prediction_slice = ball_pred
-                    self._pred_struct = raw_pred_struct
-                    self.boost_pads = BoostPad.create_standard_pads()
-                    self._sm_pad_indices = np.array([i for i, p in enumerate(self.boost_pads) if not p.is_big], dtype=int)
-                    self._bg_pad_indices = np.array([i for i, p in enumerate(self.boost_pads) if p.is_big], dtype=int)
-                    self._small_pad_pos_3d = np.array([self.boost_pads[i].pos for i in self._sm_pad_indices], dtype=np.float32)
-                    self._big_pad_pos_3d = np.array([self.boost_pads[i].pos for i in self._bg_pad_indices], dtype=np.float32)
-                    self._all_pad_pos_2d = np.array([p.pos[:2] for p in self.boost_pads], dtype=np.float32)
-
-                    if game_boosts is not None and boost_pad_mapping is not None:
-                        for std_idx, packet_idx in enumerate(boost_pad_mapping):
-                            if packet_idx < len(game_boosts):
-                                self.boost_pads[std_idx].is_active = bool(game_boosts[packet_idx].is_active)
-                                self.boost_pads[std_idx].cooldown_timer = float(getattr(game_boosts[packet_idx], "timer", 0.0))
-
-                    self._small_pad_active = np.array([self.boost_pads[i].is_active for i in self._sm_pad_indices], dtype=bool)
-                    self._big_pad_active = np.array([self.boost_pads[i].is_active for i in self._bg_pad_indices], dtype=bool)
-                    self._all_pad_active = np.array([p.is_active for p in self.boost_pads], dtype=bool)
-
-                def get_predicted_ball_pos(self, slice_idx: int = 60) -> np.ndarray:
-                    if self._pred_struct is not None and getattr(self._pred_struct, "num_slices", 0) > 0:
-                        # RLBot ball prediction struct runs at 60Hz. In training, RocketSim predicts at 120Hz (slice 60 = 0.5s).
-                        # Map slice_idx to RLBot's 60Hz timeframe (e.g. slice 60 -> RLBot slice 30 = 0.5s).
-                        rlbot_idx = min(int(round(slice_idx * 0.5)), self._pred_struct.num_slices - 1)
-                        loc = self._pred_struct.slices[rlbot_idx].physics.location
-                        return np.array([loc.x, loc.y, loc.z], dtype=np.float32)
-                    if self.ball_prediction_slice is not None:
-                        return self.ball_prediction_slice
-                    return np.array([self.ball.pos[0], self.ball.pos[1], self.ball.pos[2]], dtype=np.float32)
-
-                def get_shot_threat(self, team: int):
-                    defending_goal_y = -ARENA_EXTENT_Y if team == 0 else ARENA_EXTENT_Y
-                    ball_vy = self.ball.vel[1]
-                    is_moving_to_net = (ball_vy < -100.0) if team == 0 else (ball_vy > 100.0)
-                    if not is_moving_to_net:
-                        return False, 0.0, 0.0
-
-                    if self._pred_struct is not None and getattr(self._pred_struct, "num_slices", 0) > 0:
-                        num = min(self._pred_struct.num_slices, 120)
-                        for i in range(num):
-                            loc = self._pred_struct.slices[i].physics.location
-                            if (team == 0 and loc.y <= -5120.0) or (team == 1 and loc.y >= 5120.0):
-                                is_clean_entry = bool(abs(loc.x) <= EFFECTIVE_GOAL_HALF_WIDTH and BALL_RADIUS <= loc.z <= EFFECTIVE_GOAL_HEIGHT)
-                                is_grazing_entry = bool(not is_clean_entry and abs(loc.x) <= GOAL_HALF_WIDTH and BALL_RADIUS <= loc.z <= GOAL_HEIGHT)
-                                if is_clean_entry or is_grazing_entry:
-                                    raw_intensity = max(0.1, 1.0 - (i / 120.0))
-                                    threat_intensity = raw_intensity if is_clean_entry else (raw_intensity * 0.45)
-                                    entry_z_norm = min(1.0, max(0.0, loc.z / GOAL_HEIGHT))
-                                    return True, threat_intensity, entry_z_norm
-
-                    dy = defending_goal_y - self.ball.pos[1]
-                    if abs(ball_vy) > 1e-4:
-                        dt = dy / ball_vy
-                        if 0.05 < dt < 3.0:
-                            pred_x = self.ball.pos[0] + self.ball.vel[0] * dt
-                            pred_z = self.ball.pos[2] + self.ball.vel[2] * dt + 0.5 * (-650.0) * (dt ** 2)
-                            is_clean_entry = bool(abs(pred_x) <= EFFECTIVE_GOAL_HALF_WIDTH and BALL_RADIUS <= pred_z <= EFFECTIVE_GOAL_HEIGHT)
-                            is_grazing_entry = bool(not is_clean_entry and abs(pred_x) <= GOAL_HALF_WIDTH and BALL_RADIUS <= pred_z <= GOAL_HEIGHT)
-                            if is_clean_entry or is_grazing_entry:
-                                raw_intensity = max(0.1, 1.0 - (dt / 3.0))
-                                threat_intensity = raw_intensity if is_clean_entry else (raw_intensity * 0.45)
-                                entry_z_norm = min(1.0, max(0.0, pred_z / GOAL_HEIGHT))
-                                return True, threat_intensity, entry_z_norm
-
-                    return False, 0.0, 0.0
+            # Extract future ball trajectory from RLBot. v5 publishes 720 slices at 120 Hz covering
+            # 6 seconds; the indexer measures the spacing rather than assuming it.
+            pred_slices = getattr(getattr(self, "ball_prediction", None), "slices", None)
+            predictor = PredictionIndexer(pred_slices)
 
             # Find opponent
             opponents = []
-            for i in range(packet.num_cars):
+            for i in range(len(packet.players)):
                 if i != self.index:
-                    opp_car = packet.game_cars[i]
-                    opp_on_ground = bool(opp_car.has_wheel_contact)
-                    opp_jump = opp_on_ground or (not getattr(opp_car, "jumped", False))
-                    opp_flip = bool((not opp_on_ground) and (not getattr(opp_car, "double_jumped", False)))
+                    opp_car = packet.players[i]
+                    opp_on_ground = opp_car.air_state == AirState.OnGround
+                    opp_jump = opp_on_ground or (not opp_car.has_jumped)
+                    opp_flip = bool((not opp_on_ground) and (not opp_car.has_double_jumped) and (not opp_car.has_dodged))
                     opp_rot_mat = rotation_to_rot_mat(
                         opp_car.physics.rotation.pitch,
                         opp_car.physics.rotation.yaw,
@@ -389,33 +513,17 @@ class SenseiRLBot(BaseAgent):
             if self.ticks_since_last_action >= self.tick_skip or self.prev_action is None:
                 self.ticks_since_last_action = 0
 
-                # Compute boost pad spatial mapping once when FieldInfo is available
-                if self.boost_pad_mapping is None and RLBOT_AVAILABLE and hasattr(self, "get_field_info"):
+                # Normally built in initialize(); retried here in case field info arrived late.
+                if self.boost_pad_mapping is None:
                     try:
-                        field_info = self.get_field_info()
-                        if field_info is not None and getattr(field_info, "num_boosts", 0) > 0:
-                            std_pads = BoostPad.create_standard_pads()
-                            mapping = []
-                            for std_pad in std_pads:
-                                best_idx = 0
-                                min_dist = float("inf")
-                                for b_i in range(field_info.num_boosts):
-                                    loc = field_info.boost_pads[b_i].location
-                                    d = math.hypot(loc.x - std_pad.pos[0], loc.y - std_pad.pos[1])
-                                    if d < min_dist:
-                                        min_dist = d
-                                        best_idx = b_i
-                                mapping.append(best_idx)
-                            self.boost_pad_mapping = mapping
+                        self.build_boost_pad_mapping()
                     except Exception:
                         pass
 
-                game_boosts = getattr(packet, "game_boosts", None)
                 arena = MockArena(
                     ball_state, [car_state] + opponents,
-                    ball_pred=ball_prediction_slice,
-                    raw_pred_struct=pred_struct,
-                    game_boosts=game_boosts,
+                    predictor=predictor if predictor else None,
+                    game_boosts=packet.boost_pads,
                     boost_pad_mapping=self.boost_pad_mapping
                 )
                 obs = self.obs_builder.build_obs(car_state, arena)
@@ -549,3 +657,9 @@ class SenseiRLBot(BaseAgent):
             log_debug(f"[TICK_ERROR] {err_msg}")
 
         return controller
+
+
+if __name__ == "__main__":
+    # Passing the agent id here lets the bot be started by hand for development; when the
+    # framework launches it, RLBOT_AGENT_ID takes precedence.
+    SenseiRLBot(agent_id=AGENT_ID).run()

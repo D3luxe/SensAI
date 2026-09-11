@@ -10,7 +10,8 @@ from typing import List, Dict, Any, Optional
 from env.physics_engine import (
     CarState, BallState, RocketSimArena,
     ARENA_EXTENT_X, ARENA_EXTENT_Y, ARENA_HEIGHT_Z,
-    CAR_MAX_SPEED, BALL_MAX_SPEED, GOAL_HEIGHT
+    CAR_MAX_SPEED, BALL_MAX_SPEED, GOAL_HEIGHT,
+    BALL_PRED_SHORT_TICKS, BALL_PRED_MEDIUM_TICKS
 )
 
 OBS_DIM = 94
@@ -202,7 +203,7 @@ class DefaultObservationBuilder:
         out[30] = float(ba[2]) * 0.1
 
         # 2b. Short-Term Ball Trajectory Prediction (0.5s ahead = 60 ticks @ 120Hz)
-        future_ball_pos = arena.get_predicted_ball_pos(60) if hasattr(arena, "get_predicted_ball_pos") else None
+        future_ball_pos = arena.get_predicted_ball_pos(BALL_PRED_SHORT_TICKS) if hasattr(arena, "get_predicted_ball_pos") else None
         if future_ball_pos is None:
             dt = 0.5
             fpx = bx + bvx * dt
@@ -220,7 +221,7 @@ class DefaultObservationBuilder:
         out[33] = fpz / ARENA_HEIGHT_Z
 
         # 2c. Medium-Term Ball Trajectory Prediction (1.5s ahead = 180 ticks @ 120Hz)
-        future_ball_pos_180 = arena.get_predicted_ball_pos(180) if hasattr(arena, "get_predicted_ball_pos") else None
+        future_ball_pos_180 = arena.get_predicted_ball_pos(BALL_PRED_MEDIUM_TICKS) if hasattr(arena, "get_predicted_ball_pos") else None
         if future_ball_pos_180 is None:
             dt2 = 1.5
             fpx2 = bx + bvx * dt2

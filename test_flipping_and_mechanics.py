@@ -18,6 +18,7 @@ import RocketSim as rsim
 from env.physics_engine import RocketSimArena, CarState, BallState
 from env.rewards import JumpBridgeReward, AirRollRecoveryReward, PlayerToBallVelocityReward
 from agent.models import ActorCritic
+from bot import AirState, MatchPhase
 
 
 def set_rsim_car_state(arena: RocketSimArena, car_idx: int, pos, vel, fwd, right, up, boost=50.0, on_ground=True):
@@ -221,7 +222,7 @@ class TestFlippingAndMechanics(unittest.TestCase):
                     setattr(self, k, v)
 
         car = Struct(
-            team=0, boost=33.3, has_wheel_contact=True, jumped=False, double_jumped=False,
+            team=0, boost=33.3, air_state=AirState.OnGround, has_jumped=False, has_double_jumped=False, has_dodged=False,
             physics=Struct(
                 location=Struct(x=0.0, y=0.0, z=17.0),
                 velocity=Struct(x=0.0, y=100.0, z=0.0),
@@ -230,16 +231,16 @@ class TestFlippingAndMechanics(unittest.TestCase):
             )
         )
         packet = Struct(
-            num_cars=1,
-            game_cars=[car],
-            game_ball=Struct(
+            players=[car],
+            balls=[Struct(
                 physics=Struct(
                     location=Struct(x=0.0, y=1000.0, z=93.0),
                     velocity=Struct(x=0.0, y=0.0, z=0.0),
                     angular_velocity=Struct(x=0.0, y=0.0, z=0.0)
                 )
-            ),
-            game_info=Struct(is_kickoff_pause=False, is_round_active=True)
+            )],
+            boost_pads=[],
+            match_info=Struct(match_phase=MatchPhase.Active)
         )
         ctrl = bot.get_output(packet)
         self.assertFalse(ctrl.jump, "Jump must be suppressed when turning sharply at low speed to prevent tumbling!")
