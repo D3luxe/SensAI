@@ -40,9 +40,16 @@ except ImportError:
 
 
 # Per-channel log_std floor for [Throttle, Steer, Pitch, Yaw, Roll]. Steer, Yaw and Roll
-# sit higher than the other two because they are the axes that latch against the floor;
+# sit higher than Throttle because they are the axes that latch against the floor;
 # see the log_std_min buffer in ActorCritic.__init__ for the reasoning.
-LOG_STD_FLOOR_DEFAULT = [-2.5, -2.0, -2.5, -2.0, -2.0]
+#
+# Pitch sits highest of all. It is the flip axis, so its exploration is what discovers the
+# pitch correction that turns a nose-first landing into a clean one, and debias_symmetric_actions
+# already guarantees pitch >= log_std_ceiling_rot - 0.3 whenever a checkpoint is loaded. At -2.5
+# that guarantee held only on the load path: training was free to walk pitch 0.8 nats below it,
+# and it did, reaching sigma 0.083 and killing flip exploration outright while the load path kept
+# claiming to protect it. The floor now enforces during training what the reload already promised.
+LOG_STD_FLOOR_DEFAULT = [-2.5, -2.0, -1.7, -2.0, -2.0]
 
 
 class ActorCritic(nn.Module):

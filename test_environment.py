@@ -71,6 +71,85 @@ class TestRocketLeagueEnvironment(unittest.TestCase):
         self.assertEqual(entropy.shape, (8,))
         self.assertEqual(value.shape, (8, 1))
 
+    def _anneal_stub(self, targets, base, decay_steps, global_step):
+        """
+        A minimal stand-in for PPOTrainer carrying only the reward-annealing state, bound to the
+        real methods. Constructing a trainer spawns the whole worker pool, which would dominate
+        a test of two pieces of arithmetic.
+        """
+        from agent.ppo import PPOTrainer
+
+        class Stub:
+            pass
+
+        stub = Stub()
+        stub.reward_anneal_enabled = True
+        stub.reward_anneal_targets = dict(targets)
+        stub.reward_anneal_steps = int(decay_steps)
+        stub.base_reward_weights = dict(base)
+        stub._reward_anneal_start_steps = {}
+        stub._last_pushed_reward_weights = None
+        stub.global_step = int(global_step)
+        stub.pushed = []
+
+        class FakeEnv:
+            def update_reward_weights(inner, weights):
+                stub.pushed.append(dict(weights))
+
+        stub.env = FakeEnv()
+        stub._apply_reward_annealing = PPOTrainer._apply_reward_annealing.__get__(stub)
+        stub._reward_anneal_progress = PPOTrainer._reward_anneal_progress.__get__(stub)
+        stub._load_reward_anneal_clocks = PPOTrainer._load_reward_anneal_clocks.__get__(stub)
+        return stub
+
+    def test_a_target_added_mid_run_starts_its_own_anneal_clock(self):
+        """
+        Guarantees a newly configured target ramps from the current step rather than inheriting
+        an elapsed schedule.
+
+        Under a single shared clock, progress was pinned at 1.0 once the first target finished,
+        so adding a second term dropped its weight to the final value on the very next iteration.
+        That is a cliff in the reward function mid-run, not an anneal, and the policy has no
+        chance to adapt to it gradually.
+        """
+        base = {"powerslide_weight": 0.2, "jump_bridge_weight": 0.55}
+        targets = {"powerslide_weight": 0.0, "jump_bridge_weight": 0.15}
+        stub = self._anneal_stub(targets, base, decay_steps=400_000_000, global_step=2_000_000_000)
+
+        # powerslide has been running since step 0 and is long finished; jump_bridge is new.
+        stub._reward_anneal_start_steps = {"powerslide_weight": 0}
+        stub._apply_reward_annealing()
+
+        pushed = stub.pushed[-1]
+        self.assertAlmostEqual(pushed["powerslide_weight"], 0.0, places=6,
+                               msg="a finished target must stay at its final value")
+        self.assertAlmostEqual(pushed["jump_bridge_weight"], 0.55, places=6,
+                               msg="a freshly added target must start at its base weight, not snap to the target")
+
+        # Halfway through its own schedule it should be halfway down, with powerslide unmoved.
+        stub.global_step = 2_200_000_000
+        stub._apply_reward_annealing()
+        pushed = stub.pushed[-1]
+        self.assertAlmostEqual(pushed["jump_bridge_weight"], 0.35, places=6)
+        self.assertAlmostEqual(pushed["powerslide_weight"], 0.0, places=6)
+
+    def test_legacy_shared_anneal_clock_migrates_without_restarting_finished_targets(self):
+        """
+        Guarantees resuming a checkpoint written before the clocks were split keeps an already
+        elapsed schedule elapsed, instead of handing the policy back a bootstrap reward it has
+        grown out of.
+        """
+        base = {"powerslide_weight": 0.2}
+        targets = {"powerslide_weight": 0.0}
+        stub = self._anneal_stub(targets, base, decay_steps=400_000_000, global_step=2_161_983_488)
+
+        stub._load_reward_anneal_clocks({"reward_anneal_start_step": 1_693_417_472})
+        self.assertEqual(stub._reward_anneal_start_steps, {"powerslide_weight": 1_693_417_472})
+
+        stub._apply_reward_annealing()
+        self.assertAlmostEqual(stub.pushed[-1]["powerslide_weight"], 0.0, places=6,
+                               msg="a schedule that had already elapsed must not restart on resume")
+
     def test_mini_ppo_training_run(self):
         import tempfile
         with tempfile.TemporaryDirectory() as tmpdir:

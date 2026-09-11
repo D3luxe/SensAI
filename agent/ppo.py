@@ -242,10 +242,15 @@ class PPOTrainer:
         self.reward_anneal_steps = int(anneal_cfg.get("decay_steps", 300_000_000))
         self.reward_anneal_targets = dict(anneal_cfg.get("targets", {}))
         self.base_reward_weights = dict(rew_cfg)
-        # Anchored on first application rather than on step 0, so enabling this mid-run decays
-        # from where the policy is now instead of snapping to the end of a schedule already
-        # elapsed. Same reasoning as _rot_anneal_start_iter.
-        self._reward_anneal_start_step = None
+        # One clock per target, anchored when that target is first seen rather than on step 0,
+        # so adding a term mid-run decays from where the policy is now instead of snapping to
+        # the end of a schedule already elapsed. Same reasoning as _rot_anneal_start_iter.
+        #
+        # A single shared clock could not express this. Once the first target's schedule had
+        # run out, progress was pinned at 1.0 for every target, so a newly added term jumped
+        # straight to its final weight on the next iteration -- a cliff, not an anneal -- and
+        # the only way to get a ramp was to restart the clock for the terms already finished.
+        self._reward_anneal_start_steps: Dict[str, int] = {}
         self._last_pushed_reward_weights = None
 
         # State tracking
@@ -396,12 +401,9 @@ class PPOTrainer:
         weights = dict(self.base_reward_weights)
 
         if self.reward_anneal_enabled and self.reward_anneal_targets:
-            if self._reward_anneal_start_step is None:
-                self._reward_anneal_start_step = self.global_step
-            elapsed = max(0, self.global_step - self._reward_anneal_start_step)
-            progress = min(1.0, elapsed / max(1, self.reward_anneal_steps))
             for key, final_value in self.reward_anneal_targets.items():
                 start_value = float(self.base_reward_weights.get(key, 0.0))
+                progress = self._reward_anneal_progress(key)
                 weights[key] = start_value + (float(final_value) - start_value) * progress
 
         prev = self._last_pushed_reward_weights
@@ -415,10 +417,48 @@ class PPOTrainer:
         self._last_pushed_reward_weights = weights
 
         if self.reward_anneal_enabled and self.reward_anneal_targets and prev is not None:
-            elapsed = max(0, self.global_step - self._reward_anneal_start_step)
-            progress = min(1.0, elapsed / max(1, self.reward_anneal_steps))
-            summary = " | ".join(f"{k} {weights[k]:.3f}" for k in sorted(self.reward_anneal_targets))
-            print(f"[PPO Trainer] Reward annealing {progress * 100.0:.0f}%: {summary}")
+            # Each target carries its own percentage now that each runs on its own clock.
+            summary = " | ".join(
+                f"{k} {weights[k]:.3f} ({self._reward_anneal_progress(k) * 100.0:.0f}%)"
+                for k in sorted(self.reward_anneal_targets)
+            )
+            print(f"[PPO Trainer] Reward annealing: {summary}")
+
+    def _load_reward_anneal_clocks(self, checkpoint: dict):
+        """
+        Restore the per-target anneal clocks from a checkpoint.
+
+        Checkpoints written before the clocks were split carry a single scalar
+        reward_anneal_start_step. Seed every currently configured target from it, so a term whose
+        schedule had already elapsed under the shared clock stays elapsed instead of silently
+        restarting its ramp and handing the policy back a bootstrap reward it had grown out of.
+        """
+        saved = checkpoint.get("reward_anneal_start_steps")
+        if isinstance(saved, dict):
+            self._reward_anneal_start_steps = {str(k): int(v) for k, v in saved.items() if v is not None}
+            return
+
+        legacy = checkpoint.get("reward_anneal_start_step")
+        if legacy is None:
+            self._reward_anneal_start_steps = {}
+            return
+        self._reward_anneal_start_steps = {
+            str(k): int(legacy) for k in self.reward_anneal_targets
+        }
+
+    def _reward_anneal_progress(self, key: str) -> float:
+        """
+        Fraction of this target's own decay schedule elapsed, in [0, 1].
+
+        Starts the target's clock on first call, so a term added to the config mid-run begins its
+        ramp from the current global_step. Callers must not depend on this being side-effect free.
+        """
+        start = self._reward_anneal_start_steps.get(key)
+        if start is None:
+            start = int(self.global_step)
+            self._reward_anneal_start_steps[key] = start
+        elapsed = max(0, int(self.global_step) - start)
+        return min(1.0, elapsed / max(1, self.reward_anneal_steps))
 
     def check_live_config(self):
         """
@@ -590,7 +630,7 @@ class PPOTrainer:
         data = {
             "iteration": self.iteration,
             "global_step": self.global_step,
-            "reward_anneal_start_step": self._reward_anneal_start_step,
+            "reward_anneal_start_steps": dict(self._reward_anneal_start_steps),
             "model_state_dict": self.agent.state_dict(),
             "optimizer_state_dict": self.optimizer.state_dict(),
             "config": self.config,
@@ -741,7 +781,7 @@ class PPOTrainer:
             self.agent.load_state_dict(model_state)
             self.iteration = checkpoint.get("iteration", 0)
             self.global_step = checkpoint.get("global_step", 0)
-            self._reward_anneal_start_step = checkpoint.get("reward_anneal_start_step", None)
+            self._load_reward_anneal_clocks(checkpoint)
             self._rot_anneal_start_iter = checkpoint.get("rot_anneal_start_iter")
             self._rot_anneal_start_ceiling = checkpoint.get("rot_anneal_start_ceiling")
             self._apply_log_std_floor()
@@ -757,7 +797,7 @@ class PPOTrainer:
                 pass
         self.iteration = checkpoint.get("iteration", 0)
         self.global_step = checkpoint.get("global_step", 0)
-        self._reward_anneal_start_step = checkpoint.get("reward_anneal_start_step", None)
+        self._load_reward_anneal_clocks(checkpoint)
         self._rot_anneal_start_iter = checkpoint.get("rot_anneal_start_iter")
         self._rot_anneal_start_ceiling = checkpoint.get("rot_anneal_start_ceiling")
         self._apply_log_std_floor()
@@ -1061,7 +1101,7 @@ class PPOTrainer:
             metrics_payload = {
                 "iteration": self.iteration,
                 "global_step": self.global_step,
-            "reward_anneal_start_step": self._reward_anneal_start_step,
+                "reward_anneal_start_steps": dict(self._reward_anneal_start_steps),
                 "mean_reward": round(mean_ep_rew, 3),
                 "policy_loss": round(mean_pg_loss, 5),
                 "value_loss": round(mean_v_loss, 5),
