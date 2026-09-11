@@ -13,8 +13,6 @@ hyperparameters:
   gae_lambda: 0.95
   gamma: 0.99
   learning_rate: 0.0003
-  # Per-channel exploration floor on log_std: [Throttle, Steer, Pitch, Yaw, Roll].
-  # Steer/Yaw/Roll are held above the others because they latch against the floor.
   log_std_floor:
   - -2.5
   - -2.0
@@ -26,13 +24,13 @@ hyperparameters:
   rot_log_std_anneal_iters: 4000
   rot_log_std_ceiling_final: -1.4
 league:
+  benchmark_interval: 15
+  benchmark_opponents:
+  - checkpoints/necto-model.pt
+  - checkpoints/nexto-model.pt
+  benchmark_series: 8
   contender_mu_margin: 4.0
   contender_series_per_step: 32
-  benchmark_opponents:
-    - checkpoints/necto-model.pt
-    - checkpoints/nexto-model.pt
-  benchmark_interval: 15
-  benchmark_series: 8
   eligibility_sigma: 1.5
   enabled: true
   eval_max_steps: 3000
@@ -76,44 +74,30 @@ model:
 ppo:
   bc_decay_steps: 30000000
   bc_regularization_weight: 0.0
+reward_annealing:
+  decay_steps: 400000000
+  enabled: true
+  targets:
+    powerslide_weight: 0.0
 rewards:
-  air_roll_recovery_weight: 0.25
+  air_roll_recovery_weight: 0.4
   ball_to_goal_weight: 1.5
   boost_gain_weight: 1.1
   boost_lose_weight: 0.6
   concede_weight: -30.0
   goal_weight: 30.0
-  jump_bridge_weight: 0.7
-  own_goal_threat_weight: 2.0
+  jump_bridge_weight: 0.55
   player_to_ball_weight: 0.6
   powerslide_weight: 0.2
   save_weight: 6.0
   touch_weight: 0.5
-reward_annealing:
-  # Mechanic-shaped reward terms exist to bootstrap. Once the policy can execute the manoeuvre,
-  # the velocity potential in PlayerToBallVelocityReward carries turn-radius and traversal
-  # learning on its own, and a named manoeuvre that can be performed without achieving anything
-  # is where farmable terms come from. Decay them toward outcome-driven scoring.
-  #
-  # Anchored on the step at which annealing is first applied, not on step 0, so enabling this on
-  # a run already at billions of steps decays smoothly from now rather than snapping to a
-  # schedule that has already elapsed.
-  enabled: true
-  decay_steps: 400000000
-  targets:
-    # The audit's explicit recommendation: this term should not survive training.
-    powerslide_weight: 0.0
-    # jump_bridge_weight is deliberately NOT listed. That class mixes mechanic shaping (flip
-    # alignment, wavedash, half-flip cancel) with outcome bounties (dodge strike, flick launch),
-    # so decaying the weight would delete the outcome half along with the mechanics. Split the
-    # class before annealing it.
 scenarios:
-  aerial_prob: 0.08
-  custom_prob: 0.21
-  dribble_flick_prob: 0.08
-  kickoff_prob: 0.12
-  replay_prob: 0.44
-  save_prob: 0.03
+  aerial_prob: 0.35
+  custom_prob: 0.0
+  dribble_flick_prob: 0.16
+  kickoff_prob: 0.08
+  replay_prob: 0.32
+  save_prob: 0.06
   turnaround_prob: 0.0
   wall_prob: 0.0
-  wall_rebound_prob: 0.04
+  wall_rebound_prob: 0.03
