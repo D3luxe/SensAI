@@ -1,11 +1,12 @@
 """
 Audit imputed replay actions bucketed by car height.
 
-Samples consecutive replay frame pairs with the same 250 uu continuity filter the
-pretrainer uses, runs InverseDynamicsSolver.solve_car_action, and reports mean abs
-pitch / saturation per height band. See docs/bc_replay_pipeline_defects.md.
+Samples replay frames, pairs each with the car's next genuine state update using the same
+find_car_transition the pretrainer uses (real per-car dt on timed pools; 250 uu filter and the
+legacy 10-frame spacing on old pools), runs InverseDynamicsSolver.solve_car_action, and reports
+mean abs pitch / saturation per height band. See docs/bc_replay_pipeline_defects.md.
 
-Usage: python scripts/audit_imputed_actions.py [--pool PATH] [--samples N] [--seed S]
+Usage: python scripts/audit_imputed_actions.py [--pool PATH] [--samples N] [--seed S] [--dt SECONDS]
 """
 
 from __future__ import annotations
@@ -17,7 +18,7 @@ import numpy as np
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from utils.replay_parser import ReplayParser
+from utils.replay_parser import ReplayParser, is_fresh_car_update, find_car_transition, _car_vec
 from utils.inverse_dynamics import InverseDynamicsSolver
 
 BANDS = [
@@ -32,7 +33,7 @@ def main():
     ap.add_argument("--pool", default="data/replays/replays_pool.npz")
     ap.add_argument("--samples", type=int, default=30000)
     ap.add_argument("--seed", type=int, default=0)
-    ap.add_argument("--dt", type=float, default=1.0 / 30.0, help="frame spacing passed to the solver")
+    ap.add_argument("--dt", type=float, default=None, help="override the frame spacing passed to the solver")
     args = ap.parse_args()
 
     parser = ReplayParser(pool_path=args.pool)
@@ -42,36 +43,38 @@ def main():
         sys.exit(f"could not load pool at {args.pool}")
 
     n = len(data["car_pos"])
+    timed = "car_time" in data
     rng = np.random.default_rng(args.seed)
     idxs = rng.choice(n - 1, size=min(args.samples, n - 1), replace=False)
+    num_cars = data["car_pos"].shape[1] if data["car_pos"].ndim > 2 else 1
 
-    zs, acts = [], []
+    zs, acts, dts = [], [], []
     for idx in idxs:
-        cp, cv, cr, cb = (data[k][idx] for k in ("car_pos", "car_vel", "car_rot", "car_boost"))
-        np_, nv, nr, nb = (data[k][idx + 1] for k in ("car_pos", "car_vel", "car_rot", "car_boost"))
-        num_cars = cp.shape[0] if cp.ndim > 1 else 1
         for ci in range(min(2, num_cars)):
-            p = cp[ci] if cp.ndim > 1 else cp
-            v = cv[ci] if cv.ndim > 1 else cv
-            r = cr[ci] if cr.ndim > 1 else cr
-            b = cb[ci] if cb.ndim > 0 else cb
-            p2 = np_[ci] if np_.ndim > 1 else np_
-            v2 = nv[ci] if nv.ndim > 1 else nv
-            r2 = nr[ci] if nr.ndim > 1 else nr
-            b2 = nb[ci] if nb.ndim > 0 else nb
-            if float(np.linalg.norm(p2 - p)) >= 250.0:
+            if not is_fresh_car_update(data, idx, ci):
                 continue
+            tr = find_car_transition(data, idx, ci)
+            if tr is None:
+                continue
+            j, dt = tr
+            if args.dt is not None:
+                dt = args.dt
+            g = lambda k, i: _car_vec(data[k], i, ci)
+            boost = lambda i: float(data["car_boost"][i][ci] if data["car_boost"].ndim > 1 else data["car_boost"][i])
+            p, p2 = g("car_pos", idx), g("car_pos", j)
             a = InverseDynamicsSolver.solve_car_action(
-                p, v, r, np.zeros(3, dtype=np.float32), float(b), bool(p[2] < 25.0),
-                p2, v2, r2, np.zeros(3, dtype=np.float32), float(b2), bool(p2[2] < 25.0),
-                dt=args.dt,
+                p, g("car_vel", idx), g("car_rot", idx), np.zeros(3, dtype=np.float32), boost(idx), bool(p[2] < 25.0),
+                p2, g("car_vel", j), g("car_rot", j), np.zeros(3, dtype=np.float32), boost(j), bool(p2[2] < 25.0),
+                dt=dt,
             )
             zs.append(float(p[2]))
             acts.append(a)
+            dts.append(dt)
 
     zs = np.asarray(zs)
     acts = np.asarray(acts)
-    print(f"{len(zs)} car-frames from {len(idxs)} sampled frame pairs")
+    print(f"{'timed' if timed else 'legacy'} pool, {n} frames | {len(zs)} car transitions from {len(idxs)} sampled frames"
+          f" | dt median {np.median(dts):.4f}s")
     print(f"{'band':<16}{'n':>8}  {'pitch |mean|':>12} {'>0.9':>7} {'==+1':>7}  {'yaw |mean|':>10} {'roll |mean|':>11}")
     for name, cond in BANDS + [("all", lambda z: np.ones_like(z, dtype=bool))]:
         m = cond(zs)

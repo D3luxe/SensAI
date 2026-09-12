@@ -221,7 +221,7 @@ class InverseDynamicsSolver:
         car_vel: np.ndarray,        # (N, num_cars, 3)
         car_rot: np.ndarray,        # (N, num_cars, 3)
         car_boost: np.ndarray,      # (N, num_cars)
-        dt: float = 1.0 / 30.0
+        dt=1.0 / 30.0               # scalar, or (N,) frame timestamps' diffs of length N-1
     ) -> np.ndarray:
         """
         Vectorized/Batch action extraction across consecutive frames.
@@ -230,6 +230,7 @@ class InverseDynamicsSolver:
         n_frames = car_pos.shape[0]
         if n_frames < 2:
             return np.zeros((0, 8), dtype=np.float32)
+        step_dt = np.broadcast_to(np.asarray(dt, dtype=np.float64), (n_frames - 1,))
 
         is_multi_car = (car_pos.ndim == 3)
         num_cars = car_pos.shape[1] if is_multi_car else 1
@@ -250,7 +251,7 @@ class InverseDynamicsSolver:
                     act = cls.solve_car_action(
                         p_t, v_t, r_t, np.zeros(3, dtype=np.float32), b_t, on_gnd_t,
                         p_next, v_next, r_next, np.zeros(3, dtype=np.float32), b_next, on_gnd_next,
-                        dt=dt
+                        dt=float(step_dt[t])
                     )
                     frame_acts.append(act)
                 actions.append(frame_acts)
@@ -266,7 +267,7 @@ class InverseDynamicsSolver:
                 act = cls.solve_car_action(
                     p_t, v_t, r_t, np.zeros(3, dtype=np.float32), b_t, on_gnd_t,
                     p_next, v_next, r_next, np.zeros(3, dtype=np.float32), b_next, on_gnd_next,
-                    dt=dt
+                    dt=float(step_dt[t])
                 )
                 actions.append(act)
 

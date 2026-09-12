@@ -1,7 +1,32 @@
-# Behavioral cloning replay pipeline: four defects to fix before the next clone
+# Behavioral cloning replay pipeline: defects to fix before the next clone
 
-Status: **not fixed**. None of this affects a running policy. It only takes effect on a
-re-clone, so it should be done before the next fresh start rather than mid-run.
+Status, branch `fix/bc-replay-pipeline`:
+
+| defect | status |
+|---|---|
+| E. Pool sampled at 3 Hz, solver told 30 Hz | **fixed** (full-rate parsing, real per-car dt; legacy pools get 10/30 s) |
+| F. Quaternion to Euler conversion mirrored pitch and roll | **fixed** |
+| G. Pretrainer observations built with a mirrored right vector | **fixed in the pretrainer**; the shared helpers are a separate task |
+| D. Flip-cancel heuristic hard-writes pitch on wall frames | **fixed** (deleted) |
+| A. Euler differencing used as angular velocity | **fixed** |
+| C. Height-only contact test | not fixed |
+| B. Ground steer computed about world Z | partly: steer now reads `omega_body · up_car` as a side effect of A, but wall frames still never reach the ground branch until C lands |
+
+None of this affects a running policy. It only takes effect on a re-clone, so it should be done
+before the next fresh start rather than mid-run. **The existing `replays_pool.npz` carries E and
+F baked in and must be re-ingested**, not just re-cloned.
+
+Net effect so far on imputed pitch (legacy pool as the pretrainer used it, against a full-rate
+pool re-parsed from the same 225 replays with E, F, D and A fixed):
+
+| car state | before: mean abs pitch, exactly +1.0 | after: mean abs pitch, exactly +1.0 |
+|---|---|---|
+| floor, z under 25 | 0.011, 0.3% | 0.004, 0.0% |
+| z 25 to 200 | 0.557, 20.1% | 0.258, 5.0% |
+| wall, z over 200 | 0.796, 40.3% | **0.200, 4.1%** |
+
+The remaining wall and ramp mass is mostly C: those frames are still routed to the airborne
+branch.
 
 Context: Rocket League replays store physics, not inputs. Of the eight actions the game
 takes, replays provide only throttle, steer, handbrake, jump and boost. Pitch, yaw and roll
@@ -10,14 +35,88 @@ either. Seer's authors hit exactly this and solved the contact problem by traini
 histogram-based gradient-boosting classifier on manually collected driving data, then imputed
 the missing rotational actions on top of carball's approximations.
 
-We took a cheaper route on both and it is wrong in four independent ways. All figures below
+We took a cheaper route on both and it is wrong in several independent ways. All figures below
 were measured, not estimated.
+
+Correction to the premise: replays do record **angular velocity**. Every car `RigidBody` update
+carries `angular_velocity`, in world axes, directionally exact against the rotation stream
+(median cosine 1.000 over 12,642 pairs). Its scale is a raw network unit, roughly x80 to x100
+with a noisy fit, so it is stored in the pool as `car_ang_vel` but not yet consumed by the solver.
+
+E, F and G were found while fixing D and A, and each outweighs D.
+
+---
+
+## E. The pool was sampled at 3 Hz and the solver was told 30 Hz
+
+**The largest single defect.** `_extract_replay_binary` kept every 10th network frame. Replays
+record at 30 Hz (`RecordFPS` 30, per-frame `delta` 0.0333 s), so pool frames were 0.333 s apart
+(position-vs-velocity estimate: median 0.325 s). The pretrainer passed `dt=1/30`, inflating every
+imputed rate and acceleration about 10x.
+
+Consequences beyond the rate scale:
+
+- 0.33 s is too coarse to impute stick inputs at all: jumps, dodges and flip cancels merge.
+- The 250 uu continuity filter at 0.33 s spacing admits only cars slower than about 760 uu/s, so
+  fast play was silently dropped.
+- Even at 30 Hz, a car's physics is only replicated every 2 to 3 frames (median gap 0.067 s, 90th
+  percentile 0.1 s). Consecutive pool frames are often a carried-over duplicate, so a fixed `dt`
+  is wrong even at full rate.
+- The old 100,000-frame cap held about 18 minutes of play at full rate.
+
+Pitch on the legacy pool, D and A applied, before and after passing the true spacing:
+
+| car state | dt 1/30: mean abs pitch, exactly +1.0 | dt 1/3: mean abs pitch, exactly +1.0 |
+|---|---|---|
+| floor | 0.011, 0.3% | 0.002, 0.0% |
+| z 25 to 200 | 0.595, 18.2% | 0.259, 9.4% |
+| wall | 0.721, 40.3% | 0.437, 22.1% |
+
+**Fix (done):** parse every frame (`ReplayParser.frame_stride = 1`) and store `frame_time`,
+per-car `car_time` of the last physics update, `car_ang_vel` and `segment_id`. The pretrainer and
+the audit only label frames where the car was actually replicated (`is_fresh_car_update`) and
+pair each with that car's next update in the same recording (`find_car_transition`), using the
+real gap, rejecting gaps over 0.15 s and teleports. Legacy pools without timing fall back to the
+old 250 uu filter with `dt = 10/30`. Pool cap raised to 2,000,000 frames; the 225 replays produce
+2.46M, so the oldest 19% are currently dropped.
+
+---
+
+## F. The quaternion to Euler conversion mirrored pitch and roll
+
+`_quat_to_euler` used the aerospace ZYX formulas, which do not match the Euler convention that
+RocketSim's `rsim.Angle`, the solver and `CarState` all rebuild orientation from. Yaw survived
+(forward matched velocity on the floor), but pitch and roll came out mirrored: on side walls the
+rebuilt up vector pointed **into** the wall (median -1.00, where the quaternion gives +1.00), and
+rotation-derived rates disagreed with the quaternion path by 173%.
+
+This corrupted `car_rot` for every consumer, including `ReplayStateSetter`, which feeds pool
+angles to `rsim.Angle(...).as_rot_mat()` to spawn training episodes.
+
+**Fix (done):** read pitch, yaw and roll off the quaternion's rotation matrix: `pitch =
+asin(fwd_z)`, `yaw = atan2(fwd_y, fwd_x)`, `roll = atan2(-right_z, up_z)`. Verified: rebuilding
+the basis from the angles matches the quaternion matrix to 3e-5, wall up vectors point away from
+the wall (+1.00 over 804 frames), and the basis matches `rsim.Angle` exactly.
+
+---
+
+## G. Pretrainer observations used a mirrored right vector
+
+RocketSim's right vector is `up x forward`. `CarState.get_right_vector()` and
+`bot.rotation_to_rot_mat` both compute `forward x up`, the negative. In training the env builds
+cars from RocketSim's `rot_mat`, but the pretrainer built replay cars from `rot` alone, so every
+lateral observation during cloning was mirrored relative to what the policy sees in RL.
+
+**Fix (done in the pretrainer):** replay cars are given `rot_mat` rows in RocketSim's convention.
+The two shared helpers are left unchanged here because the live bot and rewards also call them;
+correcting them needs a caller-by-caller audit of which signs were tuned against the mirror.
 
 ---
 
 ## D. The flip-cancel heuristic hard-writes full pitch on wall frames
 
-**Worst of the four, and the cheapest to fix.**
+**Cheapest to fix, but smaller than first thought.** Deleting it alone moved wall frames at
+exactly +1.0 pitch from 40.3% to 34.5%; most of the saturation came from E.
 
 `utils/inverse_dynamics.py`, in the airborne branch:
 
@@ -139,24 +238,34 @@ negatives for false positives. The floor-to-wall fillet radius here is nearer 25
 
 ---
 
-## Suggested order
+## Remaining order
 
-D first, on its own, since it is a deletion and the effect is large and isolated. Then A,
-which is self-contained and fixes both the wall and the genuine-aerial cases. Then C, the
-largest piece of work. B only matters once C routes wall frames into the ground branch, so it
-lands with C.
+E, F, G, D and A are done. C is next and is the largest remaining piece; B lands with it. After
+that, consider consuming the recorded `car_ang_vel` directly once its scale is pinned down.
 
 Re-audit after each step by conditioning the imputed action distribution on car height. The
-floor row should stay near zero, and the wall row should come down from 0.796 toward it.
+floor row should stay near zero, and the wall row should keep coming down.
 
 ## Reproducing the measurements
 
-The probes used for all of the above lived in the session scratchpad and were not kept. Each
-is short: load the replay pool with `ReplayParser.load_pool()`, sample consecutive frame pairs
-with the same 250 uu continuity filter `agent/pretrainer.py` uses, call
-`InverseDynamicsSolver.solve_car_action` directly, and bucket the output by `car_pos[2]`. The
-contact ground truth in C comes from driving a scripted car into a wall in
-`RocketLeagueEnv` and reading `car.on_ground`, which is RocketSim's own flag.
+`python scripts/audit_imputed_actions.py --pool <pool>` reproduces the height-bucketed tables.
+It uses the pretrainer's own pairing (`find_car_transition`), so timed and legacy pools are both
+handled; `--dt` overrides the spacing. The first tables in D and A were measured on the legacy
+pool with `dt=1/30`, matching what the pretrainer did at the time.
+
+To rebuild a full-rate pool from the replay folder (about a minute for 225 replays):
+
+```python
+from utils.replay_parser import ReplayParser
+p = ReplayParser(pool_path="data/replays/replays_pool_30hz.npz",
+                 demo_dir=r"C:/Users/coryf/OneDrive/Documents/RL_ML_Training/replays")
+p.clear_pool()
+p.ingest_directory(max_replays=0, sort="oldest")
+```
+
+`rrrocket.exe` is auto-downloaded into `bin/` on first use. The contact ground truth in C comes
+from driving a scripted car into a wall in `RocketLeagueEnv` and reading `car.on_ground`, which
+is RocketSim's own flag.
 
 Note when writing probes here: assigning to `car.pos` or `ball.pos` does nothing, because
 RocketSim owns the state and overwrites it on the next step. Scripted scenarios must be
