@@ -35,6 +35,41 @@ class InverseDynamicsSolver:
     """
 
     @staticmethod
+    def basis(rot: np.ndarray) -> np.ndarray:
+        """3x3 matrix whose columns are the car's forward, right and up axes in world coordinates."""
+        cp, sp = math.cos(rot[0]), math.sin(rot[0])
+        cy, sy = math.cos(rot[1]), math.sin(rot[1])
+        cr, sr = math.cos(rot[2]), math.sin(rot[2])
+        fwd = [cp * cy, cp * sy, sp]
+        right = [-sy * cr + cy * sp * sr, cy * cr + sy * sp * sr, -cp * sr]
+        up = [-cy * sp * cr - sy * sr, -sy * sp * cr + cy * sr, cp * cr]
+        return np.array([fwd, right, up], dtype=np.float64).T
+
+    @staticmethod
+    def body_angular_velocity(rot_t: np.ndarray, rot_next: np.ndarray, dt: float) -> np.ndarray:
+        """
+        Body-frame angular velocity [ω_fwd, ω_right, ω_up] (rad/s) that rotates orientation rot_t
+        into rot_next over dt, via the axis-angle of R_t^T · R_t+1. Singularity-free.
+        """
+        r_rel = InverseDynamicsSolver.basis(rot_t).T @ InverseDynamicsSolver.basis(rot_next)
+        cos_angle = float(np.clip((np.trace(r_rel) - 1.0) * 0.5, -1.0, 1.0))
+        angle = math.acos(cos_angle)
+        skew = np.array([r_rel[2, 1] - r_rel[1, 2], r_rel[0, 2] - r_rel[2, 0], r_rel[1, 0] - r_rel[0, 1]])
+        sin_angle = math.sin(angle)
+        if sin_angle < 1e-6:
+            if angle < 1e-3:
+                # Small rotation: log map ≈ vee(R - R^T) / 2
+                return skew * 0.5 / dt
+            # Near π: axis from the diagonal of (R + I) / 2
+            axis = np.sqrt(np.clip((np.diag(r_rel) + 1.0) * 0.5, 0.0, None))
+            k = int(np.argmax(axis))
+            for j in range(3):
+                if j != k:
+                    axis[j] = math.copysign(axis[j], r_rel[k, j] + r_rel[j, k])
+            return axis / np.linalg.norm(axis) * angle / dt
+        return skew * (angle / (2.0 * sin_angle)) / dt
+
+    @staticmethod
     def solve_car_action(
         pos_t: np.ndarray,
         vel_t: np.ndarray,
@@ -99,11 +134,12 @@ class InverseDynamicsSolver:
                 throttle_act = 1.0 if a_fwd > 0 else 0.0
 
         # 4. Angular Rotations (Pitch, Yaw, Roll, Steer)
-        # Angular change delta
-        delta_rot = rot_next - rot_t
-        # Wrap to [-pi, pi]
-        delta_rot = (delta_rot + np.pi) % (2 * np.pi) - np.pi
-        measured_omega = delta_rot / dt
+        # Body angular velocity from the relative rotation R_rel = R_t^T · R_t+1 (axis-angle / dt).
+        # Euler-angle differences are not angular velocity and blow up near pitch = ±90°.
+        # Components are returned as [pitch, yaw, roll] rates with the same signs Euler differencing
+        # gave at small angles: pitch = -ω·right, yaw = ω·up, roll = -ω·fwd.
+        omega_body = InverseDynamicsSolver.body_angular_velocity(rot_t, rot_next, dt)
+        measured_omega = np.array([-omega_body[1], omega_body[2], -omega_body[0]], dtype=np.float64)
 
         if on_ground_t and on_ground_next:
             # Ground Steering (Turning Left / +yaw_rate requires act[1] < 0; Turning Right / -yaw_rate requires act[1] > 0)

@@ -32,6 +32,7 @@ def main():
     ap.add_argument("--pool", default="data/replays/replays_pool.npz")
     ap.add_argument("--samples", type=int, default=30000)
     ap.add_argument("--seed", type=int, default=0)
+    ap.add_argument("--dt", type=float, default=1.0 / 30.0, help="frame spacing passed to the solver")
     args = ap.parse_args()
 
     parser = ReplayParser(pool_path=args.pool)
@@ -63,7 +64,7 @@ def main():
             a = InverseDynamicsSolver.solve_car_action(
                 p, v, r, np.zeros(3, dtype=np.float32), float(b), bool(p[2] < 25.0),
                 p2, v2, r2, np.zeros(3, dtype=np.float32), float(b2), bool(p2[2] < 25.0),
-                dt=1.0 / 30.0,
+                dt=args.dt,
             )
             zs.append(float(p[2]))
             acts.append(a)
