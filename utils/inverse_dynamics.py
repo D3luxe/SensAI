@@ -135,12 +135,6 @@ class InverseDynamicsSolver:
             pitch_rate = float(measured_omega[0])
             pitch_act = float(np.clip(-pitch_rate / PITCH_TORQUE, -1.0, 1.0))
 
-            # Flip-Cancel Detection:
-            # If the car is inverted (up vector z < 0.2) and pitch rate is near-zero while having backward/downward flight momentum,
-            # the player is actively holding opposite stick (+1.0 nose-down) to cancel the backflip pitch rotation.
-            if up[2] < 0.2 and abs(pitch_rate) < 2.5 and (a_fwd < -200.0 or speed_fwd < -300.0 or (speed_fwd > 300.0 and abs(fwd[2]) < 0.5)):
-                pitch_act = 1.0
-
             # Yaw (Left is -1.0, Right is +1.0)
             yaw_rate = float(measured_omega[1])
             yaw_act = float(np.clip(-yaw_rate / YAW_TORQUE, -1.0, 1.0))
