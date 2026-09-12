@@ -18,12 +18,17 @@ from typing import List, Dict, Any, Optional, Tuple
 
 
 def _quat_to_euler(x: float, y: float, z: float, w: float) -> Tuple[float, float, float]:
-    """Converts a quaternion (x, y, z, w) to Euler angles (pitch, yaw, roll) in radians."""
-    sinp = 2.0 * (w * y - z * x)
-    sinp = max(-1.0, min(1.0, sinp))
-    pitch = math.asin(sinp)
-    yaw = math.atan2(2.0 * (w * z + x * y), 1.0 - 2.0 * (y * y + z * z))
-    roll = math.atan2(2.0 * (w * x + y * z), 1.0 - 2.0 * (x * x + y * y))
+    """
+    Converts a replay quaternion (x, y, z, w) to (pitch, yaw, roll) in radians, in RocketSim's
+    rsim.Angle convention. Read off the rotation matrix's forward, right and up columns so that
+    rsim.Angle(pitch, yaw, roll).as_rot_mat() reproduces the replay orientation exactly.
+    """
+    fwd_z = 2.0 * (x * z - y * w)
+    pitch = math.asin(max(-1.0, min(1.0, fwd_z)))
+    yaw = math.atan2(2.0 * (x * y + z * w), 1.0 - 2.0 * (y * y + z * z))
+    right_z = 2.0 * (y * z + x * w)
+    up_z = 1.0 - 2.0 * (x * x + y * y)
+    roll = math.atan2(-right_z, up_z)
     return float(pitch), float(yaw), float(roll)
 
 
@@ -78,6 +83,7 @@ def _ensure_rrrocket() -> Optional[str]:
 def get_default_demo_dir() -> str:
     """Auto-detects active Rocket League demo directory (OneDrive or standard Documents)."""
     candidates = [
+        os.path.expandvars(r"%USERPROFILE%\OneDrive\Documents\RL_ML_Training\replays"),
         os.path.expandvars(r"%USERPROFILE%\OneDrive\Documents\My Games\Rocket League\TAGame\Demos"),
         os.path.expandvars(r"%USERPROFILE%\Documents\My Games\Rocket League\TAGame\Demos"),
         os.path.join("data", "replays")
@@ -91,11 +97,101 @@ def get_default_demo_dir() -> str:
 DEFAULT_DEMO_DIR = get_default_demo_dir()
 DEFAULT_POOL_PATH = os.path.join("data", "replays", "replays_pool.npz")
 
+# Keep the most recent frames only. At 30 Hz one 1v1 replay is ~5-7k frames.
+MAX_POOL_FRAMES = 2_000_000
+
+REQUIRED_POOL_KEYS = ("ball_pos", "ball_vel", "car_pos", "car_vel", "car_rot", "car_boost")
+# Written by full-rate parsing; absent from legacy pools.
+#   frame_time  (N,)          replay clock of the network frame, seconds
+#   car_time    (N, cars)     replay clock of that car's last RigidBody update, seconds
+#   car_ang_vel (N, cars, 3)  angular velocity as replicated (world axes, raw network scale ~x80-100)
+#   segment_id  (N,)          contiguous-recording id; frames from different replays never pair
+TIMED_POOL_KEYS = ("frame_time", "car_time", "car_ang_vel", "segment_id")
+# Legacy pools sampled every 10th frame of a 30 Hz replay.
+LEGACY_FRAME_DT = 10.0 / 30.0
+# Longest gap between two car updates still treated as one continuous transition.
+MAX_TRANSITION_DT = 0.15
+
+
+def _car_vec(arr: np.ndarray, i: int, car_idx: int) -> np.ndarray:
+    a = arr[i]
+    return a[car_idx] if a.ndim > 1 else a
+
+
+def is_fresh_car_update(data: Dict[str, np.ndarray], idx: int, car_idx: int) -> bool:
+    """True if the car's physics state was replicated in frame idx (not a carried-over duplicate)."""
+    if "car_time" not in data:
+        return True
+    return abs(float(data["frame_time"][idx]) - float(data["car_time"][idx, car_idx])) < 1e-3
+
+
+def find_car_transition(data: Dict[str, np.ndarray], idx: int, car_idx: int) -> Optional[Tuple[int, float]]:
+    """
+    Returns (next_idx, dt) for the next genuine state update of this car after frame idx, or None when
+    there is no usable continuous transition (end of recording, gap too long, or a teleport such as a
+    demolition respawn or kickoff reset).
+    """
+    n = len(data["car_pos"])
+    if "car_time" not in data:
+        if idx + 1 >= n:
+            return None
+        if float(np.linalg.norm(_car_vec(data["car_pos"], idx + 1, car_idx) - _car_vec(data["car_pos"], idx, car_idx))) >= 250.0:
+            return None
+        return idx + 1, LEGACY_FRAME_DT
+
+    car_time, seg = data["car_time"], data["segment_id"]
+    t0 = float(car_time[idx, car_idx])
+    j = idx + 1
+    while j < n and seg[j] == seg[idx]:
+        dt = float(car_time[j, car_idx]) - t0
+        if dt > 1e-4:
+            if dt > MAX_TRANSITION_DT:
+                return None
+            p0, p1 = data["car_pos"][idx, car_idx], data["car_pos"][j, car_idx]
+            v_max = max(float(np.linalg.norm(data["car_vel"][idx, car_idx])), float(np.linalg.norm(data["car_vel"][j, car_idx])))
+            if float(np.linalg.norm(p1 - p0)) > v_max * dt * 1.5 + 100.0:
+                return None
+            return j, dt
+        j += 1
+    return None
+
+
+def _merge_pool(buffer: Optional[Dict[str, np.ndarray]], chunks: List[Dict[str, np.ndarray]]) -> Dict[str, np.ndarray]:
+    """Concatenates parsed chunks onto the pool, offsetting segment ids and enforcing MAX_POOL_FRAMES."""
+    keys = list(REQUIRED_POOL_KEYS)
+    chunks_timed = all(all(k in c for k in TIMED_POOL_KEYS) for c in chunks)
+    buffer_timed = buffer is None or all(k in buffer for k in TIMED_POOL_KEYS)
+    if chunks_timed and buffer_timed:
+        keys += list(TIMED_POOL_KEYS)
+    elif chunks_timed:
+        print("[ReplayParser] Warning: appending timed frames to a legacy pool drops timing; clear the pool to keep it.")
+
+    seg_base = 0
+    if buffer is not None and "segment_id" in keys and len(buffer["segment_id"]):
+        seg_base = int(buffer["segment_id"].max()) + 1
+    parts = {k: ([] if buffer is None else [buffer[k]]) for k in keys}
+    for c in chunks:
+        for k in keys:
+            v = np.asarray(c[k])
+            if k == "segment_id":
+                v = v.astype(np.int32) + seg_base
+            parts[k].append(v)
+        if "segment_id" in keys:
+            seg_base = int(parts["segment_id"][-1].max()) + 1
+
+    merged = {k: np.concatenate(parts[k], axis=0) for k in keys}
+    if len(merged["ball_pos"]) > MAX_POOL_FRAMES:
+        merged = {k: v[-MAX_POOL_FRAMES:] for k, v in merged.items()}
+    return merged
+
 
 class ReplayParser:
     """
     Parses Rocket League replay states and maintains a fast, memory-mapped replay buffer.
     """
+    # Keep every Nth network frame of a .replay (replays record at 30 Hz).
+    frame_stride: int = 1
+
     def __init__(self, pool_path: str = DEFAULT_POOL_PATH, demo_dir: Optional[str] = None):
         self.pool_path = pool_path
         self.demo_dir = demo_dir or DEFAULT_DEMO_DIR
@@ -122,6 +218,8 @@ class ReplayParser:
                     "car_rot": data["car_rot"],         # (N, num_cars, 3) pitch, yaw, roll
                     "car_boost": data["car_boost"]      # (N, num_cars)
                 }
+                if all(k in data.files for k in TIMED_POOL_KEYS):
+                    self.states_buffer.update({k: data[k] for k in TIMED_POOL_KEYS})
                 return True
             except Exception as e:
                 print(f"[ReplayParser] Warning: Could not load {self.pool_path}: {e}")
@@ -234,25 +332,14 @@ class ReplayParser:
             if not files:
                 return 0, 0
 
-            extracted_b_pos = []
-            extracted_b_vel = []
-            extracted_c_pos = []
-            extracted_c_vel = []
-            extracted_c_rot = []
-            extracted_c_bst = []
-
+            chunks = []
             processed_count = 0
             rejected_files = []
             for fpath in files:
                 try:
                     frames = self._parse_file(fpath)
                     if frames and len(frames["ball_pos"]) > 0:
-                        extracted_b_pos.append(frames["ball_pos"])
-                        extracted_b_vel.append(frames["ball_vel"])
-                        extracted_c_pos.append(frames["car_pos"])
-                        extracted_c_vel.append(frames["car_vel"])
-                        extracted_c_rot.append(frames["car_rot"])
-                        extracted_c_bst.append(frames["car_boost"])
+                        chunks.append(frames)
                         processed_count += 1
                     else:
                         rejected_files.append(os.path.basename(fpath))
@@ -267,40 +354,14 @@ class ReplayParser:
                 "total_frames": 0
             }
 
-            if not extracted_b_pos:
+            if not chunks:
                 return 0, 0
 
-            new_b_pos = np.vstack(extracted_b_pos)
-            new_b_vel = np.vstack(extracted_b_vel)
-            new_c_pos = np.vstack(extracted_c_pos)
-            new_c_vel = np.vstack(extracted_c_vel)
-            new_c_rot = np.vstack(extracted_c_rot)
-            new_c_bst = np.vstack(extracted_c_bst)
-
-            if self.states_buffer is not None:
-                self.states_buffer["ball_pos"] = np.vstack([self.states_buffer["ball_pos"], new_b_pos])
-                self.states_buffer["ball_vel"] = np.vstack([self.states_buffer["ball_vel"], new_b_vel])
-                self.states_buffer["car_pos"] = np.vstack([self.states_buffer["car_pos"], new_c_pos])
-                self.states_buffer["car_vel"] = np.vstack([self.states_buffer["car_vel"], new_c_vel])
-                self.states_buffer["car_rot"] = np.vstack([self.states_buffer["car_rot"], new_c_rot])
-                self.states_buffer["car_boost"] = np.vstack([self.states_buffer["car_boost"], new_c_bst])
-            else:
-                self.states_buffer = {
-                    "ball_pos": new_b_pos,
-                    "ball_vel": new_b_vel,
-                    "car_pos": new_c_pos,
-                    "car_vel": new_c_vel,
-                    "car_rot": new_c_rot,
-                    "car_boost": new_c_bst
-                }
-
-            if len(self.states_buffer["ball_pos"]) > 100000:
-                for k in self.states_buffer:
-                    self.states_buffer[k] = self.states_buffer[k][-100000:]
-
-            self.last_ingest_report["total_frames"] = len(new_b_pos)
+            n_new = sum(len(c["ball_pos"]) for c in chunks)
+            self.states_buffer = _merge_pool(self.states_buffer, chunks)
+            self.last_ingest_report["total_frames"] = n_new
             self.save_pool()
-            return processed_count, len(new_b_pos)
+            return processed_count, n_new
         finally:
             shutil.rmtree(temp_dir, ignore_errors=True)
 
@@ -385,13 +446,7 @@ class ReplayParser:
         if max_replays > 0 and len(files) > max_replays:
             files = files[:max_replays]
 
-        extracted_b_pos = []
-        extracted_b_vel = []
-        extracted_c_pos = []
-        extracted_c_vel = []
-        extracted_c_rot = []
-        extracted_c_bst = []
-
+        chunks = []
         processed_count = 0
         total_files = len(files)
         rejected_files = []
@@ -400,12 +455,7 @@ class ReplayParser:
             try:
                 frames = self._parse_file(file_path)
                 if frames and len(frames["ball_pos"]) > 0:
-                    extracted_b_pos.append(frames["ball_pos"])
-                    extracted_b_vel.append(frames["ball_vel"])
-                    extracted_c_pos.append(frames["car_pos"])
-                    extracted_c_vel.append(frames["car_vel"])
-                    extracted_c_rot.append(frames["car_rot"])
-                    extracted_c_bst.append(frames["car_boost"])
+                    chunks.append(frames)
                     processed_count += 1
                 else:
                     rejected_files.append(os.path.basename(file_path))
@@ -423,41 +473,14 @@ class ReplayParser:
             "total_frames": 0
         }
 
-        if not extracted_b_pos:
+        if not chunks:
             return {"parsed_files": 0, "total_frames": 0, "elapsed_seconds": 0.0}
 
-        new_b_pos = np.vstack(extracted_b_pos)
-        new_b_vel = np.vstack(extracted_b_vel)
-        new_c_pos = np.vstack(extracted_c_pos)
-        new_c_vel = np.vstack(extracted_c_vel)
-        new_c_rot = np.vstack(extracted_c_rot)
-        new_c_bst = np.vstack(extracted_c_bst)
-
-        if self.states_buffer is not None:
-            self.states_buffer["ball_pos"] = np.vstack([self.states_buffer["ball_pos"], new_b_pos])
-            self.states_buffer["ball_vel"] = np.vstack([self.states_buffer["ball_vel"], new_b_vel])
-            self.states_buffer["car_pos"] = np.vstack([self.states_buffer["car_pos"], new_c_pos])
-            self.states_buffer["car_vel"] = np.vstack([self.states_buffer["car_vel"], new_c_vel])
-            self.states_buffer["car_rot"] = np.vstack([self.states_buffer["car_rot"], new_c_rot])
-            self.states_buffer["car_boost"] = np.vstack([self.states_buffer["car_boost"], new_c_bst])
-        else:
-            self.states_buffer = {
-                "ball_pos": new_b_pos,
-                "ball_vel": new_b_vel,
-                "car_pos": new_c_pos,
-                "car_vel": new_c_vel,
-                "car_rot": new_c_rot,
-                "car_boost": new_c_bst
-            }
-
-        # Keep max 100,000 frames to ensure fast training and memory efficiency
-        if len(self.states_buffer["ball_pos"]) > 100000:
-            for k in self.states_buffer:
-                self.states_buffer[k] = self.states_buffer[k][-100000:]
-
-        self.last_ingest_report["total_frames"] = len(new_b_pos)
+        n_new = sum(len(c["ball_pos"]) for c in chunks)
+        self.states_buffer = _merge_pool(self.states_buffer, chunks)
+        self.last_ingest_report["total_frames"] = n_new
         self.save_pool()
-        return {"parsed_files": processed_count, "total_frames": len(new_b_pos), "elapsed_seconds": round(time.time() - _t0, 2)}
+        return {"parsed_files": processed_count, "total_frames": n_new, "elapsed_seconds": round(time.time() - _t0, 2)}
 
     def _parse_file(self, file_path: str) -> Optional[Dict[str, np.ndarray]]:
         """Parses an individual replay file or pre-formatted numpy/json dataset."""
@@ -465,14 +488,9 @@ class ReplayParser:
 
         if ext == ".npz":
             data = np.load(file_path)
-            return {
-                "ball_pos": data["ball_pos"],
-                "ball_vel": data["ball_vel"],
-                "car_pos": data["car_pos"],
-                "car_vel": data["car_vel"],
-                "car_rot": data["car_rot"],
-                "car_boost": data["car_boost"]
-            }
+            out = {k: data[k] for k in REQUIRED_POOL_KEYS}
+            out.update({k: data[k] for k in TIMED_POOL_KEYS if k in data.files})
+            return out
 
         elif ext == ".json":
             with open(file_path, "r", encoding="utf-8") as f:
@@ -538,6 +556,9 @@ class ReplayParser:
         extracted_c_vel = []
         extracted_c_rot = []
         extracted_c_bst = []
+        extracted_frame_time = []
+        extracted_car_time = []
+        extracted_c_angv = []
 
         for f_idx, f in enumerate(frames):
             for da in f.get("deleted_actors", []):
@@ -563,6 +584,8 @@ class ReplayParser:
                         "pos": [0.0, 0.0, 17.0],
                         "vel": [0.0, 0.0, 0.0],
                         "rot": [0.0, 0.0, 0.0],
+                        "ang_vel": [0.0, 0.0, 0.0],
+                        "time": float(f.get("time", 0.0)),
                         "boost": 33.3
                     }
                 elif "CarComponent_Boost" in obj_name:
@@ -588,6 +611,9 @@ class ReplayParser:
                             active_cars[aid]["vel"] = [vel["x"], vel["y"], vel["z"]] if vel else [0.0, 0.0, 0.0]
                             if rot and "w" in rot:
                                 active_cars[aid]["rot"] = list(_quat_to_euler(rot["x"], rot["y"], rot["z"], rot["w"]))
+                            ang = rb.get("angular_velocity")
+                            active_cars[aid]["ang_vel"] = [ang["x"], ang["y"], ang["z"]] if ang else [0.0, 0.0, 0.0]
+                            active_cars[aid]["time"] = float(f.get("time", 0.0))
 
                 elif atype == "ball":
                     if "RigidBody" in attr:
@@ -609,8 +635,8 @@ class ReplayParser:
                         if cid and cid in active_cars:
                             active_cars[cid]["boost"] = round((b_amt / 255.0) * 100.0, 1)
 
-            # Sample every 10 frames (~3-6 Hz) when ball and at least 1 car exist
-            if (f_idx % 10 == 0) and active_ball_id is not None and len(active_cars) >= 1:
+            # Keep every frame_stride-th network frame when ball and at least 1 car exist
+            if (f_idx % self.frame_stride == 0) and active_ball_id is not None and len(active_cars) >= 1:
                 sorted_cars = sorted(active_cars.items(), key=lambda item: car_teams.get(item[0], 0))
                 c0 = sorted_cars[0][1]
                 if len(sorted_cars) >= 2:
@@ -620,6 +646,8 @@ class ReplayParser:
                         "pos": [-c0["pos"][0], -c0["pos"][1], c0["pos"][2]],
                         "vel": [-c0["vel"][0], -c0["vel"][1], c0["vel"][2]],
                         "rot": [c0["rot"][0], c0["rot"][1] + math.pi, c0["rot"][2]],
+                        "ang_vel": [-c0["ang_vel"][0], -c0["ang_vel"][1], c0["ang_vel"][2]],
+                        "time": c0["time"],
                         "boost": c0["boost"]
                     }
 
@@ -629,6 +657,9 @@ class ReplayParser:
                 extracted_c_vel.append([c0["vel"], c1["vel"]])
                 extracted_c_rot.append([c0["rot"], c1["rot"]])
                 extracted_c_bst.append([c0["boost"], c1["boost"]])
+                extracted_frame_time.append(float(f.get("time", 0.0)))
+                extracted_car_time.append([c0["time"], c1["time"]])
+                extracted_c_angv.append([c0["ang_vel"], c1["ang_vel"]])
 
         if not extracted_b_pos:
             return None
@@ -639,5 +670,9 @@ class ReplayParser:
             "car_pos": np.array(extracted_c_pos, dtype=np.float32),
             "car_vel": np.array(extracted_c_vel, dtype=np.float32),
             "car_rot": np.array(extracted_c_rot, dtype=np.float32),
-            "car_boost": np.array(extracted_c_bst, dtype=np.float32)
+            "car_boost": np.array(extracted_c_bst, dtype=np.float32),
+            "frame_time": np.array(extracted_frame_time, dtype=np.float64),
+            "car_time": np.array(extracted_car_time, dtype=np.float64),
+            "car_ang_vel": np.array(extracted_c_angv, dtype=np.float32),
+            "segment_id": np.zeros(len(extracted_frame_time), dtype=np.int32)
         }

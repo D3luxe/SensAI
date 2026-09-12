@@ -18,8 +18,9 @@ from typing import Dict, Any, Optional, Tuple, Callable
 from agent.models import ActorCritic, OBS_MIRROR_MASK_NP, ACT_MIRROR_MASK_NP
 from env.observations import DefaultObservationBuilder
 from env.physics_engine import CarState, BallState, BoostPad, ARENA_EXTENT_X, ARENA_EXTENT_Y
-from utils.replay_parser import ReplayParser, get_default_demo_dir
+from utils.replay_parser import ReplayParser, get_default_demo_dir, is_fresh_car_update, find_car_transition
 from utils.inverse_dynamics import InverseDynamicsSolver
+from utils.surface_contact import is_on_surface
 from bot import rotation_to_rot_mat
 
 
@@ -143,6 +144,13 @@ class BehavioralCloningTrainer:
                 car_r = c_rot[car_idx] if c_rot.ndim > 1 else c_rot
                 car_b = c_bst[car_idx] if c_bst.ndim > 0 else c_bst
 
+                # Car state not replicated this frame: a carried-over duplicate carries no new label
+                if not is_fresh_car_update(data, idx, car_idx):
+                    continue
+
+                # Wheel contact from arena geometry; replays do not record it
+                on_gnd_t = is_on_surface(car_p, InverseDynamicsSolver.basis(car_r)[:, 2])
+
                 car = CarState(
                     id=car_idx,
                     team=car_idx % 2,
@@ -150,7 +158,7 @@ class BehavioralCloningTrainer:
                     vel=car_v,
                     rot=car_r,
                     boost=float(car_b),
-                    on_ground=(car_p[2] < 25.0)
+                    on_ground=on_gnd_t
                 )
 
                 arena = MockArenaForObs(ball, [car])
@@ -158,25 +166,26 @@ class BehavioralCloningTrainer:
 
                 # ── True Human Action Extraction via Inverse Dynamics ───────────
                 expert_act = None
-                if idx < total_frames - 1:
-                    # Check if next frame is part of the same continuous match sequence
-                    c_pos_next = data["car_pos"][idx + 1]
-                    c_vel_next = data["car_vel"][idx + 1]
-                    c_rot_next = data["car_rot"][idx + 1]
-                    c_bst_next = data["car_boost"][idx + 1]
+                # Next genuine update of this car in the same recording, with its real time gap
+                transition = find_car_transition(data, idx, car_idx)
+                if transition is not None:
+                    nxt, pair_dt = transition
+                    c_pos_next = data["car_pos"][nxt]
+                    c_vel_next = data["car_vel"][nxt]
+                    c_rot_next = data["car_rot"][nxt]
+                    c_bst_next = data["car_boost"][nxt]
 
                     c_p_next = c_pos_next[car_idx] if c_pos_next.ndim > 1 else c_pos_next
                     c_v_next = c_vel_next[car_idx] if c_vel_next.ndim > 1 else c_vel_next
                     c_r_next = c_rot_next[car_idx] if c_rot_next.ndim > 1 else c_rot_next
                     c_b_next = c_bst_next[car_idx] if c_bst_next.ndim > 0 else c_bst_next
 
-                    # If delta distance < 200 uu, frames are continuous
-                    if float(np.linalg.norm(c_p_next - car_p)) < 250.0:
-                        expert_act = InverseDynamicsSolver.solve_car_action(
-                            car_p, car_v, car_r, np.zeros(3, dtype=np.float32), float(car_b), bool(car_p[2] < 25.0),
-                            c_p_next, c_v_next, c_r_next, np.zeros(3, dtype=np.float32), float(c_b_next), bool(c_p_next[2] < 25.0),
-                            dt=1.0 / 30.0
-                        )
+                    expert_act = InverseDynamicsSolver.solve_car_action(
+                        car_p, car_v, car_r, np.zeros(3, dtype=np.float32), float(car_b), on_gnd_t,
+                        c_p_next, c_v_next, c_r_next, np.zeros(3, dtype=np.float32), float(c_b_next),
+                        is_on_surface(c_p_next, InverseDynamicsSolver.basis(c_r_next)[:, 2]),
+                        dt=pair_dt
+                    )
 
                 if expert_act is None:
                     # Analytical pursuit controller fallback for isolated boundary frames

@@ -1170,6 +1170,107 @@ class TestPhysicsAndControls(unittest.TestCase):
         # additive streams that used to sit alongside it in this class are gone, so the
         # net the fixture sees is the penalty against the distance delta alone.
 
+    def test_inverse_dynamics_side_dodge_direction(self):
+        """
+        Guarantees the inverse dynamics solver labels a RocketSim side dodge on the correct side.
+        Right = fwd x up (project convention); a car facing +Y dodging right is pushed toward +X
+        and must be labelled yaw = roll = +1.0, and the mirrored dodge yaw = roll = -1.0.
+        """
+        from utils.inverse_dynamics import InverseDynamicsSolver
+
+        def euler(car):
+            # rot_mat rows: forward, RocketSim row 1 (Left), up
+            f, l, u = car.rot_mat[0], car.rot_mat[1], car.rot_mat[2]
+            return np.array([math.asin(max(-1.0, min(1.0, float(f[2])))), math.atan2(f[1], f[0]), math.atan2(-l[2], u[2])])
+
+        dt = 8.0 / 120.0
+        for yaw_in, expected_side_sign in ((+1.0, +1.0), (-1.0, -1.0)):
+            arena = RocketSimArena(num_players=2, game_mode="1v1")
+            arena.reset(random_kickoff=False)
+            cs = arena._rsim_cars[0].get_state()
+            cs.pos = rsim.Vec(0, -3000, 17)
+            cs.vel = rsim.Vec(0, 1000, 0)
+            cs.rot_mat = rsim.Angle(yaw=np.pi / 2, pitch=0.0, roll=0.0).as_rot_mat()
+            arena._rsim_cars[0].set_state(cs)
+
+            # Jump, then dodge sideways with yaw held
+            arena.step([np.array([1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0]), np.zeros(8)], dt=dt)
+            c = arena.cars[0]
+            p0, v0, r0, b0 = c.pos.copy(), c.vel.copy(), euler(c), float(c.boost)
+            arena.step([np.array([1.0, 0.0, 0.0, yaw_in, 0.0, 1.0, 0.0, 0.0]), np.zeros(8)], dt=dt)
+            c = arena.cars[0]
+            self.assertTrue(arena._rsim_cars[0].get_state().has_flipped, "Scripted side dodge must trigger a flip in RocketSim!")
+            self.assertEqual(float(np.sign(c.vel[0] - v0[0])), expected_side_sign,
+                             "RocketSim yaw dodge toward the car's right must push a +Y-facing car toward +X")
+
+            act = InverseDynamicsSolver.solve_car_action(
+                p0, v0, r0, np.zeros(3, dtype=np.float32), b0, False,
+                c.pos.copy(), c.vel.copy(), euler(c), np.zeros(3, dtype=np.float32), float(c.boost), False,
+                dt=dt
+            )
+            self.assertEqual(act[5], 1.0, "Side dodge must be labelled as a jump/dodge")
+            self.assertEqual(act[3], expected_side_sign, f"Side dodge with yaw={yaw_in:+.0f} mislabelled yaw={act[3]:+.2f}")
+            self.assertEqual(act[4], expected_side_sign, f"Side dodge with yaw={yaw_in:+.0f} mislabelled roll={act[4]:+.2f}")
+
+    def test_replay_quaternion_to_euler_roundtrip(self):
+        """
+        Guarantees replay quaternions convert to (pitch, yaw, roll) that rebuild the exact same
+        orientation in RocketSim's Angle convention, for arbitrary orientations (not just level ones:
+        a pitch sign error is invisible on the floor and only shows on walls).
+        """
+        from utils.replay_parser import _quat_to_euler
+
+        rng = np.random.default_rng(3)
+        for _ in range(300):
+            x, y, z, w = rng.normal(size=4)
+            n = math.sqrt(x * x + y * y + z * z + w * w)
+            x, y, z, w = x / n, y / n, z / n, w / n
+            expected = np.array([
+                [1 - 2 * (y * y + z * z), 2 * (x * y - z * w), 2 * (x * z + y * w)],
+                [2 * (x * y + z * w), 1 - 2 * (x * x + z * z), 2 * (y * z - x * w)],
+                [2 * (x * z - y * w), 2 * (y * z + x * w), 1 - 2 * (x * x + y * y)],
+            ])
+            pitch, yaw, roll = _quat_to_euler(x, y, z, w)
+            rsim_rows = rsim.Angle(yaw=yaw, pitch=pitch, roll=roll).as_rot_mat().as_numpy()
+            # RocketSim rows: forward, Left, up == quaternion matrix columns 0, 1, 2
+            self.assertTrue(np.allclose(rsim_rows[0], expected[:, 0], atol=1e-4), "forward mismatch")
+            self.assertTrue(np.allclose(rsim_rows[1], expected[:, 1], atol=1e-4), "left mismatch")
+            self.assertTrue(np.allclose(rsim_rows[2], expected[:, 2], atol=1e-4), "up mismatch")
+
+    def test_surface_contact_matches_rocketsim(self):
+        """
+        Guarantees the geometric contact model used for replay frames agrees with RocketSim's own
+        is_on_ground flag on the floor, while driving on a side wall, and in mid-air.
+        """
+        from utils.surface_contact import is_on_surface
+
+        def settle(pos, angle, vel, throttle, ticks):
+            arena = RocketSimArena(num_players=2, game_mode="1v1")
+            arena.reset(random_kickoff=False)
+            cs = arena._rsim_cars[0].get_state()
+            cs.pos = rsim.Vec(*pos)
+            cs.vel = rsim.Vec(*vel)
+            cs.rot_mat = angle.as_rot_mat()
+            arena._rsim_cars[0].set_state(cs)
+            arena.step([np.array([throttle, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]), np.zeros(8)], dt=ticks / 120.0)
+            car = arena.cars[0]
+            return arena._rsim_cars[0].get_state().is_on_ground, is_on_surface(car.pos, car.rot_mat[2])
+
+        # Resting on the floor
+        rsim_gnd, model_gnd = settle((0, -2000, 17), rsim.Angle(yaw=np.pi / 2, pitch=0.0, roll=0.0), (0, 0, 0), 0.0, 8)
+        self.assertTrue(rsim_gnd)
+        self.assertTrue(model_gnd, "Car resting on the floor must be inferred grounded")
+
+        # Driving along the +X side wall, wheels facing -X
+        rsim_gnd, model_gnd = settle((4096 - 17, 0, 800), rsim.Angle(yaw=np.pi / 2, pitch=0.0, roll=np.pi / 2), (0, 1200, 0), 1.0, 8)
+        self.assertTrue(rsim_gnd, "Scripted wall drive must stay on the wall in RocketSim")
+        self.assertTrue(model_gnd, "Car driving on a side wall must be inferred grounded, not airborne")
+
+        # Mid-air in the middle of the arena
+        rsim_gnd, model_gnd = settle((0, 0, 900), rsim.Angle(yaw=0.0, pitch=0.0, roll=0.0), (0, 0, 0), 0.0, 4)
+        self.assertFalse(rsim_gnd)
+        self.assertFalse(model_gnd, "Car in mid-air must be inferred airborne")
+
     def test_halfflip_inverse_dynamics_and_rewards(self):
         """
         Guarantees that:
