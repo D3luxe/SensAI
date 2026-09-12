@@ -1212,6 +1212,31 @@ class TestPhysicsAndControls(unittest.TestCase):
             self.assertEqual(act[3], expected_side_sign, f"Side dodge with yaw={yaw_in:+.0f} mislabelled yaw={act[3]:+.2f}")
             self.assertEqual(act[4], expected_side_sign, f"Side dodge with yaw={yaw_in:+.0f} mislabelled roll={act[4]:+.2f}")
 
+    def test_replay_quaternion_to_euler_roundtrip(self):
+        """
+        Guarantees replay quaternions convert to (pitch, yaw, roll) that rebuild the exact same
+        orientation in RocketSim's Angle convention, for arbitrary orientations (not just level ones:
+        a pitch sign error is invisible on the floor and only shows on walls).
+        """
+        from utils.replay_parser import _quat_to_euler
+
+        rng = np.random.default_rng(3)
+        for _ in range(300):
+            x, y, z, w = rng.normal(size=4)
+            n = math.sqrt(x * x + y * y + z * z + w * w)
+            x, y, z, w = x / n, y / n, z / n, w / n
+            expected = np.array([
+                [1 - 2 * (y * y + z * z), 2 * (x * y - z * w), 2 * (x * z + y * w)],
+                [2 * (x * y + z * w), 1 - 2 * (x * x + z * z), 2 * (y * z - x * w)],
+                [2 * (x * z - y * w), 2 * (y * z + x * w), 1 - 2 * (x * x + y * y)],
+            ])
+            pitch, yaw, roll = _quat_to_euler(x, y, z, w)
+            rsim_rows = rsim.Angle(yaw=yaw, pitch=pitch, roll=roll).as_rot_mat().as_numpy()
+            # RocketSim rows: forward, Left, up == quaternion matrix columns 0, 1, 2
+            self.assertTrue(np.allclose(rsim_rows[0], expected[:, 0], atol=1e-4), "forward mismatch")
+            self.assertTrue(np.allclose(rsim_rows[1], expected[:, 1], atol=1e-4), "left mismatch")
+            self.assertTrue(np.allclose(rsim_rows[2], expected[:, 2], atol=1e-4), "up mismatch")
+
     def test_surface_contact_matches_rocketsim(self):
         """
         Guarantees the geometric contact model used for replay frames agrees with RocketSim's own

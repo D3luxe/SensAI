@@ -21,12 +21,11 @@ pool re-parsed from the same 225 replays with E, F, D and A fixed):
 
 | car state | before: mean abs pitch, exactly +1.0 | after: mean abs pitch, exactly +1.0 |
 |---|---|---|
-| floor, z under 25 | 0.011, 0.3% | 0.004, 0.0% |
-| z 25 to 200 | 0.557, 20.1% | 0.258, 5.0% |
-| wall, z over 200 | 0.796, 40.3% | **0.200, 4.1%** |
+| floor, z under 25 | 0.011, 0.3% | 0.000, 0.0% |
+| z 25 to 200 | 0.557, 20.1% | 0.105, 0.8% |
+| wall, z over 200 | 0.796, 40.3% | **0.120, 1.6%** |
 
-The remaining wall and ramp mass is mostly C: those frames are still routed to the airborne
-branch.
+"After" is the 30 Hz pool with E, F, D, A, C and the solver right-vector fix applied.
 
 Context: Rocket League replays store physics, not inputs. Of the eight actions the game
 takes, replays provide only throttle, steer, handbrake, jump and boost. Pitch, yaw and roll
@@ -94,9 +93,16 @@ This corrupted `car_rot` for every consumer, including `ReplayStateSetter`, whic
 angles to `rsim.Angle(...).as_rot_mat()` to spawn training episodes.
 
 **Fix (done):** read pitch, yaw and roll off the quaternion's rotation matrix: `pitch =
-asin(fwd_z)`, `yaw = atan2(fwd_y, fwd_x)`, `roll = atan2(-right_z, up_z)`. Verified: rebuilding
-the basis from the angles matches the quaternion matrix to 3e-5, wall up vectors point away from
-the wall (+1.00 over 804 frames), and the basis matches `rsim.Angle` exactly.
+asin(fwd_z)` with `fwd_z = 2(xz - yw)`, `yaw = atan2(fwd_y, fwd_x)`, `roll = atan2(-m_z, up_z)`
+where `m` is the matrix's second column (RocketSim's row 1). Verified: the basis matches
+`rsim.Angle` exactly, wall up vectors point away from the wall, and on side-wall frames the
+forward vector lines up with velocity (median +1.00, 96% above 0.9).
+
+**Caution, learned the hard way.** The first version of this fix wrote `fwd_z = 2(xz + yw)`, a
+pitch sign error that is invisible on the floor, where pitch is near zero, and passes a wall
+up-vector check. It only shows as cars driving sideways on walls: a 47° median slip angle and
+handbrake labelled on for 70% of wall frames. `test_replay_quaternion_to_euler_roundtrip` now
+checks all three axes against the quaternion matrix for random orientations.
 
 ---
 
@@ -238,15 +244,19 @@ Acceleration along the surface normal from the next frame was tried as an extra 
 not help, because jump impulses near the floor overlap with grounded frames. With no scikit-learn
 installed, the classifier route (option 2) was not tried.
 
-On the 30 Hz replay pool the airborne share falls from 58.0% under `z < 25` to 41.2%.
+On the 30 Hz replay pool the airborne share falls from 57.9% under `z < 25` to 39.1%.
 
-Imputed pitch on the 30 Hz pool, E, F, D and A applied, before and after C:
+Imputed pitch on the 30 Hz pool, all other fixes applied, before and after C:
 
 | car state | `z < 25`: mean abs pitch, exactly +1.0 | surface model: mean abs pitch, exactly +1.0 |
 |---|---|---|
 | floor | 0.004, 0.0% | 0.000, 0.0% |
-| z 25 to 200 | 0.258, 5.0% | 0.171, 1.4% |
-| wall | 0.200, 4.1% | 0.152, 2.0% |
+| z 25 to 200 | 0.198, 4.3% | 0.105, 0.8% |
+| wall | 0.168, 3.5% | 0.120, 1.6% |
+
+Routing wall frames into the ground branch did not destabilise steer (B): on grounded-to-grounded
+transitions steer mean abs is 0.483 on walls against 0.421 on the floor, saturated 25.5% against
+19.7%, and handbrake is labelled on for 11.2% of wall frames against 7.9% on the floor.
 
 Options considered, in the original order of preference:
 1. Model the actual collision geometry including the floor/wall fillets and the 45° corner
@@ -262,13 +272,15 @@ Options considered, in the original order of preference:
 
 All listed defects are fixed. Follow-ups worth considering:
 
-- **Handbrake labels on walls (introduced by routing walls to the ground branch).** On
-  grounded-to-grounded transitions the powerslide rule (`|vel · right| > 400` or fast yaw)
-  labels handbrake on for 70.4% of wall frames, against 8.3% on the floor and 28.4% at 25 to
-  200 uu. Steer on walls is fine (mean abs 0.268, 13.8% saturated, against 0.424 and 19.7% on the
-  floor). Gravity drags a wall-driving car sideways, so lateral speed alone is not evidence of a
-  powerslide there. Needs RocketSim ground truth with recorded handbrake inputs before choosing a
-  replacement rule. Fix before the next clone.
+- **Handbrake labels carry little signal anywhere.** Scored against 327,666 grounded RocketSim
+  transitions with recorded handbrake inputs (random driver, 28% on walls), the current rule
+  (`|vel · right| > 400` or fast yaw) catches 26% of held handbrake on the floor while firing on
+  15% of released frames, 55% balanced accuracy (walls: 54%). The best simple replacement found,
+  lateral speed above about 70 uu/s combined with lateral speed not collapsing, reached only 67 to
+  68% balanced on held-out episodes. Handbrake is weakly observable from state at replay rates;
+  consider down-weighting that action dimension in the cloning loss rather than trusting labels.
+  (An apparent 70% handbrake rate on walls turned out to be the pitch sign error described in F,
+  not a wall effect.)
 
 - Ceiling contact (64.7%) and surface-skimming false positives in the contact model.
 - Consume the recorded `car_ang_vel` directly once its scale is pinned down.

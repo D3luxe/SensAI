@@ -23,7 +23,7 @@ def _quat_to_euler(x: float, y: float, z: float, w: float) -> Tuple[float, float
     rsim.Angle convention. Read off the rotation matrix's forward, right and up columns so that
     rsim.Angle(pitch, yaw, roll).as_rot_mat() reproduces the replay orientation exactly.
     """
-    fwd_z = 2.0 * (x * z + y * w)
+    fwd_z = 2.0 * (x * z - y * w)
     pitch = math.asin(max(-1.0, min(1.0, fwd_z)))
     yaw = math.atan2(2.0 * (x * y + z * w), 1.0 - 2.0 * (y * y + z * z))
     right_z = 2.0 * (y * z + x * w)
