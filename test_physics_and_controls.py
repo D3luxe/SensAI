@@ -1170,6 +1170,48 @@ class TestPhysicsAndControls(unittest.TestCase):
         # additive streams that used to sit alongside it in this class are gone, so the
         # net the fixture sees is the penalty against the distance delta alone.
 
+    def test_inverse_dynamics_side_dodge_direction(self):
+        """
+        Guarantees the inverse dynamics solver labels a RocketSim side dodge on the correct side.
+        Right = fwd x up (project convention); a car facing +Y dodging right is pushed toward +X
+        and must be labelled yaw = roll = +1.0, and the mirrored dodge yaw = roll = -1.0.
+        """
+        from utils.inverse_dynamics import InverseDynamicsSolver
+
+        def euler(car):
+            # rot_mat rows: forward, RocketSim row 1 (Left), up
+            f, l, u = car.rot_mat[0], car.rot_mat[1], car.rot_mat[2]
+            return np.array([math.asin(max(-1.0, min(1.0, float(f[2])))), math.atan2(f[1], f[0]), math.atan2(-l[2], u[2])])
+
+        dt = 8.0 / 120.0
+        for yaw_in, expected_side_sign in ((+1.0, +1.0), (-1.0, -1.0)):
+            arena = RocketSimArena(num_players=2, game_mode="1v1")
+            arena.reset(random_kickoff=False)
+            cs = arena._rsim_cars[0].get_state()
+            cs.pos = rsim.Vec(0, -3000, 17)
+            cs.vel = rsim.Vec(0, 1000, 0)
+            cs.rot_mat = rsim.Angle(yaw=np.pi / 2, pitch=0.0, roll=0.0).as_rot_mat()
+            arena._rsim_cars[0].set_state(cs)
+
+            # Jump, then dodge sideways with yaw held
+            arena.step([np.array([1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0]), np.zeros(8)], dt=dt)
+            c = arena.cars[0]
+            p0, v0, r0, b0 = c.pos.copy(), c.vel.copy(), euler(c), float(c.boost)
+            arena.step([np.array([1.0, 0.0, 0.0, yaw_in, 0.0, 1.0, 0.0, 0.0]), np.zeros(8)], dt=dt)
+            c = arena.cars[0]
+            self.assertTrue(arena._rsim_cars[0].get_state().has_flipped, "Scripted side dodge must trigger a flip in RocketSim!")
+            self.assertEqual(float(np.sign(c.vel[0] - v0[0])), expected_side_sign,
+                             "RocketSim yaw dodge toward the car's right must push a +Y-facing car toward +X")
+
+            act = InverseDynamicsSolver.solve_car_action(
+                p0, v0, r0, np.zeros(3, dtype=np.float32), b0, False,
+                c.pos.copy(), c.vel.copy(), euler(c), np.zeros(3, dtype=np.float32), float(c.boost), False,
+                dt=dt
+            )
+            self.assertEqual(act[5], 1.0, "Side dodge must be labelled as a jump/dodge")
+            self.assertEqual(act[3], expected_side_sign, f"Side dodge with yaw={yaw_in:+.0f} mislabelled yaw={act[3]:+.2f}")
+            self.assertEqual(act[4], expected_side_sign, f"Side dodge with yaw={yaw_in:+.0f} mislabelled roll={act[4]:+.2f}")
+
     def test_halfflip_inverse_dynamics_and_rewards(self):
         """
         Guarantees that:

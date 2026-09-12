@@ -96,8 +96,13 @@ class InverseDynamicsSolver:
         cr, sr = math.cos(rot_t[2]), math.sin(rot_t[2])
 
         fwd = np.array([cp * cy, cp * sy, sp], dtype=np.float32)
-        right = np.array([-sy * cr + cy * sp * sr, cy * cr + sy * sp * sr, -cp * sr], dtype=np.float32)
         up = np.array([-cy * sp * cr - sy * sr, -sy * sp * cr + cy * sr, cp * cr], dtype=np.float32)
+        # Project convention (abc58c5): Right = fwd x up. RocketSim's rot_mat row 1 is Left.
+        right = np.array([
+            fwd[1] * up[2] - fwd[2] * up[1],
+            fwd[2] * up[0] - fwd[0] * up[2],
+            fwd[0] * up[1] - fwd[1] * up[0]
+        ], dtype=np.float32)
 
         # 2. Linear Accelerations
         measured_accel = (vel_next - vel_t) / dt
