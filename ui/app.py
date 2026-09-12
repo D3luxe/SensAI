@@ -3110,8 +3110,10 @@ def create_ui():
             mgr.update_live_config(payload)
             try:
                 base_cfg = load_yaml_config("config/default_config.yaml")
-                base_cfg["rewards"] = rewards
-                base_cfg["scenarios"] = scenarios
+                # Merge, never replace: this dict is built from the sliders on this page, so
+                # assigning it would delete every reward weight that has no slider.
+                base_cfg.setdefault("rewards", {}).update(rewards)
+                base_cfg.setdefault("scenarios", {}).update(scenarios)
                 if "hyperparameters" not in base_cfg:
                     base_cfg["hyperparameters"] = {}
                 base_cfg["hyperparameters"]["bc_regularization_weight"] = float(bc_w)

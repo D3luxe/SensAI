@@ -221,7 +221,18 @@ class TrainingProcessManager:
             except Exception:
                 live = {}
 
-        live.update(updates)
+        # Merge one level deep for dict-valued keys. A shallow update replaces the whole
+        # "rewards" block with whatever the caller built, and callers build it from a fixed
+        # list of UI sliders -- so any weight without a slider was silently deleted. That
+        # dropped jump_cost_weight and spin_cost_weight from live training three times,
+        # reverting tuning to class defaults with nothing logged.
+        for key, value in updates.items():
+            if isinstance(value, dict) and isinstance(live.get(key), dict):
+                merged = dict(live[key])
+                merged.update(value)
+                live[key] = merged
+            else:
+                live[key] = value
         live["updated_at"] = time.time()
 
         os.makedirs(os.path.dirname(self.live_config_file), exist_ok=True)

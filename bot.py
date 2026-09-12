@@ -11,6 +11,7 @@ than assumed, so a future change of rate degrades accuracy instead of silently h
 from __future__ import annotations
 import os
 import io
+import json
 import time
 import math
 from typing import Optional, Sequence
@@ -143,6 +144,22 @@ class PredictionIndexer:
         return int(round((self.count - 1) * self.dt * PREDICTION_TICK_RATE))
 
 
+
+
+def _air_state_name(state) -> str:
+    """Human-readable AirState, for the flip diagnostics.
+
+    A dodge needs the car to have FINISHED its jump. A press that arrives while the state is
+    still Jumping is a continuation of the held jump, not a new one, and the game drops it.
+    The press log could not show that because it printed height and stance but never the
+    state machine, so five ignored presses and five real dodges looked identical.
+    """
+    for name in ("OnGround", "Jumping", "DoubleJumping", "Dodging", "InAir"):
+        if state == getattr(AirState, name, object()):
+            return name
+    return "state=%s" % (state,)
+
+
 def log_debug(msg: str):
     try:
         bot_dir = os.path.dirname(os.path.abspath(__file__))
@@ -263,6 +280,53 @@ class SenseiRLBot(Bot):
         # RocketSim: neither is ever non-zero while on_ground).
         self._air_timers: dict[int, float] = {}
         self._flip_timers: dict[int, float] = {}
+        # Was the car on the ground when the current policy step began? See the dodge gate in
+        # the substep sequencer: a dodge fired inside the liftoff step reads its direction from
+        # an action chosen while grounded, where those channels are masked to zero.
+        #
+        # Defaults False because before the first step there is no step to guard. The boundary
+        # below latches the real value on the very first tick (prev_action is None forces it),
+        # so this value is unreachable in normal operation; it only shows up in harnesses that
+        # set prev_action directly, and there the conservative choice would wrongly veto a
+        # legitimate airborne dodge.
+        self._step_began_grounded = False
+
+        # Flip-press outcome tracking. The press log records an intent, not a result: the game
+        # is free to drop a jump press, and when it does the line looks exactly like a press
+        # that worked. These carry the press forward so the NEXT few ticks can say which it was.
+        self._flip_press_tick = 0          # tick of the press awaiting a verdict, 0 = none
+        self._flip_press_state = ""        # air state at the moment of that press
+        self._flip_press_z = 0.0
+        self._flips_pressed = 0
+        self._flips_ignored = 0            # pressed while flip available, flip still available
+        self._flips_consumed = 0
+        self._diag_air_state = "OnGround"
+
+        # Training-time observation envelope, for the on-screen out-of-distribution check.
+        # Two mismatches between training and the live game have already cost real training
+        # time here (the appended observation fields defaulting to zero, and the dodge firing
+        # inside the liftoff step). This makes a third visible the moment it appears rather
+        # than after a week of wondering why the bot plays worse in-game than in the sim.
+        self._obs_stats = None
+        self._obs_limit = None
+        try:
+            _stats_path = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                       "data", "obs_stats_train.json")
+            with open(_stats_path, encoding="utf-8") as _fh:
+                _st = json.load(_fh)
+            _mn = np.asarray(_st["min"], dtype=np.float32)
+            _mx = np.asarray(_st["max"], dtype=np.float32)
+            self._obs_stats = True
+            # Generous: twice the largest magnitude training ever produced, plus a constant.
+            # Saturation can never reach it; a units error or a shifted feature order will.
+            self._obs_limit = np.maximum(np.abs(_mn), np.abs(_mx)) * 2.0 + 0.5
+        except Exception:
+            self._obs_stats = None
+            self._obs_limit = None
+        self._diag_value = 0.0
+        self._diag_ood = ""
+        self._diag_resolution_set = False
+        self._diag_render_failed = False
         self.boost_pad_mapping: list[int] | None = None
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self.obs_builder = DefaultObservationBuilder(symmetric=True)
@@ -430,6 +494,120 @@ class SenseiRLBot(Bot):
             return True, timeout
         return bool(getattr(player, "is_demolished", False)), 0.0
 
+    def _diagnose_obs(self, obs) -> str:
+        """Flag an observation the policy could not have been trained on.
+
+        Deliberately narrow. The first version compared each feature against the 0.1/99.9
+        training percentiles, which sounds reasonable and is not: scored against its own
+        training data that rule fires on 19.7% of steps, because bounded quantities sit at
+        their limits constantly. Angular velocity pinned at Rocket League's 5.5 rad/s cap and
+        a unit-vector component at 1.0 are saturation, not anomalies, and it flashed red at
+        both. A monitor that cries wolf one step in five is worse than none.
+
+        Two replacements were measured and rejected:
+          - rolling-mean drift against the training mean. A 20-second window is one continuous
+            trajectory dominated by game phase, so its mean legitimately sits up to 6 sigma
+            from the global mean. Unusable.
+          - frozen-feature detection. Fires on 100% of steps, because features 80 and 81 (the
+            nearest-pad cooldown timers) are dead in training too, and binary flags such as
+            is_supersonic can legitimately hold one value for minutes.
+
+        What survives are invariants that cannot false-positive: a non-finite value is always
+        a bug, and a magnitude far beyond anything training produced means the units or the
+        feature order are wrong. Neither of the two real train/deploy mismatches found in this
+        project would have been caught here -- both were found by reading the code and running
+        offline probes -- so treat a clean line as "nothing is corrupt", not "nothing is wrong".
+        """
+        if obs is None:
+            return ""
+        o = np.asarray(obs, dtype=np.float32)
+        bad = ~np.isfinite(o)
+        if bad.any():
+            idx = np.nonzero(bad)[0][:3]
+            return "NaN/Inf at " + " ".join(str(int(i)) for i in idx)
+        if self._obs_limit is None:
+            return ""
+        n = min(len(o), len(self._obs_limit))
+        over = np.abs(o[:n]) > self._obs_limit[:n]
+        if not over.any():
+            return ""
+        idx = np.nonzero(over)[0]
+        worst = idx[np.argsort(-np.abs(o[idx]))][:3]
+        return "SCALE %d: " % len(idx) + " ".join(
+            "%d=%.1f(max%.1f)" % (i, float(o[i]), float(self._obs_limit[i])) for i in worst)
+
+    def _render_diagnostics(self, car_state, ball_state, act) -> None:
+        """Draw a compact policy readout in-game.
+
+        Two details of the RLBot v5 renderer matter and the first cost a whole test session:
+
+        1. draw_string_2d takes SCREEN FRACTIONS, not pixels -- 0.1 means a tenth of the
+           screen. The first version passed x=12, y=30, which is 1200% across and 3000% down,
+           so every line was drawn far off-screen and nothing appeared. set_resolution below
+           rescales the axes so the pixel coordinates used here mean what they look like.
+        2. The colour argument is a flat.Color, exposed as class attributes on the renderer.
+           Passing anything else raises inside the draw call.
+
+        Failures are logged rather than swallowed. The previous version caught everything
+        silently, which is why a mistake this basic survived a live test: the overlay simply
+        did not appear and left nothing behind to explain why.
+        """
+        r = getattr(self, "renderer", None)
+        if r is None:
+            return
+        try:
+            if not self._diag_resolution_set:
+                self._diag_resolution_set = True
+                try:
+                    r.set_resolution(1920, 1080)
+                except Exception as e:
+                    log_debug(f"[DIAG] set_resolution failed: {e!r}")
+                try:
+                    if not r.can_render():
+                        log_debug("[DIAG] renderer reports can_render() False -- enable "
+                                  "rendering in the match settings or nothing will draw.")
+                except Exception:
+                    pass
+
+            obs = self.latest_obs
+            dist = float(np.linalg.norm(ball_state.pos - car_state.pos))
+            local_fwd = float(obs[37]) if obs is not None and len(obs) > 38 else 0.0
+            local_right = float(obs[38]) if obs is not None and len(obs) > 38 else 0.0
+            lines = [
+                "SensAI   V=%+.2f   ball %.0fuu" % (self._diag_value, dist),
+                "ball local  fwd %+.2f  right %+.2f" % (local_fwd, local_right),
+                "thr %+.2f str %+.2f pit %+.2f yaw %+.2f rol %+.2f"
+                % (act[0], act[1], act[2], act[3], act[4]),
+                "jmp %d bst %d hnd %d | gnd %d flip %d dodge %d"
+                % (act[5] > 0, act[6] > 0, act[7] > 0,
+                   bool(car_state.on_ground), bool(car_state.has_flip),
+                   bool(getattr(car_state, "is_dodging", False))),
+                "boost %3.0f  air %.2fs  flip %.2fs"
+                % (car_state.boost, getattr(car_state, "air_timer", 0.0),
+                   getattr(car_state, "flip_timer", 0.0)),
+                "air state %-13s  flips %d ok / %d ignored / %d pressed"
+                % (self._diag_air_state, self._flips_consumed,
+                   self._flips_ignored, self._flips_pressed),
+            ]
+            white = getattr(r, "white", None)
+            red = getattr(r, "red", None)
+
+            r.begin_rendering("sensai_diag")
+            try:
+                y = 40
+                for text in lines:
+                    r.draw_string_2d(text, 30, y, 1.0, white)
+                    y += 24
+                if self._diag_ood:
+                    r.draw_string_2d(self._diag_ood, 30, y, 1.0, red)
+            finally:
+                r.end_rendering()
+        except Exception as e:
+            # Never take the match down, but never hide the reason either.
+            if not self._diag_render_failed:
+                self._diag_render_failed = True
+                log_debug(f"[DIAG] overlay disabled after error: {e!r}")
+
     def get_output(self, packet: GamePacket) -> ControllerState:
         controller = ControllerState()
 
@@ -491,6 +669,7 @@ class SenseiRLBot(Bot):
             has_jump = is_on_ground or (not my_car.has_jumped)
             # Align with RocketSim training: has_flip is only True when airborne and flip is available
             has_flip = bool((not is_on_ground) and (not my_car.has_double_jumped) and (not my_car.has_dodged))
+            air_state_name = _air_state_name(my_car.air_state)
 
             car_rot_mat = rotation_to_rot_mat(
                 my_car.physics.rotation.pitch,
@@ -569,6 +748,10 @@ class SenseiRLBot(Bot):
             self.ticks_since_last_action += 1
             if self.ticks_since_last_action >= self.tick_skip or self.prev_action is None:
                 self.ticks_since_last_action = 0
+                # Latch the stance the step starts from. The action about to be chosen has its
+                # pitch/yaw/roll masked to exactly zero if the car is grounded, so that action
+                # carries no dodge direction and must never be allowed to fire one.
+                self._step_began_grounded = bool(is_on_ground)
 
                 # Normally built in initialize(); retried here in case field info arrived late.
                 if self.boost_pad_mapping is None:
@@ -589,13 +772,15 @@ class SenseiRLBot(Bot):
                 # Model Inference at 15Hz (ActorCritic evaluates native equivariant bilateral policy)
                 with torch.no_grad():
                     obs_tensor = torch.tensor(obs, dtype=torch.float32, device=self.device).unsqueeze(0)
-                    action, _, _, _ = self.model.get_action_and_value(obs_tensor, deterministic=True)
+                    action, _, _, value = self.model.get_action_and_value(obs_tensor, deterministic=True)
+                    self._diag_value = float(value.reshape(-1)[0])
                     if self.continuous_actions:
                         act = action.squeeze(0).cpu().numpy()
                     else:
                         act_idx = int(action.squeeze().cpu().item())
                         act = self.discrete_parser.parse_actions(act_idx)
                 self.prev_action = act
+                self._diag_ood = self._diagnose_obs(obs)
             else:
                 # Hold previous action across the 8 physics substeps
                 act = self.prev_action
@@ -651,10 +836,28 @@ class SenseiRLBot(Bot):
                 controller.jump = bool(want_jump and substep_tick <= 3)
             else:
                 # Airborne Dodge / Second Jump:
-                # RocketSim and Rocket League physics require jump release while airborne before second jump.
-                # When jumping off the ground, wheels leave turf on ticks 1-2.
-                # Pressing jump on ticks 2..5 guarantees the wheel-lift check passes and executes the dodge.
-                controller.jump = bool(want_jump and has_flip and 2 <= substep_tick <= 5)
+                # RocketSim and Rocket League physics require jump release while airborne before
+                # a second jump. Press jump on ticks 2..5 so the wheel-lift check passes.
+                #
+                # But NEVER inside the step that left the ground. Real Rocket League lifts the
+                # wheels about two ticks after the press, so by substep 2 the car is already
+                # airborne and this branch would fire -- using the action chosen at substep 0,
+                # while the car was still grounded. The policy's pitch/yaw/roll are masked to
+                # exactly zero in that state, so the dodge came out with no direction at all:
+                # an empty stall that burned the flip. The log signature was a liftoff and a
+                # flip two ticks apart, both reading pit=-0.00 yaw=-0.00 rol=-0.00, followed by
+                # a genuine directional press on the next step that had no flip left to spend.
+                #
+                # Training never hit this. RocketSim holds is_on_ground true for six ticks after
+                # the press (measured), so its window 2..5 closes before the car is airborne and
+                # the flip survives to the next step, where the rotational channels are unmasked.
+                # That is why 98.9% of dodges in training are directional (median stick 0.78)
+                # while the deployed bot was stalling nearly every ground jump. Deferring the
+                # dodge by one policy step reproduces the training behaviour exactly.
+                controller.jump = bool(
+                    want_jump and has_flip and 2 <= substep_tick <= 5
+                    and not self._step_began_grounded
+                )
 
                 if controller.jump:
                     self.dodge_cooldown = 20  # ~1.3 second recovery after dodge
@@ -690,14 +893,75 @@ class SenseiRLBot(Bot):
             controller.boost = bool(act[6] > 0.0 and act[0] > -0.05 and fwd_speed > -150.0 and not (is_supersonic and is_on_ground))
             controller.handbrake = bool(act[7] > 0.0 and is_on_ground)
 
+            # Draw the readout once per policy step (15 Hz), not once per physics tick.
+            if substep_tick == 0:
+                self._diag_air_state = air_state_name
+                self._render_diagnostics(car_state, ball_state, act)
+
             self.tick_count += 1
+
+            # Did the last airborne press actually spend the flip? has_flip going False while a
+            # press is pending is the only positive evidence that the game accepted it.
+            if self._flip_press_tick:
+                age = self.tick_count - self._flip_press_tick
+                if not has_flip:
+                    self._flips_consumed += 1
+                    log_debug(
+                        f"[TICK {self.tick_count}] +++ FLIP CONSUMED +++ press at tick "
+                        f"{self._flip_press_tick} (air={self._flip_press_state}) took effect "
+                        f"after {age} ticks. now air={air_state_name}. "
+                        f"consumed={self._flips_consumed}/{self._flips_pressed}"
+                    )
+                    self._flip_press_tick = 0
+                elif age > 24 or is_on_ground:
+                    self._flips_ignored += 1
+                    log_debug(
+                        f"[TICK {self.tick_count}] --- FLIP IGNORED --- press at tick "
+                        f"{self._flip_press_tick} (air={self._flip_press_state}, "
+                        f"z={self._flip_press_z:.0f}) expired after {age} ticks with the flip "
+                        f"still available (now air={air_state_name}, gnd={is_on_ground}). "
+                        f"ignored={self._flips_ignored}/{self._flips_pressed}"
+                    )
+                    self._flip_press_tick = 0
             ball_pos = ball_state.pos
             is_kickoff = bool(abs(ball_pos[0]) < 50.0 and abs(ball_pos[1]) < 50.0 and float(np.linalg.norm(ball_state.vel)) < 100.0)
             
-            # Event logging on jump/dodge trigger
+            # Event logging on jump/dodge trigger.
+            #
+            # This logs the PRESS, not the outcome. The game can ignore a press -- most often
+            # because the flip is already spent and has_dodged has not yet come back through the
+            # packet -- so a repeated line is not proof of a repeated flip. It also could not
+            # distinguish a wavedash (dodge into the ground, land on wheels, flip refreshes)
+            # from genuine spam, because it printed neither height nor stance. Both are now
+            # included: a wavedash shows z near the floor with the flip refreshing after a
+            # landing, while spam shows presses with has_flip already False.
             if controller.jump and (substep_tick == 0 or (not is_on_ground and substep_tick == 2)):
                 action_type = "LIFTOFF JUMP" if is_on_ground else "AIRBORNE FLIP"
-                log_debug(f"[TICK {self.tick_count}] *** {action_type} EXECUTED *** pit={controller.pitch:+.2f} yaw={controller.yaw:+.2f} rol={controller.roll:+.2f}")
+                consumed = bool(getattr(my_car, "has_dodged", False) or
+                                getattr(my_car, "has_double_jumped", False))
+                log_debug(
+                    f"[TICK {self.tick_count}] *** {action_type} PRESSED *** "
+                    f"pit={controller.pitch:+.2f} yaw={controller.yaw:+.2f} rol={controller.roll:+.2f} "
+                    f"z={float(car_state.pos[2]):.0f} gnd={is_on_ground} flip_avail={has_flip} "
+                    f"already_dodged={consumed} spd={car_speed_total:.0f} "
+                    f"air={air_state_name} sub={substep_tick} jumped={bool(getattr(my_car, 'has_jumped', False))}"
+                )
+                if action_type == "AIRBORNE FLIP":
+                    # A press still pending a verdict when the next one arrives was ignored:
+                    # the flip was available before and is available again, so nothing spent it.
+                    if self._flip_press_tick and has_flip:
+                        self._flips_ignored += 1
+                        log_debug(
+                            f"[TICK {self.tick_count}] --- FLIP IGNORED --- press at tick "
+                            f"{self._flip_press_tick} (air={self._flip_press_state}, "
+                            f"z={self._flip_press_z:.0f}) never consumed the flip after "
+                            f"{self.tick_count - self._flip_press_tick} ticks. "
+                            f"ignored={self._flips_ignored}/{self._flips_pressed}"
+                        )
+                    self._flips_pressed += 1
+                    self._flip_press_tick = self.tick_count
+                    self._flip_press_state = air_state_name
+                    self._flip_press_z = float(car_state.pos[2])
 
             if self.tick_count <= 10 or self.tick_count % 120 == 0 or is_kickoff:
                 log_debug(

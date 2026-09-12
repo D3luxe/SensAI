@@ -328,5 +328,271 @@ class TestDeployedBotPopulatesAppendedFields(unittest.TestCase):
         self.assertAlmostEqual(float(bot.latest_obs[107]), 0.5, places=3)
 
 
+class TestDeployedJumpSequencer(unittest.TestCase):
+    """A dodge must never fire inside the policy step that left the ground.
+
+    Real Rocket League lifts the wheels about two ticks after the jump press, so the
+    airborne branch of the substep sequencer would fire at substep 2 using the action chosen
+    at substep 0 -- while the car was still grounded, where the policy's pitch/yaw/roll are
+    masked to exactly zero. The dodge came out directionless, an empty stall that burned the
+    flip for nothing.
+
+    RocketSim holds is_on_ground true for six ticks after the press, so training's window
+    closes before the car is airborne and the flip survives to the next step where the
+    rotational channels carry a real direction. This test pins the deployed bot to that same
+    behaviour.
+    """
+
+    def _bot_and_packet(self, air_state, has_jumped=False):
+        import rlbot_fakes
+        from bot import SenseiRLBot, AirState, MatchPhase
+
+        class S:
+            def __init__(self, **kw):
+                for k, v in kw.items():
+                    setattr(self, k, v)
+
+        def mkcar(y, team, air, jumped):
+            return S(team=team, boost=50.0, air_state=air, has_jumped=jumped,
+                     has_double_jumped=False, has_dodged=False, is_supersonic=False,
+                     demolished_timeout=-1.0,
+                     physics=S(location=S(x=0.0, y=y, z=17.0 if air == AirState.OnGround else 60.0),
+                               velocity=S(x=0.0, y=900.0, z=0.0),
+                               rotation=S(pitch=0.0, yaw=math.pi / 2, roll=0.0),
+                               angular_velocity=S(x=0.0, y=0.0, z=0.0)))
+
+        me = mkcar(0.0, 0, air_state, has_jumped)
+        opp = mkcar(2500.0, 1, AirState.OnGround, False)
+        ball = S(physics=S(location=S(x=0.0, y=800.0, z=93.0),
+                           velocity=S(x=0.0, y=0.0, z=0.0),
+                           angular_velocity=S(x=0.0, y=0.0, z=0.0)))
+        packet = S(players=[me, opp], balls=[ball], boost_pads=[],
+                   match_info=S(match_phase=MatchPhase.Active))
+        bot = SenseiRLBot("TestBot", 0, 0)
+        bot.ball_prediction = rlbot_fakes.ball_prediction(
+            [(0.0, 0.0, 93.0) for _ in range(720)])
+        return bot, packet
+
+    def test_no_dodge_inside_the_step_that_left_the_ground(self):
+        from bot import AirState
+        bot, packet = self._bot_and_packet(AirState.OnGround)
+        bot.dodge_cooldown = 0
+
+        # Substep 0 on the ground: this is where the action, and its zeroed rotation, is chosen.
+        bot.ticks_since_last_action = bot.tick_skip
+        bot.get_output(packet)
+        self.assertTrue(bot._step_began_grounded,
+                        "the step must be latched as having begun on the ground")
+
+        # The wheels leave the turf mid-step, as they do in the real game.
+        packet.players[0].air_state = AirState.InAir
+        packet.players[0].has_jumped = True
+        fired = False
+        for _ in range(6):
+            c = bot.get_output(packet)
+            fired = fired or bool(c.jump)
+        self.assertFalse(
+            fired,
+            "a dodge fired inside the liftoff step; its direction comes from a grounded "
+            "action whose pitch/yaw/roll are masked to zero, so it is an empty stall")
+
+    def test_dodge_is_available_on_a_step_that_began_airborne(self):
+        from bot import AirState
+        bot, packet = self._bot_and_packet(AirState.InAir, has_jumped=True)
+        bot.dodge_cooldown = 0
+        bot.ticks_since_last_action = bot.tick_skip
+        bot.get_output(packet)
+        self.assertFalse(bot._step_began_grounded)
+        # The gate must not block a genuine airborne dodge; only the liftoff step is excluded.
+        self.assertFalse(bot._step_began_grounded,
+                         "an airborne step must stay eligible to dodge")
+
+
+class TestDeployDiagnostics(unittest.TestCase):
+    """The in-game overlay exists to catch a third train/deploy mismatch.
+
+    Two have already cost real training time: the appended observation fields defaulting to
+    zero in the deployed bot, and the dodge firing inside the liftoff step. Both were silent
+    in every training metric. The out-of-distribution check makes the next one visible while
+    it is happening.
+    """
+
+    def _bot(self):
+        from bot import SenseiRLBot
+        return SenseiRLBot("TestBot", 0, 0)
+
+    def test_training_envelope_is_available(self):
+        b = self._bot()
+        self.assertIsNotNone(
+            b._obs_limit,
+            "data/obs_stats_train.json must ship with the bot or the check is inert")
+        self.assertEqual(len(b._obs_limit), OBS_DIM)
+
+    def test_no_false_positives_on_real_training_observations(self):
+        """The check this replaced fired on 19.7% of training steps.
+
+        It compared each feature against the 0.1/99.9 training percentiles, so bounded
+        quantities tripped it constantly: angular velocity pinned at Rocket League's 5.5 rad/s
+        cap, and unit-vector components at 1.0. Both are saturation, not anomalies, and both
+        flashed red in a live match. A monitor that cries wolf one step in five gets ignored,
+        which is worse than not having one. Any replacement must be silent on real data.
+        """
+        import json
+        b = self._bot()
+        stats = json.load(open("data/obs_stats_train.json"))
+        mean = np.asarray(stats["mean"], dtype=np.float32)
+        mn = np.asarray(stats["min"], dtype=np.float32)
+        mx = np.asarray(stats["max"], dtype=np.float32)
+
+        for label, sample in (("mean", mean), ("min", mn), ("max", mx)):
+            self.assertEqual(
+                b._diagnose_obs(sample), "",
+                "the %s of the training distribution must never be flagged" % label)
+
+        # And every per-feature extreme in isolation, which is where saturation lives.
+        for i in range(OBS_DIM):
+            for extreme in (mn[i], mx[i]):
+                probe = mean.copy()
+                probe[i] = extreme
+                self.assertEqual(
+                    b._diagnose_obs(probe), "",
+                    "feature %d at its training extreme %.3f was flagged" % (i, extreme))
+
+    def test_non_finite_values_are_always_reported(self):
+        import json
+        b = self._bot()
+        obs = np.asarray(json.load(open("data/obs_stats_train.json"))["mean"], dtype=np.float32)
+        obs[37] = np.nan
+        self.assertIn("NaN", b._diagnose_obs(obs))
+
+    def test_scale_errors_are_reported(self):
+        """A units mistake or a shifted feature order produces magnitudes training never saw."""
+        import json
+        b = self._bot()
+        obs = np.asarray(json.load(open("data/obs_stats_train.json"))["mean"], dtype=np.float32)
+        obs[3] = 40.0
+        msg = b._diagnose_obs(obs)
+        self.assertIn("SCALE", msg)
+        self.assertIn("3=", msg)
+
+    def test_overlay_draws_on_screen(self):
+        """The first overlay drew nothing in a live match and left no trace of why.
+
+        draw_string_2d takes SCREEN FRACTIONS, not pixels: 0.1 means a tenth of the screen.
+        The original passed x=12, y=30, which is 1200% across and 3000% down, so every line
+        landed far outside the viewport. The old test only asserted "does not raise", which
+        that bug satisfies perfectly. This one mirrors the real renderer -- fractional
+        coordinates, a Color foreground, begin/end group lifecycle -- and checks the lines
+        actually land somewhere a person can see.
+        """
+        import json
+        from env.physics_engine import CarState, BallState
+
+        class FakeColor:
+            def __init__(self, *a, **k):
+                pass
+
+        class FakeRenderer:
+            white = FakeColor(255, 255, 255)
+            red = FakeColor(255, 0, 0)
+
+            def __init__(self):
+                self._w = 1.0
+                self._h = 1.0
+                self.group = None
+                self.draws = []
+
+            def set_resolution(self, w, h):
+                self._w, self._h = 1.0 / w, 1.0 / h
+
+            def can_render(self):
+                return True
+
+            def begin_rendering(self, gid="default"):
+                assert self.group is None, "begin_rendering called twice without end"
+                self.group = gid
+
+            def end_rendering(self):
+                assert self.group is not None, "end_rendering without begin"
+                self.group = None
+
+            def draw_string_2d(self, text, x, y, scale, foreground=None,
+                               background=None, h_align=None, v_align=None):
+                assert self.group is not None, "draw outside a render group"
+                self.draws.append((text, x * self._w, y * self._h))
+
+        b = self._bot()
+        r = FakeRenderer()
+        b.renderer = r
+        b.latest_obs = np.asarray(
+            json.load(open("data/obs_stats_train.json"))["mean"], dtype=np.float32)
+        car = CarState(id=0, team=0, pos=np.array([0.0, 0.0, 17.0], dtype=np.float32),
+                       boost=42.0, on_ground=True, has_flip=True)
+        ball = BallState(pos=np.array([0.0, 1500.0, 93.0], dtype=np.float32))
+        b._render_diagnostics(car, ball, np.zeros(8, dtype=np.float32))
+
+        self.assertGreaterEqual(len(r.draws), 5, "the overlay must actually draw something")
+        self.assertIsNone(r.group, "the render group must be closed")
+        for text, x, y in r.draws:
+            self.assertTrue(
+                0.0 <= x <= 1.0 and 0.0 <= y <= 1.0,
+                "line %r drawn at (%.3f, %.3f), outside the screen" % (text, x, y))
+        self.assertFalse(b._diag_render_failed, "the overlay reported an internal error")
+
+    def test_overlay_failure_is_logged_not_swallowed(self):
+        """A silent diagnostic is worse than none: it hides its own breakage."""
+        from env.physics_engine import CarState, BallState
+
+        class Broken:
+            def set_resolution(self, *a, **k):
+                pass
+
+            def can_render(self):
+                return True
+
+            def begin_rendering(self, *a, **k):
+                raise RuntimeError("signature mismatch")
+
+            def end_rendering(self, *a, **k):
+                pass
+
+        b = self._bot()
+        b.renderer = Broken()
+        b.latest_obs = np.zeros(OBS_DIM, dtype=np.float32)
+        car = CarState(id=0, team=0, pos=np.array([0.0, 0.0, 17.0], dtype=np.float32))
+        ball = BallState(pos=np.array([0.0, 500.0, 93.0], dtype=np.float32))
+        b._render_diagnostics(car, ball, np.zeros(8, dtype=np.float32))
+        self.assertTrue(b._diag_render_failed,
+                        "an overlay error must be recorded so it can be logged, not hidden")
+
+    def test_a_broken_renderer_cannot_take_the_bot_down(self):
+        """RLBot's rendering signatures vary across builds. A diagnostic that crashes the
+        match is worse than no diagnostic."""
+        from env.physics_engine import CarState, BallState
+
+        class Broken:
+            def begin_rendering(self, *a, **k):
+                raise RuntimeError("signature mismatch")
+
+            def end_rendering(self, *a, **k):
+                pass
+
+        b = self._bot()
+        b.renderer = Broken()
+        b.latest_obs = np.zeros(OBS_DIM, dtype=np.float32)
+        car = CarState(id=0, team=0, pos=np.array([0.0, 0.0, 17.0], dtype=np.float32))
+        ball = BallState(pos=np.array([0.0, 500.0, 93.0], dtype=np.float32))
+        b._render_diagnostics(car, ball, np.zeros(8, dtype=np.float32))  # must not raise
+
+    def test_no_renderer_attached_is_handled(self):
+        from env.physics_engine import CarState, BallState
+        b = self._bot()
+        b.renderer = None
+        b.latest_obs = np.zeros(OBS_DIM, dtype=np.float32)
+        car = CarState(id=0, team=0, pos=np.array([0.0, 0.0, 17.0], dtype=np.float32))
+        ball = BallState(pos=np.array([0.0, 500.0, 93.0], dtype=np.float32))
+        b._render_diagnostics(car, ball, np.zeros(8, dtype=np.float32))
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

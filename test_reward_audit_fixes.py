@@ -56,6 +56,9 @@ class TestRewardAuditFixes(unittest.TestCase):
         self.arena.ball.vel = np.array([500.0, 2500.0, 300.0], dtype=np.float32)
         
         action = np.zeros(8, dtype=np.float32)
+        # Authorship gate: BallToGoalVelocityReward only prices ball motion the
+        # acting team caused, so register our touch before reading it.
+        car.ball_touches = 1
         r = rew.get_reward(car, self.arena, action, False, None)
 
         # Ball is progressing forward from defensive half at 2500 uu/s
@@ -245,6 +248,9 @@ class TestRewardAuditFixes(unittest.TestCase):
         self.arena.ball.vel = np.array([0.0, 1400.0, 0.0], dtype=np.float32)  # Heading straight into X=2000 backwall
 
         action = np.zeros(8, dtype=np.float32)
+        # Authorship gate: BallToGoalVelocityReward only prices ball motion the
+        # acting team caused, so register our touch before reading it.
+        car.ball_touches = 1
         r_wide = rew.get_reward(car, self.arena, action, False, None)
 
         self.assertGreater(r_wide, 0.0,
@@ -272,6 +278,9 @@ class TestRewardAuditFixes(unittest.TestCase):
         self.arena.ball.vel = np.array([0.0, 1400.0, 0.0], dtype=np.float32)
 
         action = np.zeros(8, dtype=np.float32)
+        # Authorship gate: BallToGoalVelocityReward only prices ball motion the
+        # acting team caused, so register our touch before reading it.
+        car.ball_touches = 1
         r = rew.get_reward(car, self.arena, action, False, None)
         self.assertGreater(r, 0.5, f"On-target shot should receive strong progression bonus, got {r}")
 
@@ -900,6 +909,9 @@ class TestRewardAuditFixes(unittest.TestCase):
         self.arena.ball.vel = np.array([0.0, 1500.0, 1000.0], dtype=np.float32)
 
         action = np.zeros(8, dtype=np.float32)
+        # Authorship gate: BallToGoalVelocityReward only prices ball motion the
+        # acting team caused, so register our touch before reading it.
+        car.ball_touches = 1
         r_high = rew.get_reward(car, self.arena, action, False, None)
 
         # Low shot straight into net opening (vz = 0, z_impact ~ 100)
@@ -1193,6 +1205,9 @@ class TestRewardAuditFixes(unittest.TestCase):
         # 1. Clean on-target shot (X=700 < EFFECTIVE_GOAL_HALF_WIDTH=801.5, Z=200 < EFFECTIVE_GOAL_HEIGHT=551.5)
         self.arena.ball.pos = np.array([700.0, 3200.0, 200.0], dtype=np.float32)
         self.arena.ball.vel = np.array([0.0, 1400.0, 0.0], dtype=np.float32)
+        # Authorship gate: BallToGoalVelocityReward only prices ball motion the
+        # acting team caused, so register our touch before reading it.
+        car.ball_touches = 1
         r_clean = rew.get_reward(car, self.arena, np.zeros(8, dtype=np.float32), False, None)
 
         # 2. Post-clanging shot (X=850: inside GOAL_HALF_WIDTH=892.755, but outside EFFECTIVE_GOAL_HALF_WIDTH=801.5)

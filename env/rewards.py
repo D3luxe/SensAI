@@ -743,9 +743,54 @@ class BallToGoalVelocityReward(BaseReward):
     """
     def __init__(self, weight: float = 1.5):
         super().__init__(weight)
+        # Team of whoever last touched the ball; None until the first touch of the point.
+        # See _refresh_authorship for why this is gated.
+        self._last_touch_team: Optional[int] = None
+        self._touch_counts: Dict[int, int] = {}
+
+    def reset(self, initial_state: RocketSimArena):
+        self._last_touch_team = None
+        self._touch_counts = {c.id: int(getattr(c, "ball_touches", 0)) for c in initial_state.cars}
+
+    def _refresh_authorship(self, car: CarState, arena: RocketSimArena) -> None:
+        """Track which team last touched the ball.
+
+        ball_touches is cumulative, so only an increase since the previous observation means a
+        new touch. This is called once per car per step; the second call of a step sees no
+        increase and correctly leaves the stored owner alone.
+
+        The acting car is scanned alongside arena.cars rather than assumed to be among them.
+        A car passed in that the arena does not list could otherwise never author a touch, and
+        would be permanently locked out of its own progression reward.
+        """
+        seen = set()
+        for c in list(arena.cars) + [car]:
+            if id(c) in seen:
+                continue
+            seen.add(id(c))
+            n = int(getattr(c, "ball_touches", 0))
+            if n > self._touch_counts.get(c.id, 0):
+                self._last_touch_team = int(c.team)
+            self._touch_counts[c.id] = n
 
     def get_reward(self, car: CarState, arena: RocketSimArena, action: np.ndarray, is_goal: bool, scoring_team: Optional[int]) -> float:
+        self._refresh_authorship(car, arena)
         if is_goal:
+            return 0.0
+
+        # Authorship gate. This term is meant to price what the CAR did to the ball, but the
+        # ball moves for reasons the car had no part in: an opponent's clear, a whiff, a bounce
+        # off our own backboard. Measured at iteration 7600, steps where the opponent was the
+        # last toucher contributed -3.17 per episode and steps before anyone had touched
+        # contributed +1.33, against +1.03 for steps the bot actually owned. Three quarters of
+        # the term's magnitude was being assigned for events outside the policy's control,
+        # which is noise in the advantage estimate and nothing else.
+        #
+        # The gate is symmetric: when the opponent owns the ball, this term pays nothing AND
+        # charges nothing. Suppressing only the positive side would leave a one-way penalty
+        # stream the policy cannot switch off, which is strictly worse than either option.
+        # Conceding is still priced, at full strength, by the terminal concede reward.
+        if self._last_touch_team is None or self._last_touch_team != car.team:
             return 0.0
 
         target_goal_y = ARENA_EXTENT_Y if car.team == 0 else -ARENA_EXTENT_Y
@@ -2845,6 +2890,167 @@ class AirRollRecoveryReward(BaseReward):
         return self.weight * total_reward
 
 
+class JumpCostReward(BaseReward):
+    """
+    A flat fee charged once, on the frame the car leaves the ground under its own jump.
+
+    Why this exists. The three binary action channels are Bernoulli, and an entropy bonus
+    pulls a Bernoulli with no reward gradient toward probability 0.5. Boost and handbrake are
+    both priced -- boost by its usage and waste penalties, handbrake by the economy penalty --
+    and both sit far from 0.5 in the learned policy. Jump was priced only by JumpBridgeReward,
+    and once that weight went to zero nothing charged for pressing it at all. Measured at
+    iteration 5360, raw P(jump) was 0.377 airborne and 0.613 one step after landing, against
+    0.042 for boost. The policy was flipping a coin on every frame a jump was available, and a
+    coin flip at 15 Hz looks exactly like re-jumping the instant the wheels touch down.
+
+    Deliberately unconditional: no distance or ball-height gate. A gate would create a cliff
+    at its own boundary, which is the class of defect that produced most of the trouble in
+    this reward set. A jump that leads to a touch, a clear or a goal absorbs the fee easily;
+    a jump taken because the channel had no opinion does not.
+
+    Charged strictly on the rising edge of takeoff. Not per airborne step, so holding jump for
+    full height costs nothing extra, and not on the dodge, so flips and aerial manoeuvres are
+    not taxed a second time. It can only ever subtract, so unlike the reward it replaces it
+    cannot be farmed.
+    """
+
+    def __init__(self, weight: float = 0.025):
+        super().__init__(weight)
+        self._prev_on_ground: Dict[int, bool] = {}
+
+    def reset(self, initial_state: RocketSimArena):
+        self._prev_on_ground = {car.id: bool(car.on_ground) for car in initial_state.cars}
+
+    def get_reward(self, car: CarState, arena: RocketSimArena, action: np.ndarray, is_goal: bool, scoring_team: Optional[int]) -> float:
+        prev_ground = self._prev_on_ground.get(car.id, bool(car.on_ground))
+        self._prev_on_ground[car.id] = bool(car.on_ground)
+
+        if self.weight <= 1e-9:
+            return 0.0
+
+        # Leaving the ground is not enough on its own: a car can drive off a ramp or the lip
+        # of the wall without spending anything. has_jump is consumed by an actual jump and
+        # stays available otherwise, so it separates a takeoff from a roll-off.
+        took_off = bool(prev_ground and not car.on_ground and not car.has_jump)
+        return -self.weight if took_off else 0.0
+
+
+class TimeCostReward(BaseReward):
+    """
+    A flat cost charged every step, to make time worth something.
+
+    WHY THIS EXISTS, and why it replaces three mechanic-specific terms.
+
+    Every shaping term here is potential-based, which is what stops them being farmed, and it
+    also makes them blind to time. player_to_ball pays (prev_dist - curr_dist) / 2000 per step,
+    so an approach telescopes to (start_dist - end_dist) / 2000 -- a quantity in which elapsed
+    time does not appear at all. Measured directly: the same approach driven at full throttle
+    with boost took 27.9 steps and paid 4.3688, and at half throttle took 48.0 steps and paid
+    4.3912. Arriving 1.3 seconds later paid very slightly MORE.
+
+    Discounting does not cover this. At gamma 0.995 a one-second delay is nominally worth 7.2%,
+    but a potential pays continuously along the path rather than at the end, so a slower car
+    collects the same total only slightly later. The discounted totals across those runs came
+    out 3.56, 3.76 and 3.63, not even ordered by speed.
+
+    So no mechanic whose only benefit is SAVING TIME could ever be worth a point: not the
+    half-flip, not the powerslide turnaround, not preserving speed through a crooked landing
+    (measured at 400 uu/s of speed saved, worth nothing when speed is not priced). The bot was
+    not failing to learn them. It had correctly learned they were worthless, and reversing at
+    600 uu/s collected exactly what a half-flip and a 1400 uu/s drive collected.
+
+    HOW IT WORKS. Every episode in this environment ends in a goal -- measured across 124
+    consecutive episodes, zero reached the 600-step limit -- so episode length is entirely
+    determined by how long someone takes to score. A flat per-step cost therefore prices
+    exactly that: dawdling costs, decisiveness pays, and every mechanic that shortens the path
+    to a goal inherits value from it without needing a term of its own.
+
+    ON ENDING THE EPISODE THE WRONG WAY. A living cost does give the policy a reason to end
+    the episode, and conceding ends it too. The arithmetic is what makes that safe rather than
+    the intent: at 0.01 per step, throwing a goal to end a 180-step episode 100 steps early
+    saves 1.0 and costs 30. Keep this weight small enough that the trade stays that lopsided.
+    A full 600-step episode costs 6.0 against a 30.0 concede.
+
+    Deliberately unconditional, including on the terminal step. A gate would create a region
+    where stalling is free, which is the whole behaviour this is meant to price.
+    """
+
+    def __init__(self, weight: float = 0.01):
+        super().__init__(weight)
+
+    def get_reward(self, car: CarState, arena: RocketSimArena, action: np.ndarray, is_goal: bool, scoring_team: Optional[int]) -> float:
+        if self.weight <= 1e-9:
+            return 0.0
+        return -self.weight
+
+
+class SpinCostReward(BaseReward):
+    """
+    A per-step fee on airborne angular speed above a deadband.
+
+    Why this exists. Pitch, yaw and roll had no price on them at all. Measured across
+    iterations 7780 to 9700, the policy held mean |pitch| of 0.72 with 37% of airborne steps
+    past 0.9, and the car spun at a mean 3.66 rad/s against a 5.5 rad/s physics cap, with 75%
+    of airborne steps above 2 rad/s. A car tumbling at that rate cannot land upright or aim,
+    and more than half of all episodes ended with the bot never touching the ball.
+
+    The counterfactual is what settled it. Replaying the same policy with pitch, yaw and roll
+    forced to zero produced 51% more touches, 154% more ball progression and flipped goals from
+    net negative to net positive. The air control the policy had learned was worse than none.
+
+    AirRollRecoveryReward was paying for the tumble -- about +0.07 per flight for exactly the
+    input mix the policy used -- but zeroing that term for 2000 iterations moved angular
+    velocity only from 3.85 to 3.66. It funded the behaviour without causing it. What remained
+    was that nothing opposed the rotational channels in either direction.
+
+    Three choices worth recording, because each rules out a worse version:
+
+    1. It prices the RESULT, not the input. Charging for stick deflection taxes a precise
+       recovery exactly as hard as a barrel roll, and a car recovering from a real bump must
+       apply large input while spinning fast. Charging for angular speed instead means a
+       recovery pays only while it is still spinning and stops paying the moment it settles.
+
+    2. All three axes together, via the magnitude of the angular velocity vector. Pitch is the
+       saturated channel today, but pricing pitch alone just invites the same tumble to be
+       rebuilt out of yaw and roll.
+
+    3. A deadband, so ordinary air control is free. Only rotation faster than a car needs for
+       deliberate manoeuvring is charged, and the charge grows with the excess.
+
+    Dodges are exempt. A dodge rotates the car hard by design and the driver cannot stop it
+    mid-flip, so charging it would be charging for the dodge itself -- which JumpCostReward
+    already does, once, at takeoff. Taxing it again here would price flips twice.
+    """
+
+    # RocketSim clamps car angular velocity here; the excess is normalised against it so the
+    # per-step charge is at most `weight`.
+    ANG_VEL_CAP = 5.5
+
+    def __init__(self, weight: float = 0.03, deadband: float = 2.0):
+        super().__init__(weight)
+        self.deadband = float(deadband)
+
+    def get_reward(self, car: CarState, arena: RocketSimArena, action: np.ndarray, is_goal: bool, scoring_team: Optional[int]) -> float:
+        if self.weight <= 1e-9 or car.on_ground:
+            return 0.0
+
+        # A dodge is a scripted rotation the car cannot arrest; JumpCostReward already charged
+        # for initiating it.
+        if car.just_dodged or getattr(car, "is_dodging", False):
+            return 0.0
+
+        ang_vel = getattr(car, "ang_vel", None)
+        if ang_vel is None:
+            return 0.0
+        speed = _norm3(ang_vel)
+        excess = speed - self.deadband
+        if excess <= 0.0:
+            return 0.0
+
+        span = max(1e-6, self.ANG_VEL_CAP - self.deadband)
+        return -self.weight * min(1.0, excess / span)
+
+
 # ==============================================================================
 # COMBINED MACRO REWARD ENGINE & MANAGER
 # ==============================================================================
@@ -2864,7 +3070,7 @@ class CombinedReward:
                 weight=weights.get("ball_to_goal_weight", 1.5)
             ),
             "own_goal_threat": OwnGoalThreatReward(
-                weight=weights.get("own_goal_threat_weight", 2.0)
+                weight=weights.get("own_goal_threat_weight", 0.0)
             ),
             "player_to_ball": PlayerToBallVelocityReward(
                 weight=weights.get("player_to_ball_weight", 0.6),
@@ -2885,6 +3091,16 @@ class CombinedReward:
             ),
             "air_roll_recovery": AirRollRecoveryReward(
                 weight=weights.get("air_roll_recovery_weight", 0.10)
+            ),
+            "jump_cost": JumpCostReward(
+                weight=weights.get("jump_cost_weight", 0.025)
+            ),
+            "time_cost": TimeCostReward(
+                weight=weights.get("time_cost_weight", 0.01)
+            ),
+            "spin_cost": SpinCostReward(
+                weight=weights.get("spin_cost_weight", 0.03),
+                deadband=weights.get("spin_cost_deadband", 2.0)
             )
         }
 
@@ -2916,6 +3132,17 @@ class CombinedReward:
 
         if "powerslide_weight" in new_weights and "powerslide" in self.rewards:
             self.rewards["powerslide"].weight = float(new_weights["powerslide_weight"])
+
+        if "jump_cost_weight" in new_weights and "jump_cost" in self.rewards:
+            self.rewards["jump_cost"].weight = float(new_weights["jump_cost_weight"])
+
+        if "time_cost_weight" in new_weights and "time_cost" in self.rewards:
+            self.rewards["time_cost"].weight = float(new_weights["time_cost_weight"])
+
+        if "spin_cost_weight" in new_weights and "spin_cost" in self.rewards:
+            self.rewards["spin_cost"].weight = float(new_weights["spin_cost_weight"])
+        if "spin_cost_deadband" in new_weights and "spin_cost" in self.rewards:
+            self.rewards["spin_cost"].deadband = float(new_weights["spin_cost_deadband"])
 
         if "jump_bridge_weight" in new_weights and "jump_bridge" in self.rewards:
             self.rewards["jump_bridge"].weight = float(new_weights["jump_bridge_weight"])

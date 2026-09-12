@@ -265,6 +265,9 @@ class TestRocketLeagueEnvironment(unittest.TestCase):
         arena.ball.vel = np.array([0.0, -1200.0, 0.0], dtype=np.float32)
 
         # 1. Test BallToGoalVelocityReward (asymmetric penalty)
+        # The term is authorship-gated: it prices what OUR touch did to the ball, so a
+        # car driving the ball at its own net must have touched it to be charged.
+        car0.ball_touches = 1
         b2g = BallToGoalVelocityReward(weight=1.5)
         rew_b2g = b2g.get_reward(car0, arena, np.zeros(8), False, None)
         self.assertLess(rew_b2g, 0.0, "Ball moving towards defending goal must yield negative progression reward")

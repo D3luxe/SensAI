@@ -525,6 +525,8 @@ class TestPhysicsAndControls(unittest.TestCase):
         self.assertGreater(rew_approach, 0.0, "Closing the distance gap to the ball must yield positive PlayerToBall reward!")
 
         # 2. Ball to Goal field progression
+        # Authorship-gated: only the team that last touched the ball is paid for its motion.
+        car.ball_touches = 1
         b2g_fn = BallToGoalVelocityReward(weight=1.5)
         rew_prog = b2g_fn.get_reward(car, MockArena(ball_fwd, [car]), np.zeros(8), False, None)
         self.assertGreater(rew_prog, 0.0, "Ball moving toward opponent net must yield positive BallToGoal reward!")
