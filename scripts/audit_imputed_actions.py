@@ -20,6 +20,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from utils.replay_parser import ReplayParser, is_fresh_car_update, find_car_transition, _car_vec
 from utils.inverse_dynamics import InverseDynamicsSolver
+from utils.surface_contact import is_on_surface
 
 BANDS = [
     ("floor, z < 25", lambda z: z < 25.0),
@@ -34,6 +35,7 @@ def main():
     ap.add_argument("--samples", type=int, default=30000)
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--dt", type=float, default=None, help="override the frame spacing passed to the solver")
+    ap.add_argument("--height-contact", action="store_true", help="use the old z < 25 contact test instead of arena geometry")
     args = ap.parse_args()
 
     parser = ReplayParser(pool_path=args.pool)
@@ -62,9 +64,13 @@ def main():
             g = lambda k, i: _car_vec(data[k], i, ci)
             boost = lambda i: float(data["car_boost"][i][ci] if data["car_boost"].ndim > 1 else data["car_boost"][i])
             p, p2 = g("car_pos", idx), g("car_pos", j)
+            r, r2 = g("car_rot", idx), g("car_rot", j)
+            contact = (not args.height_contact)
+            gnd = is_on_surface(p, InverseDynamicsSolver.basis(r)[:, 2]) if contact else bool(p[2] < 25.0)
+            gnd2 = is_on_surface(p2, InverseDynamicsSolver.basis(r2)[:, 2]) if contact else bool(p2[2] < 25.0)
             a = InverseDynamicsSolver.solve_car_action(
-                p, g("car_vel", idx), g("car_rot", idx), np.zeros(3, dtype=np.float32), boost(idx), bool(p[2] < 25.0),
-                p2, g("car_vel", j), g("car_rot", j), np.zeros(3, dtype=np.float32), boost(j), bool(p2[2] < 25.0),
+                p, g("car_vel", idx), r, np.zeros(3, dtype=np.float32), boost(idx), gnd,
+                p2, g("car_vel", j), r2, np.zeros(3, dtype=np.float32), boost(j), gnd2,
                 dt=dt,
             )
             zs.append(float(p[2]))

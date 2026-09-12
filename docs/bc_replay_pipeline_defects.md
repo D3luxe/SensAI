@@ -8,8 +8,9 @@ Status, branch `fix/bc-replay-pipeline`:
 | F. Quaternion to Euler conversion mirrored pitch and roll | **fixed** |
 | D. Flip-cancel heuristic hard-writes pitch on wall frames | **fixed** (deleted) |
 | A. Euler differencing used as angular velocity | **fixed** |
-| C. Height-only contact test | not fixed |
-| B. Ground steer computed about world Z | partly: steer now reads `omega_body · up_car` as a side effect of A, but wall frames still never reach the ground branch until C lands |
+| C. Height-only contact test | **fixed** (`utils/surface_contact.py`, validated against RocketSim) |
+| B. Ground steer computed about world Z | **fixed** as a side effect of A: steer reads `omega_body · up_car`; wall frames now reach the ground branch via C |
+| Solver `right` vector pointed Left | **fixed**: `fwd × up` per the project convention, so sideways dodges are no longer mislabelled; covered by a scripted RocketSim test |
 
 None of this affects a running policy. It only takes effect on a re-clone, so it should be done
 before the next fresh start rather than mid-run. **The existing `replays_pool.npz` carries E and
@@ -214,7 +215,40 @@ percentile 88.5, maximum 562.2. Raising the threshold does not rescue it; it jus
 negatives for false positives. The floor-to-wall fillet radius here is nearer 256 uu than the
 1000 sometimes quoted, but the conclusion does not depend on that number.
 
-**Fix options, in order of preference:**
+**Fix (done), option 1 below:** `utils/surface_contact.py` models the arena as a convex
+polytope (floor, ceiling, side and back walls, 45° corner bevels) with 128 uu rounded edges,
+joined with the two goal boxes. A car counts as grounded when its centre is within 80 uu of that
+surface and its up vector is within about 37° of the surface normal (cosine above 0.8). The
+pretrainer uses it for the observation's `on_ground` and for both solver contact flags, as does
+`batch_extract_actions`.
+
+Ground truth came from 144,000 RocketSim states at 30 Hz: a random driver, with 30% of episodes
+starting on a side wall or backboard, labelled by RocketSim's `is_on_ground`. Thresholds were
+tuned on 70% of episodes and scored on the held-out 30%:
+
+| test | accuracy | grounded called airborne | airborne called grounded |
+|---|---|---|---|
+| `z < 25` | 76.6% | 34.9% | 0.8% |
+| surface model | **93.7%** | **2.3%** | 14.3% |
+
+By region: floor 96.7% (height test 97.0%), fillet and low wall 91.1% (78.2%), wall 96.5%
+(22.1%), corner 91.8% (27.2%), goal 87.8% (67.4%). **The ceiling stays weak at 64.7%.**
+The remaining errors are mostly airborne cars skimming a surface with their wheels facing it.
+Acceleration along the surface normal from the next frame was tried as an extra feature and did
+not help, because jump impulses near the floor overlap with grounded frames. With no scikit-learn
+installed, the classifier route (option 2) was not tried.
+
+On the 30 Hz replay pool the airborne share falls from 58.0% under `z < 25` to 41.2%.
+
+Imputed pitch on the 30 Hz pool, E, F, D and A applied, before and after C:
+
+| car state | `z < 25`: mean abs pitch, exactly +1.0 | surface model: mean abs pitch, exactly +1.0 |
+|---|---|---|
+| floor | 0.004, 0.0% | 0.000, 0.0% |
+| z 25 to 200 | 0.258, 5.0% | 0.171, 1.4% |
+| wall | 0.200, 4.1% | 0.152, 2.0% |
+
+Options considered, in the original order of preference:
 1. Model the actual collision geometry including the floor/wall fillets and the 45° corner
    bevels (`CORNER_OFFSET = 1152`, `CORNER_LIMIT = 8064` in `env/physics_engine.py`), and test
    suspension or wheel-contact distance.
@@ -226,8 +260,19 @@ negatives for false positives. The floor-to-wall fillet radius here is nearer 25
 
 ## Remaining order
 
-E, F, D and A are done. C is next and is the largest remaining piece; B lands with it. After
-that, consider consuming the recorded `car_ang_vel` directly once its scale is pinned down.
+All listed defects are fixed. Follow-ups worth considering:
+
+- **Handbrake labels on walls (introduced by routing walls to the ground branch).** On
+  grounded-to-grounded transitions the powerslide rule (`|vel · right| > 400` or fast yaw)
+  labels handbrake on for 70.4% of wall frames, against 8.3% on the floor and 28.4% at 25 to
+  200 uu. Steer on walls is fine (mean abs 0.268, 13.8% saturated, against 0.424 and 19.7% on the
+  floor). Gravity drags a wall-driving car sideways, so lateral speed alone is not evidence of a
+  powerslide there. Needs RocketSim ground truth with recorded handbrake inputs before choosing a
+  replacement rule. Fix before the next clone.
+
+- Ceiling contact (64.7%) and surface-skimming false positives in the contact model.
+- Consume the recorded `car_ang_vel` directly once its scale is pinned down.
+- The pool cap drops the oldest 19% of the 225 replays.
 
 Re-audit after each step by conditioning the imputed action distribution on car height. The
 floor row should stay near zero, and the wall row should keep coming down.

@@ -20,6 +20,7 @@ from env.observations import DefaultObservationBuilder
 from env.physics_engine import CarState, BallState, BoostPad, ARENA_EXTENT_X, ARENA_EXTENT_Y
 from utils.replay_parser import ReplayParser, get_default_demo_dir, is_fresh_car_update, find_car_transition
 from utils.inverse_dynamics import InverseDynamicsSolver
+from utils.surface_contact import is_on_surface
 from bot import rotation_to_rot_mat
 
 
@@ -147,6 +148,9 @@ class BehavioralCloningTrainer:
                 if not is_fresh_car_update(data, idx, car_idx):
                     continue
 
+                # Wheel contact from arena geometry; replays do not record it
+                on_gnd_t = is_on_surface(car_p, InverseDynamicsSolver.basis(car_r)[:, 2])
+
                 car = CarState(
                     id=car_idx,
                     team=car_idx % 2,
@@ -154,7 +158,7 @@ class BehavioralCloningTrainer:
                     vel=car_v,
                     rot=car_r,
                     boost=float(car_b),
-                    on_ground=(car_p[2] < 25.0)
+                    on_ground=on_gnd_t
                 )
 
                 arena = MockArenaForObs(ball, [car])
@@ -177,8 +181,9 @@ class BehavioralCloningTrainer:
                     c_b_next = c_bst_next[car_idx] if c_bst_next.ndim > 0 else c_bst_next
 
                     expert_act = InverseDynamicsSolver.solve_car_action(
-                        car_p, car_v, car_r, np.zeros(3, dtype=np.float32), float(car_b), bool(car_p[2] < 25.0),
-                        c_p_next, c_v_next, c_r_next, np.zeros(3, dtype=np.float32), float(c_b_next), bool(c_p_next[2] < 25.0),
+                        car_p, car_v, car_r, np.zeros(3, dtype=np.float32), float(car_b), on_gnd_t,
+                        c_p_next, c_v_next, c_r_next, np.zeros(3, dtype=np.float32), float(c_b_next),
+                        is_on_surface(c_p_next, InverseDynamicsSolver.basis(c_r_next)[:, 2]),
                         dt=pair_dt
                     )
 

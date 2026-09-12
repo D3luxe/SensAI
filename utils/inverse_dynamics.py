@@ -10,6 +10,8 @@ import math
 import numpy as np
 from typing import Dict, Any, Tuple, Optional
 
+from utils.surface_contact import is_on_surface
+
 
 # Physical Constants matching RocketSim / Rocket League 120Hz physics
 CAR_MAX_SPEED = 2300.0
@@ -250,8 +252,8 @@ class InverseDynamicsSolver:
                     r_t, r_next = car_rot[t, c], car_rot[t + 1, c]
                     b_t, b_next = car_boost[t, c], car_boost[t + 1, c]
 
-                    on_gnd_t = bool(p_t[2] < 25.0)
-                    on_gnd_next = bool(p_next[2] < 25.0)
+                    on_gnd_t = is_on_surface(p_t, cls.basis(r_t)[:, 2])
+                    on_gnd_next = is_on_surface(p_next, cls.basis(r_next)[:, 2])
 
                     act = cls.solve_car_action(
                         p_t, v_t, r_t, np.zeros(3, dtype=np.float32), b_t, on_gnd_t,
@@ -266,8 +268,8 @@ class InverseDynamicsSolver:
                 r_t, r_next = car_rot[t], car_rot[t + 1]
                 b_t, b_next = car_boost[t], car_boost[t + 1]
 
-                on_gnd_t = bool(p_t[2] < 25.0)
-                on_gnd_next = bool(p_next[2] < 25.0)
+                on_gnd_t = is_on_surface(p_t, cls.basis(r_t)[:, 2])
+                on_gnd_next = is_on_surface(p_next, cls.basis(r_next)[:, 2])
 
                 act = cls.solve_car_action(
                     p_t, v_t, r_t, np.zeros(3, dtype=np.float32), b_t, on_gnd_t,

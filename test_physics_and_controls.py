@@ -1212,6 +1212,40 @@ class TestPhysicsAndControls(unittest.TestCase):
             self.assertEqual(act[3], expected_side_sign, f"Side dodge with yaw={yaw_in:+.0f} mislabelled yaw={act[3]:+.2f}")
             self.assertEqual(act[4], expected_side_sign, f"Side dodge with yaw={yaw_in:+.0f} mislabelled roll={act[4]:+.2f}")
 
+    def test_surface_contact_matches_rocketsim(self):
+        """
+        Guarantees the geometric contact model used for replay frames agrees with RocketSim's own
+        is_on_ground flag on the floor, while driving on a side wall, and in mid-air.
+        """
+        from utils.surface_contact import is_on_surface
+
+        def settle(pos, angle, vel, throttle, ticks):
+            arena = RocketSimArena(num_players=2, game_mode="1v1")
+            arena.reset(random_kickoff=False)
+            cs = arena._rsim_cars[0].get_state()
+            cs.pos = rsim.Vec(*pos)
+            cs.vel = rsim.Vec(*vel)
+            cs.rot_mat = angle.as_rot_mat()
+            arena._rsim_cars[0].set_state(cs)
+            arena.step([np.array([throttle, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]), np.zeros(8)], dt=ticks / 120.0)
+            car = arena.cars[0]
+            return arena._rsim_cars[0].get_state().is_on_ground, is_on_surface(car.pos, car.rot_mat[2])
+
+        # Resting on the floor
+        rsim_gnd, model_gnd = settle((0, -2000, 17), rsim.Angle(yaw=np.pi / 2, pitch=0.0, roll=0.0), (0, 0, 0), 0.0, 8)
+        self.assertTrue(rsim_gnd)
+        self.assertTrue(model_gnd, "Car resting on the floor must be inferred grounded")
+
+        # Driving along the +X side wall, wheels facing -X
+        rsim_gnd, model_gnd = settle((4096 - 17, 0, 800), rsim.Angle(yaw=np.pi / 2, pitch=0.0, roll=np.pi / 2), (0, 1200, 0), 1.0, 8)
+        self.assertTrue(rsim_gnd, "Scripted wall drive must stay on the wall in RocketSim")
+        self.assertTrue(model_gnd, "Car driving on a side wall must be inferred grounded, not airborne")
+
+        # Mid-air in the middle of the arena
+        rsim_gnd, model_gnd = settle((0, 0, 900), rsim.Angle(yaw=0.0, pitch=0.0, roll=0.0), (0, 0, 0), 0.0, 4)
+        self.assertFalse(rsim_gnd)
+        self.assertFalse(model_gnd, "Car in mid-air must be inferred airborne")
+
     def test_halfflip_inverse_dynamics_and_rewards(self):
         """
         Guarantees that:
