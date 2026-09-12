@@ -6,7 +6,6 @@ Status, branch `fix/bc-replay-pipeline`:
 |---|---|
 | E. Pool sampled at 3 Hz, solver told 30 Hz | **fixed** (full-rate parsing, real per-car dt; legacy pools get 10/30 s) |
 | F. Quaternion to Euler conversion mirrored pitch and roll | **fixed** |
-| G. Pretrainer observations built with a mirrored right vector | **fixed in the pretrainer**; the shared helpers are a separate task |
 | D. Flip-cancel heuristic hard-writes pitch on wall frames | **fixed** (deleted) |
 | A. Euler differencing used as angular velocity | **fixed** |
 | C. Height-only contact test | not fixed |
@@ -43,7 +42,7 @@ carries `angular_velocity`, in world axes, directionally exact against the rotat
 (median cosine 1.000 over 12,642 pairs). Its scale is a raw network unit, roughly x80 to x100
 with a noisy fit, so it is stored in the pool as `car_ang_vel` but not yet consumed by the solver.
 
-E, F and G were found while fixing D and A, and each outweighs D.
+E and F were found while fixing D and A, and each outweighs D.
 
 ---
 
@@ -97,19 +96,6 @@ angles to `rsim.Angle(...).as_rot_mat()` to spawn training episodes.
 asin(fwd_z)`, `yaw = atan2(fwd_y, fwd_x)`, `roll = atan2(-right_z, up_z)`. Verified: rebuilding
 the basis from the angles matches the quaternion matrix to 3e-5, wall up vectors point away from
 the wall (+1.00 over 804 frames), and the basis matches `rsim.Angle` exactly.
-
----
-
-## G. Pretrainer observations used a mirrored right vector
-
-RocketSim's right vector is `up x forward`. `CarState.get_right_vector()` and
-`bot.rotation_to_rot_mat` both compute `forward x up`, the negative. In training the env builds
-cars from RocketSim's `rot_mat`, but the pretrainer built replay cars from `rot` alone, so every
-lateral observation during cloning was mirrored relative to what the policy sees in RL.
-
-**Fix (done in the pretrainer):** replay cars are given `rot_mat` rows in RocketSim's convention.
-The two shared helpers are left unchanged here because the live bot and rewards also call them;
-correcting them needs a caller-by-caller audit of which signs were tuned against the mirror.
 
 ---
 
@@ -240,7 +226,7 @@ negatives for false positives. The floor-to-wall fillet radius here is nearer 25
 
 ## Remaining order
 
-E, F, G, D and A are done. C is next and is the largest remaining piece; B lands with it. After
+E, F, D and A are done. C is next and is the largest remaining piece; B lands with it. After
 that, consider consuming the recorded `car_ang_vel` directly once its scale is pinned down.
 
 Re-audit after each step by conditioning the imputed action distribution on car height. The

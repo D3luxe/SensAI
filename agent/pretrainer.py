@@ -153,9 +153,6 @@ class BehavioralCloningTrainer:
                     pos=car_p,
                     vel=car_v,
                     rot=car_r,
-                    # Rows [forward, right, up] in RocketSim's convention, as the env supplies them;
-                    # CarState's rot-only fallback returns a mirrored right vector.
-                    rot_mat=InverseDynamicsSolver.basis(car_r).T.astype(np.float32),
                     boost=float(car_b),
                     on_ground=(car_p[2] < 25.0)
                 )
