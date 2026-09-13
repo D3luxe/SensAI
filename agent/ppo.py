@@ -142,6 +142,13 @@ class PPOTrainer:
         # return standard deviation overnight, so the head is rescaled once instead (see
         # _migrate_critic_to_normalized_values).
         self._needs_value_norm_migration = False
+        # Critic warmup. Behavioural cloning trains the actor only, so a run started from it
+        # (or from scratch) has a randomly initialised critic, and the first policy updates
+        # would follow advantages that are mostly that critic's noise. For this many
+        # iterations the rollouts are collected as usual but only the value loss is optimised.
+        # Armed whenever the loaded state carries no return statistics; see _load_return_rms.
+        self.critic_warmup_iterations = max(0, int(hp.get("critic_warmup_iterations", 50)))
+        self._critic_warmup_remaining = self.critic_warmup_iterations
         self.max_grad_norm = float(hp.get("max_grad_norm", 0.5))
         # Per-channel exploration floor [Throttle, Steer, Pitch, Yaw, Roll]. Config wins over
         # whatever a resumed checkpoint was saved with, so raising it takes effect on resume
@@ -290,9 +297,10 @@ class PPOTrainer:
                 print(f"[PPO Trainer] TensorBoard disabled: {e}")
 
         # Decaying Behavioral Cloning Regularization
-        ppo_cfg = self.config.get("ppo", {})
-        self.bc_regularization_weight = float(ppo_cfg.get("bc_regularization_weight", 0.5))
-        self.bc_decay_steps = int(ppo_cfg.get("bc_decay_steps", 30_000_000))
+        # Read from `hyperparameters` (where the UI saves them); legacy `ppo` section as fallback.
+        bc_cfg = {**self.config.get("ppo", {}), **self.config.get("hyperparameters", {})}
+        self.bc_regularization_weight = float(bc_cfg.get("bc_regularization_weight", 0.5))
+        self.bc_decay_steps = int(bc_cfg.get("bc_decay_steps", 30_000_000))
         self._bc_dataset_loaded = False
         self.bc_obs_tensor = None
         self.bc_act_tensor = None
@@ -769,6 +777,7 @@ class PPOTrainer:
             "rot_anneal_start_iter": self._rot_anneal_start_iter,
             "rot_anneal_start_ceiling": self._rot_anneal_start_ceiling,
             "return_rms": self.ret_rms.state_dict(),
+            "critic_warmup_remaining": self._critic_warmup_remaining,
         }
         # Atomic save on Windows: write to .tmp file then replace with retry to avoid file lock conflict (Error 1224)
         tmp_path = path + f".tmp.{os.getpid()}"
@@ -891,6 +900,14 @@ class PPOTrainer:
         elif self.normalize_returns:
             self.ret_rms = RunningMeanStd()
             self._needs_value_norm_migration = True
+        # A checkpoint with return statistics came out of PPO and its critic has been trained,
+        # unless it was saved part-way through a warmup. One without them (behavioural cloning,
+        # or a pre-normalisation run) gets the full warmup.
+        saved_remaining = checkpoint.get("critic_warmup_remaining") if isinstance(checkpoint, dict) else None
+        if saved_remaining is not None:
+            self._critic_warmup_remaining = max(0, int(saved_remaining))
+        else:
+            self._critic_warmup_remaining = 0 if stats else self.critic_warmup_iterations
 
     def load_checkpoint(self, path: str):
         if not os.path.exists(path):
@@ -1146,6 +1163,9 @@ class PPOTrainer:
             v_losses = []
             entropy_losses = []
             bc_losses = []
+            approx_kls = []
+            current_bc_weight = 0.0
+            critic_warmup = self._critic_warmup_remaining > 0
 
             for epoch in range(self.n_epochs):
                 np.random.shuffle(b_inds)
@@ -1175,6 +1195,7 @@ class PPOTrainer:
 
                     with torch.no_grad():
                         clipfracs += [((ratio - 1.0).abs() > self.clip_range).float().mean().item()]
+                        approx_kls.append(((ratio - 1.0) - logratio).mean().item())
 
                     # Advantage normalization
                     norm_adv = (aug_adv - aug_adv.mean()) / (aug_adv.std() + 1e-8)
@@ -1205,13 +1226,18 @@ class PPOTrainer:
                     dim_scale = float(self.act_dim) if self.continuous_actions else 1.0
                     entropy_loss = entropy.mean() / dim_scale
 
-                    loss = pg_loss - self.ent_coef * entropy_loss + v_loss * self.vf_coef
+                    if critic_warmup:
+                        # Value loss alone. The actor shares no parameters with the critic, so
+                        # its gradients stay None and the optimizer leaves the policy untouched.
+                        loss = v_loss * self.vf_coef
+                    else:
+                        loss = pg_loss - self.ent_coef * entropy_loss + v_loss * self.vf_coef
 
                     # Behavioral Cloning (BC) Regularization with persistent floor anchor
                     # Prevents catastrophic forgetting of core mechanical dodges and kickoffs during extended RL self-play
                     min_bc_floor = 0.05 * self.bc_regularization_weight
                     decay_factor = max(0.0, 1.0 - (self.global_step / max(1, self.bc_decay_steps)))
-                    current_bc_weight = float(max(min_bc_floor, self.bc_regularization_weight * decay_factor))
+                    current_bc_weight = 0.0 if critic_warmup else float(max(min_bc_floor, self.bc_regularization_weight * decay_factor))
                     if current_bc_weight > 1e-4:
                         self._ensure_bc_dataset()
                         if self.bc_obs_tensor is not None and len(self.bc_obs_tensor) > 0:
@@ -1252,6 +1278,11 @@ class PPOTrainer:
                     pg_losses.append(pg_loss.item())
                     v_losses.append(v_loss.item())
                     entropy_losses.append(entropy_loss.item())
+
+            if critic_warmup:
+                self._critic_warmup_remaining -= 1
+                if self._critic_warmup_remaining == 0:
+                    print(f"[PPO Trainer] Critic warmup finished after {self.critic_warmup_iterations} iterations; policy updates start next iteration.")
 
             # 5. Metrics Compilation & Fast Vectorized Behavioral Telemetry
             mean_ep_rew = float(np.mean(episode_rewards_list)) if episode_rewards_list else float(rew_buf.mean().item() * self.num_steps)
@@ -1335,10 +1366,16 @@ class PPOTrainer:
                 self.writer.add_scalar("losses/policy_loss", mean_pg_loss, self.global_step)
                 self.writer.add_scalar("losses/value_loss", mean_v_loss, self.global_step)
                 self.writer.add_scalar("losses/entropy", mean_entropy, self.global_step)
+                self.writer.add_scalar("losses/approx_kl", float(np.mean(approx_kls)) if approx_kls else 0.0, self.global_step)
+                self.writer.add_scalar("losses/clipfrac", float(np.mean(clipfracs)) if clipfracs else 0.0, self.global_step)
+                self.writer.add_scalar("losses/bc_weight", current_bc_weight, self.global_step)
+                if bc_losses:
+                    self.writer.add_scalar("losses/bc_loss", float(np.mean(bc_losses)), self.global_step)
                 self.writer.add_scalar("charts/sps", sps, self.global_step)
                 self.writer.add_scalar("charts/truncations", rollout_truncations, self.global_step)
                 self.writer.add_scalar("charts/return_mean", self.ret_rms.mean, self.global_step)
                 self.writer.add_scalar("charts/return_std", self.ret_rms.std, self.global_step)
+                self.writer.add_scalar("charts/critic_warmup", 1.0 if critic_warmup else 0.0, self.global_step)
 
             # Console output
             print(
@@ -1350,6 +1387,7 @@ class PPOTrainer:
                 f"Touches: {rollout_touches_total} ({mean_touches:.1f}/ep) | "
                 f"Goals: {total_goals} | "
                 f"SPS: {sps}"
+                + (f" | Critic warmup ({self._critic_warmup_remaining} left)" if critic_warmup else "")
             )
 
             # Crash-recovery autosave. Overwrites one file, mints nothing, grades nothing.

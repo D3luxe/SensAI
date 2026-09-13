@@ -1,13 +1,9 @@
-"""BallToGoalVelocityReward must only pay the team that last touched the ball.
+"""BallToGoalVelocityReward must price ball progression regardless of who touched it last.
 
-The term prices ball progression toward the opponent net. Without an authorship gate it also
-prices progression the car had nothing to do with: an opponent's clear, a whiff, a rebound off
-our own backboard. Measured under the live policy at iteration 7600, opponent-owned steps
-contributed -3.17 per episode and pre-first-touch steps +1.33, against +1.03 for steps the bot
-actually owned -- most of the term's magnitude was uncontrollable.
-
-The gate is symmetric by design. Suppressing only the positive side would leave a penalty the
-policy cannot avoid; conceding remains priced by the terminal concede reward.
+An authorship gate (pay/charge only while our team was the last toucher) broke telescoping
+across possession changes: our touch forward was paid, the opponent's return was free. At
+iteration 8200 the term paid +11.1 against -2.1 per episode and out-earned goals, and the policy
+stopped contesting balls the opponent had touched. These tests pin the ungated behaviour.
 """
 
 import unittest
@@ -26,17 +22,18 @@ class MockArena:
         self.boost_pads = []
 
 
-def _pair():
-    me = CarState(id=0, team=0, pos=np.array([0.0, -1000.0, 17.0], dtype=np.float32))
+def _pair(me_pos=None):
+    p = np.array([0.0, -1000.0, 17.0], dtype=np.float32) if me_pos is None else np.array(me_pos, dtype=np.float32)
+    me = CarState(id=0, team=0, pos=p)
     opp = CarState(id=1, team=1, pos=np.array([0.0, 1000.0, 17.0], dtype=np.float32))
     me.ball_touches = 0
     opp.ball_touches = 0
     return me, opp
 
 
-def _reward(touch_by, ball_vel=(0.0, 1800.0, 0.0), ball_pos=(0.0, 0.0, 93.0)):
+def _reward(touch_by, ball_vel=(0.0, 1800.0, 0.0), ball_pos=(0.0, 0.0, 93.0), car_pos=None):
     """touch_by: None, 'me' or 'opp' -- who registers a touch before the reward is read."""
-    me, opp = _pair()
+    me, opp = _pair(me_pos=car_pos)
     arena = MockArena([me, opp], ball_pos, ball_vel)
     r = BallToGoalVelocityReward(weight=1.5)
     r.reset(arena)
@@ -47,71 +44,33 @@ def _reward(touch_by, ball_vel=(0.0, 1800.0, 0.0), ball_pos=(0.0, 0.0, 93.0)):
     return r.get_reward(me, arena, np.zeros(8, dtype=np.float32), False, None)
 
 
-class TestAuthorshipGate(unittest.TestCase):
-    def test_pays_the_team_that_touched_last(self):
-        self.assertGreater(_reward("me"), 0.0,
-                           "our own touch sending the ball goalward must still pay")
+class TestNoAuthorshipGate(unittest.TestCase):
+    def test_toucher_does_not_change_the_reward(self):
+        for vel in ((0.0, 1800.0, 0.0), (0.0, -2500.0, 0.0)):
+            vals = {who: _reward(who, ball_vel=vel) for who in (None, "me", "opp")}
+            self.assertAlmostEqual(vals["me"], vals["opp"], places=6, msg=str(vel))
+            self.assertAlmostEqual(vals["me"], vals[None], places=6, msg=str(vel))
 
-    def test_opponent_touch_pays_us_nothing(self):
-        self.assertEqual(_reward("opp"), 0.0,
-                         "an opponent clear that happens to travel toward their net is not ours")
+    def test_goalward_pays_and_return_charges(self):
+        self.assertGreater(_reward("me"), 0.0)
+        self.assertLess(_reward("opp", ball_vel=(0.0, -2500.0, 0.0)), 0.0,
+                        "the opponent driving the ball back at our net must cost ground")
 
-    def test_before_any_touch_pays_nothing(self):
-        self.assertEqual(_reward(None), 0.0,
-                         "nobody has authored the ball's motion yet")
-
-    def test_gate_is_symmetric(self):
-        """The opponent driving the ball at OUR net must not charge this term either."""
-        toward_our_net = (0.0, -2500.0, 0.0)
-        self.assertEqual(_reward("opp", ball_vel=toward_our_net), 0.0,
-                         "a one-way penalty the policy cannot switch off is worse than none")
-        self.assertLess(_reward("me", ball_vel=toward_our_net), 0.0,
-                        "our own touch driving the ball at our net must still be charged")
-
-    def test_ownership_transfers_on_the_next_touch(self):
-        me, opp = _pair()
-        arena = MockArena([me, opp], (0.0, 0.0, 93.0), (0.0, 1800.0, 0.0))
-        r = BallToGoalVelocityReward(weight=1.5)
-        r.reset(arena)
-        act = np.zeros(8, dtype=np.float32)
-
-        me.ball_touches += 1
-        self.assertGreater(r.get_reward(me, arena, act, False, None), 0.0)
-        opp.ball_touches += 1
-        self.assertEqual(r.get_reward(me, arena, act, False, None), 0.0)
-        me.ball_touches += 1
-        self.assertGreater(r.get_reward(me, arena, act, False, None), 0.0)
-
-    def test_ownership_persists_between_touches(self):
-        """A touch is one frame; the possession it creates lasts until someone else touches."""
-        me, opp = _pair()
-        arena = MockArena([me, opp], (0.0, 0.0, 93.0), (0.0, 1800.0, 0.0))
-        r = BallToGoalVelocityReward(weight=1.5)
-        r.reset(arena)
-        act = np.zeros(8, dtype=np.float32)
-        me.ball_touches += 1
-        vals = [r.get_reward(me, arena, act, False, None) for _ in range(10)]
-        self.assertTrue(all(v > 0.0 for v in vals),
-                        "cumulative ball_touches must not be re-read as a fresh touch")
-
-    def test_reset_clears_ownership(self):
-        me, opp = _pair()
-        arena = MockArena([me, opp], (0.0, 0.0, 93.0), (0.0, 1800.0, 0.0))
-        r = BallToGoalVelocityReward(weight=1.5)
-        r.reset(arena)
-        me.ball_touches += 1
-        act = np.zeros(8, dtype=np.float32)
-        self.assertGreater(r.get_reward(me, arena, act, False, None), 0.0)
-        r.reset(arena)
-        self.assertEqual(r.get_reward(me, arena, act, False, None), 0.0,
-                         "a new point starts with no owner")
+    def test_opponent_return_cancels_our_push(self):
+        """Forward then straight back at the same speed must net to zero."""
+        car_pos = (3000.0, -300.0, 17.0)
+        fwd = _reward("me", ball_vel=(0.0, 1500.0, 0.0), ball_pos=(3000.0, 0.0, 93.0), car_pos=car_pos)
+        back = _reward("opp", ball_vel=(0.0, -1500.0, 0.0), ball_pos=(3000.0, 0.0, 93.0), car_pos=car_pos)
+        self.assertGreater(fwd, 0.0)
+        self.assertLess(back, 0.0)
+        # Off-target (x=3000) so the placement bonus is zero on the forward leg.
+        self.assertAlmostEqual(fwd + back, 0.0, places=5)
 
     def test_goal_still_returns_zero(self):
         me, opp = _pair()
         arena = MockArena([me, opp], (0.0, 0.0, 93.0), (0.0, 1800.0, 0.0))
         r = BallToGoalVelocityReward(weight=1.5)
         r.reset(arena)
-        me.ball_touches += 1
         self.assertEqual(r.get_reward(me, arena, np.zeros(8, dtype=np.float32), True, 0), 0.0)
 
 
@@ -120,6 +79,10 @@ class TestStillWired(unittest.TestCase):
         c = CombinedReward({})
         self.assertIn("ball_to_goal", c.rewards)
         self.assertIsInstance(c.rewards["ball_to_goal"], BallToGoalVelocityReward)
+
+    def test_own_goal_threat_on_by_default(self):
+        c = CombinedReward({})
+        self.assertEqual(c.rewards["own_goal_threat"].weight, 2.0)
 
 
 if __name__ == "__main__":

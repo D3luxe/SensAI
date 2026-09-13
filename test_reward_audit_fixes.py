@@ -259,6 +259,7 @@ class TestRewardAuditFixes(unittest.TestCase):
                          "A push into the corner must earn no on-target placement bonus")
 
         # Same speed, same depth, but aimed at the opening: strictly better.
+        car.pos = np.array([0.0, 3000.0, 17.0], dtype=np.float32)
         self.arena.ball.pos = np.array([0.0, 3200.0, 93.0], dtype=np.float32)
         self.arena.ball.vel = np.array([0.0, 1400.0, 0.0], dtype=np.float32)
         r_on_target = rew.get_reward(car, self.arena, action, False, None)

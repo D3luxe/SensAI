@@ -104,9 +104,12 @@ REQUIRED_POOL_KEYS = ("ball_pos", "ball_vel", "car_pos", "car_vel", "car_rot", "
 # Written by full-rate parsing; absent from legacy pools.
 #   frame_time  (N,)          replay clock of the network frame, seconds
 #   car_time    (N, cars)     replay clock of that car's last RigidBody update, seconds
-#   car_ang_vel (N, cars, 3)  angular velocity as replicated (world axes, raw network scale ~x80-100)
+#   car_ang_vel (N, cars, 3)  angular velocity as replicated (world axes, network scale: rad/s x REPLAY_ANG_VEL_SCALE)
 #   segment_id  (N,)          contiguous-recording id; frames from different replays never pair
 TIMED_POOL_KEYS = ("frame_time", "car_time", "car_ang_vel", "segment_id")
+# Replicated angular velocity saturates at exactly 550 across the pool, RocketSim's 5.5 rad/s cap x 100.
+# Divide by this before anything that expects rad/s (the observation, dodge detection).
+REPLAY_ANG_VEL_SCALE = 100.0
 # Legacy pools sampled every 10th frame of a 30 Hz replay.
 LEGACY_FRAME_DT = 10.0 / 30.0
 # Longest gap between two car updates still treated as one continuous transition.

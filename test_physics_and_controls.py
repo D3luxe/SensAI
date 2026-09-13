@@ -410,9 +410,9 @@ class TestPhysicsAndControls(unittest.TestCase):
         car.vel = np.array([800.0, 0.0, 0.0], dtype=np.float32)
         reward_fn.reset(arena)
 
-        # Check target_pos blending: target_pos should be shifted toward predicted trajectory
+        # Target should anticipate future ball trajectory ahead of car
         target = reward_fn._get_target_pos(car.pos, arena, is_kickoff=False)
-        self.assertGreater(target[0], arena.ball.pos[0] - 200.0)
+        self.assertGreater(target[0], car.pos[0] + 500.0)
 
         # Car moving forward toward target earns positive reward
         action = np.array([1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0], dtype=np.float32)
@@ -525,7 +525,8 @@ class TestPhysicsAndControls(unittest.TestCase):
         self.assertGreater(rew_approach, 0.0, "Closing the distance gap to the ball must yield positive PlayerToBall reward!")
 
         # 2. Ball to Goal field progression
-        # Authorship-gated: only the team that last touched the ball is paid for its motion.
+        # Car in possession / engagement range of ball moving toward opponent net
+        car.pos = np.array([0.0, -1300.0, 17.0], dtype=np.float32)
         car.ball_touches = 1
         b2g_fn = BallToGoalVelocityReward(weight=1.5)
         rew_prog = b2g_fn.get_reward(car, MockArena(ball_fwd, [car]), np.zeros(8), False, None)

@@ -106,9 +106,10 @@ def load_weights(global_step=None):
 def load_agent(path):
     from agent.models import ActorCritic
     ck = torch.load(path, map_location="cpu", weights_only=False)
-    agent = ActorCritic(obs_dim=ck["obs_dim"], act_dim=ck["act_dim"],
-                        continuous_actions=ck["continuous_actions"],
-                        use_layer_norm=ck["use_layer_norm"], activation=ck["activation"])
+    agent = ActorCritic(obs_dim=ck.get("obs_dim", 108), act_dim=ck.get("act_dim", 8),
+                        continuous_actions=ck.get("continuous_actions", True),
+                        use_layer_norm=ck.get("use_layer_norm", True),
+                        activation=ck.get("activation", "leaky_relu"))
     agent.load_state_dict(ck["model_state_dict"])
     agent.eval()
     return agent, ck.get("iteration", -1), ck.get("global_step", None)
@@ -241,14 +242,42 @@ def run(agent, rw, n_envs, n_steps):
 
 
 def append_csv(row):
+    """Append a row, migrating the file's header first if new columns have been added.
+
+    Appending COLUMNS-ordered rows under an older header silently misaligns every new field:
+    the reader looks up a column the header does not contain, prints a dash, and the data is
+    written but never displayed. Rewrite the header and pad the older rows instead.
+    """
     os.makedirs(os.path.dirname(CSV), exist_ok=True)
-    new = not os.path.exists(CSV)
-    with io.open(CSV, "a", encoding="utf-8") as f:
-        if new:
-            f.write(",".join(COLUMNS) + "\n")
-        f.write(",".join(
-            ("%.4f" % row[c]) if isinstance(row[c], float) else str(row[c])
-            for c in COLUMNS) + "\n")
+
+    def fmt(v):
+        return ("%.4f" % v) if isinstance(v, float) else str(v)
+
+    line = ",".join(fmt(row[c]) for c in COLUMNS)
+
+    header, rows = None, []
+    if os.path.exists(CSV):
+        text = io.open(CSV, encoding="utf-8").read().strip()
+        if text:
+            lines = text.split("\n")
+            header = lines[0].split(",")
+            rows = [l.split(",") for l in lines[1:]]
+
+    if header is None:
+        io.open(CSV, "w", encoding="utf-8").write(",".join(COLUMNS) + "\n" + line + "\n")
+        return
+    if header == COLUMNS:
+        with io.open(CSV, "a", encoding="utf-8") as f:
+            f.write(line + "\n")
+        return
+
+    out = [",".join(COLUMNS)]
+    for r in rows:
+        vals = dict(zip(header, r))
+        out.append(",".join(vals.get(c, "") for c in COLUMNS))
+    out.append(line)
+    io.open(CSV, "w", encoding="utf-8").write("\n".join(out) + "\n")
+    print("migrated %s to the current column set" % os.path.relpath(CSV, ROOT))
 
 
 def print_history(limit=12):
@@ -266,7 +295,7 @@ def print_history(limit=12):
     idx = [head.index(c) if c in head else None for c in show]
 
     def cell(row, i, col):
-        if i is not None and i < len(row):
+        if i is not None and i < len(row) and row[i] != "":
             return row[i]
         # tumble_pct is recoverable from the two columns every old row already has.
         if col == "tumble_pct" and "airborne_pct" in head and "pitch_sat_pct" in head:

@@ -176,6 +176,8 @@ def compute_trajectory_arrival_time(
     """
     Canonical kinematics helper.
     Computes (arrival_time, dist, closing_speed) along line-of-sight.
+    Uses realistic vehicle acceleration (1400 uu/s^2 up to 1410 uu/s throttle speed)
+    to estimate arrival time when accelerating from low speeds.
     """
     rel_pos = target_pos - pos
     dist = _norm3(rel_pos)
@@ -188,13 +190,27 @@ def compute_trajectory_arrival_time(
     else:
         closing_speed = float(np.dot(vel, unit_dir))
 
-    if closing_speed > 50.0:
-        arrival = dist / closing_speed
+    # Kinematic arrival estimation accounting for drive acceleration
+    ACCEL = 1400.0       # Conservative vehicle drive acceleration (uu/s^2)
+    V_MAX = 1410.0       # Ground throttle top speed without boost (uu/s)
+
+    v0 = max(0.0, closing_speed)
+    if v0 >= V_MAX:
+        arrival = dist / v0
     else:
-        # Fallback when closing speed <= 50 uu/s:
-        # Assumes vehicle can accelerate toward target from baseline speed
-        speed = _norm3(vel)
-        arrival = dist / max(50.0, speed * 0.35 + 100.0)
+        # Distance needed to accelerate from v0 to V_MAX
+        t_ramp = (V_MAX - v0) / ACCEL
+        d_ramp = 0.5 * (v0 + V_MAX) * t_ramp
+        if dist <= d_ramp:
+            v_final = math.sqrt(v0 * v0 + 2.0 * ACCEL * dist)
+            arrival = 2.0 * dist / max(10.0, v0 + v_final)
+        else:
+            arrival = t_ramp + (dist - d_ramp) / V_MAX
+
+    # Add latency/turn penalty if car is currently travelling away from target
+    if closing_speed < -50.0:
+        arrival += min(0.6, abs(closing_speed) / 1500.0)
+
     return arrival, dist, closing_speed
 
 
@@ -264,7 +280,7 @@ def compute_effective_alignment(
 # Candidate lookahead slices (ticks at 120 Hz) for the intercept solver. Coarse on purpose:
 # each rung costs an arrival-time solve, and this runs for every body every step. 60 and 180 are
 # already requested by the observation builder, so those two come back from the arena's cache.
-INTERCEPT_SLICE_LADDER = (0, 30, 60, 120, 180)
+INTERCEPT_SLICE_LADDER = (0, 15, 30, 60, 90, 120, 180, 240, 360)
 
 # Depth goalside of the ball that a beaten defender should be shadowing toward.
 SHADOW_OFFSET_Y = 700.0
@@ -345,27 +361,36 @@ def solve_intercept_point(
     and arrival timing look mistimed. Instead walk the trajectory outward and take the earliest
     slice the body can actually reach, which is the definition of an intercept.
 
-    Returns (intercept_pos, intercept_time_seconds). Falls back to the furthest slice when the
-    ball outruns the body entirely, and to the live ball position when no usable prediction exists.
+    Returns (intercept_pos, intercept_time_seconds). Falls back to the closest-approach slice
+    (minimizing arrival deficit) or live ball when no slice is reachable in time.
     """
     if not hasattr(arena, "get_predicted_ball_pos") or not predictions_trustworthy(arena):
         return arena.ball.pos, 0.0
 
-    fallback_pos = arena.ball.pos
-    fallback_t = 0.0
+    best_slice_pos = arena.ball.pos
+    best_slice_t = 0.0
+    min_deficit = float("inf")
+
     for slice_ticks in ladder:
         slice_t = slice_ticks / PREDICTION_TICK_RATE
         pred = arena.ball.pos if slice_ticks == 0 else arena.get_predicted_ball_pos(slice_ticks)
         if pred is None:
             continue
-        fallback_pos, fallback_t = pred, slice_t
+
         arrival, _, _ = compute_trajectory_arrival_time(pos, vel, pred)
         if arrival <= slice_t:
             # Reachable with time to spare: this is the earliest meeting point on the trajectory.
             return pred, slice_t
 
-    # Ball outruns the chaser across the whole ladder; chase the furthest point considered.
-    return fallback_pos, fallback_t
+        deficit = arrival - slice_t
+        if deficit < min_deficit:
+            min_deficit = deficit
+            best_slice_pos = pred
+            best_slice_t = slice_t
+
+    # If the vehicle cannot intercept any slice in time, target the slice with minimum arrival
+    # deficit (closest approach in time) rather than unconditionally chasing the furthest horizon.
+    return best_slice_pos, best_slice_t
 
 
 def cached_intercept_point(arena: RocketSimArena, body_id: int, pos: np.ndarray, vel: np.ndarray) -> Tuple[np.ndarray, float]:
@@ -721,11 +746,13 @@ def on_target_factor(arena: RocketSimArena, target_goal_y: float) -> float:
 
 class BallToGoalVelocityReward(BaseReward):
     """
-    Symmetric potential-based progression with goal-opening targeting.
+    Symmetric potential-based progression with goal-opening targeting and proximity falloff.
 
-    Rewards ball velocity projected toward the opponent's goal, and charges the same rate for
-    losing that ground, so the term telescopes: accumulated reward tracks where the ball ended
-    up rather than the path it took there.
+    Rewards ball velocity projected toward the opponent's goal, scaled by the car's proximity
+    to the ball so the bot cannot 'farm' points on stray wall rebounds, loose clearances, or
+    balls rolling uncontested downfield without custody or engagement.
+    Full reward is earned when within close custody/striking range (<= near_dist, default 500 uu);
+    reward decays smoothly (via smoothstep) to 0.0 at far_dist (default 1500 uu).
 
     On-target placement is a BONUS on that rate, in [1.0, 1.6] -- never a suppressor. The old
     multiplier spanned [0.0, 1.6] and returned exactly 0.0 for any shot projecting above the
@@ -741,57 +768,28 @@ class BallToGoalVelocityReward(BaseReward):
     arrive would out-earn a blast that takes 10, biasing the policy toward slow saveable shots.
     Scaling the rate keeps the integral over a flight invariant to shot speed.
     """
-    def __init__(self, weight: float = 1.5):
+    def __init__(self, weight: float = 1.5, near_dist: float = 500.0, far_dist: float = 1500.0):
         super().__init__(weight)
-        # Team of whoever last touched the ball; None until the first touch of the point.
-        # See _refresh_authorship for why this is gated.
-        self._last_touch_team: Optional[int] = None
-        self._touch_counts: Dict[int, int] = {}
-
-    def reset(self, initial_state: RocketSimArena):
-        self._last_touch_team = None
-        self._touch_counts = {c.id: int(getattr(c, "ball_touches", 0)) for c in initial_state.cars}
-
-    def _refresh_authorship(self, car: CarState, arena: RocketSimArena) -> None:
-        """Track which team last touched the ball.
-
-        ball_touches is cumulative, so only an increase since the previous observation means a
-        new touch. This is called once per car per step; the second call of a step sees no
-        increase and correctly leaves the stored owner alone.
-
-        The acting car is scanned alongside arena.cars rather than assumed to be among them.
-        A car passed in that the arena does not list could otherwise never author a touch, and
-        would be permanently locked out of its own progression reward.
-        """
-        seen = set()
-        for c in list(arena.cars) + [car]:
-            if id(c) in seen:
-                continue
-            seen.add(id(c))
-            n = int(getattr(c, "ball_touches", 0))
-            if n > self._touch_counts.get(c.id, 0):
-                self._last_touch_team = int(c.team)
-            self._touch_counts[c.id] = n
+        self.near_dist = float(near_dist)
+        self.far_dist = float(far_dist)
 
     def get_reward(self, car: CarState, arena: RocketSimArena, action: np.ndarray, is_goal: bool, scoring_team: Optional[int]) -> float:
-        self._refresh_authorship(car, arena)
         if is_goal:
             return 0.0
 
-        # Authorship gate. This term is meant to price what the CAR did to the ball, but the
-        # ball moves for reasons the car had no part in: an opponent's clear, a whiff, a bounce
-        # off our own backboard. Measured at iteration 7600, steps where the opponent was the
-        # last toucher contributed -3.17 per episode and steps before anyone had touched
-        # contributed +1.33, against +1.03 for steps the bot actually owned. Three quarters of
-        # the term's magnitude was being assigned for events outside the policy's control,
-        # which is noise in the advantage estimate and nothing else.
-        #
-        # The gate is symmetric: when the opponent owns the ball, this term pays nothing AND
-        # charges nothing. Suppressing only the positive side would leave a one-way penalty
-        # stream the policy cannot switch off, which is strictly worse than either option.
-        # Conceding is still priced, at full strength, by the terminal concede reward.
-        if self._last_touch_team is None or self._last_touch_team != car.team:
+        # Proximity falloff: prevents reward farming when the ball is rolling downfield
+        # without the car having custody, striking proximity, or physical engagement.
+        car_to_ball = arena.ball.pos - car.pos
+        car_dist = _norm3(car_to_ball)
+        if car_dist >= self.far_dist:
             return 0.0
+
+        if car_dist <= self.near_dist:
+            proximity_factor = 1.0
+        else:
+            t = (self.far_dist - car_dist) / (self.far_dist - self.near_dist)
+            # Smoothstep (3t^2 - 2t^3) ensures a smooth C1 transition with zero derivative at boundaries
+            proximity_factor = float(t * t * (3.0 - 2.0 * t))
 
         target_goal_y = ARENA_EXTENT_Y if car.team == 0 else -ARENA_EXTENT_Y
         # If ball has already crossed the target endline into the net opening, do not invert vector
@@ -810,16 +808,14 @@ class BallToGoalVelocityReward(BaseReward):
         ball_velocity_toward_goal = float(np.dot(arena.ball.vel, unit_to_goal))
         normalized_progress = ball_velocity_toward_goal / BALL_MAX_SPEED
 
-        # Losing ground costs exactly what gaining it pays. No reverse multiplier: the old 1.5x
-        # applied anywhere on the pitch, so a rebound off the OPPONENT's backboard was priced as
-        # an own-goal threat. OwnGoalThreatReward handles real own-goal danger where it occurs.
+        # Losing ground costs exactly what gaining it pays within engagement range.
         if ball_velocity_toward_goal <= 0.0:
-            return self.weight * normalized_progress
+            return proximity_factor * self.weight * normalized_progress
 
         # Placement bonus on the progression rate, floored at 1.0 so a fast goalward ball is
         # never worth what a motionless one is worth.
         placement = on_target_factor(arena, target_goal_y)
-        return self.weight * normalized_progress * (1.0 + ON_TARGET_BONUS * placement)
+        return proximity_factor * self.weight * normalized_progress * (1.0 + ON_TARGET_BONUS * placement)
 
 
 class OwnGoalThreatReward(BaseReward):
@@ -922,7 +918,7 @@ class PlayerToBallVelocityReward(BaseReward):
 
         ball_speed = _norm3(arena.ball.vel)
         # A near-stationary ball's intercept point is its current position, so skip the solver.
-        if ball_speed <= 150.0 or not hasattr(arena, "get_predicted_ball_pos"):
+        if ball_speed <= 5.0 or not hasattr(arena, "get_predicted_ball_pos"):
             return self._apply_shadow_retarget(target_pos, car_pos, arena, car_team)
 
         chaser_vel = car_vel if car_vel is not None else np.zeros(3, dtype=np.float32)
@@ -982,12 +978,15 @@ class PlayerToBallVelocityReward(BaseReward):
         raw_dist = self._calc_dist(car_pos, arena.ball.pos)
         wrong_t *= _clip((raw_dist - 600.0) / 600.0, 0.0, 1.0)
 
-        # Field position: deep in the attacking half, "farther from our own goal than the ball"
-        # is ordinary attacking posture, not a defender who has been beaten. Full weight in our
-        # own half, fading out across the attacking half.
         ball_y = float(arena.ball.pos[1])
         ball_depth = -ball_y if car_team == 0 else ball_y  # > 0 when the ball is in our half
-        wrong_t *= _clip((ball_depth + 2000.0) / 2000.0, 0.0, 1.0)
+        ball_vy_defend = -float(arena.ball.vel[1]) if car_team == 0 else float(arena.ball.vel[1])
+
+        # In the attacking half (ball_depth < 0), only retreat if the ball is actively travelling back toward our net
+        if ball_depth < 0.0 and ball_vy_defend < 100.0:
+            return target_pos
+
+        wrong_t *= _clip((ball_depth + 1000.0) / 1000.0, 0.0, 1.0)
 
         if wrong_t <= 0.0:
             return target_pos
@@ -1185,10 +1184,10 @@ class PlayerToBallVelocityReward(BaseReward):
             if not is_active_flip and fwd_alignment < -0.15:
                 # Ground / non-flip overshoot where car drove away
                 car_spd = _norm3(car.vel)
-                overshoot_penalty = -0.40 if car_spd < 1800.0 else -0.60
+                overshoot_penalty = -0.15 if car_spd < 1800.0 else -0.25
             elif is_active_flip and car_vel_toward_ball < -100.0 and raw_delta_dist < -0.05:
                 # Body momentum actually sailing away after flip without touching
-                overshoot_penalty = -0.30
+                overshoot_penalty = -0.15
 
         # 2. Distance Delta with Strike Zone Pacing
         # Downfield (> 450 uu): 100% distance closure rewarded
@@ -1340,7 +1339,7 @@ class PlayerToBallVelocityReward(BaseReward):
                     if overshoot_penalty == 0.0:
                         if self_tti < 0.40 and effective_car_speed > desired_speed:
                             excess = (effective_car_speed - desired_speed) / 800.0
-                            pacing_penalty = -0.35 * min(1.0, max(0.0, excess))
+                            pacing_penalty = -0.15 * min(1.0, max(0.0, excess))
 
             # 3b. Trajectory & Time-To-Intercept (TTI) Defending Net Threat Evaluation:
             # Differentiates safe defensive plays (corner wraps, backboard clears, recoverable touches)
@@ -1381,10 +1380,10 @@ class PlayerToBallVelocityReward(BaseReward):
                     dribble_boost_penalty = -0.30 * float(action[6])
 
             # Hard Anti-Stacking Floor:
-            # Clamps combined strike-zone approach penalties to a maximum floor of -0.60
+            # Clamps combined strike-zone approach penalties to a maximum floor of -0.30
             total_approach_penalties = overshoot_penalty + pacing_penalty + dribble_boost_penalty + wrong_side_push_penalty
-            if total_approach_penalties < -0.60:
-                scale = -0.60 / total_approach_penalties
+            if total_approach_penalties < -0.30:
+                scale = -0.30 / total_approach_penalties
                 overshoot_penalty *= scale
                 pacing_penalty *= scale
                 dribble_boost_penalty *= scale
@@ -3067,10 +3066,12 @@ class CombinedReward:
                 save_weight=weights.get("save_weight", 12.0)
             ),
             "ball_to_goal": BallToGoalVelocityReward(
-                weight=weights.get("ball_to_goal_weight", 1.5)
+                weight=weights.get("ball_to_goal_weight", 1.5),
+                near_dist=weights.get("ball_to_goal_near_dist", 500.0),
+                far_dist=weights.get("ball_to_goal_far_dist", 1500.0),
             ),
             "own_goal_threat": OwnGoalThreatReward(
-                weight=weights.get("own_goal_threat_weight", 0.0)
+                weight=weights.get("own_goal_threat_weight", 2.0)
             ),
             "player_to_ball": PlayerToBallVelocityReward(
                 weight=weights.get("player_to_ball_weight", 0.6),
@@ -3121,6 +3122,10 @@ class CombinedReward:
 
         if "ball_to_goal_weight" in new_weights and "ball_to_goal" in self.rewards:
             self.rewards["ball_to_goal"].weight = float(new_weights["ball_to_goal_weight"])
+        if "ball_to_goal_near_dist" in new_weights and "ball_to_goal" in self.rewards:
+            self.rewards["ball_to_goal"].near_dist = float(new_weights["ball_to_goal_near_dist"])
+        if "ball_to_goal_far_dist" in new_weights and "ball_to_goal" in self.rewards:
+            self.rewards["ball_to_goal"].far_dist = float(new_weights["ball_to_goal_far_dist"])
 
         if "own_goal_threat_weight" in new_weights and "own_goal_threat" in self.rewards:
             self.rewards["own_goal_threat"].weight = float(new_weights["own_goal_threat_weight"])

@@ -18,13 +18,26 @@ from typing import Dict, Any, Optional, Tuple, Callable
 from agent.models import ActorCritic, OBS_MIRROR_MASK_NP, ACT_MIRROR_MASK_NP
 from env.observations import DefaultObservationBuilder
 from env.physics_engine import CarState, BallState, BoostPad, ARENA_EXTENT_X, ARENA_EXTENT_Y
-from utils.replay_parser import ReplayParser, get_default_demo_dir, is_fresh_car_update, find_car_transition
+from utils.replay_parser import ReplayParser, get_default_demo_dir, is_fresh_car_update, find_car_transition, REPLAY_ANG_VEL_SCALE
+from utils.replay_state import ReplayStateReconstructor
 from utils.inverse_dynamics import InverseDynamicsSolver
 from utils.surface_contact import is_on_surface
 from bot import rotation_to_rot_mat
 
+try:
+    import RocketSim as rsim
+except ImportError:
+    rsim = None
+
 
 class MockArenaForObs:
+    """
+    Arena-shaped view of one replay frame (or hand-built state) for the observation builder.
+
+    Ball prediction and shot threat are answered by RocketSim, the source the training arena uses;
+    the straight-line extrapolation this used to do disagreed with the environment on every bounce
+    and never reported a threat. Pad state is whatever the caller reconstructed, all active if none.
+    """
     _SHARED_PADS = None
     _SM_PAD_INDICES = None
     _BG_PAD_INDICES = None
@@ -32,8 +45,9 @@ class MockArenaForObs:
     _BIG_PAD_POS_3D = None
     _SMALL_PAD_ACTIVE = None
     _BIG_PAD_ACTIVE = None
+    _SIM = None
 
-    def __init__(self, ball: BallState, cars: list[CarState]):
+    def __init__(self, ball: BallState, cars: list[CarState], pad_active: Optional[np.ndarray] = None, pad_cooldown: Optional[np.ndarray] = None):
         if MockArenaForObs._SHARED_PADS is None:
             MockArenaForObs._SHARED_PADS = BoostPad.create_standard_pads()
             MockArenaForObs._SM_PAD_INDICES = np.array([i for i, p in enumerate(MockArenaForObs._SHARED_PADS) if not p.is_big], dtype=int)
@@ -45,23 +59,55 @@ class MockArenaForObs:
 
         self.ball = ball
         self.cars = cars
-        self.boost_pads = MockArenaForObs._SHARED_PADS
         self._sm_pad_indices = MockArenaForObs._SM_PAD_INDICES
         self._bg_pad_indices = MockArenaForObs._BG_PAD_INDICES
         self._small_pad_pos_3d = MockArenaForObs._SMALL_PAD_POS_3D
         self._big_pad_pos_3d = MockArenaForObs._BIG_PAD_POS_3D
-        self._small_pad_active = MockArenaForObs._SMALL_PAD_ACTIVE
-        self._big_pad_active = MockArenaForObs._BIG_PAD_ACTIVE
+        if pad_active is None:
+            self.boost_pads = MockArenaForObs._SHARED_PADS
+            self._small_pad_active = MockArenaForObs._SMALL_PAD_ACTIVE
+            self._big_pad_active = MockArenaForObs._BIG_PAD_ACTIVE
+        else:
+            pad_active = np.asarray(pad_active, dtype=bool)
+            self.boost_pads = [
+                BoostPad(pos=p.pos, is_big=p.is_big, is_active=bool(a), cooldown_timer=float(cd))
+                for p, a, cd in zip(MockArenaForObs._SHARED_PADS, pad_active, pad_cooldown)
+            ]
+            self._small_pad_active = pad_active[MockArenaForObs._SM_PAD_INDICES]
+            self._big_pad_active = pad_active[MockArenaForObs._BG_PAD_INDICES]
+        self._sim_synced = False
+
+    @classmethod
+    def _shared_sim(cls):
+        if cls._SIM is None:
+            from env.physics_engine import RocketSimArena
+            cls._SIM = RocketSimArena(num_players=2)
+        return cls._SIM
+
+    def _sync_sim(self):
+        """Loads this frame's ball into the shared RocketSim arena and drops its per-step caches."""
+        sim = MockArenaForObs._shared_sim()
+        if not self._sim_synced:
+            pos = np.asarray(self.ball.pos, dtype=np.float32)
+            vel = np.asarray(self.ball.vel, dtype=np.float32)
+            sim.ball = BallState(pos=pos.copy(), vel=vel.copy())
+            if sim._use_rsim and rsim is not None:
+                bs = sim._rsim_arena.ball.get_state()
+                bs.pos = rsim.Vec(float(pos[0]), float(pos[1]), float(pos[2]))
+                bs.vel = rsim.Vec(float(vel[0]), float(vel[1]), float(vel[2]))
+                bs.ang_vel = rsim.Vec(0.0, 0.0, 0.0)
+                sim._rsim_arena.ball.set_state(bs)
+            sim.step_count += 1
+            sim._cached_rsim_preds = None
+            sim._cached_threat = {}
+            self._sim_synced = True
+        return sim
 
     def get_shot_threat(self, team: int) -> Tuple[bool, float, float]:
-        return False, 0.0, 0.0
+        return self._sync_sim().get_shot_threat(team)
 
     def get_predicted_ball_pos(self, ticks_ahead: int) -> np.ndarray:
-        dt = (ticks_ahead / 120.0)
-        px = self.ball.pos[0] + self.ball.vel[0] * dt
-        py = self.ball.pos[1] + self.ball.vel[1] * dt
-        pz = max(93.0, self.ball.pos[2] + self.ball.vel[2] * dt + 0.5 * (-650.0) * (dt ** 2))
-        return np.array([px, py, pz], dtype=np.float32)
+        return self._sync_sim().get_predicted_ball_pos(ticks_ahead)
 
 
 
@@ -100,6 +146,35 @@ class BehavioralCloningTrainer:
         self._stop_requested = True
         self.status["message"] = "Stopping pretraining..."
 
+    def _synthetic_obs(self, car: CarState, ball: BallState, phase: str, rng: np.random.Generator) -> np.ndarray:
+        """
+        Observation for a hand-built demonstration state, given the context every real state has:
+        an opponent somewhere on the field, a ball already in play, and the jump and flip state of
+        the demonstration phase ("ground", "jumped": airborne with the flip in hand, "dodging").
+        """
+        car.ball_touches = 1
+        if phase == "ground":
+            car.has_jump, car.has_flip = True, False
+        elif phase == "jumped":
+            car.has_jump, car.has_flip, car.air_timer = False, True, 0.15
+        elif phase == "dodging":
+            car.has_jump, car.has_flip, car.is_dodging = False, False, True
+            car.flip_timer, car.air_timer = 0.25, 0.4
+        car.is_supersonic = bool(np.linalg.norm(car.vel) >= 2200.0)
+
+        yaw = float(rng.uniform(-math.pi, math.pi))
+        speed = float(rng.uniform(0.0, 1800.0))
+        opp = CarState(
+            id=1, team=1,
+            pos=np.array([rng.uniform(-3500.0, 3500.0), rng.uniform(-4500.0, 4500.0), 17.0], dtype=np.float32),
+            vel=np.array([math.cos(yaw) * speed, math.sin(yaw) * speed, 0.0], dtype=np.float32),
+            rot=np.array([0.0, yaw, 0.0], dtype=np.float32),
+            rot_mat=rotation_to_rot_mat(0.0, yaw, 0.0),
+            boost=float(rng.uniform(0.0, 100.0)),
+            on_ground=True, has_jump=True, has_flip=False, ball_touches=1
+        )
+        return self.obs_builder.build_obs(car, MockArenaForObs(ball, [car, opp]))
+
     def generate_pretrain_dataset(self, parser: Optional[ReplayParser] = None, max_samples: int = 50000) -> Tuple[np.ndarray, np.ndarray]:
         if parser is None:
             parser = ReplayParser(pool_path=self.pool_path)
@@ -119,9 +194,16 @@ class BehavioralCloningTrainer:
         if total_frames == 0:
             return np.zeros((0, self.obs_builder.obs_dim), dtype=np.float32), np.zeros((0, 8), dtype=np.float32)
 
-        indices = np.arange(total_frames)
-        if total_frames > max_samples:
-            indices = np.random.choice(total_frames, size=max_samples, replace=False)
+        # Everything the replay does not record (opponent context aside): jump and flip state, timers,
+        # touch-since-kickoff and pad state. Without it the cloned policy trains on states RocketSim never produces.
+        recon = ReplayStateReconstructor(data)
+        synth_rng = np.random.default_rng(0)
+
+        # Frames whose second car is the parser's mirrored stand-in hold no real opponent
+        usable = np.nonzero(~recon.synthetic_opponent)[0]
+        indices = usable
+        if len(usable) > max_samples:
+            indices = np.random.choice(usable, size=max_samples, replace=False)
 
         obs_list = []
         act_list = []
@@ -133,35 +215,35 @@ class BehavioralCloningTrainer:
             c_vel = data["car_vel"][idx]
             c_rot = data["car_rot"][idx]
             c_bst = data["car_boost"][idx]
+            c_angv = data["car_ang_vel"][idx] / REPLAY_ANG_VEL_SCALE if "car_ang_vel" in data else np.zeros_like(c_vel)
 
             ball = BallState(pos=b_pos, vel=b_vel)
 
-            # Extract for each car in frame
-            num_cars = c_pos.shape[0] if c_pos.ndim > 1 else 1
-            for car_idx in range(min(2, num_cars)):
-                car_p = c_pos[car_idx] if c_pos.ndim > 1 else c_pos
-                car_v = c_vel[car_idx] if c_vel.ndim > 1 else c_vel
-                car_r = c_rot[car_idx] if c_rot.ndim > 1 else c_rot
-                car_b = c_bst[car_idx] if c_bst.ndim > 0 else c_bst
+            touches = 0 if recon.untouched[idx] else 1
+            frame_cars = [
+                CarState(
+                    id=car_idx, team=car_idx, pos=c_pos[car_idx], vel=c_vel[car_idx], rot=c_rot[car_idx],
+                    ang_vel=c_angv[car_idx], boost=float(c_bst[car_idx]), ball_touches=touches,
+                    **recon.car_fields(idx, car_idx)
+                )
+                for car_idx in range(2)
+            ]
+            pad_active, pad_cooldown = recon.pads_at(idx)
+            arena = MockArenaForObs(ball, frame_cars, pad_active, pad_cooldown)
+
+            for car_idx in range(2):
+                car_p = c_pos[car_idx]
+                car_v = c_vel[car_idx]
+                car_r = c_rot[car_idx]
+                car_b = c_bst[car_idx]
 
                 # Car state not replicated this frame: a carried-over duplicate carries no new label
                 if not is_fresh_car_update(data, idx, car_idx):
                     continue
 
+                car = frame_cars[car_idx]
                 # Wheel contact from arena geometry; replays do not record it
-                on_gnd_t = is_on_surface(car_p, InverseDynamicsSolver.basis(car_r)[:, 2])
-
-                car = CarState(
-                    id=car_idx,
-                    team=car_idx % 2,
-                    pos=car_p,
-                    vel=car_v,
-                    rot=car_r,
-                    boost=float(car_b),
-                    on_ground=on_gnd_t
-                )
-
-                arena = MockArenaForObs(ball, [car])
+                on_gnd_t = car.on_ground
                 obs_vec = self.obs_builder.build_obs(car, arena)
 
                 # ── True Human Action Extraction via Inverse Dynamics ───────────
@@ -188,10 +270,12 @@ class BehavioralCloningTrainer:
                     )
 
                 if expert_act is None:
-                    # Analytical pursuit controller fallback for isolated boundary frames
-                    local_ball_x = float(obs_vec[34])
-                    local_ball_y = float(obs_vec[35])
-                    local_ball_z = float(obs_vec[36])
+                    # Analytical pursuit controller fallback for isolated boundary frames.
+                    # Ball offset in the car's frame (obs 37..39, 1000 uu = 0.5); 34..36 are the
+                    # 1.5 s predicted ball position in field coordinates, which this once read.
+                    local_ball_x = float(obs_vec[37])
+                    local_ball_y = float(obs_vec[38])
+                    local_ball_z = float(obs_vec[39])
 
                     up_vec = car.get_up_vector()
                     is_on_wall = bool(car.pos[2] > 150.0 and abs(up_vec[2]) < 0.7)
@@ -273,11 +357,13 @@ class BehavioralCloningTrainer:
 
                 # Kickoff Sanitation: If frame is during active kickoff and player peeled away to corner boost,
                 # sanitize expert action to enforce straight-ahead kickoff rush toward the ball.
-                is_kickoff = bool(obs_vec[52] > 0.5)
+                # obs 58 is the kickoff flag (ball resting at centre, untouched). This read obs 52, the
+                # up component of the direction to the opponent goal, which is never above 0.5 on the ground.
+                is_kickoff = bool(obs_vec[58] > 0.5)
                 if is_kickoff:
                     expert_act[0] = 1.0  # Full forward throttle
-                    # Ball to right (obs_vec[35] > 0) -> Steer right (expert_act[1] > 0)
-                    expert_act[1] = float(np.clip(float(obs_vec[35]) * 2.5, -0.6, 0.6))
+                    # Ball to right (local lateral offset obs_vec[38] > 0) -> Steer right (expert_act[1] > 0)
+                    expert_act[1] = float(np.clip(float(obs_vec[38]) * 2.5, -0.6, 0.6))
                     expert_act[6] = 1.0 if car.boost > 0 else -1.0  # Boost on kickoff
 
                 # Add direct sample
@@ -305,7 +391,7 @@ class BehavioralCloningTrainer:
                         for bx in [-1000.0, 0.0, 1000.0]:
                             for by in [-1500.0, 0.0, 1500.0]:
                                 ball_floor = BallState(pos=np.array([bx, by, 93.0], dtype=np.float32), vel=np.zeros(3, dtype=np.float32))
-                                obs_w = self.obs_builder.build_obs(car_wall, MockArenaForObs(ball_floor, [car_wall]))
+                                obs_w = self._synthetic_obs(car_wall, ball_floor, "ground", synth_rng)
                                 steer_down = -float(side * heading_sign)
                                 act_w = np.array([1.0, steer_down, 0.0, 0.0, float(side), 1.0, -1.0, -1.0], dtype=np.float32)
 
@@ -373,8 +459,8 @@ class BehavioralCloningTrainer:
                         )
                         act_f4 = np.array([1.0, 0.0, 0.0, 0.0, 0.0, -1.0, -1.0, -1.0], dtype=np.float32)
 
-                        for cs, act in [(car_f1, act_f1), (car_f2, act_f2), (car_f3, act_f3), (car_f4, act_f4)]:
-                            obs_val = self.obs_builder.build_obs(cs, MockArenaForObs(ball_ff, [cs]))
+                        for cs, act, phase in [(car_f1, act_f1, "jumped"), (car_f2, act_f2, "jumped"), (car_f3, act_f3, "dodging"), (car_f4, act_f4, "ground")]:
+                            obs_val = self._synthetic_obs(cs, ball_ff, phase, synth_rng)
                             obs_list.append(obs_val)
                             act_list.append(act)
                             obs_list.append(obs_val * OBS_MIRROR_MASK_NP)
@@ -427,8 +513,8 @@ class BehavioralCloningTrainer:
                         )
                         act_sf3 = np.array([1.0, 0.0, -0.6, float(-flip_side * 0.6), float(-flip_side * 0.6), -1.0, 1.0, -1.0], dtype=np.float32)
 
-                        for cs, act in [(car_sf1, act_sf1), (car_sf2, act_sf2), (car_sf3, act_sf3)]:
-                            obs_val = self.obs_builder.build_obs(cs, MockArenaForObs(ball_sf, [cs]))
+                        for cs, act, phase in [(car_sf1, act_sf1, "jumped"), (car_sf2, act_sf2, "jumped"), (car_sf3, act_sf3, "dodging")]:
+                            obs_val = self._synthetic_obs(cs, ball_sf, phase, synth_rng)
                             obs_list.append(obs_val)
                             act_list.append(act)
                             obs_list.append(obs_val * OBS_MIRROR_MASK_NP)
@@ -468,8 +554,8 @@ class BehavioralCloningTrainer:
                         )
                         act_st2 = np.array([1.0, 0.0, 1.0, 0.0, 0.0, 1.0, 1.0, -1.0], dtype=np.float32)
 
-                        for cs, act in [(car_st1, act_st1), (car_st2, act_st2)]:
-                            obs_val = self.obs_builder.build_obs(cs, MockArenaForObs(ball_st, [cs]))
+                        for cs, act, phase in [(car_st1, act_st1, "jumped"), (car_st2, act_st2, "jumped")]:
+                            obs_val = self._synthetic_obs(cs, ball_st, phase, synth_rng)
                             obs_list.append(obs_val)
                             act_list.append(act)
                             obs_list.append(obs_val * OBS_MIRROR_MASK_NP)
@@ -538,8 +624,8 @@ class BehavioralCloningTrainer:
                         )
                         act_s4 = np.array([1.0, 0.0, 0.0, 0.0, 0.0, -1.0, 1.0, -1.0], dtype=np.float32)
 
-                        for cs, act in [(car_s1, act_s1), (car_s2, act_s2), (car_s3, act_s3), (car_s4, act_s4)]:
-                            obs_val = self.obs_builder.build_obs(cs, MockArenaForObs(ball_hf, [cs]))
+                        for cs, act, phase in [(car_s1, act_s1, "jumped"), (car_s2, act_s2, "jumped"), (car_s3, act_s3, "dodging"), (car_s4, act_s4, "ground")]:
+                            obs_val = self._synthetic_obs(cs, ball_hf, phase, synth_rng)
                             obs_list.append(obs_val)
                             act_list.append(act)
                             obs_list.append(obs_val * OBS_MIRROR_MASK_NP)
@@ -691,6 +777,7 @@ class BehavioralCloningTrainer:
             "continuous_actions": True,
             "continuous": True,
             "use_layer_norm": True,
+            "activation": "leaky_relu",
             "pretrained": True,
             "pretrain_samples": dataset_size,
             "iteration": orig_iteration,
