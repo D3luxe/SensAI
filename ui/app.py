@@ -3858,12 +3858,26 @@ def create_ui():
             b_rew = stats.get("blue_total_reward", stats.get("rewards_blue", 0.0))
             o_rew = stats.get("orange_total_reward", stats.get("rewards_orange", 0.0))
 
+            b_breakdown = stats.get("blue_breakdown", {})
+            o_breakdown = stats.get("orange_breakdown", {})
+
+            top_b_pos = sorted([(k, v) for k, v in b_breakdown.items() if v > 0.005], key=lambda x: x[1], reverse=True)
+            top_b_neg = sorted([(k, v) for k, v in b_breakdown.items() if v < -0.005], key=lambda x: x[1])
+            top_o_pos = sorted([(k, v) for k, v in o_breakdown.items() if v > 0.005], key=lambda x: x[1], reverse=True)
+            top_o_neg = sorted([(k, v) for k, v in o_breakdown.items() if v < -0.005], key=lambda x: x[1])
+
+            b_pos_str = f"{top_b_pos[0][0].replace('_', ' ').title()} (`{top_b_pos[0][1]:+.2f}`)" if top_b_pos else "None"
+            b_neg_str = f"{top_b_neg[0][0].replace('_', ' ').title()} (`{top_b_neg[0][1]:+.2f}`)" if top_b_neg else "None"
+            o_pos_str = f"{top_o_pos[0][0].replace('_', ' ').title()} (`{top_o_pos[0][1]:+.2f}`)" if top_o_pos else "None"
+            o_neg_str = f"{top_o_neg[0][0].replace('_', ' ').title()} (`{top_o_neg[0][1]:+.2f}`)" if top_o_neg else "None"
+
             summary_md = f"""
             #### 📊 Headless Match Simulation Results
             * **Simulated Duration:** `{total_s}` steps ({total_s/15.0:.1f}s match time)
             * **Score:** Blue **{b_goals}** - **{o_goals}** Orange
             * **Blue Ball Touches:** **{b_touches}** | **Orange Ball Touches:** **{o_touches}**
-            * **Blue Net Reward:** `{b_rew:+.2f}` | **Orange Net Reward:** `{o_rew:+.2f}`
+            * **Blue Net Reward:** `{b_rew:+.2f}` (Top Gain: {b_pos_str} | Top Cost: {b_neg_str})
+            * **Orange Net Reward:** `{o_rew:+.2f}` (Top Gain: {o_pos_str} | Top Cost: {o_neg_str})
             """
             return p_fig, r_fig, summary_md
 

@@ -259,10 +259,10 @@ class TestPhysicsAndControls(unittest.TestCase):
         self.assertFalse(ctrl.handbrake, "Handbrake must NOT be hijacked when ball is behind car!")
         self.assertEqual(ctrl.throttle, 1.0, "Throttle must NOT be overridden when ball is behind car!")
 
-    def test_boost_suppressed_on_reverse_throttle(self):
-        """Guarantees bot.py suppresses boost whenever reverse throttle (act[0] < -0.05) is commanded."""
+    def test_boost_suppressed_on_reverse_momentum(self):
+        """Guarantees bot.py executes boost based on policy intent but suppresses when momentum opposes nose (fwd_speed < -150)."""
         bot = SenseiRLBot("TestBot", 0, 0)
-        # Policy requests reverse throttle + boost
+        # Policy requests reverse throttle + boost at standstill
         bot.prev_action = np.array([-0.7, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0], dtype=np.float32)
         bot.ticks_since_last_action = 0
 
@@ -271,7 +271,8 @@ class TestPhysicsAndControls(unittest.TestCase):
                 for k, v in kwargs.items():
                     setattr(self, k, v)
 
-        car = Struct(
+        # Standstill car: policy requests boost, so boost must be executed (matching simulation physics)
+        car_standstill = Struct(
             team=0, boost=50.0, air_state=AirState.OnGround, has_jumped=False, has_double_jumped=False, has_dodged=False,
             physics=Struct(
                 location=Struct(x=0.0, y=0.0, z=17.0),
@@ -281,10 +282,26 @@ class TestPhysicsAndControls(unittest.TestCase):
             )
         )
         ball = Struct(physics=Struct(location=Struct(x=0.0, y=500.0, z=93.0), velocity=Struct(x=0.0, y=0.0, z=0.0), angular_velocity=Struct(x=0.0, y=0.0, z=0.0)))
-        packet = Struct(players=[car], balls=[ball], boost_pads=[], match_info=Struct(match_phase=MatchPhase.Active))
+        packet = Struct(players=[car_standstill], balls=[ball], boost_pads=[], match_info=Struct(match_phase=MatchPhase.Active))
 
         ctrl = bot.get_output(packet)
-        self.assertFalse(ctrl.boost, "Boost must be False when commanding reverse throttle to prevent standstill cancel!")
+        self.assertTrue(ctrl.boost, "Boost must execute when requested at standstill to maintain simulation consistency!")
+
+        # Rapidly reversing car (fwd_speed < -150 uu/s): momentum opposes nose, so boost is suppressed
+        car_reversing = Struct(
+            team=0, boost=50.0, air_state=AirState.OnGround, has_jumped=False, has_double_jumped=False, has_dodged=False,
+            physics=Struct(
+                location=Struct(x=0.0, y=0.0, z=17.0),
+                velocity=Struct(x=0.0, y=-300.0, z=0.0),  # Nose facing +Y, moving -Y at 300 uu/s
+                rotation=Struct(pitch=0.0, yaw=np.pi / 2, roll=0.0),
+                angular_velocity=Struct(x=0.0, y=0.0, z=0.0)
+            )
+        )
+        packet_rev = Struct(players=[car_reversing], balls=[ball], boost_pads=[], match_info=Struct(match_phase=MatchPhase.Active))
+        bot.prev_action = np.array([-0.7, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0], dtype=np.float32)
+        bot.ticks_since_last_action = 0
+        ctrl_rev = bot.get_output(packet_rev)
+        self.assertFalse(ctrl_rev.boost, "Boost must be suppressed when backward momentum opposes nose (fwd_speed < -150 uu/s)!")
 
     def test_mock_arena_get_predicted_ball_pos(self):
         """Guarantees MockArena implements get_predicted_ball_pos and observation builder uses it."""

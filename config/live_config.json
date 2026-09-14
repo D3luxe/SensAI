@@ -1,5 +1,5 @@
 {
-  "updated_at": 1789330768.2992733,
+  "updated_at": 1789424978.8695292,
   "learning_rate": 0.0003,
   "ent_coef": 0.01,
   "clip_range": 0.2,
@@ -23,7 +23,7 @@
     "own_goal_threat_weight": 2.0,
     "player_to_ball_weight": 0.5,
     "jump_bridge_weight": 0.0,
-    "jump_cost_weight": 0.025,
+    "jump_cost_weight": 0.015,
     "spin_cost_weight": 0.015,
     "spin_cost_deadband": 2.0,
     "time_cost_weight": 0.01,
@@ -31,7 +31,7 @@
     "powerslide_weight": 0.2,
     "touch_weight": 0.5,
     "boost_gain_weight": 0.8,
-    "boost_lose_weight": 0.45,
+    "boost_lose_weight": 0.25,
     "boost_pathing_threshold": 50.0
   },
   "scenarios": {

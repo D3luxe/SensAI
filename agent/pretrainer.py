@@ -14,6 +14,7 @@ import torch
 import torch.nn as nn
 import torch.optim as optim
 from typing import Dict, Any, Optional, Tuple, Callable
+from pathlib import Path
 
 from agent.models import ActorCritic, OBS_MIRROR_MASK_NP, ACT_MIRROR_MASK_NP
 from env.observations import DefaultObservationBuilder
@@ -175,10 +176,43 @@ class BehavioralCloningTrainer:
         )
         return self.obs_builder.build_obs(car, MockArenaForObs(ball, [car, opp]))
 
-    def generate_pretrain_dataset(self, parser: Optional[ReplayParser] = None, max_samples: int = 50000) -> Tuple[np.ndarray, np.ndarray]:
+    def generate_pretrain_dataset(
+        self,
+        parser: Optional[ReplayParser] = None,
+        max_samples: int = 50000,
+        use_cache: bool = True
+    ) -> Tuple[np.ndarray, np.ndarray]:
+        pool_file = parser.pool_path if parser is not None else self.pool_path
+        pool_stem = Path(pool_file).stem if pool_file else "replays_pool"
+        cache_dir = Path("data/cache")
+        cache_file = cache_dir / f"bc_dataset_{pool_stem}_{max_samples}_dim{self.obs_builder.obs_dim}.npz"
+
+        if use_cache and cache_file.exists() and os.path.exists(pool_file):
+            try:
+                # Invalidate cache if the replay pool was modified after the cache was written
+                if os.path.getmtime(pool_file) <= os.path.getmtime(cache_file):
+                    with np.load(cache_file) as c:
+                        obs = c["obs"]
+                        act = c["act"]
+                    if len(obs) > 0 and obs.shape[1] == self.obs_builder.obs_dim:
+                        print(f"[BC Pretrainer] Fast-boot: Loaded {len(obs):,} cached frames from {cache_file}")
+                        return obs, act
+            except Exception as e:
+                print(f"[BC Pretrainer] Cache read failed ({e}), regenerating dataset...")
+
         if parser is None:
             parser = ReplayParser(pool_path=self.pool_path)
-        return self.generate_expert_dataset(parser, max_samples)
+        obs, act = self.generate_expert_dataset(parser, max_samples)
+
+        if use_cache and len(obs) > 0:
+            try:
+                cache_dir.mkdir(parents=True, exist_ok=True)
+                np.savez_compressed(cache_file, obs=obs, act=act)
+                print(f"[BC Pretrainer] Saved {len(obs):,} BC dataset frames to cache: {cache_file}")
+            except Exception as e:
+                print(f"[BC Pretrainer] Warning: Failed to save BC cache: {e}")
+
+        return obs, act
 
     def generate_expert_dataset(self, parser: ReplayParser, max_samples: int = 50000) -> Tuple[np.ndarray, np.ndarray]:
         """

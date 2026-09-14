@@ -171,13 +171,15 @@ def compute_trajectory_arrival_time(
     pos: np.ndarray,
     vel: np.ndarray,
     target_pos: np.ndarray,
-    target_vel: Optional[np.ndarray] = None
+    target_vel: Optional[np.ndarray] = None,
+    boost_amount: Optional[float] = None
 ) -> Tuple[float, float, float]:
     """
     Canonical kinematics helper.
     Computes (arrival_time, dist, closing_speed) along line-of-sight.
-    Uses realistic vehicle acceleration (1400 uu/s^2 up to 1410 uu/s throttle speed)
-    to estimate arrival time when accelerating from low speeds.
+    Uses universal vehicle top speed (V_MAX = 2300.0 uu/s, attainable via flips/dodges
+    regardless of boost level) and drive acceleration (1400.0 uu/s^2).
+    Continuous boost credit saves up to ~0.40s reaching top speed without hard gates.
     """
     rel_pos = target_pos - pos
     dist = _norm3(rel_pos)
@@ -190,9 +192,9 @@ def compute_trajectory_arrival_time(
     else:
         closing_speed = float(np.dot(vel, unit_dir))
 
-    # Kinematic arrival estimation accounting for drive acceleration
-    ACCEL = 1400.0       # Conservative vehicle drive acceleration (uu/s^2)
-    V_MAX = 1410.0       # Ground throttle top speed without boost (uu/s)
+    # Universal Rocket League kinematics (accessible via flips/dodges/throttle)
+    ACCEL = 1400.0       # Conservative vehicle drive/flip acceleration (uu/s^2)
+    V_MAX = 2300.0       # Universal Rocket League terminal velocity (uu/s)
 
     v0 = max(0.0, closing_speed)
     if v0 >= V_MAX:
@@ -211,6 +213,14 @@ def compute_trajectory_arrival_time(
     if closing_speed < -50.0:
         arrival += min(0.6, abs(closing_speed) / 1500.0)
 
+    # Continuous boost arrival credit: 100 boost saves ~0.40s reaching top speed
+    if boost_amount is not None and boost_amount > 0.0:
+        b_val = float(boost_amount)
+        boost_ratio = min(1.0, max(0.0, b_val / 100.0 if b_val > 1.0 else b_val))
+        distance_scale = min(1.0, dist / 800.0)
+        boost_credit = 0.40 * boost_ratio * distance_scale
+        arrival = max(0.02, arrival - boost_credit)
+
     return arrival, dist, closing_speed
 
 
@@ -219,8 +229,9 @@ def compute_car_arrival_time(
     target_pos: np.ndarray,
     target_vel: Optional[np.ndarray] = None
 ) -> float:
-    """Computes arrival time in seconds for car relative to target_pos."""
-    arrival, _, _ = compute_trajectory_arrival_time(car.pos, car.vel, target_pos, target_vel)
+    """Computes arrival time in seconds for car relative to target_pos, incorporating boost credit."""
+    boost_val = getattr(car, "boost", 0.0)
+    arrival, _, _ = compute_trajectory_arrival_time(car.pos, car.vel, target_pos, target_vel, boost_amount=boost_val)
     return arrival
 
 
@@ -350,7 +361,8 @@ def solve_intercept_point(
     pos: np.ndarray,
     vel: np.ndarray,
     arena: RocketSimArena,
-    ladder: Tuple[int, ...] = INTERCEPT_SLICE_LADDER
+    ladder: Tuple[int, ...] = INTERCEPT_SLICE_LADDER,
+    boost_amount: Optional[float] = None,
 ) -> Tuple[np.ndarray, float]:
     """
     Finds where along the ball's predicted trajectory a body at (pos, vel) can first meet it.
@@ -377,7 +389,7 @@ def solve_intercept_point(
         if pred is None:
             continue
 
-        arrival, _, _ = compute_trajectory_arrival_time(pos, vel, pred)
+        arrival, _, _ = compute_trajectory_arrival_time(pos, vel, pred, boost_amount=boost_amount)
         if arrival <= slice_t:
             # Reachable with time to spare: this is the earliest meeting point on the trajectory.
             return pred, slice_t
@@ -393,7 +405,13 @@ def solve_intercept_point(
     return best_slice_pos, best_slice_t
 
 
-def cached_intercept_point(arena: RocketSimArena, body_id: int, pos: np.ndarray, vel: np.ndarray) -> Tuple[np.ndarray, float]:
+def cached_intercept_point(
+    arena: RocketSimArena,
+    body_id: int,
+    pos: np.ndarray,
+    vel: np.ndarray,
+    boost_amount: Optional[float] = None,
+) -> Tuple[np.ndarray, float]:
     """Per-step memo around solve_intercept_point, keyed by body id.
 
     Several terms need the same body's intercept within one step -- the pursuit target, the
@@ -408,7 +426,12 @@ def cached_intercept_point(arena: RocketSimArena, body_id: int, pos: np.ndarray,
     cache = arena._intercept_cache
     hit = cache.get(body_id)
     if hit is None:
-        hit = solve_intercept_point(pos, vel, arena)
+        if boost_amount is None and hasattr(arena, "cars"):
+            for c in arena.cars:
+                if getattr(c, "id", -1) == body_id:
+                    boost_amount = getattr(c, "boost", 0.0)
+                    break
+        hit = solve_intercept_point(pos, vel, arena, boost_amount=boost_amount)
         cache[body_id] = hit
     return hit
 
@@ -445,8 +468,9 @@ def compute_opponent_threats(
     for opp in opponents:
         if opp.demoed or opp.id == car.id or opp.team == car.team:
             continue
-        opp_ref = cached_intercept_point(arena, opp.id, opp.pos, opp.vel)[0] if solve_per_opponent else ref_pos
-        arrival, dist, closing_speed = compute_trajectory_arrival_time(opp.pos, opp.vel, opp_ref)
+        opp_boost = getattr(opp, "boost", 0.0)
+        opp_ref = cached_intercept_point(arena, opp.id, opp.pos, opp.vel, boost_amount=opp_boost)[0] if solve_per_opponent else ref_pos
+        arrival, dist, closing_speed = compute_trajectory_arrival_time(opp.pos, opp.vel, opp_ref, boost_amount=opp_boost)
         threats.append(OpponentThreat(opp, dist, closing_speed, arrival))
 
     threats.sort(key=lambda t: t.arrival_time)
@@ -777,17 +801,31 @@ class BallToGoalVelocityReward(BaseReward):
         if is_goal:
             return 0.0
 
-        # Proximity falloff: prevents reward farming when the ball is rolling downfield
-        # without the car having custody, striking proximity, or physical engagement.
+        # Proximity and continuous TTI custody falloff:
+        # Prevents reward farming when the ball is rolling downfield without the car having
+        # custody, striking proximity, or physical engagement.
+        # Striking / close engagement (<= near_dist or arrival <= 0.40s) earns 1.0 custody.
+        # Decays smoothly (via smoothstep) to 0.0 at far_dist (default 1500 uu), extended
+        # dynamically by time-to-arrival when closing at speed.
         car_to_ball = arena.ball.pos - car.pos
         car_dist = _norm3(car_to_ball)
-        if car_dist >= self.far_dist:
-            return 0.0
 
-        if car_dist <= self.near_dist:
+        car_tti, _, closing_speed = compute_trajectory_arrival_time(
+            car.pos, car.vel, arena.ball.pos, None,
+            boost_amount=getattr(car, "boost", 0.0)
+        )
+
+        if car_dist <= self.near_dist or car_tti <= 0.40:
             proximity_factor = 1.0
+        elif car_dist >= self.far_dist and (closing_speed <= 300.0 or car_tti >= 1.50):
+            proximity_factor = 0.0
         else:
-            t = (self.far_dist - car_dist) / (self.far_dist - self.near_dist)
+            t_dist = _clip((self.far_dist - car_dist) / (self.far_dist - self.near_dist), 0.0, 1.0)
+            if closing_speed > 300.0:
+                t_time = _clip((1.50 - car_tti) / (1.50 - 0.40), 0.0, 1.0)
+                t = max(t_dist, t_time)
+            else:
+                t = t_dist
             # Smoothstep (3t^2 - 2t^3) ensures a smooth C1 transition with zero derivative at boundaries
             proximity_factor = float(t * t * (3.0 - 2.0 * t))
 
@@ -809,6 +847,9 @@ class BallToGoalVelocityReward(BaseReward):
         normalized_progress = ball_velocity_toward_goal / BALL_MAX_SPEED
 
         # Losing ground costs exactly what gaining it pays within engagement range.
+        # No w_challenge multiplier is applied here:
+        # 1. 50/50 defensive losses in custody are fully penalized (no "Concede Immunity" exploit).
+        # 2. Offensive shots on a waiting goalkeeper earn full progression credit without race discounts.
         if ball_velocity_toward_goal <= 0.0:
             return proximity_factor * self.weight * normalized_progress
 
@@ -906,41 +947,76 @@ class PlayerToBallVelocityReward(BaseReward):
     def _get_target_pos(self, car_pos: np.ndarray, arena: RocketSimArena, is_kickoff: bool, car_vel: Optional[np.ndarray] = None, car_id: int = -1, car_team: int = 0) -> np.ndarray:
         """
         Computes the tactical target point for distance delta and alignment.
-        When the ball has significant velocity (> 300 uu/s) and has future trajectory,
-        blends the target toward predicted future position so reading wall bounces
-        and intercepting rebounds yields positive rewards instead of penalties.
-        Inside the close strike zone (< 400 uu) or when ball is slow, seamlessly
-        locks to the instantaneous ball position for accurate touches.
+        When winning or contesting the race, targets the ball intercept point.
+        When beaten (w_challenge -> 0), smoothly transitions toward the defensive shadow line
+        between the ball and our goal, eliminating the 0-reward midfield stalling dead zone.
         """
         target_pos = arena.ball.pos
         if is_kickoff:
             return target_pos
 
         ball_speed = _norm3(arena.ball.vel)
-        # A near-stationary ball's intercept point is its current position, so skip the solver.
-        if ball_speed <= 5.0 or not hasattr(arena, "get_predicted_ball_pos"):
-            return self._apply_shadow_retarget(target_pos, car_pos, arena, car_team)
-
         chaser_vel = car_vel if car_vel is not None else np.zeros(3, dtype=np.float32)
-        pred_pos, _ = cached_intercept_point(arena, car_id, car_pos, chaser_vel)
-        if pred_pos is None:
-            return self._apply_shadow_retarget(target_pos, car_pos, arena, car_team)
 
-        # Blend on proximity alone. The solver already collapses to the live ball position when
-        # the intercept is immediate, so the old speed_factor damping only weakened correct
-        # lookahead on slower balls. Inside the strike zone we still lock to the true ball so
-        # contact geometry stays exact.
+        # 1. Intercept point prediction
+        if ball_speed > 5.0 and hasattr(arena, "get_predicted_ball_pos"):
+            pred_pos, pred_t = cached_intercept_point(arena, car_id, car_pos, chaser_vel)
+            if pred_pos is None:
+                pred_pos = arena.ball.pos
+                pred_t = 0.0
+        else:
+            pred_pos = arena.ball.pos
+            pred_t = 0.0
+
+        # Blend on proximity alone inside the close strike zone
         raw_ball_dist = self._calc_dist(car_pos, arena.ball.pos)
         blend = min(1.0, max(0.0, (raw_ball_dist - 250.0) / 350.0))
         blended = (1.0 - blend) * arena.ball.pos + blend * pred_pos
 
         # Clamp within arena bounds to prevent numerical overshoot
-        clamped = np.array([
+        clamped_intercept = np.array([
             _clip(blended[0], -ARENA_EXTENT_X + 100.0, ARENA_EXTENT_X - 100.0),
             _clip(blended[1], -ARENA_EXTENT_Y + 100.0, ARENA_EXTENT_Y - 100.0),
             _clip(blended[2], 93.0, ARENA_HEIGHT_Z - 100.0)
         ], dtype=np.float32)
-        return self._apply_shadow_retarget(clamped, car_pos, arena, car_team)
+
+        # 2. Multi-Agent Race Evaluation & Continuous Logistic Challenge Weight
+        opponents = [c for c in getattr(arena, "cars", []) if getattr(c, "team", -1) != car_team and not getattr(c, "demoed", False)]
+        if opponents:
+            opp_arrivals = []
+            for opp in opponents:
+                opp_b = getattr(opp, "boost", 0.0)
+                o_ref = cached_intercept_point(arena, opp.id, opp.pos, opp.vel, boost_amount=opp_b)[0]
+                arr, _, _ = compute_trajectory_arrival_time(opp.pos, opp.vel, o_ref, boost_amount=opp_b)
+                opp_arrivals.append(arr)
+            t_opp = min(opp_arrivals)
+            t_self = pred_t if pred_t > 0.0 else compute_trajectory_arrival_time(car_pos, chaser_vel, clamped_intercept)[0]
+            delta_t_race = t_self - t_opp
+        else:
+            delta_t_race = -999.0
+
+        # Smooth logistic challenge sigmoid centered at +0.10s with steepness 8.0:
+        # Delta t = -0.20s -> w ~ 0.91 (attack / strike)
+        # Delta t =  0.00s -> w ~ 0.69 (solid contest incentive on 50/50s)
+        # Delta t = +0.10s -> w = 0.50
+        # Delta t = +0.35s -> w ~ 0.12 (smoothly yields to shadow positioning)
+        w_challenge = float(1.0 / (1.0 + math.exp(min(20.0, max(-20.0, 8.0 * (delta_t_race - 0.10))))))
+
+        # Close striking proximity override: when directly engaging (< 500 uu), contest takes priority
+        if raw_ball_dist < 500.0:
+            prox_boost = min(1.0, max(0.0, (500.0 - raw_ball_dist) / 300.0))
+            w_challenge = float(w_challenge + (1.0 - w_challenge) * prox_boost)
+
+        # 3. Defensive Shadow Anchor along ball-to-own-goal line
+        defend_goal_y = -ARENA_EXTENT_Y if car_team == 0 else ARENA_EXTENT_Y
+        shadow_x = _clip(float(arena.ball.pos[0]) * 0.5, -ARENA_EXTENT_X + 200.0, ARENA_EXTENT_X - 200.0)
+        shadow_y = _clip((float(arena.ball.pos[1]) + defend_goal_y) * 0.5, -ARENA_EXTENT_Y + 200.0, ARENA_EXTENT_Y - 200.0)
+        shadow_anchor = np.array([shadow_x, shadow_y, BALL_RADIUS], dtype=np.float32)
+
+        # Dynamic blend between pursuit intercept and defensive shadow line
+        tactical_pos = (w_challenge * clamped_intercept + (1.0 - w_challenge) * shadow_anchor).astype(np.float32)
+
+        return self._apply_shadow_retarget(tactical_pos, car_pos, arena, car_team)
 
     def _apply_shadow_retarget(self, target_pos: np.ndarray, car_pos: np.ndarray, arena: RocketSimArena, car_team: int) -> np.ndarray:
         """
@@ -1044,17 +1120,10 @@ class PlayerToBallVelocityReward(BaseReward):
         # Storing last step's distance and differencing it against this step's makes the shaping
         # non-stationary: the tactical target is a blend toward a predicted intercept, so it moves
         # discontinuously whenever the ball bounces, an opponent touches it, or the blend factor
-        # crosses one of its proximity/speed ramps. That injected a free +/- delta unrelated to any
-        # action the bot took -- and the opponent-touch guard below only ever clamped the negative
-        # side, so an opponent knocking the ball toward the bot paid out.
+        # crosses one of its proximity/speed ramps.
         #
-        # Split the delta into the two halves that produce it and hold the other endpoint fixed for
-        # each, so both are measured against a single consistent potential:
-        #   car-motion   : how much the car closed on THIS step's target
-        #   target-motion: how much the target moved relative to THIS step's car position
-        # The car half is always trustworthy. The target half is clamped to the distance the ball
-        # could physically have travelled this step, which absorbs prediction-blend jumps while
-        # preserving genuine credit/debit for a ball rolling toward or away from the bot.
+        # Measure car motion strictly against THIS step's tactical target, guaranteeing zero
+        # reward spikes when w_challenge transitions between attack and shadow defense.
         prev_car_pos = self._prev_pos.get(car.id)
         prev_target = self._prev_target.get(car.id)
         self._prev_pos[car.id] = car.pos.copy()
@@ -1066,19 +1135,20 @@ class PlayerToBallVelocityReward(BaseReward):
             prev_dist = curr_dist
         else:
             car_motion_delta = self._calc_dist(prev_car_pos, target_pos) - curr_dist
-            target_motion_delta = self._calc_dist(car.pos, prev_target) - curr_dist
 
+            raw_ball_dist = self._calc_dist(car.pos, arena.ball.pos)
             step_dt = float(getattr(arena, "last_step_dt", 8.0 / 120.0))
-            # Generous budget: ball speed plus a floor for a near-stationary ball that is
-            # nonetheless about to be struck. Anything beyond this is a target discontinuity.
             ball_travel_budget = _norm3(arena.ball.vel) * step_dt + 60.0
-            target_motion_delta = _clip(target_motion_delta, -ball_travel_budget, ball_travel_budget)
 
-            # Both halves are kept deliberately. Crediting only the car's motion against the
-            # CURRENT target was tried and is worse: a car following a fleeing ball at a fixed
-            # gap would then be paid every step for ground it never gained. With both terms a
-            # car and ball moving together cancel to exactly zero, which is the correct price
-            # for a carry.
+            # Target motion delta is only evaluated during close ball tracking (< 600 uu)
+            # to preserve carry cancellation. When shadowing downfield, car_motion_delta
+            # provides a pure, spike-free gradient.
+            if raw_ball_dist < 600.0:
+                raw_target_delta = self._calc_dist(car.pos, prev_target) - curr_dist
+                target_motion_delta = _clip(raw_target_delta, -ball_travel_budget, ball_travel_budget)
+            else:
+                target_motion_delta = 0.0
+
             prev_dist = curr_dist + car_motion_delta + target_motion_delta
 
         prev_t = self._prev_touches.get(car.id, car.ball_touches)
@@ -1101,13 +1171,18 @@ class PlayerToBallVelocityReward(BaseReward):
 
         if is_kickoff:
             delta_dist = (prev_dist - curr_dist) / 2000.0
-            if fwd_alignment < -0.20 and float(action[0]) > 0.30:
-                # Car is actively peeling away backwards from the kickoff ball
-                return self.weight * -1.5
-            fwd_speed_to_ball = max(0.0, float(np.dot(car.vel, unit_to_ball)))
-            vel_toward_ball = (fwd_speed_to_ball / 2300.0) * 0.30 * max(0.0, fwd_alignment)
-            kickoff_mult = 3.0 if delta_dist > 0.0 else 2.5
-            return self.weight * (delta_dist * kickoff_mult + vel_toward_ball)
+            # Output-driven signed kinematic velocity projection along target vector
+            # (+1.0 at max speed toward ball, 0.0 stationary, -1.0 reversing away)
+            vel_proj = float(np.dot(car.vel, unit_to_ball)) / 2300.0
+            vel_toward_ball = vel_proj * 0.15 * max(-1.0, min(1.0, fwd_alignment))
+
+            # Output-driven forward wheel traction progress along nose toward ball
+            car_fwd_vel = float(np.dot(car.vel[:2], car.get_forward_vector()[:2]))
+            wheel_progress = (car_fwd_vel / 2300.0) * 0.10 * max(0.0, fwd_alignment)
+
+            # Symmetric distance delta with amplified backward penalty
+            kickoff_mult = 1.5 if delta_dist > 0.0 else 3.0
+            return self.weight * (delta_dist * kickoff_mult + vel_toward_ball + wheel_progress)
 
         # ── General Open Play ─────────────────────────────────────────────────
         ball_z = float(arena.ball.pos[2])
@@ -1336,10 +1411,10 @@ class PlayerToBallVelocityReward(BaseReward):
                     desired_speed = effective_ball_speed + safe_speed_margin
 
                     # Pacing penalty is mutually exclusive with overshoot penalty (approach vs aftermath)
-                    if overshoot_penalty == 0.0:
+                    """ if overshoot_penalty == 0.0:
                         if self_tti < 0.40 and effective_car_speed > desired_speed:
                             excess = (effective_car_speed - desired_speed) / 800.0
-                            pacing_penalty = -0.15 * min(1.0, max(0.0, excess))
+                            pacing_penalty = -0.15 * min(1.0, max(0.0, excess)) """
 
             # 3b. Trajectory & Time-To-Intercept (TTI) Defending Net Threat Evaluation:
             # Differentiates safe defensive plays (corner wraps, backboard clears, recoverable touches)
@@ -1374,10 +1449,10 @@ class PlayerToBallVelocityReward(BaseReward):
                         wrong_side_push_penalty = -0.35 * (car_vy_defend / 1500.0)
 
             # Dribble Proximity Pacing & Anti-Overshoot:
-            is_close_approach = bool(raw_ball_dist < 350.0 or (horiz_ball_dist < 350.0 and ball_z < 650.0))
+            """ is_close_approach = bool(raw_ball_dist < 350.0 or (horiz_ball_dist < 350.0 and ball_z < 650.0))
             if is_close_approach and car.on_ground and not is_roof_carry and not is_on_wall and not is_ball_on_wall and ball_z < 250.0:
                 if effective_car_speed > effective_ball_speed + 150.0 and float(action[6]) > 0.0:
-                    dribble_boost_penalty = -0.30 * float(action[6])
+                    dribble_boost_penalty = -0.30 * float(action[6]) """
 
             # Hard Anti-Stacking Floor:
             # Clamps combined strike-zone approach penalties to a maximum floor of -0.30
@@ -2150,45 +2225,99 @@ class JumpBridgeReward(BaseReward):
 # ==============================================================================
 # 8. BOOST RETENTION & ECONOMY (Necto Sqrt-Potential Engine)
 # ==============================================================================
-def _nearest_active_pad_dist(active, poses, cpx: float, cpy: float, radius: float):
+def _best_active_pad_score(
+    active,
+    poses,
+    cpx: float,
+    cpy: float,
+    radius: float,
+    unit_fwd: np.ndarray,
+    unit_vel: np.ndarray,
+    has_speed: bool,
+    target_vec_2d: np.ndarray,
+    is_big: bool = False,
+    car_boost: float = 0.0
+) -> float:
     """
-    Planar distance to the nearest ACTIVE pad within `radius`, or None if there is none.
+    Computes the best pad transit score within `radius`, combining proximity with
+    pad-velocity alignment (heading) and corridor alignment toward the macro target.
 
-    Ignores respawning pads deliberately: a pad on cooldown is not boost, so steering at one
-    should not read as progress.
+    Safeguard 1: Zero-division guard on car speed (> 50 uu/s).
+    Safeguard 2: Differentiates 100-orbs from small pads scaled by boost deficit.
+    Safeguard 3: Evaluated against backpost or ball macro-target.
+    Includes a singularity deadzone for d < 150 uu where alignment is locked to 1.0.
     """
-    best2 = radius * radius
-    found = False
+    best_score = 0.0
+    radius2 = radius * radius
+    boost_deficit = 1.0 - _clip(car_boost / 100.0, 0.0, 1.0)
+    # Big pads get up to 2.0x priority multiplier when starving
+    pad_type_mult = 1.0 + (1.0 if is_big else 0.0) * boost_deficit
+
     for i in range(len(active)):
         if not active[i]:
             continue
         dx = float(poses[i, 0]) - cpx
         dy = float(poses[i, 1]) - cpy
         d2 = dx * dx + dy * dy
-        if d2 < best2:
-            best2 = d2
-            found = True
-    return math.sqrt(best2) if found else None
+        if d2 >= radius2:
+            continue
+
+        d = math.sqrt(d2)
+        prox_score = 1.0 - (d / radius)
+
+        # Vector Singularity Deadzone: inside 150 uu (hitbox boundary),
+        # lock trajectory_mult to 1.0 to eliminate directional noise/singularity.
+        if d < 150.0:
+            trajectory_mult = 1.0
+        else:
+            unit_pad_x = dx / d
+            unit_pad_y = dy / d
+
+            # 1. Heading/Velocity alignment: how well the pad sits in front of the car
+            align_heading = float(unit_fwd[0] * unit_pad_x + unit_fwd[1] * unit_pad_y)
+            if has_speed:
+                align_heading = max(align_heading, float(unit_vel[0] * unit_pad_x + unit_vel[1] * unit_pad_y))
+
+            # 2. Corridor alignment: how well the pad sits on the path to macro target (ball or backpost)
+            align_corridor = max(0.0, float(target_vec_2d[0] * unit_pad_x + target_vec_2d[1] * unit_pad_y))
+
+            # Blend heading (60%) and corridor (40%), clamped to [0.0, 1.0]
+            trajectory_mult = _clip(0.60 * align_heading + 0.40 * align_corridor, 0.0, 1.0)
+
+        score = prox_score * trajectory_mult * pad_type_mult
+        if score > best_score:
+            best_score = score
+
+    return best_score
 
 
 class BoostReward(BaseReward):
     """
-    Potential-Based Boost Conservation & Pad Collection.
+    Potential-Based Boost Conservation & Pad Collection with Trajectory & Urgency Gating.
 
     The conservation term is an exact potential difference, charged at the same rate in
     both directions, so any path that returns to the boost level it started from sums to
     zero. What survives is a pure function of the boost the car ended up holding.
 
-    On top of that sit situational waste penalties (supersonic burn, ceiling climbs,
-    reverse-momentum airbraking, off-axis orbiting) scaled by lose_weight, and a transit
-    shaping stream for routing through pads while low, scaled by gain_weight.
+    Pad collection transit is shaped via a trajectory-aligned, urgency-gated potential:
+      1. Pad-Trajectory Alignment: Rewards pads sitting on the bot's heading, velocity, and
+         macro-target corridor, with a 150 uu deadzone preventing origin singularities.
+      2. Dynamic Backpost Targeting: Target switches to defensive backpost during retreat,
+         allowing the bot to collect pads along defensive rotations without penalty.
+      3. Dynamic Urgency Gating: Opponent kinematics and net threats smoothly ramp safety
+         budget down, buffered by a slew-rate limiter to eliminate single-tick credit shocks.
+      4. Pure Telescoping PBRS: Evaluated via gamma * Psi(s_{t+1}) - Psi(s_t) without artificial
+         clamps or floors, guaranteeing zero reward-pump exploits.
     """
-    def __init__(self, gain_weight: float = 0.6, lose_weight: float = 0.3):
+    def __init__(self, gain_weight: float = 0.6, lose_weight: float = 0.3, gamma: float = 1.0):
         super().__init__(gain_weight)
         self.gain_weight = gain_weight
         self.lose_weight = lose_weight
+        self.gamma = float(gamma)
         self._prev_boost: Dict[int, float] = {}
         self._prev_transit: Dict[int, float] = {}
+        self._retreat_mode: Dict[int, bool] = {}
+        self._safety_budget_filter: Dict[int, float] = {}
 
     @staticmethod
     def _potential(b: float) -> float:
@@ -2213,30 +2342,14 @@ class BoostReward(BaseReward):
 
     def reset(self, initial_state: RocketSimArena):
         self._prev_boost = {car.id: _clip(car.boost / 100.0, 0.0, 1.0) for car in initial_state.cars}
+        self._retreat_mode = {car.id: False for car in initial_state.cars}
+        self._safety_budget_filter = {car.id: 1.0 for car in initial_state.cars}
         self._prev_transit = {car.id: self._transit_potential(car, initial_state) for car in initial_state.cars}
 
     def _transit_potential(self, car: CarState, arena: RocketSimArena) -> float:
         """
-        Psi(s): how well placed the car is to pick up boost it needs, as a pure function of
-        state -- distance to the nearest active pad, scaled by how empty the tank is.
-
-        This replaces a per-step INCOME stream. The old term paid
-        `0.40 * hunger * align * prox * speed` on every step the car was closing on a pad,
-        which had no counterpart when it turned away, so circling in and out of pad range
-        while low on boost paid roughly 3.0 per approach and could be repeated all episode.
-
-        Charging the DIFFERENCE in Psi instead preserves exactly the behaviour that term was
-        bought for -- routing through pads rather than skipping them still pays, step by
-        step, in proportion to distance actually closed -- while making it a guide with zero
-        net payout. Approaching a pad and turning away refunds precisely what it paid, and
-        collecting one zeroes Psi (the pad goes inactive and the tank is full), which cancels
-        the approach. All the durable value then comes from Phi, where it belongs.
-
-        The explicit alignment and speed gates the rate term needed are gone: a potential
-        difference already measures alignment times speed, because that is what closing
-        distance is. The height taper stays, and in this form its old hazard is gone too --
-        jumping near a pad costs Psi but landing refunds it, so there is no longer a standing
-        opportunity cost for leaving the turf.
+        Psi(s): how well placed the car is to pick up boost it needs along its intended trajectory,
+        gated dynamically by opponent threat kinematics and defensive urgency.
         """
         if self.gain_weight <= 1e-6:
             return 0.0
@@ -2247,43 +2360,119 @@ class BoostReward(BaseReward):
             return 0.0
         air_taper = 1.0 if car.on_ground else max(0.0, 1.0 - (cz - 17.0) / 233.0)
 
+        # ── Macro-Target Vector & Schmitt Trigger Hysteresis (Safeguard 3) ──
+        team_sign = 1.0 if car.team == 0 else -1.0
+        goalside_margin = (float(car.pos[1]) - float(arena.ball.pos[1])) * team_sign
+        car_vy_defend = -float(car.vel[1]) if car.team == 0 else float(car.vel[1])
+
+        is_in_retreat = self._retreat_mode.get(car.id, False)
+        if not is_in_retreat:
+            # Enter retreat mode when caught ahead of the ball or sprinting back to defend
+            if goalside_margin > 300.0 or car_vy_defend > 250.0:
+                is_in_retreat = True
+        else:
+            # Exit retreat mode once recovered goalside and no longer rushing to net
+            if goalside_margin < 100.0 and car_vy_defend < 100.0:
+                is_in_retreat = False
+        self._retreat_mode[car.id] = is_in_retreat
+
+        if is_in_retreat:
+            # Back-post targeting: goal post is at ~892 uu; use 800 uu.
+            # If ball is on positive X, backpost is negative X (and vice versa).
+            backpost_x = -800.0 if float(arena.ball.pos[0]) > 0.0 else 800.0
+            defend_y = -ARENA_EXTENT_Y if team_sign > 0 else ARENA_EXTENT_Y
+            target_pos = np.array([backpost_x, defend_y, 0.0], dtype=np.float32)
+        else:
+            target_pos = arena.ball.pos
+
+        car_to_target_2d = target_pos[:2] - car.pos[:2]
+        dist_target = _norm2(car_to_target_2d)
+        target_vec_2d = car_to_target_2d / max(1e-4, dist_target)
+
+        # ── Heading & Velocity Vectors with Zero-Division Guard (Safeguard 1) ──
+        fwd_vec = car.get_forward_vector()[:2]
+        fwd_norm = _norm2(fwd_vec)
+        unit_fwd = fwd_vec / max(1e-4, fwd_norm)
+
+        car_speed = _norm2(car.vel[:2])
+        has_speed = bool(car_speed > 50.0)
+        unit_vel = car.vel[:2] / max(1e-4, car_speed) if has_speed else unit_fwd
+
+        # ── Dynamic Threat Intensity & Slew-Rate Limiter (Issue 4) ──────────
+        threats = compute_opponent_threats(car, arena)
+        I_race = 0.0
+        if threats:
+            nearest_threat = threats[0]
+            opp = nearest_threat.opp
+            opp_arr = nearest_threat.arrival_time
+            bot_arr = compute_car_arrival_time(car, arena.ball.pos, arena.ball.vel)
+
+            opp_to_ball = arena.ball.pos - opp.pos
+            opp_dist_to_ball = _norm3(opp_to_ball)
+            opp_unit_to_ball = opp_to_ball / max(1e-4, opp_dist_to_ball)
+            opp_fwd = opp.get_forward_vector()
+            opp_align_to_ball = float(np.dot(opp_fwd, opp_unit_to_ball))
+            opp_closing_vel = float(np.dot(opp.vel, opp_unit_to_ball))
+
+            if opp_closing_vel > 200.0 and opp_align_to_ball > 0.2:
+                race_margin = bot_arr - opp_arr
+                if opp_arr < 2.5:
+                    urgency = _clip((2.5 - opp_arr) / 2.0, 0.0, 1.0)
+                    threat_proximity = _clip((race_margin + 0.5) / 1.0, 0.0, 1.0)
+                    I_race = urgency * threat_proximity
+
+        defend_goal_y = -ARENA_EXTENT_Y if car.team == 0 else ARENA_EXTENT_Y
+        dist_ball_to_defend = abs(float(arena.ball.pos[1]) - defend_goal_y)
+        ball_vy_defend = -float(arena.ball.vel[1]) if car.team == 0 else float(arena.ball.vel[1])
+        I_net = 0.0
+        if ball_vy_defend > 100.0 and dist_ball_to_defend < 4500.0:
+            speed_factor = _clip(ball_vy_defend / 1500.0, 0.0, 1.0)
+            depth_factor = _clip(1.0 - dist_ball_to_defend / 4500.0, 0.0, 1.0)
+            I_net = speed_factor * depth_factor
+
+        I_threat = max(I_race, I_net)
+        raw_budget = _clip(1.0 - I_threat, 0.0, 1.0)
+
+        prev_budget = self._safety_budget_filter.get(car.id, 1.0)
+        # Slew-rate limit budget changes to at most 0.20 per step
+        safety_budget = _clip(raw_budget, prev_budget - 0.20, prev_budget + 0.20)
+        self._safety_budget_filter[car.id] = safety_budget
+
         cpx, cpy = float(car.pos[0]), float(car.pos[1])
         best = 0.0
 
-        # Big orbs: worth going further out of the way for, so a wider search radius.
+        # Big orbs: search radius 1200.0
         if car.boost < 50.0 and hasattr(arena, "_big_pad_pos_3d") and hasattr(arena, "_big_pad_active"):
-            # Urgency below 20 boost ramps in continuously rather than switching on at the
-            # threshold. As a rate term the old `if boost < 20: hunger *= 1.3` was merely a
-            # step in the income; as a potential it became a payment for crossing 20 going
-            # down, which made the combined potential non-monotone in boost right there --
-            # burning a sliver of boost next to a pad paid 0.074. The ramp reaches the same
-            # 1.3x at empty with no discontinuity anywhere.
             hunger = (50.0 - car.boost) / 50.0
             hunger *= 1.0 + 0.3 * _clip((20.0 - car.boost) / 20.0, 0.0, 1.0)
             hunger = min(1.5, hunger)
-            d = _nearest_active_pad_dist(arena._big_pad_active, arena._big_pad_pos_3d, cpx, cpy, 1200.0)
-            if d is not None:
-                best = max(best, 0.40 * hunger * (1.0 - d / 1200.0))
+            score = _best_active_pad_score(
+                arena._big_pad_active, arena._big_pad_pos_3d, cpx, cpy, 1200.0,
+                unit_fwd, unit_vel, has_speed, target_vec_2d, is_big=True, car_boost=car.boost
+            )
+            if score > 0.0:
+                best = max(best, 0.40 * hunger * score)
 
+        # Small pads: search radius 550.0
         if car.boost < 65.0 and hasattr(arena, "_small_pad_pos_3d") and hasattr(arena, "_small_pad_active"):
             hunger = (65.0 - car.boost) / 65.0
-            d = _nearest_active_pad_dist(arena._small_pad_active, arena._small_pad_pos_3d, cpx, cpy, 550.0)
-            if d is not None:
-                best = max(best, 0.20 * hunger * (1.0 - d / 550.0))
+            score = _best_active_pad_score(
+                arena._small_pad_active, arena._small_pad_pos_3d, cpx, cpy, 550.0,
+                unit_fwd, unit_vel, has_speed, target_vec_2d, is_big=False, car_boost=car.boost
+            )
+            if score > 0.0:
+                best = max(best, 0.20 * hunger * score)
 
-        return float(self.gain_weight * best * air_taper)
+        return float(self.gain_weight * best * air_taper * safety_budget)
 
     def get_reward(self, car: CarState, arena: RocketSimArena, action: np.ndarray, is_goal: bool, scoring_team: Optional[int]) -> float:
         prev = self._prev_boost.get(car.id, _clip(car.boost / 100.0, 0.0, 1.0))
         curr = _clip(car.boost / 100.0, 0.0, 1.0)
         self._prev_boost[car.id] = curr
 
-        # Transit potential advances on EVERY step, including kickoff and including steps
-        # where the tank did not change. Skipping the update on any step would drop that
-        # step's difference on the floor, and a shaping term that silently forgets an
-        # interval is no longer telescoping.
+        # Transit potential advances on EVERY step, evaluating discounted PBRS cleanly
         psi_now = self._transit_potential(car, arena)
-        psi_delta = psi_now - self._prev_transit.get(car.id, psi_now)
+        psi_delta = float(self.gamma * psi_now - self._prev_transit.get(car.id, psi_now))
         self._prev_transit[car.id] = psi_now
 
         boost_diff = math.sqrt(curr) - math.sqrt(prev)
@@ -3085,7 +3274,8 @@ class CombinedReward:
             ),
             "boost": BoostReward(
                 gain_weight=weights.get("boost_gain_weight", 0.6),
-                lose_weight=weights.get("boost_lose_weight", 0.3)
+                lose_weight=weights.get("boost_lose_weight", 0.3),
+                gamma=weights.get("gamma", 0.99)
             ),
             "powerslide": PowerslideReward(
                 weight=weights.get("powerslide_weight", 0.20)
@@ -3162,6 +3352,8 @@ class CombinedReward:
             self.rewards["boost"].gain_weight = float(new_weights["boost_gain_weight"])
         if "boost_lose_weight" in new_weights and "boost" in self.rewards:
             self.rewards["boost"].lose_weight = float(new_weights["boost_lose_weight"])
+        if "gamma" in new_weights and "boost" in self.rewards:
+            self.rewards["boost"].gamma = float(new_weights["gamma"])
 
     def get_reward(self, car: CarState, arena: RocketSimArena, action: np.ndarray, is_goal: bool, scoring_team: Optional[int], include_breakdown: bool = True) -> Tuple[float, Dict[str, float]]:
         total = 0.0

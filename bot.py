@@ -888,9 +888,9 @@ class SenseiRLBot(Bot):
                 controller.roll = 0.0
 
             # Boost Economy & Momentum Safety Gate:
-            # 1. Suppress boost when reverse throttle is commanded (act[0] < -0.05) or momentum strongly opposes nose (fwd_speed < -150 uu/s).
+            # 1. Suppress boost when momentum strongly opposes nose direction (fwd_speed < -150 uu/s).
             # 2. Suppress boost on the ground when already at supersonic speed (is_supersonic), preventing boost waste.
-            controller.boost = bool(act[6] > 0.0 and act[0] > -0.05 and fwd_speed > -150.0 and not (is_supersonic and is_on_ground))
+            controller.boost = bool(act[6] > 0.0 and fwd_speed > -150.0 and not (is_supersonic and is_on_ground))
             controller.handbrake = bool(act[7] > 0.0 and is_on_ground)
 
             # Draw the readout once per policy step (15 Hz), not once per physics tick.

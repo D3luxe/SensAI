@@ -42,14 +42,20 @@ class TestOutcomeRewardsAndTTI(unittest.TestCase):
         ball_vel = np.array([0.0, 0.0, 0.0], dtype=np.float32)
 
         t_arr, dist, closing = compute_trajectory_arrival_time(car_pos, car_vel, ball_pos, ball_vel)
-        self.assertAlmostEqual(t_arr, 1.0, delta=0.05)
+        # Vehicle accelerates from closing speed 1000 uu/s at 1400 uu/s^2 toward universal V_MAX 2300 uu/s (~0.68s)
+        self.assertAlmostEqual(t_arr, 0.678, delta=0.05)
         self.assertAlmostEqual(dist, 1000.0, delta=5.0)
         self.assertAlmostEqual(closing, 1000.0, delta=5.0)
 
-        car = CarState(id=0, team=0, pos=car_pos, vel=car_vel)
+        car = CarState(id=0, team=0, pos=car_pos, vel=car_vel, boost=0.0)
         t_car = compute_car_arrival_time(car, ball_pos, ball_vel)
         self.assertIsInstance(t_car, float)
-        self.assertAlmostEqual(t_car, 1.0, delta=0.05)
+        self.assertAlmostEqual(t_car, 0.678, delta=0.05)
+
+        # Boost credit test: 50 boost saves 0.20s reaching top speed
+        car_boosted = CarState(id=0, team=0, pos=car_pos, vel=car_vel, boost=50.0)
+        t_boosted = compute_car_arrival_time(car_boosted, ball_pos, ball_vel)
+        self.assertAlmostEqual(t_boosted, 0.678 - 0.20, delta=0.05)
 
         car_vel_perp = np.array([1000.0, 0.0, 0.0], dtype=np.float32)
         t_fallback, _, closing_fallback = compute_trajectory_arrival_time(car_pos, car_vel_perp, ball_pos, ball_vel)
