@@ -1050,32 +1050,60 @@ class PlayerToBallVelocityReward(BaseReward):
         ], dtype=np.float32)
 
         # 2. Multi-Agent Race Evaluation & Continuous Logistic Challenge Weight
-        opponents = [c for c in getattr(arena, "cars", []) if getattr(c, "team", -1) != car_team and not getattr(c, "demoed", False)]
-        opp_has_possession = False
-        if opponents:
-            opp_arrivals = []
-            for opp in opponents:
-                opp_b = getattr(opp, "boost", 0.0)
-                o_ref = cached_intercept_point(arena, opp.id, opp.pos, opp.vel, boost_amount=opp_b)[0]
-                arr, d_opp, _ = compute_trajectory_arrival_time(opp.pos, opp.vel, o_ref, boost_amount=opp_b)
-                opp_arrivals.append(arr)
-                if d_opp < 350.0:
-                    opp_has_possession = True
-            t_opp = min(opp_arrivals)
-            t_self = pred_t if pred_t > 0.0 else compute_trajectory_arrival_time(car_pos, chaser_vel, clamped_intercept, boost_amount=boost_amount)[0]
-            delta_t_race = t_self - t_opp
+        threat_car = car
+        if threat_car is None:
+            threat_car = CarState(id=car_id, team=car_team)
+            threat_car.pos = car_pos
+            threat_car.vel = chaser_vel
+            threat_car.boost = boost_amount
+
+        threats = compute_opponent_threats(threat_car, arena, use_intercept=True)
+        if threats:
+            fastest_threat = threats[0]
+            t_opp = float(fastest_threat.arrival_time)
+            d_opp = float(fastest_threat.dist)
+            v_close = float(fastest_threat.closing_speed)
+            fastest_opp = fastest_threat.opp
+            opp_has_possession = bool(fastest_threat.dist < 350.0)
+
+            g_arr = _clip((2.5 - t_opp) / 1.8, 0.0, 1.0)
+            g_dist = _clip((4500.0 - d_opp) / 3500.0, 0.0, 1.0)
+            g_close = _clip((v_close - 100.0) / 600.0, 0.0, 1.0)
+            # Smooth possession sigmoid over 150..500 uu (touch contact range to 50/50 approach)
+            g_poss = _clip((500.0 - d_opp) / 350.0, 0.0, 1.0)
+            g_opp = _clip(max(g_arr * g_dist * g_close, g_poss), 0.0, 1.0)
         else:
-            delta_t_race = -999.0
+            t_opp = float("inf")
+            d_opp = float("inf")
+            v_close = 0.0
+            fastest_opp = None
+            opp_has_possession = False
+            g_poss = 0.0
+            g_opp = 0.0
 
         ball_y = float(arena.ball.pos[1])
         ball_depth = -ball_y if car_team == 0 else ball_y  # > 0 when ball is in our defending half
         ball_vy_defend = -float(arena.ball.vel[1]) if car_team == 0 else float(arena.ball.vel[1])
 
-        # Threat Gating: Only surrender pursuit to shadow defense if the play threatens our half
-        # (ball is in our half, ball moving toward net > 150 uu/s, or opponent has close possession).
-        # Harmless loose balls in the opponent's half keep w_challenge high to maintain pressure.
-        is_threatening = bool(ball_depth > 0.0 or ball_vy_defend > 150.0 or opp_has_possession)
-        effective_delta_t = delta_t_race if is_threatening else min(0.05, delta_t_race)
+        # 1. Pitch Depth Gradient (smooth symmetric thirds transition based on 5120 arena extent)
+        g_depth = _clip((ball_depth + 1700.0) / 3400.0, 0.0, 1.0)
+
+        # 2. Ball Speed Threat Gradient (deadband at 200 uu/s prevents harmless rolls from generating threat)
+        I_ball = g_depth * _clip((ball_vy_defend - 200.0) / 1000.0, 0.0, 1.0)
+
+        # 3. Opponent Threat Factor (with +0.15 * g_poss challenge recognition floor in offensive half)
+        I_opp = g_opp * _clip(g_depth + 0.3 * _clip(ball_vy_defend / 800.0, 0.0, 1.0) + 0.15 * g_poss, 0.0, 1.0)
+
+        # 4. Unified Continuous Threat Intensity
+        I_threat = _clip(max(I_ball, I_opp), 0.0, 1.0)
+
+        t_self = pred_t if pred_t > 0.0 else compute_trajectory_arrival_time(car_pos, chaser_vel, clamped_intercept, boost_amount=boost_amount)[0]
+        delta_t_race = (t_self - t_opp) if t_opp < float("inf") else -999.0
+
+        # Continuous Threat-Weighted Race Blend:
+        # When unthreatened (I_threat -> 0), blend toward decisive safe floor (<= -0.25s) so w_challenge >= 0.94
+        safe_dt = min(delta_t_race, -0.25)
+        effective_delta_t = (1.0 - I_threat) * safe_dt + I_threat * delta_t_race
 
         # Smooth logistic challenge sigmoid centered at +0.10s with steepness 8.0:
         # Delta t = -0.20s -> w ~ 0.91 (attack / strike)
@@ -1100,7 +1128,7 @@ class PlayerToBallVelocityReward(BaseReward):
         # Continuous Opponent Dribble-Speed Gradient:
         # When opponent is slowly pushing/rolling the ball (< 1400 uu/s), maintain an active challenge floor
         # so SensAI cuts across and tackles instead of conceding open space.
-        v_opp = _norm3(opponents[0].vel) if opponents else 0.0
+        v_opp = _norm3(fastest_opp.vel) if fastest_opp is not None else 0.0
         w_slow_opp = _clip((1400.0 - v_opp) / 1000.0, 0.0, 1.0) * 0.45
         w_challenge = max(w_challenge, w_slow_opp)
 
@@ -1122,9 +1150,9 @@ class PlayerToBallVelocityReward(BaseReward):
         # Dynamic blend between pursuit intercept and defensive shadow line
         tactical_pos = (w_challenge * clamped_intercept + (1.0 - w_challenge) * shadow_anchor).astype(np.float32)
 
-        return self._apply_shadow_retarget(tactical_pos, car_pos, arena, car_team)
+        return self._apply_shadow_retarget(tactical_pos, car_pos, arena, car_team, I_threat=I_threat)
 
-    def _apply_shadow_retarget(self, target_pos: np.ndarray, car_pos: np.ndarray, arena: RocketSimArena, car_team: int) -> np.ndarray:
+    def _apply_shadow_retarget(self, target_pos: np.ndarray, car_pos: np.ndarray, arena: RocketSimArena, car_team: int, I_threat: float = 1.0) -> np.ndarray:
         """
         Slides the tactical target toward a shadow point when the ball is goalside of the car.
 
@@ -1143,13 +1171,13 @@ class PlayerToBallVelocityReward(BaseReward):
 
         ball_y = float(arena.ball.pos[1])
         ball_depth = -ball_y if car_team == 0 else ball_y  # > 0 when the ball is in our half
-        ball_vy_defend = -float(arena.ball.vel[1]) if car_team == 0 else float(arena.ball.vel[1])
 
-        # In the attacking half (ball_depth < 0), only retreat if the ball is actively travelling back toward our net
-        if ball_depth < 0.0 and ball_vy_defend < 100.0:
+        # 1. Scale shadow pull by genuine threat intensity first
+        wrong_t *= I_threat
+
+        # 2. In the attacking half (ball_depth < 0), only retreat if there is a severe active threat
+        if ball_depth < 0.0 and I_threat < 0.35:
             return target_pos
-
-        wrong_t *= _clip((ball_depth + 1000.0) / 1000.0, 0.0, 1.0)
 
         if wrong_t <= 0.0:
             return target_pos
