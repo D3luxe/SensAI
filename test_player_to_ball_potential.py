@@ -152,12 +152,12 @@ class TestPenaltiesCannotBeFarmed(unittest.TestCase):
         src = inspect.getsource(PlayerToBallVelocityReward.get_reward)
         assembly = src[src.index("total_reward = self.weight * ("):]
         for banned in ("vel_toward_ball", "vel_matching_bonus", "turnaround_reward",
-                       "roof_carry_reward", "timing_reward", "boost_ahead_reward"):
+                       "roof_carry_reward", "timing_reward", "boost_ahead_reward",
+                       "overshoot_penalty", "pacing_penalty", "dribble_boost_penalty"):
             self.assertNotIn(
                 banned, assembly,
-                "%s is back in the reward assembly; it is positive-only per-step income" % banned)
-        for kept in ("delta_dist", "pacing_penalty", "overshoot_penalty",
-                     "ceiling_penalty", "wrong_side_push_penalty", "dribble_boost_penalty"):
+                "%s should not be in the reward assembly" % banned)
+        for kept in ("delta_dist", "ceiling_penalty", "wrong_side_push_penalty"):
             self.assertIn(kept, assembly, "%s should still be part of the term" % kept)
 
 

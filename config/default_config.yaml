@@ -7,7 +7,7 @@ environment:
 hyperparameters:
   batch_size: 16384
   bc_decay_steps: 500000000
-  bc_regularization_weight: 0.02
+  bc_regularization_weight: 0.0
   clip_range: 0.2
   critic_warmup_iterations: 50
   ent_coef: 0.01
@@ -57,7 +57,7 @@ league:
   series_length: 9
   series_wins_needed: 5
   target_eval_matches: 30
-  training_opponent_ratio: 0.5
+  training_opponent_ratio: 0.0
   training_opponents:
   - checkpoints/necto-model.pt
 logging:
@@ -79,7 +79,6 @@ reward_annealing:
   enabled: true
   targets:
     player_to_ball_weight: 0.25
-    powerslide_weight: 0.0
 rewards:
   air_roll_recovery_weight: 0.0
   ball_to_goal_weight: 0.25
@@ -89,22 +88,22 @@ rewards:
   concede_weight: -30.0
   goal_weight: 30.0
   jump_bridge_weight: 0.0
-  jump_cost_weight: 0.025
-  own_goal_threat_weight: 2.0
+  jump_cost_weight: 0.015
+  own_goal_threat_weight: 0.0
   player_to_ball_weight: 0.5
-  powerslide_weight: 0.2
+  powerslide_weight: 0.0
   save_weight: 6.0
   spin_cost_deadband: 2.0
   spin_cost_weight: 0.015
   time_cost_weight: 0.01
   touch_weight: 0.5
 scenarios:
-  aerial_prob: 0.04
-  custom_prob: 0.16
-  dribble_flick_prob: 0.05
-  kickoff_prob: 0.1
-  replay_prob: 0.45
-  save_prob: 0.08
-  turnaround_prob: 0.04
-  wall_prob: 0.04
-  wall_rebound_prob: 0.04
+  aerial_prob: 0.03
+  custom_prob: 0.1
+  dribble_flick_prob: 0.03
+  kickoff_prob: 0.2
+  replay_prob: 0.5
+  save_prob: 0.05
+  turnaround_prob: 0.03
+  wall_prob: 0.03
+  wall_rebound_prob: 0.03

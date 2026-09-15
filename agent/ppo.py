@@ -1164,8 +1164,18 @@ class PPOTrainer:
             entropy_losses = []
             bc_losses = []
             approx_kls = []
-            current_bc_weight = 0.0
             critic_warmup = self._critic_warmup_remaining > 0
+            decay_factor = max(0.0, 1.0 - (self.global_step / max(1, self.bc_decay_steps)))
+            current_bc_weight = 0.0 if critic_warmup else float(self.bc_regularization_weight * decay_factor)
+
+            # Execution & memory detachment guard: when BC decays to 0, release dataset from GPU memory
+            if current_bc_weight <= 1e-4 and getattr(self, "bc_obs_tensor", None) is not None:
+                del self.bc_obs_tensor, self.bc_act_tensor
+                self.bc_obs_tensor = None
+                self.bc_act_tensor = None
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
+                print(f"[PPO Trainer] Step {self.global_step:,}: BC regularization fully decayed to 0.0. Freed replay dataset from GPU memory.")
 
             for epoch in range(self.n_epochs):
                 np.random.shuffle(b_inds)
@@ -1233,11 +1243,7 @@ class PPOTrainer:
                     else:
                         loss = pg_loss - self.ent_coef * entropy_loss + v_loss * self.vf_coef
 
-                    # Behavioral Cloning (BC) Regularization with persistent floor anchor
-                    # Prevents catastrophic forgetting of core mechanical dodges and kickoffs during extended RL self-play
-                    min_bc_floor = 0.05 * self.bc_regularization_weight
-                    decay_factor = max(0.0, 1.0 - (self.global_step / max(1, self.bc_decay_steps)))
-                    current_bc_weight = 0.0 if critic_warmup else float(max(min_bc_floor, self.bc_regularization_weight * decay_factor))
+                    # Behavioral Cloning (BC) Regularization (decays cleanly to 0.0)
                     if current_bc_weight > 1e-4:
                         self._ensure_bc_dataset()
                         if self.bc_obs_tensor is not None and len(self.bc_obs_tensor) > 0:

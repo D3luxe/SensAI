@@ -80,9 +80,9 @@ class TestStillWired(unittest.TestCase):
         self.assertIn("ball_to_goal", c.rewards)
         self.assertIsInstance(c.rewards["ball_to_goal"], BallToGoalVelocityReward)
 
-    def test_own_goal_threat_on_by_default(self):
+    def test_own_goal_threat_disabled_by_default(self):
         c = CombinedReward({})
-        self.assertEqual(c.rewards["own_goal_threat"].weight, 2.0)
+        self.assertEqual(c.rewards["own_goal_threat"].weight, 0.0)
 
 
 if __name__ == "__main__":

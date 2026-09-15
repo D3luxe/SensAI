@@ -2175,21 +2175,20 @@ def create_ui():
                         with gr.Group():
                             gr.Markdown("### 🎛️ Quick Live Reward Weights")
                             with gr.Row():
-                                goal_slider = gr.Slider(0.0, 30.0, value=float(rew_cfg.get("goal_weight", 20.0)), step=1.0, label="Goal (+pts)")
-                                concede_slider = gr.Slider(-30.0, 0.0, value=float(rew_cfg.get("concede_weight", -20.0)), step=1.0, label="Concede (-pts)")
+                                goal_slider = gr.Slider(0.0, 50.0, value=float(rew_cfg.get("goal_weight", 30.0)), step=1.0, label="Goal Score (goal_weight)", info="Terminal reward for scoring a goal (+30.0 standard).")
+                                concede_slider = gr.Slider(-50.0, 0.0, value=float(rew_cfg.get("concede_weight", -30.0)), step=1.0, label="Concede Penalty (concede_weight)", info="Terminal penalty for conceding a goal (-30.0 standard).")
+                                save_slider = gr.Slider(0.0, 20.0, value=float(rew_cfg.get("save_weight", 6.0)), step=0.5, label="Defensive Save (save_weight)", info="Reward for goal-line saves (+6.0 standard).")
                             with gr.Row():
-                                save_slider = gr.Slider(0.0, 15.0, value=float(rew_cfg.get("save_weight", 3.0)), step=0.5, label="Save (+pts)")
-                                touch_slider = gr.Slider(0.0, 5.0, value=float(rew_cfg.get("touch_weight", 1.2)), step=0.1, label="Touch Quality")
+                                ball_to_goal_slider = gr.Slider(0.0, 5.0, value=float(rew_cfg.get("ball_to_goal_weight", 0.25)), step=0.05, label="Ball to Goal Velocity (ball_to_goal_weight)", info="Reward for projecting ball velocity towards opponent goal.")
+                                player_to_ball_slider = gr.Slider(0.0, 3.0, value=float(rew_cfg.get("player_to_ball_weight", 0.5)), step=0.05, label="Player to Ball Approach (player_to_ball_weight)", info="Potential-based reward for closing distance to ball.")
+                                touch_slider = gr.Slider(0.0, 5.0, value=float(rew_cfg.get("touch_weight", 0.5)), step=0.1, label="Ball Touch Quality (touch_weight)", info="Impulse-scaled reward for clean strikes, clears, and soft catches.")
                             with gr.Row():
-                                ball_to_goal_slider = gr.Slider(0.0, 5.0, value=float(rew_cfg.get("ball_to_goal_weight", 1.5)), step=0.1, label="Ball to Goal")
-                                player_to_ball_slider = gr.Slider(0.0, 3.0, value=float(rew_cfg.get("player_to_ball_weight", 0.6)), step=0.1, label="Ball Pursuit")
-                            with gr.Row():
-                                boost_gain_slider = gr.Slider(0.0, 2.0, value=float(rew_cfg.get("boost_gain_weight", 0.6)), step=0.05, label="Boost Gain (Sqrt)")
-                                boost_lose_slider = gr.Slider(0.0, 2.0, value=float(rew_cfg.get("boost_lose_weight", 0.3)), step=0.05, label="Boost Waste")
-                                boost_pathing_slider = gr.Slider(0.0, 100.0, value=float(rew_cfg.get("boost_pathing_threshold", 50.0)), step=5.0, label="Low Boost Pathing Ceiling")
+                                boost_gain_slider = gr.Slider(0.0, 2.0, value=float(rew_cfg.get("boost_gain_weight", 0.8)), step=0.05, label="Boost Pad Collection (boost_gain_weight)", info="Potential-based reward for collecting boost pads.")
+                                boost_lose_slider = gr.Slider(0.0, 2.0, value=float(rew_cfg.get("boost_lose_weight", 0.25)), step=0.05, label="Boost Consumption (boost_lose_weight)", info="Potential-based penalty for expending boost.")
+                                time_cost_slider = gr.Slider(0.0, 0.05, value=float(rew_cfg.get("time_cost_weight", 0.01)), step=0.002, label="Living Time Cost (time_cost_weight)", info="Flat per-step cost that drives speed, tight recoveries, and decisiveness.")
                             apply_live_rewards_btn = gr.Button("⚡ Apply Live Rewards", variant="primary")
                             live_rewards_msg = gr.Markdown("")
-                            gr.Markdown("<span style='color: #94a3b8; font-size: 0.88em;'>💡 For high aerials, jump bridges, air-roll recoveries, and custom scenario probabilities, visit the <b>🎛️ Rewards & Curriculum</b> tab.</span>")
+                            gr.Markdown("<span style='color: #94a3b8; font-size: 0.88em;'>💡 For flight mechanics, takeoff/spin action costs, and custom scenario probabilities, visit the <b>🎛️ Rewards & Curriculum</b> tab.</span>")
 
                     # Right Column: Auto-Updating Metrics Plot & Live Console Output
                     with gr.Column(scale=6):
@@ -2254,11 +2253,13 @@ def create_ui():
                 )
 
                 with gr.Group():
-                    gr.Markdown("### 🚀 Advanced Flight & Recovery Mechanics")
+                    gr.Markdown("### 🚀 Flight Mechanics & Action Cost Regularizers")
                     with gr.Row():
-                        jump_bridge_slider = gr.Slider(0.0, 1.0, value=float(rew_cfg.get("jump_bridge_weight", 0.35)), step=0.05, label="Jump & Aerial Takeoff Incentive", info="Takeoff & speed-flip transition bounty (2.0x on elevated aerials).")
-                        air_roll_recovery_slider = gr.Slider(0.0, 2.0, value=float(rew_cfg.get("air_roll_recovery_weight", 0.10)), step=0.05, label="Air-Roll & Landing Recovery", info="Rewards wheels-down recovery on descent.")
-                        powerslide_slider = gr.Slider(0.0, 2.0, value=float(rew_cfg.get("powerslide_weight", 0.20)), step=0.05, label="Powerslide & Drift Cut Bounty", info="Rewards handbrake powerslides on sharp turns.")
+                        jump_cost_slider = gr.Slider(0.0, 0.10, value=float(rew_cfg.get("jump_cost_weight", 0.025)), step=0.005, label="Jump Takeoff Fee (jump_cost_weight)", info="Single-shot fee charged on takeoff to prevent 15 Hz coin-flip jumping.")
+                        spin_cost_slider = gr.Slider(0.0, 0.10, value=float(rew_cfg.get("spin_cost_weight", 0.015)), step=0.005, label="Air Spin Penalty (spin_cost_weight)", info="Per-step fee on excessive airborne tumbling above 2.0 rad/s deadband.")
+                    with gr.Row():
+                        jump_bridge_slider = gr.Slider(0.0, 1.0, value=float(rew_cfg.get("jump_bridge_weight", 0.0)), step=0.05, label="Aerial Challenge Bridge (jump_bridge_weight)", info="Takeoff & 50/50 contest incentive on elevated aerials.")
+                        air_roll_recovery_slider = gr.Slider(0.0, 1.0, value=float(rew_cfg.get("air_roll_recovery_weight", 0.0)), step=0.05, label="Landing Recovery (air_roll_recovery_weight)", info="Rewards wheels-down recovery on pitch or wall descent.")
 
                 with gr.Group():
                     with gr.Row():
@@ -3033,7 +3034,7 @@ def create_ui():
         )
 
         # Quick Live Rewards (Tab 1)
-        def on_apply_quick_rewards(g_w, c_w, sv_w, b2g_w, p2b_w, tch_w, bg_w, bl_w, bp_th):
+        def on_apply_quick_rewards(g_w, c_w, sv_w, b2g_w, p2b_w, tch_w, bg_w, bl_w, tc_w):
             rewards = {
                 "goal_weight": float(g_w),
                 "concede_weight": float(c_w),
@@ -3043,7 +3044,7 @@ def create_ui():
                 "touch_weight": float(tch_w),
                 "boost_gain_weight": float(bg_w),
                 "boost_lose_weight": float(bl_w),
-                "boost_pathing_threshold": float(bp_th)
+                "time_cost_weight": float(tc_w)
             }
             mgr.update_live_config({"rewards": rewards})
             try:
@@ -3061,7 +3062,7 @@ def create_ui():
             inputs=[
                 goal_slider, concede_slider, save_slider,
                 ball_to_goal_slider, player_to_ball_slider, touch_slider,
-                boost_gain_slider, boost_lose_slider, boost_pathing_slider
+                boost_gain_slider, boost_lose_slider, time_cost_slider
             ],
             outputs=[live_rewards_msg]
         )
@@ -3071,8 +3072,9 @@ def create_ui():
         # -------------------------------------------------------------
         def on_apply_curriculum(
             g_w, c_w, sv_w,
-            b2g_w, p2b_w, jb_w, ar_w, pw_w, tch_w,
-            bg_w, bl_w,
+            b2g_w, p2b_w, tch_w,
+            bg_w, bl_w, tc_w,
+            jc_w, sc_w, jb_w, ar_w,
             k_p, r_p, a_p, c_p, tr_p, w_p, wr_p, s_p, df_p,
             bc_w, bc_dec
         ):
@@ -3082,12 +3084,14 @@ def create_ui():
                 "save_weight": float(sv_w),
                 "ball_to_goal_weight": float(b2g_w),
                 "player_to_ball_weight": float(p2b_w),
-                "jump_bridge_weight": float(jb_w),
-                "air_roll_recovery_weight": float(ar_w),
-                "powerslide_weight": float(pw_w),
                 "touch_weight": float(tch_w),
                 "boost_gain_weight": float(bg_w),
-                "boost_lose_weight": float(bl_w)
+                "boost_lose_weight": float(bl_w),
+                "time_cost_weight": float(tc_w),
+                "jump_cost_weight": float(jc_w),
+                "spin_cost_weight": float(sc_w),
+                "jump_bridge_weight": float(jb_w),
+                "air_roll_recovery_weight": float(ar_w)
             }
             scenarios = {
                 "kickoff_prob": float(k_p),
@@ -3127,8 +3131,9 @@ def create_ui():
             fn=on_apply_curriculum,
             inputs=[
                 goal_slider, concede_slider, save_slider,
-                ball_to_goal_slider, player_to_ball_slider, jump_bridge_slider, air_roll_recovery_slider, powerslide_slider, touch_slider,
-                boost_gain_slider, boost_lose_slider,
+                ball_to_goal_slider, player_to_ball_slider, touch_slider,
+                boost_gain_slider, boost_lose_slider, time_cost_slider,
+                jump_cost_slider, spin_cost_slider, jump_bridge_slider, air_roll_recovery_slider,
                 kickoff_prob_slider, replay_prob_slider, aerial_prob_slider, custom_prob_slider,
                 turnaround_prob_slider, wall_prob_slider, wall_rebound_prob_slider, save_prob_slider, dribble_flick_prob_slider,
                 bc_weight_slider, bc_decay_input
@@ -3328,26 +3333,28 @@ def create_ui():
             </div>
             """
             return (
-                rew.get("goal_weight", 20.0),
-                rew.get("concede_weight", -20.0),
-                rew.get("save_weight", 3.0),
-                rew.get("ball_to_goal_weight", 1.5),
-                rew.get("player_to_ball_weight", 0.6),
-                rew.get("jump_bridge_weight", 0.35),
-                rew.get("air_roll_recovery_weight", 0.10),
-                rew.get("powerslide_weight", 0.20),
-                rew.get("touch_weight", 1.2),
-                rew.get("boost_gain_weight", 0.6),
-                rew.get("boost_lose_weight", 0.3),
-                sc.get("kickoff_prob", 0.20),
-                sc.get("replay_prob", 0.15),
-                sc.get("aerial_prob", 0.11),
-                sc.get("custom_prob", 0.15),
-                sc.get("turnaround_prob", 0.13),
-                sc.get("wall_prob", 0.07),
-                sc.get("wall_rebound_prob", 0.08),
-                sc.get("save_prob", 0.07),
-                sc.get("dribble_flick_prob", 0.08),
+                rew.get("goal_weight", 30.0),
+                rew.get("concede_weight", -30.0),
+                rew.get("save_weight", 6.0),
+                rew.get("ball_to_goal_weight", 0.25),
+                rew.get("player_to_ball_weight", 0.5),
+                rew.get("touch_weight", 0.5),
+                rew.get("boost_gain_weight", 0.8),
+                rew.get("boost_lose_weight", 0.25),
+                rew.get("time_cost_weight", 0.01),
+                rew.get("jump_cost_weight", 0.025),
+                rew.get("spin_cost_weight", 0.015),
+                rew.get("jump_bridge_weight", 0.0),
+                rew.get("air_roll_recovery_weight", 0.0),
+                sc.get("kickoff_prob", 0.10),
+                sc.get("replay_prob", 0.45),
+                sc.get("aerial_prob", 0.04),
+                sc.get("custom_prob", 0.16),
+                sc.get("turnaround_prob", 0.04),
+                sc.get("wall_prob", 0.04),
+                sc.get("wall_rebound_prob", 0.04),
+                sc.get("save_prob", 0.08),
+                sc.get("dribble_flick_prob", 0.05),
                 badge_html,
                 "🔄 **Reset dials to balanced standard configuration.**"
             )
@@ -3356,8 +3363,9 @@ def create_ui():
             fn=on_reset_rewards,
             outputs=[
                 goal_slider, concede_slider, save_slider,
-                ball_to_goal_slider, player_to_ball_slider, jump_bridge_slider, air_roll_recovery_slider, powerslide_slider, touch_slider,
-                boost_gain_slider, boost_lose_slider,
+                ball_to_goal_slider, player_to_ball_slider, touch_slider,
+                boost_gain_slider, boost_lose_slider, time_cost_slider,
+                jump_cost_slider, spin_cost_slider, jump_bridge_slider, air_roll_recovery_slider,
                 kickoff_prob_slider, replay_prob_slider, aerial_prob_slider, custom_prob_slider,
                 turnaround_prob_slider, wall_prob_slider, wall_rebound_prob_slider, save_prob_slider, dribble_flick_prob_slider,
                 scenario_total_badge,

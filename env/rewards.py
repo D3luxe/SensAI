@@ -879,7 +879,7 @@ class OwnGoalThreatReward(BaseReward):
         super().__init__(weight)
 
     def get_reward(self, car: CarState, arena: RocketSimArena, action: np.ndarray, is_goal: bool, scoring_team: Optional[int]) -> float:
-        if is_goal:
+        if self.weight <= 1e-9 or is_goal:
             return 0.0
 
         defend_goal_y = -ARENA_EXTENT_Y if car.team == 0 else ARENA_EXTENT_Y
@@ -1245,26 +1245,10 @@ class PlayerToBallVelocityReward(BaseReward):
         # be paid or charged on the resulting trajectory.
         if opp_touched and not bot_touched:
             raw_delta_dist = _clip(raw_delta_dist, -0.08, 0.08)
-
-        # 1. Anti-Overshoot Penalty & Strike Zone Tracking
-        overshoot_penalty = 0.0
+        # Strike Zone Tracking & Distance Delta with Strike Zone Pacing
         in_strike = (raw_ball_dist < 400.0) or (car.on_ground and horiz_ball_dist < 380.0 and ball_z < 650.0)
-        was_strike = self._was_in_strike_zone.get(car.id, False)
         self._was_in_strike_zone[car.id] = in_strike
 
-        car_fwd_spd = float(np.dot(car.vel, car.get_forward_vector())) if not car.on_ground else float(np.dot(car.vel[:2], car.get_forward_vector()[:2]))
-        is_active_flip = bool(car.just_dodged or getattr(car, "is_dodging", False) or (not car.on_ground and not car.has_flip))
-        car_vel_toward_ball = float(np.dot(car.vel, unit_to_ball))
-        if was_strike and not in_strike and car.ball_touches == prev_t and not opp_touched and car_fwd_spd > 150.0:
-            if not is_active_flip and fwd_alignment < -0.15:
-                # Ground / non-flip overshoot where car drove away
-                car_spd = _norm3(car.vel)
-                overshoot_penalty = -0.15 if car_spd < 1800.0 else -0.25
-            elif is_active_flip and car_vel_toward_ball < -100.0 and raw_delta_dist < -0.05:
-                # Body momentum actually sailing away after flip without touching
-                overshoot_penalty = -0.15
-
-        # 2. Distance Delta with Strike Zone Pacing
         # Downfield (> 450 uu): 100% distance closure rewarded
         # Inside strike zone (< 450 uu): Paces approach so car doesn't blindly barrel past ball
         strike_pacing = min(1.0, max(0.20, (eff_dist - 150.0) / 300.0))
@@ -1343,164 +1327,28 @@ class PlayerToBallVelocityReward(BaseReward):
             # to strongly incentivize executing an angular turnaround (powerslide cut or half-flip)
             delta_dist = delta_dist * max(0.0, fwd_alignment + 1.0) * 0.2
 
-        fwd_vec = car.get_forward_vector()
-        right_vec = car.get_right_vector()
-        up_vec = car.get_up_vector()
-        local_x = float(np.dot(car_to_ball[:2], unit_horiz(fwd_vec)))
-        local_y = float(np.dot(car_to_ball[:2], unit_horiz(right_vec)))
-        local_z = float(np.dot(arena.ball.pos - car.pos, up_vec))
-        is_roof_carry = bool(
-            car.on_ground and
-            curr_dist < 210.0 and
-            110.0 <= local_z <= 170.0 and
-            -30.0 <= local_x <= 65.0 and
-            abs(local_y) < 50.0
-        )
-        is_ground_pushing = bool(raw_ball_dist < 180.0 and ball_z < 130.0 and car.on_ground)
-
-        # 3. Strike-Zone Velocity Matching, Arrival Pacing & Anti-Overshoot (< 500 uu)
-        vel_matching_bonus = 0.0
-        pacing_penalty = 0.0
+        # Active Own-Net Push Guard:
+        # Strictly penalizes the bot when the CAR ITSELF is actively pushing the ball toward its own net in the red zone.
+        # Opponent shots are completely exempt (zero car-unattributed penalty).
         wrong_side_push_penalty = 0.0
-        dribble_boost_penalty = 0.0
+        if is_wrong_side or car_vy_defend > 50.0:
+            ball_vy_defend = -arena.ball.vel[1] if car.team == 0 else arena.ball.vel[1]
+            dist_ball_to_defend = abs(arena.ball.pos[1] - defend_goal_y)
 
-        self_tti, dist_to_ball, closing_spd = compute_trajectory_arrival_time(car.pos, car.vel, arena.ball.pos, arena.ball.vel)
-        threats = compute_opponent_threats(car, arena)
-        opp_tti = threats[0].arrival_time if threats else 999.0
-        delta_t = opp_tti - self_tti  # > 0: bot arrives first
-
-        is_opponent_challenging = False
-        if threats:
-            most_urgent = threats[0]
-            is_opponent_challenging = bool(
-                most_urgent.dist <= 650.0 or
-                (most_urgent.closing_speed > 100.0 and most_urgent.arrival_time < 0.85) or
-                (abs(delta_t) < 0.30 and self_tti < 0.60)
-            )
-
-        in_strike_zone = (raw_ball_dist < 500.0) or (car.on_ground and horiz_ball_dist < 500.0 and ball_z < 650.0)
-        if in_strike_zone:
-            car_speed = _norm3(car.vel)
-            ball_speed = _norm3(arena.ball.vel)
-            car_speed_2d = _norm2(car.vel)
-            ball_speed_2d = _norm2(arena.ball.vel)
-            rel_speed = _norm3(car.vel - arena.ball.vel)
-            rel_speed_2d = _norm2(car.vel - arena.ball.vel)
-
-            effective_car_speed = car_speed_2d if (car.on_ground and ball_z < 650.0) else car_speed
-            effective_ball_speed = ball_speed_2d if (car.on_ground and ball_z < 650.0) else ball_speed
-            effective_rel_speed = rel_speed_2d if (car.on_ground and ball_z < 650.0) else rel_speed
-
-            # 3a. Forward Strike-Zone Velocity Matching & Arrival Pacing
-            if fwd_alignment > 0.2 and not (is_wrong_side and car_vy_defend > 100.0):
-                if not is_ground_pushing and not is_roof_carry and effective_ball_speed > 250.0 and effective_car_speed > 200.0:
-                    # vel_matching_bonus removed with the rest of the additive income.
-                    # It paid up to 0.30/step for matching the ball's speed inside the strike
-                    # zone, which is the shape that rewards shadowing a ball instead of
-                    # hitting it. The pacing and overshoot penalties below still discourage
-                    # barrelling through it, and they only subtract.
-                    pass
-
-                # Kinetic Arrival Velocity Pacing Envelope:
-                # When closing toward the ball on the ground, evaluate required approach pacing:
-                # Pure outcome-driven penalty avoidance: overspeeding incurs pacing_penalty,
-                # decelerating to desired speed brings penalty to 0.0. No positive per-tick hovering bounties.
-                # Strictly for grounded open-field dribble pacing (exempt on walls where climbing momentum is required).
-                if car.on_ground and not is_roof_carry and not is_ground_pushing and not is_on_wall and not is_ball_on_wall and (ball_z < 250.0 or (ball_z < 500.0 and arena.ball.vel[2] < -100.0)):
-                    safe_speed_margin = max(150.0, (min(curr_dist, 500.0) / 500.0) * 650.0)
-                    desired_speed = effective_ball_speed + safe_speed_margin
-
-                    # Pacing penalty is mutually exclusive with overshoot penalty (approach vs aftermath)
-                    """ if overshoot_penalty == 0.0:
-                        if self_tti < 0.40 and effective_car_speed > desired_speed:
-                            excess = (effective_car_speed - desired_speed) / 800.0
-                            pacing_penalty = -0.15 * min(1.0, max(0.0, excess)) """
-
-            # 3b. Trajectory & Time-To-Intercept (TTI) Defending Net Threat Evaluation:
-            # Differentiates safe defensive plays (corner wraps, backboard clears, recoverable touches)
-            # and dangerous unrecoverable own-goal threats. Evaluates regardless of car facing angle!
-            if is_wrong_side or car_vy_defend > 50.0:
-                ball_vy_defend = -arena.ball.vel[1] if car.team == 0 else arena.ball.vel[1]
-                dist_ball_to_defend = abs(arena.ball.pos[1] - defend_goal_y)
-
-                if ball_vy_defend > 150.0:
-                    dt_defend = dist_ball_to_defend / ball_vy_defend
-                    # Threat horizon capped at 6.5s to comfortably cover full-pitch shots while avoiding singularities
-                    if dt_defend <= 6.5:
-                        x_defend_impact = arena.ball.pos[0] + arena.ball.vel[0] * dt_defend
-                        z_defend_impact = max(BALL_RADIUS, arena.ball.pos[2] + arena.ball.vel[2] * dt_defend + 0.5 * (-650.0) * (dt_defend ** 2))
-                        is_on_defend_net = bool(abs(x_defend_impact) <= EFFECTIVE_GOAL_HALF_WIDTH and z_defend_impact <= EFFECTIVE_GOAL_HEIGHT + 50.0)
-
-                        if is_on_defend_net:
-                            # Ball is heading on-target into defending net opening!
-                            impact_pos = np.array([x_defend_impact, defend_goal_y, min(GOAL_HEIGHT * 0.5, z_defend_impact)], dtype=np.float32)
-                            car_tti_defend, _, _ = compute_trajectory_arrival_time(car.pos, car.vel, impact_pos)
-
-                            is_unrecoverable = bool(car_tti_defend >= dt_defend - 0.15)
-                            is_active_own_net_push = bool(car_vy_defend > 80.0 and (raw_ball_dist < 250.0 or horiz_ball_dist < 250.0))
-
-                            if is_unrecoverable or is_active_own_net_push:
-                                threat_severity = max(0.4, min(1.0, ball_vy_defend / 1200.0))
-                                proximity_scale = max(0.5, 1.0 - (dist_ball_to_defend / 3500.0))
-                                wrong_side_push_penalty = -0.50 * threat_severity * proximity_scale
-                elif is_wrong_side and car_vy_defend > 150.0 and (raw_ball_dist < 200.0 or horiz_ball_dist < 200.0):
-                    # Proximity goal-mouth push toward defending net inside red zone
-                    if dist_ball_to_defend < 1800.0:
-                        wrong_side_push_penalty = -0.35 * (car_vy_defend / 1500.0)
-
-            # Dribble Proximity Pacing & Anti-Overshoot:
-            """ is_close_approach = bool(raw_ball_dist < 350.0 or (horiz_ball_dist < 350.0 and ball_z < 650.0))
-            if is_close_approach and car.on_ground and not is_roof_carry and not is_on_wall and not is_ball_on_wall and ball_z < 250.0:
-                if effective_car_speed > effective_ball_speed + 150.0 and float(action[6]) > 0.0:
-                    dribble_boost_penalty = -0.30 * float(action[6]) """
-
-            # Hard Anti-Stacking Floor:
-            # Clamps combined strike-zone approach penalties to a maximum floor of -0.30
-            total_approach_penalties = overshoot_penalty + pacing_penalty + dribble_boost_penalty + wrong_side_push_penalty
-            if total_approach_penalties < -0.30:
-                scale = -0.30 / total_approach_penalties
-                overshoot_penalty *= scale
-                pacing_penalty *= scale
-                dribble_boost_penalty *= scale
-                wrong_side_push_penalty *= scale
-
-        # Sections 4, 5, the strike-timing term and the boost-ahead term used to live here.
-        # All four were removed: every one of them paid positive-only, per-step income on top
-        # of a distance potential that already measured the same thing symmetrically.
-        #
-        #   vel_toward_ball    up to 0.40/step for moving at the ball, with nothing charged
-        #                      for moving away. This double-counted delta_dist: one symmetric
-        #                      copy that telescopes, one asymmetric copy that does not.
-        #   turnaround_reward  cut, pacing and rotation bonuses for executing a pivot.
-        #   roof_carry_reward  carry, velcro and sync bonuses for balancing the ball on the
-        #                      roof -- income for holding possession rather than using it,
-        #                      which prices dribbling above flicking or shooting.
-        #   timing_reward      strike-window arrival shaping.
-        #   boost_ahead_reward a second, non-telescoping copy of the boost-pathing incentive
-        #                      that BoostReward's transit potential already provides, and
-        #                      provides symmetrically.
-        #
-        # Measured on the policy at iteration 2320, this class paid about 18.5 per episode
-        # while a pure distance potential at this weight is bounded near 1.25, because a car
-        # cannot close more ground than the pitch is long. Roughly 93% of the term was these
-        # streams rather than distance.
-        #
-        # What remains is the distance potential plus the one-sided penalties below it, which
-        # cannot be farmed because they only ever subtract. The policy was seeded from human
-        # replays, so it already knows how to cut, dribble and strike; how it uses the ball is
-        # now decided by touch, ball_to_goal and goal rather than by hand-written per-step pay.
-        #
-        # The kickoff branch keeps its own vel_toward_ball term and its own early return. It
-        # is bounded to the opening seconds and kickoffs are the one phase already working.
+            is_active_own_net_push = bool(car_vy_defend > 80.0 and (raw_ball_dist < 250.0 or horiz_ball_dist < 250.0))
+            if ball_vy_defend > 150.0 and is_active_own_net_push:
+                threat_severity = max(0.4, min(1.0, ball_vy_defend / 1200.0))
+                proximity_scale = max(0.5, 1.0 - (dist_ball_to_defend / 3500.0))
+                wrong_side_push_penalty = -0.50 * threat_severity * proximity_scale
+            elif is_wrong_side and car_vy_defend > 150.0 and (raw_ball_dist < 200.0 or horiz_ball_dist < 200.0):
+                if dist_ball_to_defend < 1800.0:
+                    wrong_side_push_penalty = -0.35 * (car_vy_defend / 1500.0)
 
         # The distance potential, plus penalties that can only subtract. Nothing here pays
         # positive income per step, so the term telescopes: over any path that returns to its
         # starting distance the delta sums to zero, and what survives is ground actually
         # gained. That bounds the whole class near 1.25 per episode at weight 0.5.
-        total_reward = self.weight * (
-            delta_dist + pacing_penalty + dribble_boost_penalty +
-            overshoot_penalty + ceiling_penalty + wrong_side_push_penalty
-        )
+        total_reward = self.weight * (delta_dist + ceiling_penalty + wrong_side_push_penalty)
         return float(total_reward)
 
 
@@ -2648,6 +2496,8 @@ class PowerslideReward(BaseReward):
                 self._prev_alignment[car.id] = 1.0
 
     def get_reward(self, car: CarState, arena: RocketSimArena, action: np.ndarray, is_goal: bool, scoring_team: Optional[int]) -> float:
+        if self.weight <= 1e-9:
+            return 0.0
         car_to_ball = arena.ball.pos - car.pos
         dist = _norm3(car_to_ball)
         if dist < 1e-4:
@@ -2758,6 +2608,8 @@ class AirRollRecoveryReward(BaseReward):
     def get_reward(self, car: CarState, arena: RocketSimArena, action: np.ndarray, is_goal: bool, scoring_team: Optional[int]) -> float:
         prev_ground = self._prev_on_ground.get(car.id, car.on_ground)
         self._prev_on_ground[car.id] = car.on_ground
+        if self.weight <= 1e-9:
+            return 0.0
 
         up = car.get_up_vector()
         up_z = float(up[2])
@@ -3260,7 +3112,7 @@ class CombinedReward:
                 far_dist=weights.get("ball_to_goal_far_dist", 1500.0),
             ),
             "own_goal_threat": OwnGoalThreatReward(
-                weight=weights.get("own_goal_threat_weight", 2.0)
+                weight=weights.get("own_goal_threat_weight", 0.0)
             ),
             "player_to_ball": PlayerToBallVelocityReward(
                 weight=weights.get("player_to_ball_weight", 0.6),
@@ -3278,7 +3130,7 @@ class CombinedReward:
                 gamma=weights.get("gamma", 0.99)
             ),
             "powerslide": PowerslideReward(
-                weight=weights.get("powerslide_weight", 0.20)
+                weight=weights.get("powerslide_weight", 0.0)
             ),
             "air_roll_recovery": AirRollRecoveryReward(
                 weight=weights.get("air_roll_recovery_weight", 0.10)
