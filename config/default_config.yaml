@@ -57,7 +57,7 @@ league:
   series_length: 9
   series_wins_needed: 5
   target_eval_matches: 30
-  training_opponent_ratio: 0.0
+  training_opponent_ratio: 0.1875
   training_opponents:
   - checkpoints/necto-model.pt
 logging:
@@ -87,8 +87,8 @@ rewards:
   boost_pathing_threshold: 50.0
   concede_weight: -30.0
   goal_weight: 30.0
-  jump_bridge_weight: 0.0
-  jump_cost_weight: 0.015
+  jump_bridge_weight: 0.05
+  jump_cost_weight: 0.01
   own_goal_threat_weight: 0.0
   player_to_ball_weight: 0.5
   powerslide_weight: 0.0
@@ -98,12 +98,12 @@ rewards:
   time_cost_weight: 0.01
   touch_weight: 0.5
 scenarios:
-  aerial_prob: 0.03
-  custom_prob: 0.1
-  dribble_flick_prob: 0.03
-  kickoff_prob: 0.2
-  replay_prob: 0.5
-  save_prob: 0.05
-  turnaround_prob: 0.03
-  wall_prob: 0.03
-  wall_rebound_prob: 0.03
+  aerial_prob: 0.05
+  custom_prob: 0.08
+  dribble_flick_prob: 0.02
+  kickoff_prob: 0.17
+  replay_prob: 0.58
+  save_prob: 0.04
+  turnaround_prob: 0.02
+  wall_prob: 0.02
+  wall_rebound_prob: 0.02

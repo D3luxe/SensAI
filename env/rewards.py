@@ -11,7 +11,7 @@ from typing import Dict, Any, List, Optional, Tuple
 from env.physics_engine import (
     CarState, BallState, RocketSimArena,
     CAR_MAX_SPEED, BALL_MAX_SPEED, GOAL_HALF_WIDTH, GOAL_HEIGHT, ARENA_EXTENT_X, ARENA_EXTENT_Y, ARENA_HEIGHT_Z,
-    WALL_BOUNCE_VX_THRESHOLD, WALL_BOUNCE_VY_THRESHOLD, BALL_RADIUS, GRAVITY,
+    CORNER_LIMIT, WALL_BOUNCE_VX_THRESHOLD, WALL_BOUNCE_VY_THRESHOLD, BALL_RADIUS, GRAVITY,
     PREDICTION_HORIZON_TICKS, PREDICTION_HORIZON_S, PREDICTION_TICK_RATE
 )
 
@@ -144,6 +144,53 @@ def compute_landing_surface_normal(car: CarState, horizon: float = 1.4) -> np.nd
     if best_normal is not None and best_t <= horizon and best_t < t_floor:
         return best_normal
     return FLOOR_NORMAL
+
+
+def is_car_on_wall(car: CarState) -> bool:
+    """Authoritative check for whether a car is actively driving on a wall or curved transition ramp.
+
+    Respects real Soccar arena geometry (4096 x 5120 x 2044 uu, clipped 45-degree diagonal corners).
+
+    Guarantees:
+    1. Airborne cars (jumps, aerial saves, half-flips) return False (requires surface contact).
+    2. Cars on flat pitch floor or flat net floor return False.
+    3. Ceiling driving (Z > 1900 uu) returns False (handled by ceiling logic).
+    4. Accurately identifies vertical sidewalls, backboards, transition ramps, and diagonal clipped corners.
+    """
+    if not bool(car.on_ground):
+        return False
+
+    car_z = float(car.pos[2])
+    if car_z > 1900.0:
+        return False  # Ceiling
+
+    up_vec = car.get_up_vector() if hasattr(car, "get_up_vector") else (
+        car.rot_mat[2] if hasattr(car, "rot_mat") and car.rot_mat is not None else np.array([0.0, 0.0, 1.0], dtype=np.float32)
+    )
+    up_tilt = abs(float(up_vec[2]))
+
+    # Floor protection: grounded cars on flat floor have Z <= 80 uu and up_tilt >= 0.85
+    is_climbing = bool(car_z > 80.0 or up_tilt < 0.85)
+    if not is_climbing:
+        return False
+
+    abs_x = abs(float(car.pos[0]))
+    abs_y = abs(float(car.pos[1]))
+
+    # 1. Elevated on wall/ramp surface (at Z > 160 uu with on_ground, car is physically on wall/ramp)
+    is_elevated_wall = bool((abs_x > 3450.0 or abs_y > 4450.0) and car_z > 160.0)
+
+    # 2. Vertical wall contact (car CoM displaced ~60-116 uu from wall face at 4096 / 5120)
+    is_vertical_wall = bool(abs_x > 3980.0 or abs_y > 4980.0)
+
+    # 3. Transition curved ramp (starts curving at ~3700 / ~4700 with tilt)
+    is_transition_ramp = bool((abs_x > 3700.0 or abs_y > 4700.0) and up_tilt < 0.88)
+
+    # 4. Clipped diagonal corner walls (uses physics_engine.CORNER_LIMIT = 8064.0 uu)
+    # Car CoM on diagonal wall is displaced inward from 8064.0:
+    is_diagonal_corner = bool((abs_x + abs_y) > (CORNER_LIMIT - 100.0) and abs_x > 3000.0 and abs_y > 4000.0)
+
+    return is_elevated_wall or is_vertical_wall or is_transition_ramp or is_diagonal_corner
 
 
 class BaseReward:
@@ -944,7 +991,17 @@ class PlayerToBallVelocityReward(BaseReward):
             return float((1.0 - alpha) * d2 + alpha * d3)
         return _norm3(ball_pos - car_pos)
 
-    def _get_target_pos(self, car_pos: np.ndarray, arena: RocketSimArena, is_kickoff: bool, car_vel: Optional[np.ndarray] = None, car_id: int = -1, car_team: int = 0) -> np.ndarray:
+    def _get_target_pos(
+        self,
+        car_pos: np.ndarray,
+        arena: RocketSimArena,
+        is_kickoff: bool,
+        car_vel: Optional[np.ndarray] = None,
+        car_id: int = -1,
+        car_team: int = 0,
+        car: Optional[CarState] = None,
+        boost_amount: Optional[float] = None
+    ) -> np.ndarray:
         """
         Computes the tactical target point for distance delta and alignment.
         When winning or contesting the race, targets the ball intercept point.
@@ -955,12 +1012,24 @@ class PlayerToBallVelocityReward(BaseReward):
         if is_kickoff:
             return target_pos
 
+        # Resolve boost amount for trajectory solver
+        if boost_amount is None:
+            if car is not None:
+                boost_amount = float(car.boost)
+            elif car_id != -1 and hasattr(arena, "cars"):
+                for c in arena.cars:
+                    if c.id == car_id:
+                        boost_amount = float(c.boost)
+                        break
+        if boost_amount is None:
+            boost_amount = 0.0
+
         ball_speed = _norm3(arena.ball.vel)
         chaser_vel = car_vel if car_vel is not None else np.zeros(3, dtype=np.float32)
 
         # 1. Intercept point prediction
         if ball_speed > 5.0 and hasattr(arena, "get_predicted_ball_pos"):
-            pred_pos, pred_t = cached_intercept_point(arena, car_id, car_pos, chaser_vel)
+            pred_pos, pred_t = cached_intercept_point(arena, car_id, car_pos, chaser_vel, boost_amount=boost_amount)
             if pred_pos is None:
                 pred_pos = arena.ball.pos
                 pred_t = 0.0
@@ -993,7 +1062,7 @@ class PlayerToBallVelocityReward(BaseReward):
                 if d_opp < 350.0:
                     opp_has_possession = True
             t_opp = min(opp_arrivals)
-            t_self = pred_t if pred_t > 0.0 else compute_trajectory_arrival_time(car_pos, chaser_vel, clamped_intercept)[0]
+            t_self = pred_t if pred_t > 0.0 else compute_trajectory_arrival_time(car_pos, chaser_vel, clamped_intercept, boost_amount=boost_amount)[0]
             delta_t_race = t_self - t_opp
         else:
             delta_t_race = -999.0
@@ -1019,6 +1088,21 @@ class PlayerToBallVelocityReward(BaseReward):
         if raw_ball_dist < 500.0:
             prox_boost = min(1.0, max(0.0, (500.0 - raw_ball_dist) / 300.0))
             w_challenge = float(w_challenge + (1.0 - w_challenge) * prox_boost)
+
+        # Defensive Goal-Proximity Urgency:
+        # As ball enters the defensive third (< 3000 uu from our net), urgency smoothly scales w_challenge up to 1.0.
+        # At 1500 uu, w_challenge = 1.0 unconditionally to save/contest the ball regardless of arrival time.
+        defend_goal_y = -ARENA_EXTENT_Y if car_team == 0 else ARENA_EXTENT_Y
+        d_ball_to_net = _norm2(np.array([arena.ball.pos[0], arena.ball.pos[1] - defend_goal_y], dtype=np.float32))
+        w_goal_urgency = _clip((3000.0 - d_ball_to_net) / 1500.0, 0.0, 1.0)
+        w_challenge = max(w_challenge, w_goal_urgency)
+
+        # Continuous Opponent Dribble-Speed Gradient:
+        # When opponent is slowly pushing/rolling the ball (< 1400 uu/s), maintain an active challenge floor
+        # so SensAI cuts across and tackles instead of conceding open space.
+        v_opp = _norm3(opponents[0].vel) if opponents else 0.0
+        w_slow_opp = _clip((1400.0 - v_opp) / 1000.0, 0.0, 1.0) * 0.45
+        w_challenge = max(w_challenge, w_slow_opp)
 
         # 3. Dynamic Defensive Shadow Anchor along true ball-to-own-goal vector
         defend_goal_y = -ARENA_EXTENT_Y if car_team == 0 else ARENA_EXTENT_Y
@@ -1098,7 +1182,7 @@ class PlayerToBallVelocityReward(BaseReward):
         self._prev_dist = {}
         self._prev_pos = {car.id: car.pos.copy() for car in initial_state.cars}
         self._prev_target = {
-            car.id: np.asarray(self._get_target_pos(car.pos, initial_state, is_kickoff, car.vel, car.id, car.team), dtype=np.float32).copy()
+            car.id: np.asarray(self._get_target_pos(car.pos, initial_state, is_kickoff, car.vel, car.id, car.team, car=car, boost_amount=float(car.boost)), dtype=np.float32).copy()
             for car in initial_state.cars
         }
         self._prev_touches = {car.id: car.ball_touches for car in initial_state.cars}
@@ -1119,7 +1203,7 @@ class PlayerToBallVelocityReward(BaseReward):
             _norm3(arena.ball.vel) < 100.0
         )
 
-        target_pos = self._get_target_pos(car.pos, arena, is_kickoff, car.vel, car.id, car.team)
+        target_pos = self._get_target_pos(car.pos, arena, is_kickoff, car.vel, car.id, car.team, car=car, boost_amount=float(car.boost))
         curr_dist = self._calc_dist(car.pos, target_pos)
 
         # Stationary-potential decomposition.
@@ -1212,9 +1296,7 @@ class PlayerToBallVelocityReward(BaseReward):
         is_elevated_aerial = bool(ball_z > 350.0 and not is_ball_on_wall)
 
         is_on_ceiling = bool((car.pos[2] > 1750.0 and car.on_ground) or car.pos[2] > 1900.0)
-        up_tilt = abs(float(car.rot_mat[2, 2])) if hasattr(car, "rot_mat") and car.rot_mat is not None else 1.0
-        is_on_wall_curve = bool((abs(car.pos[0]) > 3300.0 or abs(car.pos[1]) > 4300.0) and car.on_ground and (car.pos[2] > 55.0 or up_tilt < 0.92))
-        is_on_wall = bool(((abs(car.pos[0]) > 3450.0 or abs(car.pos[1]) > 4450.0) and car.pos[2] > 200.0 and car.on_ground) or is_on_wall_curve)
+        is_on_wall = is_car_on_wall(car)
 
         horiz_ball_dist = _norm2(arena.ball.pos - car.pos)
         eff_dist = min(curr_dist, horiz_ball_dist) if (car.on_ground and ball_z < 650.0) else curr_dist
@@ -1330,9 +1412,9 @@ class PlayerToBallVelocityReward(BaseReward):
         is_traveling_toward_ball = bool(is_forward_traveling or not car.on_ground) and (travel_align_to_ball > 0.35 and car_horiz_speed > 100.0)
 
         if fwd_alignment < 0.0 and delta_dist > 0.0 and not is_dodging_toward_ball and not is_airborne_half_flip:
-            # On wheels on the turf, driving in reverse toward a trailing ball receives damped delta_dist (0.2x)
-            # to strongly incentivize executing an angular turnaround (powerslide cut or half-flip)
-            delta_dist = delta_dist * max(0.0, fwd_alignment + 1.0) * 0.2
+            # Continuous monotonic angular remap: reversing is damped but maintains a strictly positive
+            # gradient across all 360 degrees (0.15x at 180 deg facing away to 0.275x at 90 deg perpendicular)
+            delta_dist = delta_dist * (0.15 + 0.125 * (fwd_alignment + 1.0))
 
         # Active Own-Net Push Guard:
         # Strictly penalizes the bot when the CAR ITSELF is actively pushing the ball toward its own net in the red zone.
@@ -2419,52 +2501,6 @@ class BoostReward(BaseReward):
             if action[6] > 0.0 and fwd_speed < -150.0:
                 rev_waste_scale = min(1.0, abs(fwd_speed) / 1200.0)
                 loss_rew -= flat_scale * ((0.35 if not car.on_ground else 0.20) * rev_waste_scale)
-
-            # Off-axis boost waste penalty: burning boost when facing away from ball on ground (causes wide orbiting)
-            # Only exempt when genuinely boosting in forward retreat direction toward defending net
-            defend_goal_y = -ARENA_EXTENT_Y if car.team == 0 else ARENA_EXTENT_Y
-            car_vy_defend = -car.vel[1] if car.team == 0 else car.vel[1]
-            dist_ball_to_defend = abs(arena.ball.pos[1] - defend_goal_y)
-
-            threats = compute_opponent_threats(car, arena)
-            threat_active = bool(
-                not threats or threats[0].arrival_time < 1.8 or dist_ball_to_defend < 3000.0
-            )
-            is_retreating_to_defend = bool(car_vy_defend > 100.0 and fwd_speed > 100.0 and threat_active)
-
-            car_to_ball = arena.ball.pos - car.pos
-            dist_to_ball = _norm3(car_to_ball)
-
-            if not is_retreating_to_defend:
-                if car.on_ground and action[6] > 0.0:
-                    if dist_to_ball > 300.0:
-                        unit_to_ball = car_to_ball / dist_to_ball
-                        fwd_align = float(np.dot(fwd_vec, unit_to_ball))
-                        if fwd_align < 0.10:
-                            loss_rew -= flat_scale * 0.15 * (1.0 - fwd_align)
-
-                # Airborne off-trajectory boost waste penalty:
-                # Burning boost while airborne when car's 3D momentum is moving away from or past the ball
-                elif not car.on_ground and action[6] > 0.0:
-                    is_active_dodge = bool(car.just_dodged or getattr(car, "is_dodging", False))
-                    # Physical thruster-momentum penalty during flips:
-                    # Thrusters apply force along nose. Penalize if nose points backward against momentum
-                    # or steeply down into the pitch (slamming car into turf).
-                    if is_active_dodge:
-                        car_fwd_proj = float(np.dot(fwd_vec, car.vel))
-                        is_thruster_braking = bool(car_fwd_proj < -100.0)
-                        horiz_speed = _norm2(car.vel)
-                        is_thruster_ground_smash = bool(fwd_vec[2] < -0.40 and car.pos[2] < 250.0 and horiz_speed < 800.0)
-                        if is_thruster_braking or is_thruster_ground_smash:
-                            loss_rew -= flat_scale * 0.30
-                    else:
-                        is_recovering_halfflip = bool(float(action[2]) > 0.4 and abs(float(action[4])) > 0.2)
-                        if dist_to_ball > 250.0 and not is_recovering_halfflip:
-                            unit_to_ball = car_to_ball / dist_to_ball
-                            closing_vel = float(np.dot(car.vel, unit_to_ball))
-                            eff_align = compute_effective_alignment(car, unit_to_ball)
-                            if closing_vel < -100.0 or (closing_vel < 100.0 and eff_align < 0.20):
-                                loss_rew -= flat_scale * 0.30 * min(1.0, max(0.2, -closing_vel / 1000.0 if closing_vel < 0 else 0.5))
 
             return loss_rew
         else:

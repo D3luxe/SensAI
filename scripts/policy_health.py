@@ -58,6 +58,7 @@ import yaml
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ROOT)
+os.environ.setdefault("RS_COLLISION_MESHES", os.path.join(ROOT, "collision_meshes"))
 
 HZ = 15.0
 CSV = os.path.join(ROOT, "logs", "policy_health.csv")

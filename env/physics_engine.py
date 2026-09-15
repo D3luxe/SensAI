@@ -14,7 +14,13 @@ try:
     import RocketSim as rsim
     # Initialize RocketSim once
     try:
-        rsim.init()
+        _REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        _MESH_PATH = os.path.join(_REPO_ROOT, "collision_meshes")
+        if os.path.exists(_MESH_PATH):
+            os.environ.setdefault("RS_COLLISION_MESHES", _MESH_PATH)
+            rsim.init(_MESH_PATH)
+        else:
+            rsim.init()
         ROCKETSIM_AVAILABLE = True
     except Exception as e:
         print(f"[RocketSim] Init note: {e}")
@@ -306,7 +312,8 @@ class RocketSimArena:
                     )
                     for r_pad in self._rsim_pads
                 ]
-            except Exception:
+            except Exception as e:
+                print(f"[RocketSimArena] Note: Arena init failed ({e}), falling back to pure-Python physics.")
                 self._use_rsim = False
                 self._rsim_pads = []
         else:
@@ -656,6 +663,23 @@ class RocketSimArena:
             self._cached_threat = {}
             return (self.scored_team is not None), self.scored_team
 
+        # Pure Python Fallback Step
+        substeps = max(1, int(round(dt * 120.0)))
+        sub_dt = dt / substeps
+
+        for _ in range(substeps):
+            goal, team = self._step_internal(actions, sub_dt)
+            if goal:
+                self._cached_pred_step = -1
+                self._cached_rsim_preds = None
+                self._cached_threat = {}
+                return True, team
+
+        self._cached_pred_step = -1
+        self._cached_rsim_preds = None
+        self._cached_threat = {}
+        return False, None
+
     def get_predicted_ball_pos(self, slice_idx: int = 60) -> np.ndarray:
         """Returns cached future ball position for the given slice index (calculated once per step per arena)."""
         if getattr(self, "_cached_pred_step", -1) != self.step_count:
@@ -801,16 +825,6 @@ class RocketSimArena:
         if hasattr(self, "_cached_threat"):
             self._cached_threat[team] = res
         return res
-
-        # Pure Python Fallback Step
-        substeps = max(1, int(round(dt * 120.0)))
-        sub_dt = dt / substeps
-
-        for _ in range(substeps):
-            goal, team = self._step_internal(actions, sub_dt)
-            if goal:
-                return True, team
-        return False, None
 
     def _step_internal(self, actions: List[np.ndarray], dt: float) -> Tuple[bool, Optional[int]]:
         self.scored_team = None

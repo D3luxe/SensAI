@@ -1,5 +1,5 @@
 {
-  "updated_at": 1789437473.7698681,
+  "updated_at": 1789495208.1856997,
   "learning_rate": 0.0003,
   "ent_coef": 0.01,
   "clip_range": 0.2,
@@ -22,8 +22,8 @@
     "ball_to_goal_weight": 0.25,
     "own_goal_threat_weight": 0.0,
     "player_to_ball_weight": 0.5,
-    "jump_bridge_weight": 0.0,
-    "jump_cost_weight": 0.015,
+    "jump_bridge_weight": 0.05,
+    "jump_cost_weight": 0.01,
     "spin_cost_weight": 0.015,
     "spin_cost_deadband": 2.0,
     "time_cost_weight": 0.01,
@@ -35,20 +35,20 @@
     "boost_pathing_threshold": 50.0
   },
   "scenarios": {
-    "kickoff_prob": 0.2,
-    "replay_prob": 0.5,
-    "aerial_prob": 0.03,
-    "custom_prob": 0.1,
-    "turnaround_prob": 0.03,
-    "wall_prob": 0.03,
-    "wall_rebound_prob": 0.03,
-    "save_prob": 0.05,
-    "dribble_flick_prob": 0.03
+    "kickoff_prob": 0.17,
+    "replay_prob": 0.58,
+    "aerial_prob": 0.05,
+    "custom_prob": 0.08,
+    "turnaround_prob": 0.02,
+    "wall_prob": 0.02,
+    "wall_rebound_prob": 0.02,
+    "save_prob": 0.04,
+    "dribble_flick_prob": 0.02
   },
   "training_opponents": [
     "checkpoints/necto-model.pt"
   ],
-  "training_opponent_ratio": 0.0,
+  "training_opponent_ratio": 0.1875,
   "torch_num_threads": 8,
   "contender_series_per_step": 32
 }
