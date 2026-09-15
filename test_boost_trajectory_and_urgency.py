@@ -200,6 +200,22 @@ class TestBoostTrajectoryAndUrgency(unittest.TestCase):
         self.assertEqual(rew._safety_budget_filter[car.id], 1.0)
         self.assertIn(car.id, rew._prev_transit)
 
+    def test_goalside_defending_car_never_forced_into_retreat(self):
+        """A car that is already goalside of the ball must never be forced into retreat even when driving fast defensively."""
+        rew = BoostReward(gain_weight=1.0, lose_weight=0.3, gamma=1.0)
+        # Blue car at Y = -1500 (goalside), ball at Y = 0 (goalside_margin = -1500 <= 0)
+        # Sprinting towards own net at -1800 uu/s
+        car = CarState(id=0, team=0, pos=np.array([0.0, -1500.0, 17.0], dtype=np.float32),
+                       vel=np.array([0.0, -1800.0, 0.0], dtype=np.float32),
+                       rot=np.array([0.0, -np.pi / 2, 0.0], dtype=np.float32),
+                       boost=20.0, on_ground=True)
+        arena = MockArena([car], ball_pos=[500.0, 0.0, 93.0])
+        rew.reset(arena)
+
+        rew._transit_potential(car, arena)
+        self.assertFalse(rew._retreat_mode[car.id], "Goalside car must NEVER enter retreat mode")
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
+

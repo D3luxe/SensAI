@@ -982,35 +982,57 @@ class PlayerToBallVelocityReward(BaseReward):
 
         # 2. Multi-Agent Race Evaluation & Continuous Logistic Challenge Weight
         opponents = [c for c in getattr(arena, "cars", []) if getattr(c, "team", -1) != car_team and not getattr(c, "demoed", False)]
+        opp_has_possession = False
         if opponents:
             opp_arrivals = []
             for opp in opponents:
                 opp_b = getattr(opp, "boost", 0.0)
                 o_ref = cached_intercept_point(arena, opp.id, opp.pos, opp.vel, boost_amount=opp_b)[0]
-                arr, _, _ = compute_trajectory_arrival_time(opp.pos, opp.vel, o_ref, boost_amount=opp_b)
+                arr, d_opp, _ = compute_trajectory_arrival_time(opp.pos, opp.vel, o_ref, boost_amount=opp_b)
                 opp_arrivals.append(arr)
+                if d_opp < 350.0:
+                    opp_has_possession = True
             t_opp = min(opp_arrivals)
             t_self = pred_t if pred_t > 0.0 else compute_trajectory_arrival_time(car_pos, chaser_vel, clamped_intercept)[0]
             delta_t_race = t_self - t_opp
         else:
             delta_t_race = -999.0
 
+        ball_y = float(arena.ball.pos[1])
+        ball_depth = -ball_y if car_team == 0 else ball_y  # > 0 when ball is in our defending half
+        ball_vy_defend = -float(arena.ball.vel[1]) if car_team == 0 else float(arena.ball.vel[1])
+
+        # Threat Gating: Only surrender pursuit to shadow defense if the play threatens our half
+        # (ball is in our half, ball moving toward net > 150 uu/s, or opponent has close possession).
+        # Harmless loose balls in the opponent's half keep w_challenge high to maintain pressure.
+        is_threatening = bool(ball_depth > 0.0 or ball_vy_defend > 150.0 or opp_has_possession)
+        effective_delta_t = delta_t_race if is_threatening else min(0.05, delta_t_race)
+
         # Smooth logistic challenge sigmoid centered at +0.10s with steepness 8.0:
         # Delta t = -0.20s -> w ~ 0.91 (attack / strike)
         # Delta t =  0.00s -> w ~ 0.69 (solid contest incentive on 50/50s)
         # Delta t = +0.10s -> w = 0.50
-        # Delta t = +0.35s -> w ~ 0.12 (smoothly yields to shadow positioning)
-        w_challenge = float(1.0 / (1.0 + math.exp(min(20.0, max(-20.0, 8.0 * (delta_t_race - 0.10))))))
+        # Delta t = +0.35s -> w ~ 0.12 (smoothly yields to shadow positioning when threatened)
+        w_challenge = float(1.0 / (1.0 + math.exp(min(20.0, max(-20.0, 8.0 * (effective_delta_t - 0.10))))))
 
         # Close striking proximity override: when directly engaging (< 500 uu), contest takes priority
         if raw_ball_dist < 500.0:
             prox_boost = min(1.0, max(0.0, (500.0 - raw_ball_dist) / 300.0))
             w_challenge = float(w_challenge + (1.0 - w_challenge) * prox_boost)
 
-        # 3. Defensive Shadow Anchor along ball-to-own-goal line
+        # 3. Dynamic Defensive Shadow Anchor along true ball-to-own-goal vector
         defend_goal_y = -ARENA_EXTENT_Y if car_team == 0 else ARENA_EXTENT_Y
-        shadow_x = _clip(float(arena.ball.pos[0]) * 0.5, -ARENA_EXTENT_X + 200.0, ARENA_EXTENT_X - 200.0)
-        shadow_y = _clip((float(arena.ball.pos[1]) + defend_goal_y) * 0.5, -ARENA_EXTENT_Y + 200.0, ARENA_EXTENT_Y - 200.0)
+        goal_diff = np.array([0.0 - float(arena.ball.pos[0]), defend_goal_y - float(arena.ball.pos[1])], dtype=np.float32)
+        dist_to_goal = _norm2(goal_diff)
+        if dist_to_goal < 150.0:
+            u_def = np.array([0.0, -1.0 if car_team == 0 else 1.0], dtype=np.float32)
+        else:
+            u_def = goal_diff / dist_to_goal
+
+        # Tactical shadow separation: stay contestably goalside (850 uu) along true defensive line
+        shadow_dist = max(0.0, min(850.0, dist_to_goal - 250.0))
+        shadow_x = _clip(float(arena.ball.pos[0]) + u_def[0] * shadow_dist, -ARENA_EXTENT_X + 200.0, ARENA_EXTENT_X - 200.0)
+        shadow_y = _clip(float(arena.ball.pos[1]) + u_def[1] * shadow_dist, -ARENA_EXTENT_Y + 200.0, ARENA_EXTENT_Y - 200.0)
         shadow_anchor = np.array([shadow_x, shadow_y, BALL_RADIUS], dtype=np.float32)
 
         # Dynamic blend between pursuit intercept and defensive shadow line
@@ -1022,22 +1044,8 @@ class PlayerToBallVelocityReward(BaseReward):
         """
         Slides the tactical target toward a shadow point when the ball is goalside of the car.
 
-        The distance potential used to aim at the ball unconditionally. The wrong-side flag was
-        computed and then spent only on suppressing velocity-matching and pursuit bonuses, never
-        on the delta itself, so a bot doing the correct 1v1 thing -- turning and retreating toward
-        its back post to delay an attacker instead of diving from a bad angle -- was charged for
-        every uu of ground it gave up. A persistent per-step cost against a delayed and uncertain
-        benefit is the shape of pressure that produces desperate challenges.
-
-        Retargeting rather than nulling: nulling removes the penalty and the guidance together,
-        while a shadow point keeps a gradient pointing where a defender should actually go. Same
-        construction JumpBridgeReward already uses, including its clamp keeping the point on the
-        playable pitch rather than inside the net structure.
-
-        The offset is blended in over 250 uu of relative depth. Switching it on a boolean would
-        teleport the target by 700 uu in one tick, and inside a distance delta that does not even
-        surface as a visible spike: the decomposition clips target motion to the ball's own travel
-        budget, so the potential would quietly swallow most of the transition instead.
+        Retargeting rather than nulling keeps a gradient pointing where a defender should actually go,
+        positioning the bot on the true line of sight between the ball and our defending net.
         """
         defend_goal_y = -ARENA_EXTENT_Y if car_team == 0 else ARENA_EXTENT_Y
         dist_car_to_defend = abs(float(car_pos[1]) - defend_goal_y)
@@ -1046,11 +1054,6 @@ class PlayerToBallVelocityReward(BaseReward):
         # 0 while the car is goalside of the ball, ramping to 1 once the ball is 300 uu behind it.
         wrong_t = _clip((dist_car_to_defend - dist_ball_to_defend - 50.0) / 250.0, 0.0, 1.0)
 
-        # Being goalside of the ball is not the same as being beaten. Two guards, both ramped:
-        #
-        # Proximity: with the ball within reach the car is contesting, not retreating, and pulling
-        # its target off the ball would starve every strike-zone term that depends on aiming at
-        # it. Only a ball that has genuinely got past and away calls for shadowing.
         raw_dist = self._calc_dist(car_pos, arena.ball.pos)
         wrong_t *= _clip((raw_dist - 600.0) / 600.0, 0.0, 1.0)
 
@@ -1067,15 +1070,19 @@ class PlayerToBallVelocityReward(BaseReward):
         if wrong_t <= 0.0:
             return target_pos
 
-        shadow_offset = -SHADOW_OFFSET_Y if car_team == 0 else SHADOW_OFFSET_Y
-        shadow_y = float(arena.ball.pos[1]) + shadow_offset
-        if car_team == 0:
-            shadow_y = max(-ARENA_EXTENT_Y + 200.0, min(0.0, shadow_y))
+        goal_diff = np.array([0.0 - float(arena.ball.pos[0]), defend_goal_y - float(arena.ball.pos[1])], dtype=np.float32)
+        dist_to_goal = _norm2(goal_diff)
+        if dist_to_goal < 150.0:
+            u_def = np.array([0.0, -1.0 if car_team == 0 else 1.0], dtype=np.float32)
         else:
-            shadow_y = min(ARENA_EXTENT_Y - 200.0, max(0.0, shadow_y))
+            u_def = goal_diff / dist_to_goal
+
+        shadow_dist = max(0.0, min(SHADOW_OFFSET_Y, dist_to_goal - 250.0))
+        shadow_x = _clip(float(arena.ball.pos[0]) + u_def[0] * shadow_dist, -ARENA_EXTENT_X + 200.0, ARENA_EXTENT_X - 200.0)
+        shadow_y = _clip(float(arena.ball.pos[1]) + u_def[1] * shadow_dist, -ARENA_EXTENT_Y + 200.0, ARENA_EXTENT_Y - 200.0)
 
         shadow = np.array([
-            float(arena.ball.pos[0]) * 0.5,
+            shadow_x,
             shadow_y,
             BALL_RADIUS,
         ], dtype=np.float32)
@@ -2208,30 +2215,38 @@ class BoostReward(BaseReward):
             return 0.0
         air_taper = 1.0 if car.on_ground else max(0.0, 1.0 - (cz - 17.0) / 233.0)
 
-        # ── Macro-Target Vector & Schmitt Trigger Hysteresis (Safeguard 3) ──
+        # ── Dynamic Macro-Target Vector with Continuous Recovery Gradient (Safeguard 3) ──
         team_sign = 1.0 if car.team == 0 else -1.0
+        # Positive when car is ahead of the ball (towards opponent goal relative to ball)
         goalside_margin = (float(car.pos[1]) - float(arena.ball.pos[1])) * team_sign
-        car_vy_defend = -float(car.vel[1]) if car.team == 0 else float(car.vel[1])
 
-        is_in_retreat = self._retreat_mode.get(car.id, False)
-        if not is_in_retreat:
-            # Enter retreat mode when caught ahead of the ball or sprinting back to defend
-            if goalside_margin > 300.0 or car_vy_defend > 250.0:
-                is_in_retreat = True
-        else:
-            # Exit retreat mode once recovered goalside and no longer rushing to net
-            if goalside_margin < 100.0 and car_vy_defend < 100.0:
-                is_in_retreat = False
-        self._retreat_mode[car.id] = is_in_retreat
+        # Continuous recovery weight: 0.0 when goalside of the ball, ramping to 1.0 when 400 uu ahead
+        w_recover = _clip(goalside_margin / 400.0, 0.0, 1.0)
+        self._retreat_mode[car.id] = bool(w_recover > 0.5)
 
-        if is_in_retreat:
-            # Back-post targeting: goal post is at ~892 uu; use 800 uu.
-            # If ball is on positive X, backpost is negative X (and vice versa).
-            backpost_x = -800.0 if float(arena.ball.pos[0]) > 0.0 else 800.0
-            defend_y = -ARENA_EXTENT_Y if team_sign > 0 else ARENA_EXTENT_Y
-            target_pos = np.array([backpost_x, defend_y, 0.0], dtype=np.float32)
+        if w_recover > 0.0:
+            defend_y = -ARENA_EXTENT_Y if car.team == 0 else ARENA_EXTENT_Y
+            goal_diff = np.array([0.0 - float(arena.ball.pos[0]), defend_y - float(arena.ball.pos[1])], dtype=np.float32)
+            dist_to_goal = _norm2(goal_diff)
+            if dist_to_goal < 150.0:
+                u_def = np.array([0.0, -team_sign], dtype=np.float32)
+            else:
+                u_def = goal_diff / dist_to_goal
+
+            # Contestable shadow separation along defensive vector (clamped safely near net)
+            shadow_dist = max(0.0, min(900.0, dist_to_goal - 250.0))
+
+            # Wide Recovery Lane: offset laterally away from the ball's side by 700 uu so the bot
+            # recovers down the flank/pad lane rather than straight down the opponent's line of fire
+            lane_side = -1.0 if float(arena.ball.pos[0]) >= 0.0 else 1.0
+            lane_offset_x = lane_side * 700.0
+            recover_x = _clip(float(arena.ball.pos[0]) + u_def[0] * shadow_dist + lane_offset_x, -ARENA_EXTENT_X + 250.0, ARENA_EXTENT_X - 250.0)
+            recover_y = _clip(float(arena.ball.pos[1]) + u_def[1] * shadow_dist, -ARENA_EXTENT_Y + 200.0, ARENA_EXTENT_Y - 200.0)
+
+            pos_recover = np.array([recover_x, recover_y, BALL_RADIUS], dtype=np.float32)
+            target_pos = (1.0 - w_recover) * np.asarray(arena.ball.pos, dtype=np.float32) + w_recover * pos_recover
         else:
-            target_pos = arena.ball.pos
+            target_pos = np.asarray(arena.ball.pos, dtype=np.float32)
 
         car_to_target_2d = target_pos[:2] - car.pos[:2]
         dist_target = _norm2(car_to_target_2d)
