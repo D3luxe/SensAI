@@ -536,7 +536,7 @@ class RocketSimArena:
             car.boost = float(c_state.boost)
             car.on_ground = bool(c_state.is_on_ground)
             car.has_jump = bool(not c_state.has_jumped or c_state.is_on_ground)
-            car.has_flip = bool(not c_state.has_flipped and not c_state.has_double_jumped and not c_state.is_on_ground)
+            car.has_flip = bool(c_state.has_flip_or_jump() and not c_state.is_on_ground)
             car.has_double_jumped = bool(c_state.has_double_jumped)
             was_dodging = bool(getattr(car, "is_dodging", False))
             car.is_dodging = bool(c_state.is_flipping)
@@ -609,7 +609,7 @@ class RocketSimArena:
 
                     c_state = r_car.get_state()
                     is_on_gnd = bool(c_state.is_on_ground)
-                    has_flip = bool(c_state.has_flipped or c_state.has_double_jumped)
+                    has_flip_avail = bool(c_state.has_flip_or_jump())
                     want_jump = bool(act[5] > 0.0)
 
                     # Substep Jump & Flip Sequencer:
@@ -621,14 +621,15 @@ class RocketSimArena:
                         yaw_val = -float(act[3]) if want_jump else 0.0
                         roll_val = -float(act[4]) if want_jump else 0.0
                     else:
-                        jump_val = bool(want_jump and not has_flip and 2 <= tick <= 5)
+                        jump_val = bool(want_jump and has_flip_avail and 2 <= tick <= 5)
                         pitch_val = -float(act[2])
                         yaw_val = -float(act[3])
                         roll_val = -float(act[4])
-                        # Dodge deadzone scaling when dodge is triggered
+                        # Dodge deadzone scaling: only scale stick deflection when agent intends a directional dodge (stick >= 0.50).
+                        # Sub-0.50 deflection is preserved as a neutral double jump, allowing pitch-up + vertical climb.
                         if jump_val:
                             stick_mag = math.hypot(pitch_val, yaw_val)
-                            if stick_mag > 0.08:
+                            if stick_mag >= 0.50:
                                 scale = max(1.0, 0.90 / stick_mag)
                                 pitch_val = _clip(pitch_val * scale, -1.0, 1.0)
                                 yaw_val = _clip(yaw_val * scale, -1.0, 1.0)

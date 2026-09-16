@@ -1,5 +1,5 @@
 {
-  "updated_at": 1789507184.4885962,
+  "updated_at": 1789512631.9687326,
   "learning_rate": 0.0003,
   "ent_coef": 0.01,
   "clip_range": 0.2,
@@ -35,14 +35,14 @@
     "boost_pathing_threshold": 50.0
   },
   "scenarios": {
-    "kickoff_prob": 0.17,
-    "replay_prob": 0.58,
-    "aerial_prob": 0.05,
+    "kickoff_prob": 0.16,
+    "replay_prob": 0.43,
+    "aerial_prob": 0.22,
     "custom_prob": 0.08,
     "turnaround_prob": 0.02,
     "wall_prob": 0.02,
     "wall_rebound_prob": 0.02,
-    "save_prob": 0.04,
+    "save_prob": 0.03,
     "dribble_flick_prob": 0.02
   },
   "training_opponents": [

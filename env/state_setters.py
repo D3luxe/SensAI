@@ -105,7 +105,7 @@ class AerialScenarioSetter(BaseStateSetter):
     def reset(self, rsim_arena: Any, num_players: int) -> None:
         target_team = random.choice([0, 1])
         sign = 1.0 if target_team == 0 else -1.0
-        mode = random.choices(["stationary_float", "rising_popup", "dynamic_intercept"], weights=[0.25, 0.35, 0.40])[0]
+        mode = random.choices(["stationary_float", "rising_popup", "low_popup_double_jump", "dynamic_intercept"], weights=[0.20, 0.25, 0.20, 0.35])[0]
 
         if mode == "stationary_float":
             # Mode 1: High floating ball with zero horizontal velocity; ideal for discovering initial jump+boost liftoff
@@ -131,8 +131,20 @@ class AerialScenarioSetter(BaseStateSetter):
             base_cy = by - sign * random.uniform(700.0, 1100.0)
             approach_speed = random.uniform(800.0, 950.0)
 
+        elif mode == "low_popup_double_jump":
+            # Mode 3: Low popup hovering at double-jump apex (Z=320-520) with low/descending vertical velocity
+            bx = random.uniform(-1200.0, 1200.0)
+            by = sign * random.uniform(600.0, 1800.0)
+            bz = random.uniform(320.0, 520.0)
+            bvx = random.uniform(-100.0, 100.0)
+            bvy = sign * random.uniform(50.0, 180.0)
+            bvz = random.uniform(-80.0, 120.0)
+            base_cx = bx + random.uniform(-200.0, 200.0)
+            base_cy = by - sign * random.uniform(700.0, 1050.0)
+            approach_speed = random.uniform(650.0, 850.0)
+
         else:
-            # Mode 3: Dynamic aerial cross / shot; analytical vz ensures >= 1.85s hang time above Z=250
+            # Mode 4: Dynamic aerial cross / shot; analytical vz ensures >= 1.85s hang time above Z=250
             bx = random.uniform(-1400.0, 1400.0)
             by = sign * random.uniform(500.0, 2000.0)
             bz = random.uniform(900.0, 1300.0)

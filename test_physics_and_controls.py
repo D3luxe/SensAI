@@ -1005,13 +1005,10 @@ class TestPhysicsAndControls(unittest.TestCase):
         self.assertEqual(rew_fast_brake, rew_fast_thr,
                          "Outcome-driven pacing must not award artificial input bounties for holding reverse!")
 
-        # 2. Outcome comparison: Paced car avoids pacing penalty
-        p2b_paced = PlayerToBallVelocityReward(weight=1.0)
-        p2b_paced.reset(MockArena(ball, [car_paced]))
-        rew_paced = p2b_paced.get_reward(car_paced, MockArena(ball, [car_paced]), act_neu, False, None)
-
-        self.assertGreater(rew_paced, rew_fast_thr,
-                           f"Properly paced approach ({rew_paced}) must exceed overspeeding approach ({rew_fast_thr}) due to pacing penalty avoidance!")
+        # 2. Outcome comparison:
+        # Removed with the additive income in PlayerToBallVelocityReward. This asserted a
+        # distinction the term no longer draws: it discriminated cases by VELOCITY, and the
+        # term now responds only to realized position change (tested in test_player_to_ball_potential.py).
 
     def test_bouncing_and_falling_ball_pacing_and_braking(self):
         """
@@ -1039,17 +1036,9 @@ class TestPhysicsAndControls(unittest.TestCase):
                              vel=np.array([0, 400, 0], dtype=np.float32),
                              rot=np.array([0, math.pi / 2, 0], dtype=np.float32), on_ground=True)
 
-        p2b_fast = PlayerToBallVelocityReward(weight=1.0)
-        p2b_fast.reset(MockArena(ball_falling, [car_fast]))
-        act_neu = np.array([0, 0, 0, 0, 0, 0, 0, 0], dtype=np.float32)
-        rew_fast = p2b_fast.get_reward(car_fast, MockArena(ball_falling, [car_fast]), act_neu, False, None)
-
-        p2b_paced = PlayerToBallVelocityReward(weight=1.0)
-        p2b_paced.reset(MockArena(ball_falling, [car_paced]))
-        rew_paced = p2b_paced.get_reward(car_paced, MockArena(ball_falling, [car_paced]), act_neu, False, None)
-
-        self.assertGreater(rew_paced, rew_fast,
-                           f"Properly paced approach on falling ball must exceed overspeeding rush! paced={rew_paced} fast={rew_fast}")
+        # Approach comparison removed with the additive income in PlayerToBallVelocityReward.
+        # The term now responds only to realized position change, strictly preserving telescoping.
+        act_neu = np.zeros(8, dtype=np.float32)
 
         # 2. Overshooting a bouncing ball (Z=320, trailing behind car at local_x < 0)
         ball_bouncing_behind = BallState(pos=np.array([0, -3100, 320], dtype=np.float32),
@@ -1095,7 +1084,7 @@ class TestPhysicsAndControls(unittest.TestCase):
                                 rot=np.array([0, math.pi / 2, 0], dtype=np.float32), on_ground=True)
         car_overshot.ball_touches = car_approaching.ball_touches
         rew_overshot = p2b_strike.get_reward(car_overshot, MockArena(ball_bounce, [car_overshot]), act_thr, False, None)
-        self.assertLess(rew_overshot, -0.20, f"Zooming past bouncing ball without touching must incur anti-overshoot penalty! got {rew_overshot}")
+        self.assertLess(rew_overshot, -0.05, f"Zooming past bouncing ball without touching must incur negative distance delta! got {rew_overshot}")
 
     def test_aerial_momentum_and_attitude_rewards(self):
         """

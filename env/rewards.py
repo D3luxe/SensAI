@@ -977,19 +977,16 @@ class PlayerToBallVelocityReward(BaseReward):
         self._reread_ticks: Dict[int, int] = {}
 
     def _calc_dist(self, car_pos: np.ndarray, ball_pos: np.ndarray) -> float:
-        # If BOTH car and ball are near pitch floor (car Z < 150, ball Z < 300), evaluate horizontal (X, Y) distance
-        # so low ground flips / wavedashes do not incur an artificial vertical distance penalty.
-        # Smoothly blend between 2D and 3D distance between car Z=150 and Z=350 to avoid metric cliffs.
-        if ball_pos[2] < 300.0:
-            d2 = _norm2(ball_pos - car_pos)
-            if car_pos[2] <= 150.0:
-                return d2
-            d3 = _norm3(ball_pos - car_pos)
-            if car_pos[2] >= 350.0:
-                return d3
-            alpha = (float(car_pos[2]) - 150.0) / 200.0
-            return float((1.0 - alpha) * d2 + alpha * d3)
-        return _norm3(ball_pos - car_pos)
+        # If BOTH car and ball are near pitch floor (car Z <= 100, ball Z <= 120), evaluate horizontal (X, Y) distance
+        # so low ground flips, dribbles, and wavedashes do not incur an artificial vertical distance penalty.
+        # Smoothly blend between 2D and 3D distance as ball rises (120 -> 300 uu) or car jumps (100 -> 250 uu)
+        # to ensure continuous gradients everywhere with zero metric cliffs.
+        d2 = _norm2(ball_pos - car_pos)
+        d3 = _norm3(ball_pos - car_pos)
+        alpha_ball = _clip((float(ball_pos[2]) - 120.0) / 180.0, 0.0, 1.0)
+        alpha_car = _clip((float(car_pos[2]) - 100.0) / 150.0, 0.0, 1.0)
+        alpha = max(alpha_ball, alpha_car)
+        return float((1.0 - alpha) * d2 + alpha * d3)
 
     def _get_target_pos(
         self,
@@ -1927,9 +1924,6 @@ class JumpBridgeReward(BaseReward):
         is_neutral_double_jump = bool(
             not car.on_ground and curr_double_jump and not prev_double_jump
         )
-        if not is_neutral_double_jump and is_executing_dodge and stick_deflection <= 0.08 and not car.just_dodged:
-            is_neutral_double_jump = True
-
         if is_neutral_double_jump:
             car_vz = float(car.vel[2])
             ball_rel_z = ball_z - car.pos[2]

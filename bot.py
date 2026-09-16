@@ -280,6 +280,7 @@ class SenseiRLBot(Bot):
         # RocketSim: neither is ever non-zero while on_ground).
         self._air_timers: dict[int, float] = {}
         self._flip_timers: dict[int, float] = {}
+        self._flip_expired: dict[int, bool] = {}
         # Was the car on the ground when the current policy step began? See the dodge gate in
         # the substep sequencer: a dodge fired inside the liftoff step reads its direction from
         # an action chosen while grounded, where those channels are masked to zero.
@@ -477,6 +478,7 @@ class SenseiRLBot(Bot):
             if state == AirState.OnGround:
                 self._air_timers[i] = 0.0
                 self._flip_timers[i] = 0.0
+                self._flip_expired[i] = False
                 continue
             self._air_timers[i] = self._air_timers.get(i, 0.0) + dt
             # flip_time starts when the dodge starts and keeps running until touchdown,
@@ -486,6 +488,14 @@ class SenseiRLBot(Bot):
                 self._flip_timers[i] = running + dt
             else:
                 self._flip_timers[i] = 0.0
+
+            # Flip expiration:
+            # 1. Spent flip via double jump or dodge
+            # 2. Used first jump to liftoff and airborne duration has exceeded RocketSim / RL 1.25s timeout
+            if getattr(p, "has_double_jumped", False) or getattr(p, "has_dodged", False):
+                self._flip_expired[i] = True
+            elif getattr(p, "has_jumped", False) and self._air_timers[i] >= 1.25:
+                self._flip_expired[i] = True
 
     def _demo_state(self, player) -> tuple:
         """(demoed, seconds until respawn) from whichever field this RLBot build exposes."""
@@ -668,7 +678,7 @@ class SenseiRLBot(Bot):
             is_on_ground = my_car.air_state == AirState.OnGround
             has_jump = is_on_ground or (not my_car.has_jumped)
             # Align with RocketSim training: has_flip is only True when airborne and flip is available
-            has_flip = bool((not is_on_ground) and (not my_car.has_double_jumped) and (not my_car.has_dodged))
+            has_flip = bool((not is_on_ground) and not self._flip_expired.get(self.index, False))
             air_state_name = _air_state_name(my_car.air_state)
 
             car_rot_mat = rotation_to_rot_mat(
@@ -715,7 +725,7 @@ class SenseiRLBot(Bot):
                     opp_car = packet.players[i]
                     opp_on_ground = opp_car.air_state == AirState.OnGround
                     opp_jump = opp_on_ground or (not opp_car.has_jumped)
-                    opp_flip = bool((not opp_on_ground) and (not opp_car.has_double_jumped) and (not opp_car.has_dodged))
+                    opp_flip = bool((not opp_on_ground) and not self._flip_expired.get(i, False))
                     opp_rot_mat = rotation_to_rot_mat(
                         opp_car.physics.rotation.pitch,
                         opp_car.physics.rotation.yaw,
@@ -860,17 +870,17 @@ class SenseiRLBot(Bot):
                 )
 
                 if controller.jump:
-                    self.dodge_cooldown = 20  # ~1.3 second recovery after dodge
-
                     # Dodge Deadzone Compensation:
                     # Rocket League and RocketSim require analog stick deflection >= 0.50 to execute a directional flip/dodge.
                     # When an airborne dodge is triggered, scale directional stick deflection past the deadzone threshold
                     # so continuous policy outputs execute genuine forward, backward, or diagonal dodges instead of empty double jumps.
+                    # Sub-0.50 stick deflection is preserved as a neutral double jump, allowing pitch-up + vertical climb.
                     stick_mag = math.hypot(controller.pitch, controller.yaw)
-                    if stick_mag > 0.08:
+                    if stick_mag >= 0.50:
                         scale = max(1.0, 0.90 / stick_mag)
                         controller.pitch = float(np.clip(controller.pitch * scale, -1.0, 1.0))
                         controller.yaw = float(np.clip(controller.yaw * scale, -1.0, 1.0))
+                        self.dodge_cooldown = 20  # Recovery after actual dodge/flip only
 
                 # Half-Flip Recovery: If doing a reverse backflip, cancel and roll when inverted
                 elif not is_on_ground and not has_flip and fwd_speed < -100.0:
