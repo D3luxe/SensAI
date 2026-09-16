@@ -10,7 +10,7 @@ hyperparameters:
   bc_regularization_weight: 0.0
   clip_range: 0.2
   critic_warmup_iterations: 50
-  ent_coef: 0.01
+  ent_coef: 0.008
   gae_lambda: 0.98
   gamma: 0.995
   learning_rate: 0.0003
@@ -80,30 +80,31 @@ reward_annealing:
   targets:
     player_to_ball_weight: 0.25
 rewards:
-  air_roll_recovery_weight: 0.0
+  air_roll_recovery_weight: 0.05
   ball_to_goal_weight: 0.25
   boost_gain_weight: 0.8
   boost_lose_weight: 0.25
   boost_pathing_threshold: 50.0
-  concede_weight: -30.0
-  goal_weight: 30.0
+  concede_weight: -5.0
+  goal_weight: 5.0
   jump_bridge_weight: 0.05
-  jump_cost_weight: 0.01
+  jump_cost_weight: 0.05
   own_goal_threat_weight: 0.0
-  player_to_ball_weight: 0.5
+  player_to_ball_weight: 0.35
   powerslide_weight: 0.0
-  save_weight: 6.0
+  retreat_flip_weight: 0.4
+  save_weight: 2.0
   spin_cost_deadband: 2.0
   spin_cost_weight: 0.015
-  time_cost_weight: 0.01
-  touch_weight: 0.5
+  time_cost_weight: 0.002
+  touch_weight: 0.4
 scenarios:
-  aerial_prob: 0.22
-  custom_prob: 0.08
-  dribble_flick_prob: 0.02
-  kickoff_prob: 0.16
-  replay_prob: 0.43
-  save_prob: 0.03
-  turnaround_prob: 0.02
-  wall_prob: 0.02
-  wall_rebound_prob: 0.02
+  aerial_prob: 0.13
+  custom_prob: 0.13
+  dribble_flick_prob: 0.08
+  kickoff_prob: 0.11
+  replay_prob: 0.23
+  save_prob: 0.08
+  turnaround_prob: 0.08
+  wall_prob: 0.08
+  wall_rebound_prob: 0.08

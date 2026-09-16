@@ -6,7 +6,7 @@ Guarantees:
   3. Half-flip (backflip -> cancel + air roll -> touchdown forward) receives cancel reward and +1.50 turnaround bonus.
   4. Open-field traversal flips require speed > 350 uu/s, eliminating 0-speed flips in place.
   5. Low-altitude flip slam into turf is recognized as a wavedash and awarded the dedicated impulse bonus.
-  6. Deterministic jump threshold is calibrated to p > 0.30 (logit -0.8473).
+  6. Deterministic button thresholds come from the shared BIN_THRESH_LOGITS constant.
 """
 
 import math
@@ -253,10 +253,11 @@ class TestFlippingAndMechanics(unittest.TestCase):
         self.assertGreaterEqual(rew, 1.0, "Low altitude flip slam into turf must award explicit wavedash bonus!")
 
     def test_model_jump_threshold_calibrated(self):
-        """Guarantees that ActorCritic deterministic jump threshold is set to p > 0.15 (-1.7346)."""
+        """Guarantees that ActorCritic deterministic thresholds come from the shared BIN_THRESH_LOGITS constant."""
+        from agent.models import BIN_THRESH_LOGITS
         model = ActorCritic(obs_dim=74, act_dim=8, continuous_actions=True)
-        self.assertAlmostEqual(model.bin_thresh_logits[0].item(), -1.7346, places=3,
-                               msg="Jump threshold logit must be calibrated to -1.7346 (p > 0.15)!")
+        for i, expected in enumerate(BIN_THRESH_LOGITS):
+            self.assertAlmostEqual(model.bin_thresh_logits[i].item(), expected, places=4)
 
     def test_mid_flip_inverted_flight_velocity_reward_undampened(self):
         """Guarantees that inverted flight during a front flip/speedflip receives 100% velocity reward without dampening."""

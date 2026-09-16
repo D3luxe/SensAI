@@ -33,6 +33,14 @@ def get_activation_cls(activation: str):
 
 from env.observations import OBS_DIM, OBS_MIRROR_MASK_NP, OBS_MIRROR_INDICES_NP, ACT_MIRROR_MASK_NP
 
+# Deterministic activation thresholds (logits) for the binary Bernoulli buttons. Single source of
+# truth: the buffer is non-persistent, so every constructed model (training eval and bot) uses these.
+# Index 0 (Jump):      p > 0.15 (logit > -1.7346) - kept low for dodge second-press reliability;
+#                      revisit only with logged jump-probability data.
+# Index 1 (Boost):     p > 0.25 (logit > -1.0986)
+# Index 2 (Handbrake): p > 0.40 (logit > -0.4055)
+BIN_THRESH_LOGITS = (-1.7346, -1.0986, -0.4055)
+
 try:
     from env.observations import OBS_LEGACY_MIRROR_MASK_NP
 except ImportError:
@@ -87,11 +95,7 @@ class ActorCritic(nn.Module):
         self.register_buffer("obs_mirror_mask", torch.tensor(mirror_mask_np, dtype=torch.float32), persistent=False)
         self.register_buffer("obs_mirror_indices", torch.tensor(mirror_indices_np, dtype=torch.long), persistent=False)
         self.register_buffer("act_mirror_mask", torch.tensor(ACT_MIRROR_MASK_NP, dtype=torch.float32), persistent=False)
-        # Calibrated deterministic activation thresholds for binary Bernoulli buttons:
-        # Index 0 (Jump): p > 0.15 (logit > -1.7346) - calibrated for deliberate takeoff/dodges without phantom low-speed turn hops
-        # Index 1 (Boost): p > 0.25 (logit > -1.0986)
-        # Index 2 (Handbrake): p > 0.52 (logit > 0.0800)
-        self.register_buffer("bin_thresh_logits", torch.tensor([-1.7346, -1.0986, 0.0800], dtype=torch.float32), persistent=False)
+        self.register_buffer("bin_thresh_logits", torch.tensor(BIN_THRESH_LOGITS, dtype=torch.float32), persistent=False)
 
         act_cls = get_activation_cls(activation)
 
@@ -355,6 +359,8 @@ class ActorCritic(nn.Module):
             else:
                 action_mean = torch.tanh(self.actor_mean(features))
                 bin_logits = self.actor_binary(features)
+            # Unmasked button logits of the latest pass, read by bot.py's jump-probability logging.
+            self.last_bin_logits = bin_logits.detach()
 
             clamped_log_std = self.clamped_log_std()
             action_std = torch.exp(clamped_log_std).expand_as(action_mean)

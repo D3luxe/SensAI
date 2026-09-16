@@ -82,6 +82,7 @@ def load_weights(global_step=None):
     cfg = yaml.safe_load(io.open(os.path.join(ROOT, "config/default_config.yaml"),
                                  encoding="utf-8").read())
     rw = dict(cfg.get("rewards", {}))
+    rw.setdefault("gamma", float((cfg.get("hyperparameters", {}) or {}).get("gamma", 0.99)))  # as PPOTrainer does
     try:
         live = json.load(io.open(os.path.join(ROOT, "config/live_config.json"),
                                  encoding="utf-8"))
@@ -382,20 +383,16 @@ def main():
     print()
     tot = sum(m["_b2g"].values())
     if abs(tot) > 1e-9:
-        # This is an assertion, not a trend. The gate returns exactly 0.0 on steps the
-        # opponent owns, so anything other than 100% / 0% / 0% means the gate is broken --
-        # not that possession changed.
-        leak = abs(m["_b2g"]["theirs"]) + abs(m["_b2g"]["none"])
-        if leak > 1e-6:
-            print("BALL_TO_GOAL AUTHORSHIP   *** GATE LEAKING ***")
-            for label, key in (("our team", "ours"), ("opponent", "theirs"),
-                               ("nobody yet", "none")):
-                print("  %-12s %+9.4f per episode  %5.1f%%"
-                      % (label, m["_b2g"][key] / eps, 100.0 * m["_b2g"][key] / tot))
-            print("  ball_to_goal must pay only the team that last touched the ball.")
-        else:
-            print("ball_to_goal authorship gate: OK (100%% of the term earned on our own "
-                  "possession, %+.4f per episode)" % (m["_b2g"]["ours"] / eps))
+        # Informational, NOT an assertion. BallToGoalVelocityReward is deliberately ungated: it
+        # prices ball progression regardless of who touched the ball last, so goalward movement
+        # pays and a return toward our goal charges within engagement range whoever caused it
+        # (see test_ball_to_goal_authorship.py). An authorship gate broke telescoping across
+        # possession changes and was removed, so a nonzero "opponent" or "nobody yet" share is
+        # expected -- a negative opponent share is the charge for balls they send back at us.
+        print("BALL_TO_GOAL BY LAST TOUCHER   (ungated by design; informational)")
+        for label, key in (("our team", "ours"), ("opponent", "theirs"),
+                           ("nobody yet", "none")):
+            print("  %-12s %+9.4f per episode" % (label, m["_b2g"][key] / eps))
         print()
 
     if not args.no_log:

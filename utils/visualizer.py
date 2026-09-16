@@ -183,6 +183,12 @@ REWARD_METADATA: Dict[str, Dict[str, Any]] = {
         "desc": "Launch incentives for intercepting aerial balls",
         "priority": 8,
     },
+    "retreat_flip": {
+        "label": "Retreat Flip",
+        "category": "Movement & Positioning",
+        "desc": "Dodges that add speed toward the defensive recovery point when beaten upfield",
+        "priority": 8,
+    },
     "time_cost": {
         "label": "Time Cost (Dawdle Penalty)",
         "category": "Penalties & Costs",

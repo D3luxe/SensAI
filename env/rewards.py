@@ -343,6 +343,100 @@ INTERCEPT_SLICE_LADDER = (0, 15, 30, 60, 90, 120, 180, 240, 360)
 # Depth goalside of the ball that a beaten defender should be shadowing toward.
 SHADOW_OFFSET_Y = 700.0
 
+# Peak sideways shift of a recovery target when the ball sits on the car's straight line to it.
+GO_AROUND_OFFSET = 450.0
+
+
+def _smoothstep(x: float, lo: float, hi: float) -> float:
+    """0 at or below lo, 1 at or above hi, C1-continuous in between (no gradient cliffs)."""
+    t = _clip((float(x) - lo) / (hi - lo), 0.0, 1.0)
+    return t * t * (3.0 - 2.0 * t)
+
+
+def defensive_recovery_point(ball_pos: np.ndarray, car_team: int, depth: float = SHADOW_OFFSET_Y) -> np.ndarray:
+    """
+    Point `depth` uu goalside of the ball along the ball-to-own-goal line.
+
+    Shared by the pursuit shadow retarget, boost pad routing and retreat flips so all three
+    agree on where a beaten car is heading. The depth shrinks to zero within 250 uu of the
+    goal centre, so the point slides continuously onto the ball there.
+    """
+    defend_goal_y = -ARENA_EXTENT_Y if car_team == 0 else ARENA_EXTENT_Y
+    gx = 0.0 - float(ball_pos[0])
+    gy = defend_goal_y - float(ball_pos[1])
+    dist_to_goal = math.sqrt(gx * gx + gy * gy)
+    shadow_dist = max(0.0, min(depth, dist_to_goal - 250.0))
+    inv = 1.0 / max(1e-4, dist_to_goal)
+    return np.array([
+        _clip(float(ball_pos[0]) + gx * inv * shadow_dist, -ARENA_EXTENT_X + 200.0, ARENA_EXTENT_X - 200.0),
+        _clip(float(ball_pos[1]) + gy * inv * shadow_dist, -ARENA_EXTENT_Y + 200.0, ARENA_EXTENT_Y - 200.0),
+        BALL_RADIUS,
+    ], dtype=np.float32)
+
+
+def shot_line_factor(car_pos: np.ndarray, ball_pos: np.ndarray, car_team: int) -> float:
+    """
+    How squarely the car is lined up behind the ball toward the opponent's goal, in [0, 1].
+
+    Compares the car-to-ball direction with the ball-to-goal direction (goal aim point clamped
+    inside the posts) on the ground plane: 0 below a 0.5 cosine (~60 degrees off), 1 above 0.85
+    (~32 degrees), smoothstep between. Used to stop pacing and overspeed terms from discouraging
+    a committed, lined-up strike.
+    """
+    target_y = ARENA_EXTENT_Y if car_team == 0 else -ARENA_EXTENT_Y
+    aim_x = _clip(float(ball_pos[0]), -GOAL_HALF_WIDTH * 0.75, GOAL_HALF_WIDTH * 0.75)
+    ax = float(ball_pos[0]) - float(car_pos[0])
+    ay = float(ball_pos[1]) - float(car_pos[1])
+    gx = aim_x - float(ball_pos[0])
+    gy = target_y - float(ball_pos[1])
+    na = math.sqrt(ax * ax + ay * ay)
+    ng = math.sqrt(gx * gx + gy * gy)
+    if na < 1e-3 or ng < 1e-3:
+        return 0.0
+    return _smoothstep((ax * gx + ay * gy) / (na * ng), 0.5, 0.85)
+
+
+def go_around_offset(car_pos: np.ndarray, ball_pos: np.ndarray, target_pos: np.ndarray,
+                     car_vel: Optional[np.ndarray] = None) -> np.ndarray:
+    """
+    Sideways (x, y) shift that routes a recovering car around the ball instead of through it.
+
+    Only non-zero when the ball sits between the car and `target_pos`, close to that straight
+    line, and within ~1800 uu of the car. Every gate is a smoothstep, so the shift fades in and
+    out without snapping. The side is the one the car is already on relative to the ball
+    (tie-broken by its sideways velocity), never the field half the ball is in, so a ball
+    crossing x=0 does not flip the route.
+    """
+    lx = float(target_pos[0]) - float(car_pos[0])
+    ly = float(target_pos[1]) - float(car_pos[1])
+    line_len = math.sqrt(lx * lx + ly * ly)
+    if line_len < 1e-3:
+        return np.zeros(2, dtype=np.float32)
+    ux, uy = lx / line_len, ly / line_len
+    px, py = -uy, ux
+
+    rx = float(ball_pos[0]) - float(car_pos[0])
+    ry = float(ball_pos[1]) - float(car_pos[1])
+    along = rx * ux + ry * uy
+    lateral = rx * px + ry * py  # signed: > 0 when the ball is on the +perp side of the line
+
+    w_between = _smoothstep(along, 0.0, 250.0) * _smoothstep(line_len - along, 0.0, 250.0)
+    w_block = 1.0 - _smoothstep(abs(lateral), 200.0, 550.0)
+    w_near = 1.0 - _smoothstep(math.sqrt(rx * rx + ry * ry), 900.0, 1800.0)
+    w = w_between * w_block * w_near
+    if w <= 0.0:
+        return np.zeros(2, dtype=np.float32)
+
+    lateral_vel = 0.0
+    if car_vel is not None:
+        lateral_vel = float(car_vel[0]) * px + float(car_vel[1]) * py
+    # Pass on the side away from the ball, leaning toward where the car is already drifting.
+    # The ramp is continuous through zero; a car dead-centre behind the ball with no sideways
+    # motion gets no shift from this term and relies on the own-net push penalties.
+    side = _clip((-lateral + 0.25 * lateral_vel) / 40.0, -1.0, 1.0)
+    mag = GO_AROUND_OFFSET * w * side
+    return np.array([px * mag, py * mag], dtype=np.float32)
+
 # Rung used to decide whether the engine's trajectory can be trusted at all. Shared with the
 # ladder so the probe never costs an extra trajectory integration on the pure-Python fallback.
 _TRUST_PROBE_TICKS = 30
@@ -627,10 +721,11 @@ def evaluate_clear_quality(
 class GoalReward(BaseReward):
     """
     Zero-sum match outcome reward.
-    Rewards scoring goals (+30.0), penalizes conceding (-30.0),
-    and rewards defensive saves/clears off the goal line (+8.0).
+    Rewards scoring goals (+5.0 base, scaling up to 10.0 with speed and placement),
+    penalizes conceding (-5.0 base, scaling with opponent shot quality),
+    and rewards defensive saves/clears off the goal line (+2.0).
     """
-    def __init__(self, goal_weight: float = 30.0, concede_weight: float = -30.0, save_weight: float = 12.0):
+    def __init__(self, goal_weight: float = 5.0, concede_weight: float = -5.0, save_weight: float = 2.0):
         super().__init__(goal_weight)
         self.concede_weight = concede_weight
         self.save_weight = save_weight
@@ -646,7 +741,47 @@ class GoalReward(BaseReward):
     def get_reward(self, car: CarState, arena: RocketSimArena, action: np.ndarray, is_goal: bool, scoring_team: Optional[int]) -> float:
         if is_goal and scoring_team is not None:
             self._prev_touches[car.id] = car.ball_touches
-            return self.weight if car.team == scoring_team else self.concede_weight
+
+            # Retrieve snapshot of ball kinematics at the exact goal moment if captured by physics engine
+            ball_pos = getattr(arena, "last_goal_ball_pos", None)
+            if ball_pos is None:
+                ball_pos = arena.ball.pos
+            ball_vel = getattr(arena, "last_goal_ball_vel", None)
+            if ball_vel is None:
+                ball_vel = arena.ball.vel
+
+            # 1. Ball Speed Bonus Factor: s_speed in [0.0, 1.0]
+            # Continuous piecewise linear gradient:
+            # - Below 1000 uu/s: smooth positive slope (0.10 * v / 1000.0) to encourage speed over slow rolls
+            # - 1000 to 2500 uu/s: steep ramp rewarding supersonic power strikes (up to 1.0 at >= 2500 uu/s)
+            v_mag = _norm3(ball_vel)
+            if v_mag < 1000.0:
+                s_speed = 0.10 * (v_mag / 1000.0)
+            else:
+                s_speed = 0.10 + 0.90 * _clip((v_mag - 1000.0) / 1500.0, 0.0, 1.0)
+
+            # 2. Goal Placement Bonus Factor: s_placement in [0.0, 1.0]
+            # Evaluates distance from clamped ball entry point to defending cars in defensive range.
+            target_goal_y = ARENA_EXTENT_Y if scoring_team == 0 else -ARENA_EXTENT_Y
+            # Each defender's influence fades from full within 1500 uu of their goal line to none
+            # beyond 2500 uu (was a hard 2000 uu cutoff that could swing the goal value by 2.5).
+            # Placement is limited by the most obstructive defender; an open net scores 1.0.
+            bx = _clip(float(ball_pos[0]), -GOAL_HALF_WIDTH, GOAL_HALF_WIDTH)
+            bz = _clip(float(ball_pos[2]), 0.0, GOAL_HEIGHT)
+            s_placement = 1.0
+            for c in arena.cars:
+                if c.team == scoring_team:
+                    continue
+                w_def = 1.0 - _smoothstep(abs(float(c.pos[1]) - target_goal_y), 1500.0, 2500.0)
+                if w_def <= 0.0:
+                    continue
+                cover = _clip(math.hypot(bx - float(c.pos[0]), bz - float(c.pos[2])) / 1500.0, 0.0, 1.0)
+                s_placement = min(s_placement, 1.0 - w_def * (1.0 - cover))
+
+            # 3. Dynamic Shot Quality Multiplier: F_shot in [1.0, 2.0]
+            f_shot = 1.0 + 0.5 * s_speed + 0.5 * s_placement
+            reward = (self.weight * f_shot) if car.team == scoring_team else (self.concede_weight * f_shot)
+            return float(reward)
 
         # Anti-farming gate: deny the save when THIS car is the one that last put the ball in
         # motion. Without it the save is farmable: nudge the ball off-target toward your own
@@ -1109,9 +1244,19 @@ class PlayerToBallVelocityReward(BaseReward):
         # Delta t = +0.35s -> w ~ 0.12 (smoothly yields to shadow positioning when threatened)
         w_challenge = float(1.0 / (1.0 + math.exp(min(20.0, max(-20.0, 8.0 * (effective_delta_t - 0.10))))))
 
-        # Close striking proximity override: when directly engaging (< 500 uu), contest takes priority
+        # Close striking proximity override: when directly engaging (< 500 uu) AND actively
+        # approaching the ball, contest takes priority. Heading gate prevents penalizing correct
+        # retreats, rotations, and whiff recoveries near the ball by letting the race sigmoid
+        # decide when the car is driving away or perpendicular.
         if raw_ball_dist < 500.0:
-            prox_boost = min(1.0, max(0.0, (500.0 - raw_ball_dist) / 300.0))
+            car_to_ball_vec = arena.ball.pos - car_pos
+            chaser_speed = _norm3(chaser_vel)
+            if chaser_speed > 50.0:
+                approach_align = float(np.dot(chaser_vel, car_to_ball_vec)) / (chaser_speed * max(1e-4, _norm3(car_to_ball_vec)))
+                heading_gate = max(0.0, approach_align)  # 0 when driving away, 1 when straight at ball
+            else:
+                heading_gate = 0.5  # Near-stationary: mild default so car isn't stuck in shadow mode at contact range
+            prox_boost = min(1.0, max(0.0, (500.0 - raw_ball_dist) / 300.0)) * heading_gate
             w_challenge = float(w_challenge + (1.0 - w_challenge) * prox_boost)
 
         # Defensive Goal-Proximity Urgency:
@@ -1130,26 +1275,15 @@ class PlayerToBallVelocityReward(BaseReward):
         w_challenge = max(w_challenge, w_slow_opp)
 
         # 3. Dynamic Defensive Shadow Anchor along true ball-to-own-goal vector
-        defend_goal_y = -ARENA_EXTENT_Y if car_team == 0 else ARENA_EXTENT_Y
-        goal_diff = np.array([0.0 - float(arena.ball.pos[0]), defend_goal_y - float(arena.ball.pos[1])], dtype=np.float32)
-        dist_to_goal = _norm2(goal_diff)
-        if dist_to_goal < 150.0:
-            u_def = np.array([0.0, -1.0 if car_team == 0 else 1.0], dtype=np.float32)
-        else:
-            u_def = goal_diff / dist_to_goal
-
         # Tactical shadow separation: stay contestably goalside (850 uu) along true defensive line
-        shadow_dist = max(0.0, min(850.0, dist_to_goal - 250.0))
-        shadow_x = _clip(float(arena.ball.pos[0]) + u_def[0] * shadow_dist, -ARENA_EXTENT_X + 200.0, ARENA_EXTENT_X - 200.0)
-        shadow_y = _clip(float(arena.ball.pos[1]) + u_def[1] * shadow_dist, -ARENA_EXTENT_Y + 200.0, ARENA_EXTENT_Y - 200.0)
-        shadow_anchor = np.array([shadow_x, shadow_y, BALL_RADIUS], dtype=np.float32)
+        shadow_anchor = defensive_recovery_point(arena.ball.pos, car_team, depth=850.0)
 
         # Dynamic blend between pursuit intercept and defensive shadow line
         tactical_pos = (w_challenge * clamped_intercept + (1.0 - w_challenge) * shadow_anchor).astype(np.float32)
 
-        return self._apply_shadow_retarget(tactical_pos, car_pos, arena, car_team, I_threat=I_threat)
+        return self._apply_shadow_retarget(tactical_pos, car_pos, arena, car_team, I_threat=I_threat, car_vel=chaser_vel)
 
-    def _apply_shadow_retarget(self, target_pos: np.ndarray, car_pos: np.ndarray, arena: RocketSimArena, car_team: int, I_threat: float = 1.0) -> np.ndarray:
+    def _apply_shadow_retarget(self, target_pos: np.ndarray, car_pos: np.ndarray, arena: RocketSimArena, car_team: int, I_threat: float = 1.0, car_vel: Optional[np.ndarray] = None) -> np.ndarray:
         """
         Slides the tactical target toward a shadow point when the ball is goalside of the car.
 
@@ -1161,7 +1295,8 @@ class PlayerToBallVelocityReward(BaseReward):
         dist_ball_to_defend = abs(float(arena.ball.pos[1]) - defend_goal_y)
 
         # 0 while the car is goalside of the ball, ramping to 1 once the ball is 300 uu behind it.
-        wrong_t = _clip((dist_car_to_defend - dist_ball_to_defend - 50.0) / 250.0, 0.0, 1.0)
+        wrong_side = _clip((dist_car_to_defend - dist_ball_to_defend - 50.0) / 250.0, 0.0, 1.0)
+        wrong_t = wrong_side
 
         raw_dist = self._calc_dist(car_pos, arena.ball.pos)
         wrong_t *= _clip((raw_dist - 600.0) / 600.0, 0.0, 1.0)
@@ -1172,30 +1307,34 @@ class PlayerToBallVelocityReward(BaseReward):
         # 1. Scale shadow pull by genuine threat intensity first
         wrong_t *= I_threat
 
-        # 2. In the attacking half (ball_depth < 0), only retreat if there is a severe active threat
-        if ball_depth < 0.0 and I_threat < 0.35:
+        # 2. In the attacking half (ball_depth < 0), smoothly suppress shadow retarget when threat
+        # is low. Eliminates the cliff that caused a small I_threat change near 0.35 to flip the
+        # target from full attack to partial retreat in a single step.
+        #   I_threat <= 0.35: fully suppressed (pure attack, no shadow pull)
+        #   I_threat >= 0.65: full retarget allowed (genuine defensive need)
+        #   Between: smooth linear ramp for continuous gradient
+        if ball_depth < 0.0:
+            attack_suppression = _clip((I_threat - 0.35) / 0.30, 0.0, 1.0)
+            wrong_t *= attack_suppression
+
+        if wrong_side <= 0.0:
             return target_pos
 
-        if wrong_t <= 0.0:
-            return target_pos
+        shadow = defensive_recovery_point(arena.ball.pos, car_team)
+        out = np.asarray(target_pos, dtype=np.float32)
+        if wrong_t > 0.0:
+            out = ((1.0 - wrong_t) * out + wrong_t * shadow).astype(np.float32)
 
-        goal_diff = np.array([0.0 - float(arena.ball.pos[0]), defend_goal_y - float(arena.ball.pos[1])], dtype=np.float32)
-        dist_to_goal = _norm2(goal_diff)
-        if dist_to_goal < 150.0:
-            u_def = np.array([0.0, -1.0 if car_team == 0 else 1.0], dtype=np.float32)
-        else:
-            u_def = goal_diff / dist_to_goal
-
-        shadow_dist = max(0.0, min(SHADOW_OFFSET_Y, dist_to_goal - 250.0))
-        shadow_x = _clip(float(arena.ball.pos[0]) + u_def[0] * shadow_dist, -ARENA_EXTENT_X + 200.0, ARENA_EXTENT_X - 200.0)
-        shadow_y = _clip(float(arena.ball.pos[1]) + u_def[1] * shadow_dist, -ARENA_EXTENT_Y + 200.0, ARENA_EXTENT_Y - 200.0)
-
-        shadow = np.array([
-            shadow_x,
-            shadow_y,
-            BALL_RADIUS,
-        ], dtype=np.float32)
-        return ((1.0 - wrong_t) * np.asarray(target_pos, dtype=np.float32) + wrong_t * shadow).astype(np.float32)
+        # Go-around: whenever the car is upfield of the ball, bend the target sideways if the ball
+        # blocks the straight route back. Deliberately independent of the threat and proximity
+        # fades above -- those protect challenges, not driving through the ball toward our own
+        # net. Near the ball this slides the target off the ball's face so the car arcs past it.
+        offset = go_around_offset(car_pos, arena.ball.pos, shadow, car_vel) * wrong_side
+        if offset[0] != 0.0 or offset[1] != 0.0:
+            out = out.copy()
+            out[0] = _clip(float(out[0]) + float(offset[0]), -ARENA_EXTENT_X + 200.0, ARENA_EXTENT_X - 200.0)
+            out[1] = _clip(float(out[1]) + float(offset[1]), -ARENA_EXTENT_Y + 200.0, ARENA_EXTENT_Y - 200.0)
+        return out
 
     def reset(self, initial_state: RocketSimArena):
         is_kickoff = bool(
@@ -1366,6 +1505,16 @@ class PlayerToBallVelocityReward(BaseReward):
         # Downfield (> 450 uu): 100% distance closure rewarded
         # Inside strike zone (< 450 uu): Paces approach so car doesn't blindly barrel past ball
         strike_pacing = min(1.0, max(0.20, (eff_dist - 150.0) / 300.0))
+        # Committed strike: when lined up behind a low ball toward goal AND closing on it fast,
+        # arriving fast IS the shot, so pacing is relaxed in proportion (it exists to stop
+        # overshooting a ball the car is not set up to hit). The closing-speed gate keeps a roof
+        # carry or a lined-up back-off paced exactly as before. Faded out for balls above
+        # ~250-400 uu, where pacing still matters.
+        rel_to_ball = arena.ball.pos - car.pos
+        rel_norm = _norm3(rel_to_ball)
+        closing_speed = float(np.dot(car.vel - arena.ball.vel, rel_to_ball)) / max(1e-4, rel_norm)
+        w_commit = shot_line_factor(car.pos, arena.ball.pos, car.team)             * (1.0 - _smoothstep(ball_z, 250.0, 400.0))             * _smoothstep(closing_speed, 300.0, 700.0)
+        strike_pacing = strike_pacing + (1.0 - strike_pacing) * w_commit
         delta_dist = raw_delta_dist * strike_pacing
 
         # Kinematic TTI-Detour Pathing Gate with Continuous Boost Urgency Gradient:
@@ -1478,15 +1627,27 @@ class TouchBallReward(BaseReward):
       3. Defensive Saves / Clears: Rewarded when clearing the ball out of the defensive sector.
       4. Own-Goal Touch Guard: Strictly penalizes touches that project the ball towards the defending net.
       5. Vertical Aerials: Heavy height scaling (up to 2.5x) and airborne bonuses for aerial challenges.
+
+    Possession payouts decay for repeated contacts inside a carry (see FRESH_TOUCH_*), so a
+    slow dribble that goes nowhere cannot out-earn a shot. Every branch that used to be a hard
+    threshold (forward/backward fork, gentle push, clear, soft catch, on-target, own-goal
+    recoverability) is a smoothstep blend, so near-identical touches pay near-identical amounts.
     """
+    # Possession freshness window: a touch this soon after the car's previous touch is a carry
+    # re-contact and earns no possession payout; by FULL seconds apart it is a fresh catch.
+    FRESH_TOUCH_START_S = 0.5
+    FRESH_TOUCH_FULL_S = 3.0
+
     def __init__(self, weight: float = 1.2):
         super().__init__(weight)
         self._prev_touches: Dict[int, int] = {}
         self._prev_ball_vel: Dict[int, np.ndarray] = {}
+        self._time_since_touch: Dict[int, float] = {}
 
     def reset(self, initial_state: RocketSimArena):
         self._prev_touches = {car.id: car.ball_touches for car in initial_state.cars}
         self._prev_ball_vel = {car.id: initial_state.ball.vel.copy() for car in initial_state.cars}
+        self._time_since_touch = {car.id: self.FRESH_TOUCH_FULL_S for car in initial_state.cars}
 
     def get_reward(self, car: CarState, arena: RocketSimArena, action: np.ndarray, is_goal: bool, scoring_team: Optional[int]) -> float:
         prev_b_vel = self._prev_ball_vel.get(car.id, arena.ball.vel.copy())
@@ -1496,210 +1657,198 @@ class TouchBallReward(BaseReward):
         curr = car.ball_touches
         self._prev_touches[car.id] = curr
 
-        if curr > prev:
-            # Height scaling: Ground touch (Z=93) = 1.0x, High Aerial touch (Z=1500) = 2.5x
-            ball_z = float(arena.ball.pos[2])
-            height_multiplier = 1.0 + 1.5 * max(0.0, min(1.0, (ball_z - 150.0) / 1850.0))
+        step_dt = float(getattr(arena, "last_step_dt", 8.0 / 120.0))
+        time_since_prev_touch = self._time_since_touch.get(car.id, self.FRESH_TOUCH_FULL_S)
+        self._time_since_touch[car.id] = time_since_prev_touch + step_dt
 
-            # Aerial airborne touch bonus: rewards leaving the turf to intercept bouncing or aerial balls cleanly
-            airborne_bonus = 1.2 * min(1.0, max(0.4, (ball_z - 120.0) / 300.0)) if (not car.on_ground and ball_z > 140.0) else 0.0
+        if curr <= prev:
+            return 0.0
+        self._time_since_touch[car.id] = 0.0
 
-            # Kickoff first-touch race bounty
-            is_kickoff_touch = bool(abs(arena.ball.pos[0]) < 200.0 and abs(arena.ball.pos[1]) < 200.0 and arena.ball.pos[2] < 150.0 and all(c.ball_touches <= 1 for c in arena.cars))
-            kickoff_bounty = 1.0 if is_kickoff_touch else 0.0
+        # Possession freshness: 0 for a re-contact inside a carry (roof bounces re-trigger the
+        # debounced touch counter every few steps), 1 for regaining the ball after 3 s apart.
+        # Scales only the possession payouts (base contact, soft catch, safe back-touch), so a
+        # slow carry cannot out-earn a shot; strikes are scored by added impulse and are unscaled.
+        fresh = _smoothstep(time_since_prev_touch, self.FRESH_TOUCH_START_S, self.FRESH_TOUCH_FULL_S)
 
-            # Explicit Goal Scoring Touch:
-            # Reward scoring strikes generously; never penalize the shot that enters the net
-            if is_goal:
-                if scoring_team == car.team:
-                    return self.weight * (2.5 * height_multiplier + airborne_bonus + kickoff_bounty)
-                else:
-                    return 0.0
+        # Height scaling: Ground touch (Z=93) = 1.0x, High Aerial touch (Z=1500) = 2.5x
+        ball_z = float(arena.ball.pos[2])
+        height_multiplier = 1.0 + 1.5 * _clip((ball_z - 150.0) / 1850.0, 0.0, 1.0)
 
-            # Touch occurred on this step
-            ball_speed = _norm3(arena.ball.vel)
-            # Target goal opening rather than pure +Y direction
-            target_goal_y = ARENA_EXTENT_Y if car.team == 0 else -ARENA_EXTENT_Y
-            defend_goal_y = -ARENA_EXTENT_Y if car.team == 0 else ARENA_EXTENT_Y
+        # Aerial airborne touch bonus for genuinely high balls: fades in over ball height 250..400 uu,
+        # so jumping into a bouncing ball near car height no longer out-earns a grounded strike.
+        # Below ~450-700 uu it also takes the carry freshness scale (a hop-and-tap chain is not an
+        # aerial); higher touches keep it in full so air dribbles still pay on every contact.
+        airborne_bonus = 0.0
+        if not car.on_ground:
+            w_high = _smoothstep(ball_z, 250.0, 400.0)
+            air_fresh = max(fresh, _smoothstep(ball_z, 450.0, 700.0))
+            airborne_bonus = 1.2 * w_high * air_fresh * _clip((ball_z - 120.0) / 300.0, 0.4, 1.0)
 
-            target_x = _clip(arena.ball.pos[0], -GOAL_HALF_WIDTH * 0.75, GOAL_HALF_WIDTH * 0.75)
-            target_pos = np.array([target_x, target_goal_y, GOAL_HEIGHT * 0.35], dtype=np.float32)
+        # Kickoff first-touch race bounty (once per kickoff by construction)
+        is_kickoff_touch = bool(abs(arena.ball.pos[0]) < 200.0 and abs(arena.ball.pos[1]) < 200.0 and arena.ball.pos[2] < 150.0 and all(c.ball_touches <= 1 for c in arena.cars))
+        kickoff_bounty = 1.0 if is_kickoff_touch else 0.0
 
-            ball_to_net = target_pos - arena.ball.pos
-            unit_to_goal = ball_to_net / max(1e-4, _norm3(ball_to_net))
+        # Explicit Goal Scoring Touch:
+        # Reward scoring strikes generously; never penalize the shot that enters the net
+        if is_goal:
+            if scoring_team == car.team:
+                return self.weight * (2.5 * height_multiplier + airborne_bonus + kickoff_bounty)
+            return 0.0
 
-            goal_alignment = 0.0
-            if ball_speed > 1e-4:
-                unit_ball_vel = arena.ball.vel / ball_speed
-                goal_alignment = float(np.dot(unit_ball_vel, unit_to_goal))
+        ball_speed = _norm3(arena.ball.vel)
+        target_goal_y = ARENA_EXTENT_Y if car.team == 0 else -ARENA_EXTENT_Y
+        defend_goal_y = -ARENA_EXTENT_Y if car.team == 0 else ARENA_EXTENT_Y
 
-            # Defensive sector clear / save check:
-            # Recognizes forward clears (vy_out > 80.0) or lateral corner pinches/clears (|vx| > 350.0)
-            dist_ball_to_defend = abs(arena.ball.pos[1] - defend_goal_y)
-            ball_vy_out = arena.ball.vel[1] if car.team == 0 else -arena.ball.vel[1]
-            ball_vx_mag = abs(arena.ball.vel[0])
-            is_defensive_clear = bool(
-                dist_ball_to_defend < 2400.0 and (
-                    ball_vy_out > 80.0 or (ball_vx_mag > 350.0 and ball_vy_out > -100.0)
-                )
-            )
+        target_x = _clip(arena.ball.pos[0], -GOAL_HALF_WIDTH * 0.75, GOAL_HALF_WIDTH * 0.75)
+        target_pos = np.array([target_x, target_goal_y, GOAL_HEIGHT * 0.35], dtype=np.float32)
+        ball_to_net = target_pos - arena.ball.pos
+        unit_to_goal = ball_to_net / max(1e-4, _norm3(ball_to_net))
 
-            clear_quality = 1.0
-            clear_urgency = 1.0
-            if is_defensive_clear:
+        goal_alignment = 0.0
+        if ball_speed > 1e-4:
+            goal_alignment = float(np.dot(arena.ball.vel / ball_speed, unit_to_goal))
+
+        rel_speed = _norm3(car.vel - arena.ball.vel)
+        delta_v_vec = arena.ball.vel - prev_b_vel
+
+        # Lazily solved opponent arrival (only the clear and soft-catch terms need it)
+        _opp_arr_cache: List[float] = []
+
+        def opp_arrival() -> float:
+            if not _opp_arr_cache:
                 threats = compute_opponent_threats(car, arena)
-                if threats:
-                    arr_time = threats[0].arrival_time
-                    if arr_time < 0.7:
-                        clear_urgency = 1.2
-                    elif arr_time > 2.5:
-                        clear_urgency = 0.7
-                    else:
-                        clear_urgency = 1.0
-                else:
-                    clear_urgency = 1.0
+                _opp_arr_cache.append(float(threats[0].arrival_time) if threats else 999.0)
+            return _opp_arr_cache[0]
 
-                clear_quality = evaluate_clear_quality(
-                    arena.ball.pos, arena.ball.vel, car.team, arena=arena
-                )
+        # ── Defensive clear weight (was a boolean with hard speed/distance edges) ──
+        dist_ball_to_defend = abs(float(arena.ball.pos[1]) - defend_goal_y)
+        ball_vy_out = float(arena.ball.vel[1]) if car.team == 0 else -float(arena.ball.vel[1])
+        ball_vx_mag = abs(float(arena.ball.vel[0]))
+        w_clear = (1.0 - _smoothstep(dist_ball_to_defend, 2200.0, 2600.0)) * max(
+            _smoothstep(ball_vy_out, 40.0, 120.0),
+            _smoothstep(ball_vx_mag, 250.0, 450.0) * _smoothstep(ball_vy_out, -150.0, -50.0),
+        )
 
-            # --- CASE 1: Ball hit directed toward opponent half / goal ---
-            if goal_alignment >= 0.0:
-                # On-Target Trajectory Bonus: Check if touch velocity produces a direct shot into
-                # the net. This used to carry its own copy of the endline projection, with the
-                # same gravity constant and goal geometry as BallToGoalVelocityReward's copy and
-                # a different set of thresholds on the result. Both now read the shared helper,
-                # which also means both inherit its arena-aware trajectory rather than a bare
-                # parabola that ignores the ceiling and side walls.
-                vy_forward = arena.ball.vel[1] if car.team == 0 else -arena.ball.vel[1]
-                if vy_forward > 80.0:
-                    placement = on_target_factor(arena, target_goal_y)
-                    if placement >= 1.0:
-                        # Direct shot on target into the net opening!
-                        goal_alignment = max(goal_alignment, 0.7) + 0.35
-                    elif placement > 0.0:
-                        # Near-post / crossbar grazing shot: moderate alignment without clean goal bonus
-                        goal_alignment = max(goal_alignment, 0.45)
+        clear_quality = 1.0
+        clear_urgency = 1.0
+        if w_clear > 0.0:
+            arr_time = opp_arrival()
+            # 1.2x when the opponent is on top of it, 0.7x when far, smooth in between
+            clear_urgency = 1.2 - 0.2 * _smoothstep(arr_time, 0.5, 0.9) - 0.3 * _smoothstep(arr_time, 2.2, 2.8)
+            clear_quality = evaluate_clear_quality(arena.ball.pos, arena.ball.vel, car.team, arena=arena)
 
-                direction_multiplier = 1.0 + (min(1.0, goal_alignment) * 1.5)  # 1.0x -> 2.5x
+        # Wall contact weight (car up the wall or back wall), faded over height and wall depth
+        w_wall = _smoothstep(float(car.pos[2]), 150.0, 250.0) * max(
+            _smoothstep(abs(float(car.pos[0])), 3300.0, 3500.0),
+            _smoothstep(abs(float(car.pos[1])), 4300.0, 4500.0),
+        )
 
-                # Dual-Path Context Evaluator:
-                rel_speed = _norm3(car.vel - arena.ball.vel)
-                is_gentle_ground_push = bool(car.on_ground and ball_z < 130.0 and rel_speed < 150.0)
+        # Grounded-contact weight for traction effects on a low ball
+        w_ground_contact = (1.0 if car.on_ground else 0.0) * (1.0 - _smoothstep(ball_z, 160.0, 200.0))
+        contact_lateral_slip = abs(float(np.dot(car.vel[:2], car.get_right_vector()[:2])))
 
-                # Dedicated Wall Strike Bonus:
-                # Rewards solid wall contact (pops, pinches, passes, and strikes along/off the wall)
-                is_wall_touch = bool(car.pos[2] > 200.0 and (abs(car.pos[0]) > 3400.0 or abs(car.pos[1]) > 4400.0))
-                wall_strike_bonus = (0.60 * min(1.5, max(0.4, ball_speed / 1000.0))) if is_wall_touch else 0.0
+        # Forward/backward blend across goal_alignment in [-0.15, 0.15] (was a hard fork at 0)
+        w_fwd = _smoothstep(goal_alignment, -0.15, 0.15)
 
-                # Directional Kinetic Impulse Transfer:
-                #
-                # Single strike estimator. This used to be three: a power bonus on the ball's
-                # absolute speed, this impulse bonus on the same collision projected toward the
-                # net, and the direction multiplier they were both multiplied by. Power and
-                # direction multiply out to roughly speed-times-alignment, which is the quantity
-                # impulse measures directly, so three knobs moved one number and tuning any of
-                # them silently rescaled the others.
-                #
-                # Impulse is the right one to keep. Absolute ball speed pays for a ball that was
-                # already travelling fast: tapping a rocket that is on its way to the net scored
-                # nearly as well as striking it, though the bot did almost nothing. Velocity
-                # ADDED along the goal direction is what the car is actually responsible for.
-                #
-                # Critically this does not cross the possession fork. A catch matches ball speed,
-                # so its impulse is near zero by construction, and an impulse-only score would
-                # pay hugely for booming the ball at a wall and near nothing for a soft catch or
-                # a roof carry -- boom-ball, conceding possession on every touch. Possession is
-                # scored by base_touch through soft_catch_bonus and the gentle-push path, both
-                # untouched here, and strike is gated off entirely for a gentle ground push.
-                delta_v_vec = arena.ball.vel - prev_b_vel
-                delta_v_goal = float(np.dot(delta_v_vec, unit_to_goal))
-                strike_impulse = 0.0
-                if goal_alignment > 0.15 and not is_gentle_ground_push:
-                    strike_impulse = _clip(delta_v_goal / STRIKE_IMPULSE_REF, 0.0, STRIKE_IMPULSE_CAP)
+        forward_rew = 0.0
+        if w_fwd > 0.0:
+            # On-target trajectory bonus, faded in with forward ball speed and placement quality
+            vy_forward = float(arena.ball.vel[1]) if car.team == 0 else -float(arena.ball.vel[1])
+            ga = goal_alignment
+            w_vy = _smoothstep(vy_forward, 40.0, 160.0)
+            if w_vy > 0.0:
+                placement = on_target_factor(arena, target_goal_y) * w_vy
+                if placement > 0.0:
+                    boosted = max(ga, 0.45 + 0.25 * placement) + 0.35 * placement
+                    ga = ga + placement * (boosted - ga)
 
-                if is_defensive_clear:
-                    clear_bonus = 0.5 * clear_urgency * max(0.0, (clear_quality - 0.5) / 0.5)
-                else:
-                    clear_bonus = 0.0
+            direction_multiplier = 1.0 + 1.5 * _clip(ga, 0.0, 1.0)  # 1.0x -> 2.5x
 
-                # Soft Possession Catch Bonus:
-                # When uncontested (opponent threat arrival > 1.2s or no threats) on a grounded/low ball,
-                # reward cushioning the ball (rel_speed < 350.0 uu/s) into an immediate dribble/carry
-                # rather than blasting it away uncontrollably.
-                soft_catch_bonus = 0.0
-                if car.on_ground and ball_z < 200.0 and not is_defensive_clear and not is_wall_touch:
-                    threats = compute_opponent_threats(car, arena)
-                    opp_arr = threats[0].arrival_time if threats else 999.0
-                    self_arr, _, _ = compute_trajectory_arrival_time(car.pos, car.vel, arena.ball.pos, arena.ball.vel)
-                    delta_t = opp_arr - self_arr
-                    if delta_t > 0.60 and rel_speed < 350.0:
-                        soft_catch_bonus = 0.80 * max(0.0, 1.0 - (rel_speed / 350.0))
+            # Gentle ground push weight: slow relative contact on a grounded low ball
+            w_gentle = (1.0 if car.on_ground else 0.0) \
+                * (1.0 - _smoothstep(ball_z, 120.0, 150.0)) \
+                * (1.0 - _smoothstep(rel_speed, 100.0, 250.0))
 
-                base_touch = 0.25 if is_gentle_ground_push else (0.8 + clear_bonus + soft_catch_bonus + wall_strike_bonus)
+            wall_strike_bonus = w_wall * 0.60 * _clip(ball_speed / 1000.0, 0.4, 1.5)
 
-                # Physical Lateral Tire Slip Dampening on Ground Contact:
-                # When striking a grounded ball, if the car is sliding laterally across the turf
-                # (high lateral slip), the strike lacks traction and glances weakly.
-                # Solid strikes with wheels gripping the pitch transfer full impulse into the ball.
-                if car.on_ground and ball_z < 180.0:
-                    contact_lateral_slip = abs(float(np.dot(car.vel[:2], car.get_right_vector()[:2])))
-                    if contact_lateral_slip > 80.0:
-                        slip_factor = max(0.2, 1.0 - (contact_lateral_slip - 80.0) / 300.0)
-                        base_touch *= slip_factor
-                        strike_impulse *= slip_factor
-                        kickoff_bounty *= slip_factor
+            # Directional Kinetic Impulse Transfer: velocity the touch ADDED toward the goal.
+            # Faded in over alignment 0.05..0.25 and out for gentle pushes.
+            delta_v_goal = float(np.dot(delta_v_vec, unit_to_goal))
+            strike_impulse = _clip(delta_v_goal / STRIKE_IMPULSE_REF, 0.0, STRIKE_IMPULSE_CAP) \
+                * _smoothstep(ga, 0.05, 0.25) * (1.0 - w_gentle)
 
-                return self.weight * ((base_touch + strike_impulse) * direction_multiplier * height_multiplier + airborne_bonus + kickoff_bounty)
+            clear_bonus = w_clear * 0.5 * clear_urgency * max(0.0, (clear_quality - 0.5) / 0.5)
 
-            # --- CASE 2: Ball hit directed backward toward defending half / goal ---
-            else:
-                if is_defensive_clear:
-                    # Lateral pinch / side clear out of defensive third
-                    unit_clear_y = 1.0 if car.team == 0 else -1.0
-                    delta_v_vec = arena.ball.vel - prev_b_vel
-                    delta_v_clear = float(delta_v_vec[1] * unit_clear_y)
-                    clear_impulse = min(0.50, max(0.0, delta_v_clear / 1500.0))
-                    wall_clear_bonus = 0.40 if (car.pos[2] > 200.0 and (abs(car.pos[0]) > 3400.0 or abs(car.pos[1]) > 4400.0)) else 0.0
-                    if car.on_ground and ball_z < 180.0:
-                        contact_lateral_slip = abs(float(np.dot(car.vel[:2], car.get_right_vector()[:2])))
-                        clear_base = (0.8 + wall_clear_bonus) * clear_quality * max(0.4, 1.0 - (contact_lateral_slip / 500.0))
-                    else:
-                        clear_base = (0.8 + wall_clear_bonus) * clear_quality
-                    return self.weight * ((clear_base + clear_impulse) * height_multiplier + airborne_bonus)
-                else:
-                    # Trajectory & Time-To-Intercept (TTI) Defending Net Threat Evaluation:
-                    # Differentiates safe back-passes, corner rolls, and wall wraps from unrecoverable own-goal shots.
-                    ball_vy_defend = -arena.ball.vel[1] if car.team == 0 else arena.ball.vel[1]
-                    dist_ball_to_defend = abs(arena.ball.pos[1] - defend_goal_y)
-                    is_threatening_own_net = False
-                    is_unrecoverable_own_shot = False
+            # Soft Possession Catch Bonus: cushioning a low ball while uncontested. Faded over
+            # ball height, the opponent's arrival margin, and relative speed.
+            soft_catch_bonus = 0.0
+            w_soft_ctx = (1.0 if car.on_ground else 0.0) * (1.0 - _smoothstep(ball_z, 180.0, 220.0)) \
+                * (1.0 - w_clear) * (1.0 - w_wall)
+            if w_soft_ctx > 0.0 and rel_speed < 350.0 and fresh > 0.0:
+                self_arr, _, _ = compute_trajectory_arrival_time(car.pos, car.vel, arena.ball.pos, arena.ball.vel)
+                delta_t = opp_arrival() - self_arr
+                soft_catch_bonus = 0.80 * (1.0 - rel_speed / 350.0) * _smoothstep(delta_t, 0.3, 0.9) * w_soft_ctx
 
-                    if ball_vy_defend > 150.0:
-                        dt_defend = dist_ball_to_defend / ball_vy_defend
-                        if dt_defend <= 6.5:
-                            x_defend_impact = arena.ball.pos[0] + arena.ball.vel[0] * dt_defend
-                            z_defend_impact = max(BALL_RADIUS, arena.ball.pos[2] + arena.ball.vel[2] * dt_defend + 0.5 * (-650.0) * (dt_defend ** 2))
-                            if abs(x_defend_impact) <= EFFECTIVE_GOAL_HALF_WIDTH and z_defend_impact <= EFFECTIVE_GOAL_HEIGHT + 50.0:
-                                is_threatening_own_net = True
-                                impact_pos = np.array([x_defend_impact, defend_goal_y, min(GOAL_HEIGHT * 0.5, z_defend_impact)], dtype=np.float32)
-                                car_tti_defend, _, _ = compute_trajectory_arrival_time(car.pos, car.vel, impact_pos)
-                                is_unrecoverable_own_shot = bool(car_tti_defend >= dt_defend - 0.15)
+            # Carry progress: a re-contact inside a carry pays only for moving the ball goalward.
+            ball_v_goal = float(np.dot(arena.ball.vel, unit_to_goal))
+            carry_progress = (1.0 - fresh) * 0.25 * _smoothstep(ball_v_goal, 0.0, 1200.0)
 
-                    if is_unrecoverable_own_shot:
-                        # Direct unrecoverable touch into own goal: strictly penalized
-                        penalty_scale = max(0.5, abs(goal_alignment))
-                        return -self.weight * 1.5 * penalty_scale * height_multiplier
-                    elif is_threatening_own_net:
-                        # Ball directed on-target into own net, but car may still reach it: mild discouragement
-                        return -self.weight * 0.3 * abs(goal_alignment)
-                    else:
-                        # Safe touch toward own half (corner reset, backboard wrap, soft possession catch):
-                        # Completely unpenalized! Allow strategic reset and possession play.
-                        rel_speed = _norm3(car.vel - arena.ball.vel)
-                        return self.weight * 0.10 if (car.on_ground and rel_speed < 300.0) else 0.0
+            gentle_base = 0.25 * fresh + carry_progress
+            full_base = 0.8 * fresh + soft_catch_bonus * fresh + clear_bonus + wall_strike_bonus + carry_progress
+            base_touch = w_gentle * gentle_base + (1.0 - w_gentle) * full_base
 
-        return 0.0
+            # Lateral tire slip dampening on a grounded strike (continuous from 80 uu/s slip)
+            slip_factor = _clip(1.0 - (contact_lateral_slip - 80.0) / 300.0, 0.2, 1.0)
+            slip_scale = 1.0 - w_ground_contact * (1.0 - slip_factor)
+            base_touch *= slip_scale
+            strike_impulse *= slip_scale
+            kickoff_fwd = kickoff_bounty * slip_scale
+
+            forward_rew = (base_touch + strike_impulse) * direction_multiplier * height_multiplier + airborne_bonus + kickoff_fwd
+
+        backward_rew = 0.0
+        if w_fwd < 1.0:
+            # Lateral pinch / side clear out of the defensive third
+            clear_rew = 0.0
+            if w_clear > 0.0:
+                unit_clear_y = 1.0 if car.team == 0 else -1.0
+                clear_impulse = _clip(float(delta_v_vec[1] * unit_clear_y) / 1500.0, 0.0, 0.50)
+                wall_clear_bonus = 0.40 * w_wall
+                traction = 1.0 - w_ground_contact * (1.0 - max(0.4, 1.0 - contact_lateral_slip / 500.0))
+                clear_base = (0.8 + wall_clear_bonus) * clear_quality * traction
+                clear_rew = (clear_base + clear_impulse) * height_multiplier + airborne_bonus
+
+            # Own-net threat evaluation, every condition faded rather than thresholded
+            ball_vy_defend = -float(arena.ball.vel[1]) if car.team == 0 else float(arena.ball.vel[1])
+            w_threat = 0.0
+            w_unrec = 0.0
+            if ball_vy_defend > 100.0:
+                dt_defend = dist_ball_to_defend / ball_vy_defend
+                w_time = 1.0 - _smoothstep(dt_defend, 6.0, 7.0)
+                if w_time > 0.0:
+                    x_imp = float(arena.ball.pos[0]) + float(arena.ball.vel[0]) * dt_defend
+                    z_imp = max(BALL_RADIUS, float(arena.ball.pos[2]) + float(arena.ball.vel[2]) * dt_defend + 0.5 * (-650.0) * (dt_defend ** 2))
+                    w_on_net = (1.0 - _smoothstep(abs(x_imp), EFFECTIVE_GOAL_HALF_WIDTH, EFFECTIVE_GOAL_HALF_WIDTH + 150.0)) \
+                        * (1.0 - _smoothstep(z_imp, EFFECTIVE_GOAL_HEIGHT, EFFECTIVE_GOAL_HEIGHT + 150.0))
+                    w_threat = _smoothstep(ball_vy_defend, 100.0, 200.0) * w_time * w_on_net
+                    if w_threat > 0.0:
+                        impact_pos = np.array([x_imp, defend_goal_y, min(GOAL_HEIGHT * 0.5, z_imp)], dtype=np.float32)
+                        car_tti_defend, _, _ = compute_trajectory_arrival_time(car.pos, car.vel, impact_pos)
+                        w_unrec = _smoothstep(car_tti_defend - (dt_defend - 0.15), -0.15, 0.15)
+
+            own_net_penalty = -w_threat * (
+                w_unrec * 1.5 * max(0.5, abs(goal_alignment)) * height_multiplier
+                + (1.0 - w_unrec) * 0.3 * abs(goal_alignment)
+            )
+            # Safe touch toward own half (corner reset, backboard wrap): tiny, possession-fresh only
+            safe_touch = (1.0 - w_threat) * 0.10 * fresh * (1.0 if car.on_ground else 0.0) \
+                * (1.0 - _smoothstep(rel_speed, 250.0, 350.0))
+            non_clear_rew = own_net_penalty + safe_touch
+
+            backward_rew = w_clear * clear_rew + (1.0 - w_clear) * non_clear_rew
+
+        return float(self.weight * (w_fwd * forward_rew + (1.0 - w_fwd) * backward_rew))
 
 
 # ==============================================================================
@@ -1913,12 +2062,14 @@ class JumpBridgeReward(BaseReward):
                 elif car_boost >= 30.0 and forward_alignment > 0.4:
                     reward += self.weight * forward_alignment * 0.8
 
-            # 1d. Open-field ground traversal & downfield sprint (dist > 650 uu, ball grounded)
-            elif not is_aerial_ball and not is_on_wall_zone and dist > 650.0 and forward_alignment > 0.40:
-                if car_fwd_speed > 400.0:
-                    is_kickoff = bool(abs(arena.ball.pos[0]) < 50.0 and abs(arena.ball.pos[1]) < 50.0 and arena.ball.pos[2] < 120.0)
-                    liftoff_mult = 1.30 if is_kickoff else 0.80
-                    reward += self.weight * liftoff_mult * forward_alignment
+            # 1d. Kickoff liftoff (speedflip / kickoff jump). Open-field non-kickoff hops pay
+            # nothing: a raw liftoff bounty here taught the policy to bunny-hop across the pitch.
+            # Genuine open-field flips and wavedashes are paid by the impulse rewards below.
+            elif (not is_aerial_ball and not is_on_wall_zone and dist > 650.0
+                  and forward_alignment > 0.40 and car_fwd_speed > 400.0
+                  and abs(arena.ball.pos[0]) < 50.0 and abs(arena.ball.pos[1]) < 50.0
+                  and arena.ball.pos[2] < 120.0):
+                reward += self.weight * 1.30 * forward_alignment
 
         # ── 1e. Neutral Double-Jump Impulse (Fast Aerial Vertical Kick) ─────
         is_neutral_double_jump = bool(
@@ -2195,7 +2346,8 @@ def _best_active_pad_score(
     has_speed: bool,
     target_vec_2d: np.ndarray,
     is_big: bool = False,
-    car_boost: float = 0.0
+    car_boost: float = 0.0,
+    w_recover: float = 0.0
 ) -> float:
     """
     Computes the best pad transit score within `radius`, combining proximity with
@@ -2204,7 +2356,13 @@ def _best_active_pad_score(
     Safeguard 1: Zero-division guard on car speed (> 50 uu/s).
     Safeguard 2: Differentiates 100-orbs from small pads scaled by boost deficit.
     Safeguard 3: Evaluated against backpost or ball macro-target.
-    Includes a singularity deadzone for d < 150 uu where alignment is locked to 1.0.
+    Near the pad (d < 100 uu) alignment is locked to 1.0 and blends smoothly into the
+    directional score by 250 uu, avoiding both the singularity and a step at the boundary.
+
+    Retreat (w_recover -> 1): the corridor toward the recovery target dominates the heading
+    term (80/20 instead of 40/60), and pads off that corridor are smoothly gated out -- big
+    pads strictly, small pads loosely -- so a starving car collects pads on the way back
+    instead of detouring to a corner orb.
     """
     best_score = 0.0
     radius2 = radius * radius
@@ -2224,9 +2382,9 @@ def _best_active_pad_score(
         d = math.sqrt(d2)
         prox_score = 1.0 - (d / radius)
 
-        # Vector Singularity Deadzone: inside 150 uu (hitbox boundary),
-        # lock trajectory_mult to 1.0 to eliminate directional noise/singularity.
-        if d < 150.0:
+        # Vector Singularity Deadzone: locked to 1.0 inside 100 uu, fully directional past 250 uu.
+        w_dir = _smoothstep(d, 100.0, 250.0)
+        if w_dir <= 0.0:
             trajectory_mult = 1.0
         else:
             unit_pad_x = dx / d
@@ -2237,11 +2395,21 @@ def _best_active_pad_score(
             if has_speed:
                 align_heading = max(align_heading, float(unit_vel[0] * unit_pad_x + unit_vel[1] * unit_pad_y))
 
-            # 2. Corridor alignment: how well the pad sits on the path to macro target (ball or backpost)
+            # 2. Corridor alignment: how well the pad sits on the path to macro target (ball or recovery point)
             align_corridor = max(0.0, float(target_vec_2d[0] * unit_pad_x + target_vec_2d[1] * unit_pad_y))
 
-            # Blend heading (60%) and corridor (40%), clamped to [0.0, 1.0]
-            trajectory_mult = _clip(0.60 * align_heading + 0.40 * align_corridor, 0.0, 1.0)
+            # Heading/corridor blend slides from 60/40 (attacking) to 20/80 (retreating)
+            w_corr = 0.40 + 0.40 * w_recover
+            directional = _clip((1.0 - w_corr) * align_heading + w_corr * align_corridor, 0.0, 1.0)
+
+            # Retreat corridor gate: big pads need to sit well on the route back, small pads loosely
+            if is_big:
+                corridor_gate = _smoothstep(align_corridor, 0.35, 0.75)
+            else:
+                corridor_gate = _smoothstep(align_corridor, 0.0, 0.50)
+            directional *= (1.0 - w_recover) + w_recover * corridor_gate
+
+            trajectory_mult = (1.0 - w_dir) + w_dir * directional
 
         score = prox_score * trajectory_mult * pad_type_mult
         if score > best_score:
@@ -2329,25 +2497,14 @@ class BoostReward(BaseReward):
         self._retreat_mode[car.id] = bool(w_recover > 0.5)
 
         if w_recover > 0.0:
-            defend_y = -ARENA_EXTENT_Y if car.team == 0 else ARENA_EXTENT_Y
-            goal_diff = np.array([0.0 - float(arena.ball.pos[0]), defend_y - float(arena.ball.pos[1])], dtype=np.float32)
-            dist_to_goal = _norm2(goal_diff)
-            if dist_to_goal < 150.0:
-                u_def = np.array([0.0, -team_sign], dtype=np.float32)
-            else:
-                u_def = goal_diff / dist_to_goal
-
-            # Contestable shadow separation along defensive vector (clamped safely near net)
-            shadow_dist = max(0.0, min(900.0, dist_to_goal - 250.0))
-
-            # Wide Recovery Lane: offset laterally away from the ball's side by 700 uu so the bot
-            # recovers down the flank/pad lane rather than straight down the opponent's line of fire
-            lane_side = -1.0 if float(arena.ball.pos[0]) >= 0.0 else 1.0
-            lane_offset_x = lane_side * 700.0
-            recover_x = _clip(float(arena.ball.pos[0]) + u_def[0] * shadow_dist + lane_offset_x, -ARENA_EXTENT_X + 250.0, ARENA_EXTENT_X - 250.0)
-            recover_y = _clip(float(arena.ball.pos[1]) + u_def[1] * shadow_dist, -ARENA_EXTENT_Y + 200.0, ARENA_EXTENT_Y - 200.0)
-
-            pos_recover = np.array([recover_x, recover_y, BALL_RADIUS], dtype=np.float32)
+            # Same recovery point the pursuit reward shadows toward, bent around the ball only
+            # when the ball actually blocks the straight route back. (A fixed 700 uu flank lane
+            # used to live here; it applied at any distance, flipped sides at x=0, and pulled
+            # retreats toward corner boost instead of the goal.)
+            pos_recover = defensive_recovery_point(arena.ball.pos, car.team)
+            offset = go_around_offset(car.pos, arena.ball.pos, pos_recover, car.vel)
+            pos_recover[0] = _clip(float(pos_recover[0]) + float(offset[0]), -ARENA_EXTENT_X + 200.0, ARENA_EXTENT_X - 200.0)
+            pos_recover[1] = _clip(float(pos_recover[1]) + float(offset[1]), -ARENA_EXTENT_Y + 200.0, ARENA_EXTENT_Y - 200.0)
             target_pos = (1.0 - w_recover) * np.asarray(arena.ball.pos, dtype=np.float32) + w_recover * pos_recover
         else:
             target_pos = np.asarray(arena.ball.pos, dtype=np.float32)
@@ -2381,23 +2538,33 @@ class BoostReward(BaseReward):
             opp_align_to_ball = float(np.dot(opp_fwd, opp_unit_to_ball))
             opp_closing_vel = float(np.dot(opp.vel, opp_unit_to_ball))
 
-            if opp_closing_vel > 200.0 and opp_align_to_ball > 0.2:
-                race_margin = bot_arr - opp_arr
-                if opp_arr < 2.5:
-                    urgency = _clip((2.5 - opp_arr) / 2.0, 0.0, 1.0)
-                    threat_proximity = _clip((race_margin + 0.5) / 1.0, 0.0, 1.0)
-                    I_race = urgency * threat_proximity
+            # Smooth gates (formerly hard `if` thresholds on closing speed, alignment and arrival)
+            g_closing = _smoothstep(opp_closing_vel, 200.0, 600.0)
+            g_align = _smoothstep(opp_align_to_ball, 0.2, 0.5)
+            if math.isfinite(opp_arr) and math.isfinite(bot_arr):
+                urgency = _clip((2.5 - opp_arr) / 2.0, 0.0, 1.0)
+                threat_proximity = _clip((bot_arr - opp_arr + 0.5) / 1.0, 0.0, 1.0)
+                I_race = g_closing * g_align * urgency * threat_proximity
+            elif math.isfinite(opp_arr):
+                # Bot cannot reach the ball at all: treat as losing the race
+                I_race = g_closing * g_align * _clip((2.5 - opp_arr) / 2.0, 0.0, 1.0)
 
         defend_goal_y = -ARENA_EXTENT_Y if car.team == 0 else ARENA_EXTENT_Y
         dist_ball_to_defend = abs(float(arena.ball.pos[1]) - defend_goal_y)
         ball_vy_defend = -float(arena.ball.vel[1]) if car.team == 0 else float(arena.ball.vel[1])
-        I_net = 0.0
-        if ball_vy_defend > 100.0 and dist_ball_to_defend < 4500.0:
-            speed_factor = _clip(ball_vy_defend / 1500.0, 0.0, 1.0)
-            depth_factor = _clip(1.0 - dist_ball_to_defend / 4500.0, 0.0, 1.0)
-            I_net = speed_factor * depth_factor
+        speed_factor = _smoothstep(ball_vy_defend, 100.0, 1500.0)
+        depth_factor = _clip(1.0 - dist_ball_to_defend / 4500.0, 0.0, 1.0)
+        I_net = speed_factor * depth_factor
 
-        I_threat = max(I_race, I_net)
+        # Beaten-car retreat: caught upfield of a ball that is heading toward (or already in) our
+        # half. Fires from anywhere on the pitch, so pad-seeking shuts off as soon as the car is
+        # beaten rather than only once the ball is within 4500 uu of the net.
+        ball_depth = (-float(arena.ball.pos[1])) if car.team == 0 else float(arena.ball.pos[1])
+        ball_heading_home = max(_smoothstep(ball_vy_defend, 0.0, 800.0),
+                                0.6 * _smoothstep(ball_depth, -500.0, 2000.0))
+        I_retreat = w_recover * ball_heading_home
+
+        I_threat = max(I_race, I_net, I_retreat)
         raw_budget = _clip(1.0 - I_threat, 0.0, 1.0)
 
         prev_budget = self._safety_budget_filter.get(car.id, 1.0)
@@ -2415,7 +2582,8 @@ class BoostReward(BaseReward):
             hunger = min(1.5, hunger)
             score = _best_active_pad_score(
                 arena._big_pad_active, arena._big_pad_pos_3d, cpx, cpy, 1200.0,
-                unit_fwd, unit_vel, has_speed, target_vec_2d, is_big=True, car_boost=car.boost
+                unit_fwd, unit_vel, has_speed, target_vec_2d, is_big=True, car_boost=car.boost,
+                w_recover=w_recover
             )
             if score > 0.0:
                 best = max(best, 0.40 * hunger * score)
@@ -2425,7 +2593,8 @@ class BoostReward(BaseReward):
             hunger = (65.0 - car.boost) / 65.0
             score = _best_active_pad_score(
                 arena._small_pad_active, arena._small_pad_pos_3d, cpx, cpy, 550.0,
-                unit_fwd, unit_vel, has_speed, target_vec_2d, is_big=False, car_boost=car.boost
+                unit_fwd, unit_vel, has_speed, target_vec_2d, is_big=False, car_boost=car.boost,
+                w_recover=w_recover
             )
             if score > 0.0:
                 best = max(best, 0.20 * hunger * score)
@@ -2505,8 +2674,14 @@ class BoostReward(BaseReward):
             # Strike-zone overspeed boost waste penalty: burning boost when closing on ball too fast
             self_arr = compute_car_arrival_time(car, arena.ball.pos, arena.ball.vel)
             ball_speed = _norm3(arena.ball.vel)
-            if car.on_ground and action[6] > 0.0 and self_arr < 0.35 and speed > ball_speed + 200.0:
-                loss_rew -= flat_scale * 0.25
+            if car.on_ground and action[6] > 0.0:
+                # Faded over arrival 0.25..0.45 s and closing surplus 100..300 uu/s (were hard
+                # thresholds at 0.35 s and 200 uu/s), and waived when lined up for a shot on goal:
+                # boosting into a committed strike is how a hard, on-target shot is made.
+                w_close = 1.0 - _smoothstep(self_arr, 0.25, 0.45)
+                w_surplus = _smoothstep(speed - ball_speed, 100.0, 300.0)
+                w_unlined = 1.0 - shot_line_factor(car.pos, arena.ball.pos, car.team)
+                loss_rew -= flat_scale * 0.25 * w_close * w_surplus * w_unlined
 
             # Ceiling and vertical climb boost waste penalty: burning boost along ceiling or climbing vertically away from a lower ball
             is_climbing_above_ball = bool(car.vel[2] > 100.0 and car.pos[2] > arena.ball.pos[2] + 200.0)
@@ -3003,6 +3178,65 @@ class AirRollRecoveryReward(BaseReward):
         return self.weight * total_reward
 
 
+class RetreatFlipReward(BaseReward):
+    """
+    Pays a dodge that adds speed toward the defensive recovery point while the car is caught
+    upfield of the ball.
+
+    A beaten car's fastest way home is flipping toward goal and collecting small pads on the
+    way, but a flip's value there was only visible through the ~0.05-weighted JumpBridge
+    impulse terms, far below a corner big-pad refill. This term prices that flip directly.
+
+    Payout on the dodge step (every factor a smoothstep, so there are no cliffs):
+      weight * wrong_side * speed_gain * speed_after * threat * target_distance
+        wrong_side:      0 while goalside of the ball, 1 once 800 uu upfield of it
+        speed_gain:      velocity added toward the recovery point by the dodge, 0 -> 500 uu/s
+        speed_after:     speed toward the recovery point after the dodge, 600 -> 1800 uu/s
+        threat:          0.4 baseline, rising to 1.0 as the ball heads toward our half
+        target_distance: fades out within 300..900 uu of the recovery point (already home)
+    Bounded at `weight` per dodge, and a dodge needs a landing to refresh, so it cannot be
+    farmed faster than the car can physically flip.
+    """
+    def __init__(self, weight: float = 0.4):
+        super().__init__(weight)
+        self._prev_vel: Dict[int, np.ndarray] = {}
+
+    def reset(self, initial_state: RocketSimArena):
+        self._prev_vel = {car.id: car.vel.copy() for car in initial_state.cars}
+
+    def get_reward(self, car: CarState, arena: RocketSimArena, action: np.ndarray, is_goal: bool, scoring_team: Optional[int]) -> float:
+        prev_vel = self._prev_vel.get(car.id, car.vel)
+        self._prev_vel[car.id] = car.vel.copy()
+        if self.weight <= 1e-6 or is_goal or not car.just_dodged:
+            return 0.0
+
+        team_sign = 1.0 if car.team == 0 else -1.0
+        upfield_margin = (float(car.pos[1]) - float(arena.ball.pos[1])) * team_sign
+        w_wrong = _smoothstep(upfield_margin, 0.0, 800.0)
+        if w_wrong <= 0.0:
+            return 0.0
+
+        target = defensive_recovery_point(arena.ball.pos, car.team)
+        offset = go_around_offset(car.pos, arena.ball.pos, target, car.vel)
+        tx = float(target[0]) + float(offset[0]) - float(car.pos[0])
+        ty = float(target[1]) + float(offset[1]) - float(car.pos[1])
+        dist = math.sqrt(tx * tx + ty * ty)
+        w_far = _smoothstep(dist, 300.0, 900.0)
+        if w_far <= 0.0:
+            return 0.0
+        ux, uy = tx / dist, ty / dist
+
+        dv = (float(car.vel[0]) - float(prev_vel[0])) * ux + (float(car.vel[1]) - float(prev_vel[1])) * uy
+        v_after = float(car.vel[0]) * ux + float(car.vel[1]) * uy
+        w_gain = _smoothstep(dv, 0.0, 500.0)
+        w_speed = _smoothstep(v_after, 600.0, 1800.0)
+
+        ball_vy_defend = -float(arena.ball.vel[1]) * team_sign
+        w_threat = 0.4 + 0.6 * _smoothstep(ball_vy_defend, 0.0, 800.0)
+
+        return float(self.weight * w_wrong * w_gain * w_speed * w_threat * w_far)
+
+
 class JumpCostReward(BaseReward):
     """
     A flat fee charged once, on the frame the car leaves the ground under its own jump.
@@ -3175,9 +3409,9 @@ class CombinedReward:
     def __init__(self, weights: Dict[str, float]):
         self.rewards: Dict[str, BaseReward] = {
             "goal": GoalReward(
-                goal_weight=weights.get("goal_weight", 30.0),
-                concede_weight=weights.get("concede_weight", -30.0),
-                save_weight=weights.get("save_weight", 12.0)
+                goal_weight=weights.get("goal_weight", 5.0),
+                concede_weight=weights.get("concede_weight", -5.0),
+                save_weight=weights.get("save_weight", 2.0)
             ),
             "ball_to_goal": BallToGoalVelocityReward(
                 weight=weights.get("ball_to_goal_weight", 1.5),
@@ -3207,6 +3441,9 @@ class CombinedReward:
             ),
             "air_roll_recovery": AirRollRecoveryReward(
                 weight=weights.get("air_roll_recovery_weight", 0.10)
+            ),
+            "retreat_flip": RetreatFlipReward(
+                weight=weights.get("retreat_flip_weight", 0.4)
             ),
             "jump_cost": JumpCostReward(
                 weight=weights.get("jump_cost_weight", 0.025)
@@ -3252,6 +3489,9 @@ class CombinedReward:
 
         if "powerslide_weight" in new_weights and "powerslide" in self.rewards:
             self.rewards["powerslide"].weight = float(new_weights["powerslide_weight"])
+
+        if "retreat_flip_weight" in new_weights and "retreat_flip" in self.rewards:
+            self.rewards["retreat_flip"].weight = float(new_weights["retreat_flip_weight"])
 
         if "jump_cost_weight" in new_weights and "jump_cost" in self.rewards:
             self.rewards["jump_cost"].weight = float(new_weights["jump_cost_weight"])

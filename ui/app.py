@@ -51,6 +51,48 @@ def load_yaml_config(path: str = "config/default_config.yaml") -> dict:
     return {}
 
 
+CONFIG_SYNC_FILES = ("config/default_config.yaml", "config/live_config.json")
+
+
+def read_effective_ui_config() -> dict:
+    """
+    Flat {key: value} view of the dial values the trainer actually runs with: the yaml base with
+    live_config.json layered on top, exactly as the page builds its initial slider values.
+    Keys: reward weights and scenario probabilities by name, plus the live hyperparameters
+    (learning_rate, ent_coef, clip_range, bc_regularization_weight, bc_decay_steps).
+    """
+    cfg = load_yaml_config("config/default_config.yaml") or {}
+    flat = {}
+    flat.update(cfg.get("rewards", {}) or {})
+    flat.update(cfg.get("scenarios", {}) or {})
+    hp = cfg.get("hyperparameters", {}) or {}
+    for k in ("learning_rate", "ent_coef", "clip_range", "bc_regularization_weight", "bc_decay_steps"):
+        if k in hp:
+            flat[k] = hp[k]
+    if os.path.exists("config/live_config.json"):
+        try:
+            with open("config/live_config.json", "r", encoding="utf-8") as f:
+                live = json.load(f)
+            flat.update(live.get("rewards", {}) or {})
+            flat.update(live.get("scenarios", {}) or {})
+            for k in ("learning_rate", "ent_coef", "clip_range", "bc_regularization_weight", "bc_decay_steps"):
+                if k in live:
+                    flat[k] = live[k]
+        except Exception:
+            pass  # mid-write or malformed: keep the yaml view, the next tick retries
+    return flat
+
+
+def config_files_mtime() -> tuple:
+    out = []
+    for path in CONFIG_SYNC_FILES:
+        try:
+            out.append(os.path.getmtime(path))
+        except OSError:
+            out.append(0.0)
+    return tuple(out)
+
+
 def save_yaml_config(cfg: dict, path: str = "config/default_config.yaml"):
     os.makedirs(os.path.dirname(path), exist_ok=True)
     with open(path, "w") as f:
@@ -1966,6 +2008,9 @@ def create_ui():
         except Exception:
             pass
 
+    # Dial values this page is built with; baseline for the config file sync below.
+    ui_build_config_values = read_effective_ui_config()
+
     init_status = mgr.get_status_info()
     ts_evaluator = TrueSkillEvaluator()
 
@@ -2175,9 +2220,9 @@ def create_ui():
                         with gr.Group():
                             gr.Markdown("### 🎛️ Quick Live Reward Weights")
                             with gr.Row():
-                                goal_slider = gr.Slider(0.0, 50.0, value=float(rew_cfg.get("goal_weight", 30.0)), step=1.0, label="Goal Score (goal_weight)", info="Terminal reward for scoring a goal (+30.0 standard).")
-                                concede_slider = gr.Slider(-50.0, 0.0, value=float(rew_cfg.get("concede_weight", -30.0)), step=1.0, label="Concede Penalty (concede_weight)", info="Terminal penalty for conceding a goal (-30.0 standard).")
-                                save_slider = gr.Slider(0.0, 20.0, value=float(rew_cfg.get("save_weight", 6.0)), step=0.5, label="Defensive Save (save_weight)", info="Reward for goal-line saves (+6.0 standard).")
+                                goal_slider = gr.Slider(0.0, 50.0, value=float(rew_cfg.get("goal_weight", 5.0)), step=0.5, label="Goal Score (goal_weight)", info="Terminal reward for scoring a goal (+5.0 base, scales up to 2x with speed & placement).")
+                                concede_slider = gr.Slider(-50.0, 0.0, value=float(rew_cfg.get("concede_weight", -5.0)), step=0.5, label="Concede Penalty (concede_weight)", info="Terminal penalty for conceding a goal (-5.0 base, scales with opponent shot quality).")
+                                save_slider = gr.Slider(0.0, 20.0, value=float(rew_cfg.get("save_weight", 2.0)), step=0.5, label="Defensive Save (save_weight)", info="Reward for goal-line saves (+2.0 standard).")
                             with gr.Row():
                                 ball_to_goal_slider = gr.Slider(0.0, 5.0, value=float(rew_cfg.get("ball_to_goal_weight", 0.25)), step=0.05, label="Ball to Goal Velocity (ball_to_goal_weight)", info="Reward for projecting ball velocity towards opponent goal.")
                                 player_to_ball_slider = gr.Slider(0.0, 3.0, value=float(rew_cfg.get("player_to_ball_weight", 0.5)), step=0.05, label="Player to Ball Approach (player_to_ball_weight)", info="Potential-based reward for closing distance to ball.")
@@ -2185,7 +2230,7 @@ def create_ui():
                             with gr.Row():
                                 boost_gain_slider = gr.Slider(0.0, 2.0, value=float(rew_cfg.get("boost_gain_weight", 0.8)), step=0.05, label="Boost Pad Collection (boost_gain_weight)", info="Potential-based reward for collecting boost pads.")
                                 boost_lose_slider = gr.Slider(0.0, 2.0, value=float(rew_cfg.get("boost_lose_weight", 0.25)), step=0.05, label="Boost Consumption (boost_lose_weight)", info="Potential-based penalty for expending boost.")
-                                time_cost_slider = gr.Slider(0.0, 0.05, value=float(rew_cfg.get("time_cost_weight", 0.01)), step=0.002, label="Living Time Cost (time_cost_weight)", info="Flat per-step cost that drives speed, tight recoveries, and decisiveness.")
+                                time_cost_slider = gr.Slider(0.0, 0.01, value=float(rew_cfg.get("time_cost_weight", 0.002)), step=0.0005, label="Living Time Cost (time_cost_weight)", info="Flat per-step cost that drives decisiveness. Keep a full 600-step episode well under a quarter of the concede penalty (<= ~0.002 at -5).")
                             apply_live_rewards_btn = gr.Button("⚡ Apply Live Rewards", variant="primary")
                             live_rewards_msg = gr.Markdown("")
                             gr.Markdown("<span style='color: #94a3b8; font-size: 0.88em;'>💡 For flight mechanics, takeoff/spin action costs, and custom scenario probabilities, visit the <b>🎛️ Rewards & Curriculum</b> tab.</span>")
@@ -3341,7 +3386,7 @@ def create_ui():
                 rew.get("touch_weight", 0.5),
                 rew.get("boost_gain_weight", 0.8),
                 rew.get("boost_lose_weight", 0.25),
-                rew.get("time_cost_weight", 0.01),
+                rew.get("time_cost_weight", 0.002),
                 rew.get("jump_cost_weight", 0.025),
                 rew.get("spin_cost_weight", 0.015),
                 rew.get("jump_bridge_weight", 0.0),
@@ -4137,6 +4182,79 @@ def create_ui():
                 console_output, live_metrics_plot,
                 cockpit_lb_summary, cockpit_league_ticker, cockpit_lb_table
             ]
+        )
+
+        # -------------------------------------------------------------
+        # CONFIG FILE -> DIAL SYNC
+        # -------------------------------------------------------------
+        # Polls default_config.yaml and live_config.json. When either file's mtime changes, the
+        # effective values are re-read and pushed ONLY to dials whose file value actually changed
+        # since the last sync. Everything else returns gr.skip(), so an unsaved drag on another
+        # dial is never clobbered, and writes this page makes itself (which leave values equal)
+        # are no-ops. Scenario .release() handlers do not fire on programmatic updates.
+        synced_dials = [
+            ("goal_weight", goal_slider), ("concede_weight", concede_slider), ("save_weight", save_slider),
+            ("ball_to_goal_weight", ball_to_goal_slider), ("player_to_ball_weight", player_to_ball_slider),
+            ("touch_weight", touch_slider), ("boost_gain_weight", boost_gain_slider),
+            ("boost_lose_weight", boost_lose_slider), ("time_cost_weight", time_cost_slider),
+            ("jump_cost_weight", jump_cost_slider), ("spin_cost_weight", spin_cost_slider),
+            ("jump_bridge_weight", jump_bridge_slider), ("air_roll_recovery_weight", air_roll_recovery_slider),
+            ("kickoff_prob", kickoff_prob_slider), ("replay_prob", replay_prob_slider),
+            ("aerial_prob", aerial_prob_slider), ("custom_prob", custom_prob_slider),
+            ("turnaround_prob", turnaround_prob_slider), ("wall_prob", wall_prob_slider),
+            ("wall_rebound_prob", wall_rebound_prob_slider), ("save_prob", save_prob_slider),
+            ("dribble_flick_prob", dribble_flick_prob_slider),
+            ("bc_regularization_weight", bc_weight_slider), ("bc_decay_steps", bc_decay_input),
+            ("learning_rate", lr_input), ("ent_coef", ent_coef_slider), ("clip_range", clip_range_slider),
+        ]
+        scenario_keys = ("kickoff_prob", "replay_prob", "aerial_prob", "custom_prob", "turnaround_prob",
+                         "wall_prob", "wall_rebound_prob", "save_prob", "dribble_flick_prob")
+        # Per browser session, so every open tab receives the change, not just the first to poll.
+        config_sync_state = gr.State(None)
+
+        def on_config_sync_tick(state):
+            skip_all = [gr.skip()] * (len(synced_dials) + 2)
+            mtime = config_files_mtime()
+            if state is None:
+                # First tick of this session: the dials were built from the files at page build
+                # time, which may predate this session. Baseline from that snapshot so an edit
+                # made between server start and page open is still pushed.
+                state = {"mtime": None, "values": ui_build_config_values}
+            if mtime == state["mtime"]:
+                return skip_all + [state]
+            new_vals = read_effective_ui_config()
+            old_vals = state["values"]
+            state = {"mtime": mtime, "values": new_vals}
+
+            updates, changed = [], []
+            for key, _ in synced_dials:
+                nv, ov = new_vals.get(key), old_vals.get(key)
+                if nv is None or (ov is not None and abs(float(nv) - float(ov)) < 1e-12):
+                    updates.append(gr.skip())
+                else:
+                    updates.append(int(nv) if key == "bc_decay_steps" else float(nv))
+                    changed.append(key)
+            if not changed:
+                return skip_all + [state]
+
+            if any(k in scenario_keys for k in changed):
+                pct_total = int(round(sum(float(new_vals.get(k, 0.0)) for k in scenario_keys) * 100))
+                badge = f"""
+            <div style="display: flex; justify-content: flex-end; align-items: center; height: 100%;">
+                <span class="status-badge-running" style="font-size: 1.0em; padding: 6px 16px;">● Total Mix: {pct_total}%</span>
+            </div>
+            """
+            else:
+                badge = gr.skip()
+            note = f"🔄 **Synced from config files at {time.strftime('%H:%M:%S')}:** " + ", ".join(f"`{k}`" for k in changed)
+            return updates + [badge, note, state]
+
+        config_sync_timer = gr.Timer(2.0, active=True)
+        config_sync_timer.tick(
+            fn=on_config_sync_tick,
+            inputs=[config_sync_state],
+            outputs=[d for _, d in synced_dials] + [scenario_total_badge, curriculum_apply_msg, config_sync_state],
+            show_progress="hidden",
         )
 
     return demo

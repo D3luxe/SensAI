@@ -114,7 +114,11 @@ class PPOTrainer:
         hp = self.config.get("hyperparameters", {})
         env_cfg = self.config.get("environment", {})
         model_cfg = self.config.get("model", {})
-        rew_cfg = self.config.get("rewards", {})
+        rew_cfg = dict(self.config.get("rewards", {}))
+        # Potential-based shaping (BoostReward's pad-transit term) is only policy-invariant when
+        # discounted with the SAME gamma PPO optimises. The rewards block has no gamma, so it used
+        # to fall back to 0.99 against a 0.995 trainer and leak a small per-step charge.
+        rew_cfg.setdefault("gamma", float(hp.get("gamma", 0.99)))
         log_cfg = self.config.get("logging", {})
 
         self.lr = float(hp.get("learning_rate", 3e-4))

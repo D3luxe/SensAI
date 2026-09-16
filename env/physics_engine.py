@@ -264,6 +264,8 @@ class RocketSimArena:
         self.cars: List[CarState] = []
         self.boost_pads = BoostPad.create_standard_pads()
         self.scored_team: Optional[int] = None
+        self.last_goal_ball_pos: Optional[np.ndarray] = None
+        self.last_goal_ball_vel: Optional[np.ndarray] = None
         self.step_count = 0
 
         self._use_rsim = False
@@ -287,6 +289,14 @@ class RocketSimArena:
                         # Position-based fallback
                         b_pos_y = self._rsim_arena.ball.get_state().pos.y
                         self.scored_team = 0 if b_pos_y > 0 else 1
+
+                    # Critical snapshot: preserve ball kinematic state at the exact tick the goal triggers
+                    try:
+                        b_state = self._rsim_arena.ball.get_state()
+                        self.last_goal_ball_pos = b_state.pos.as_numpy().astype(np.float32)
+                        self.last_goal_ball_vel = b_state.vel.as_numpy().astype(np.float32)
+                    except Exception:
+                        pass
 
                 self._touch_active_this_step = {i: False for i in range(num_players)}
                 self._car_was_touching = {i: False for i in range(num_players)}
@@ -388,6 +398,9 @@ class RocketSimArena:
                     r_pad.set_state(ps)
 
             self._sync_from_rsim()
+            self.scored_team = None
+            self.last_goal_ball_pos = None
+            self.last_goal_ball_vel = None
 
             # Fix #6: Clear stale state carried across episode boundaries
             for car in self.cars:
@@ -415,6 +428,9 @@ class RocketSimArena:
             return
 
         # Pure-Python Fallback Reset
+        self.scored_team = None
+        self.last_goal_ball_pos = None
+        self.last_goal_ball_vel = None
         self._last_scenario = "kickoff"
         for pad in self.boost_pads:
             pad.is_active = True
@@ -586,6 +602,8 @@ class RocketSimArena:
 
         if self._use_rsim and self._rsim_arena:
             self.scored_team = None
+            self.last_goal_ball_pos = None
+            self.last_goal_ball_vel = None
             total_ticks = max(1, int(round(dt * 120.0)))
 
             # Step simulation through substeps with exact Rocket League / RLGym jump timing sequencer
@@ -646,6 +664,8 @@ class RocketSimArena:
                         handbrake=hnd_val
                     ))
                 self._rsim_arena.step(1)
+                if self.scored_team is not None:
+                    break
 
             self._sync_from_rsim()
 
@@ -665,12 +685,18 @@ class RocketSimArena:
             return (self.scored_team is not None), self.scored_team
 
         # Pure Python Fallback Step
+        self.scored_team = None
+        self.last_goal_ball_pos = None
+        self.last_goal_ball_vel = None
         substeps = max(1, int(round(dt * 120.0)))
         sub_dt = dt / substeps
 
         for _ in range(substeps):
             goal, team = self._step_internal(actions, sub_dt)
             if goal:
+                self.scored_team = team
+                self.last_goal_ball_pos = self.ball.pos.copy()
+                self.last_goal_ball_vel = self.ball.vel.copy()
                 self._cached_pred_step = -1
                 self._cached_rsim_preds = None
                 self._cached_threat = {}

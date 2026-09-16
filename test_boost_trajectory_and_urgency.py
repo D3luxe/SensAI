@@ -3,8 +3,8 @@ Unit tests for Trajectory-Aligned & Urgency-Gated Boost Transit shaping in Boost
 
 Guarantees:
 1. Pad-trajectory alignment: pads ahead on travel trajectory are scored; pads behind are zeroed.
-2. Dynamic back-post targeting on defensive retreat: pads along defensive rotation routes are rewarded.
-3. Singularity deadzone: d < 150 uu locks trajectory_mult = 1.0 with no zero-division.
+2. Defensive retreat routing: pads on the route to the recovery point are rewarded; off-route flank pads are not.
+3. Singularity deadzone: d < 100 uu locks trajectory_mult = 1.0, blending smoothly to directional by 250 uu.
 4. Boost deficit multiplier: starving cars strongly prioritize big 100-orbs over small pennies.
 5. Dynamic urgency gating: opponent threats reduce safety budget, buffered by a slew limiter.
 6. Telescoping & No Reward Pump: approach-and-reverse loops net zero (or <= 0 under gamma=0.99).
@@ -65,21 +65,28 @@ class TestBoostTrajectoryAndUrgency(unittest.TestCase):
         self.assertAlmostEqual(psi_reverse, 0.0, places=4, msg="Pad directly behind car must yield zero transit score")
 
     def test_defensive_backpost_rotation(self):
-        """When retreating on defense, corridor targets the back-post rather than the ball behind."""
+        """When retreating, pads on the route to the defensive recovery point score; pads off it do not."""
         rew = BoostReward(gain_weight=1.0, lose_weight=0.3, gamma=1.0)
-        # Blue car caught ahead of ball at Y = 1000, ball at Y = 0 (goalside_margin = 1000 > 300)
-        # Ball is on positive X (X = 1500), so backpost should be negative X (-800, -5120)
-        car = CarState(id=0, team=0, pos=np.array([-2000.0, 500.0, 17.0], dtype=np.float32),
+        # Blue car caught 1000 uu upfield of the ball. Recovery point is ~700 uu goalside of the
+        # ball, down and slightly left, so the big pad at (3072, 0) sits on the route home.
+        car = CarState(id=0, team=0, pos=np.array([2900.0, 1000.0, 17.0], dtype=np.float32),
                        vel=np.array([0.0, -800.0, 0.0], dtype=np.float32),  # Sprinting back to defense (-Y)
                        rot=np.array([0.0, -np.pi / 2, 0.0], dtype=np.float32),  # Facing -Y
                        boost=20.0, on_ground=True)
-        arena = MockArena([car], ball_pos=[1500.0, 0.0, 93.0])
+        arena = MockArena([car], ball_pos=[2600.0, 0.0, 93.0])
         rew.reset(arena)
 
-        # Pad at (-3072, -4096) is in the defensive corner along the negative X retreat route
         psi_retreat = rew._transit_potential(car, arena)
         self.assertTrue(rew._retreat_mode[car.id], "Car caught ahead of ball and sprinting back must enter retreat mode")
-        self.assertGreater(psi_retreat, 0.0, "Retreating car should be reinforced for routing through defensive pads")
+        self.assertGreater(psi_retreat, 0.0, "Retreating car should be reinforced for routing through on-route pads")
+
+        # Mirror the car to the far flank: the only big pad in range, (-3072, 0), is now off the
+        # route back toward the ball's side, so a retreating car gets no pull toward it.
+        car.pos = np.array([-2000.0, 500.0, 17.0], dtype=np.float32)
+        arena.ball.pos = np.array([1500.0, 0.0, 93.0], dtype=np.float32)
+        rew.reset(arena)
+        self.assertAlmostEqual(rew._transit_potential(car, arena), 0.0, places=4,
+                               msg="Off-route flank pad must not pull a retreating car wide")
 
     def test_vector_singularity_deadzone(self):
         """Inside 150 uu of pad center, trajectory_mult locks to 1.0 with no zero division or angular flutter."""

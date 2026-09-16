@@ -569,10 +569,14 @@ class TestPhysicsAndControls(unittest.TestCase):
         self.assertGreater(phi(1.0) - phi(0.0), 4.0 * (phi(0.22) - phi(0.10)),
                            "A full big orb must far outweigh a single small pad.")
 
-        # 4. Zero-Sum Goal Reward
+        # 4. Zero-Sum Goal Reward (scales dynamically by speed & placement, perfectly zero-sum)
+        # For ball_fwd (v=1000 uu/s -> s_speed=0.10) and open net (s_placement=1.0): F_shot = 1.55
         goal_fn = GoalReward(goal_weight=10.0, concede_weight=-10.0)
-        self.assertEqual(goal_fn.get_reward(car, MockArena(ball_fwd, [car]), np.zeros(8), True, 0), 10.0)
-        self.assertEqual(goal_fn.get_reward(car, MockArena(ball_fwd, [car]), np.zeros(8), True, 1), -10.0)
+        r_scored = goal_fn.get_reward(car, MockArena(ball_fwd, [car]), np.zeros(8), True, 0)
+        r_concede = goal_fn.get_reward(car, MockArena(ball_fwd, [car]), np.zeros(8), True, 1)
+        self.assertEqual(r_scored, 15.5)
+        self.assertEqual(r_concede, -15.5)
+        self.assertEqual(r_scored + r_concede, 0.0)
 
     def test_jump_passthrough_and_ground_stabilization(self):
         """

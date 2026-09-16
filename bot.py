@@ -172,6 +172,28 @@ def log_debug(msg: str):
         pass
 
 
+# Ticks after the bot's own ground jump press during which RLBot's lagging suspension raycast
+# may still report OnGround while the car is already rising.
+GROUND_JUMP_LAG_TICKS = 12
+# Jump-probability logging for threshold calibration. On by default while calibrating;
+# set SENSAI_LOG_JUMP_PROB=0 to silence.
+LOG_JUMP_PROB = os.environ.get("SENSAI_LOG_JUMP_PROB", "1") == "1"
+
+
+def is_car_grounded(raw_on_ground: bool, recently_jumped: bool, z: float, vz: float) -> bool:
+    """RLBot grounded state, corrected for suspension raycast lag after the bot's own jump.
+
+    Only overrides OnGround within a few ticks of a ground jump press, so driving onto the
+    ball / another car or suspension rebound after a landing still counts as grounded.
+    """
+    return bool(raw_on_ground and not (recently_jumped and z >= 22.0 and vz > 50.0))
+
+
+def handbrake_allowed(act_hb: float, on_ground: bool, z: float) -> bool:
+    """Handbrake gate matching ActorCritic's can_slide mask (grounded or within 120 uu of the floor)."""
+    return bool(act_hb > 0.0 and (on_ground or z < 120.0))
+
+
 class MockArena:
     """
     Arena-shaped view of one live packet, for the observation builder and reward helpers.
@@ -295,6 +317,21 @@ class SenseiRLBot(Bot):
         # Flip-press outcome tracking. The press log records an intent, not a result: the game
         # is free to drop a jump press, and when it does the line looks exactly like a press
         # that worked. These carry the press forward so the NEXT few ticks can say which it was.
+        self._ground_jump_tick = 0         # tick of the last ground jump press, 0 = none
+        # Liftoff outcome tracking, mirroring the flip verdicts below: did the ground press
+        # actually launch the car (has_jumped / air state left OnGround), and from which surface?
+        self._liftoff_press_tick = 0       # press awaiting a verdict, 0 = none
+        self._liftoff_press_z = 0.0
+        self._liftoff_press_up_z = 1.0     # car up-vector z at the press: ~1 floor, ~0 wall
+        self._liftoffs_pressed = 0
+        self._liftoffs_launched = 0
+        self._liftoffs_ignored = 0
+        # Touch logging: RLBot's per-player latest_touch timestamp when the packet carries it,
+        # otherwise a ball velocity kick within contact range of the car.
+        self._last_touch_seconds = None
+        self._prev_ball_vel_log = None
+        self._last_own_touch_tick = 0
+        self._touches_logged = 0
         self._flip_press_tick = 0          # tick of the press awaiting a verdict, 0 = none
         self._flip_press_state = ""        # air state at the moment of that press
         self._flip_press_z = 0.0
@@ -445,7 +482,6 @@ class SenseiRLBot(Bot):
                     self.model.load_state_dict(model_state)
                 else:
                     self.model.load_state_dict(saved_state)
-                self.model.bin_thresh_logits.data = torch.tensor([-1.7346, -1.0986, -0.4055], dtype=torch.float32, device=self.device)
                 self.model.debias_symmetric_actions()
                 self.model.eval()
                 self.loaded_ckpt_mtime = os.path.getmtime(ckpt_path) if os.path.exists(ckpt_path) else 0.0
@@ -618,6 +654,60 @@ class SenseiRLBot(Bot):
                 self._diag_render_failed = True
                 log_debug(f"[DIAG] overlay disabled after error: {e!r}")
 
+    def _log_touch(self, my_car, car_state, ball_state, packet) -> None:
+        """Log each of our ball touches with the inputs TouchBallReward scores it on."""
+        ball_vel = np.asarray(ball_state.vel, dtype=np.float32)
+        prev_ball_vel = self._prev_ball_vel_log
+        self._prev_ball_vel_log = ball_vel.copy()
+        if prev_ball_vel is None:
+            return
+
+        touched = False
+        touch = getattr(my_car, "latest_touch", None)
+        if touch is not None and hasattr(touch, "game_seconds"):
+            secs = float(touch.game_seconds)
+            if self._last_touch_seconds is not None and secs > self._last_touch_seconds + 1e-4:
+                touched = True
+            self._last_touch_seconds = secs
+        else:
+            dist = float(np.linalg.norm(ball_state.pos - car_state.pos))
+            touched = bool(dist < 260.0 and float(np.linalg.norm(ball_vel - prev_ball_vel)) > 150.0)
+            if touched and self.tick_count - self._last_own_touch_tick <= 4:
+                touched = False  # same contact still resolving
+        if not touched:
+            return
+
+        dt_since = (self.tick_count - self._last_own_touch_tick) / 120.0 if self._last_own_touch_tick else 99.0
+        self._last_own_touch_tick = self.tick_count
+        self._touches_logged += 1
+
+        target_y = 5120.0 if car_state.team == 0 else -5120.0
+        target = np.array([float(np.clip(ball_state.pos[0], -670.0, 670.0)), target_y, 225.0], dtype=np.float32)
+        to_goal = target - ball_state.pos
+        to_goal /= max(1e-4, float(np.linalg.norm(to_goal)))
+        speed = float(np.linalg.norm(ball_vel))
+        align = float(np.dot(ball_vel / speed, to_goal)) if speed > 1e-4 else 0.0
+        added_goal = float(np.dot(ball_vel - prev_ball_vel, to_goal))
+        rel_speed = float(np.linalg.norm(car_state.vel - ball_vel))
+        car_to_ball = ball_state.pos - car_state.pos
+        car_to_ball_2d = car_to_ball[:2] / max(1e-4, float(np.linalg.norm(car_to_ball[:2])))
+        ball_to_goal_2d = to_goal[:2] / max(1e-4, float(np.linalg.norm(to_goal[:2])))
+        shot_line = float(np.dot(car_to_ball_2d, ball_to_goal_2d))
+        foe = None
+        for i, p in enumerate(packet.players):
+            if i != self.index and p.team != car_state.team:
+                foe = p
+                break
+        foe_txt = (f"({foe.physics.location.x:.0f}, {foe.physics.location.y:.0f})" if foe is not None else "none")
+        log_debug(
+            f"[TICK {self.tick_count}] ### TOUCH ### n={self._touches_logged} since_prev={dt_since:.2f}s "
+            f"car_z={float(car_state.pos[2]):.0f} air={not bool(car_state.on_ground)} "
+            f"car_spd={float(np.linalg.norm(car_state.vel)):.0f} shot_line={shot_line:+.2f} "
+            f"ball=({float(ball_state.pos[0]):.0f}, {float(ball_state.pos[1]):.0f}, {float(ball_state.pos[2]):.0f}) "
+            f"ball_spd={float(np.linalg.norm(prev_ball_vel)):.0f}->{speed:.0f} goal_align={align:+.2f} "
+            f"added_toward_goal={added_goal:+.0f} rel_spd={rel_speed:.0f} opp={foe_txt}"
+        )
+
     def get_output(self, packet: GamePacket) -> ControllerState:
         controller = ControllerState()
 
@@ -675,7 +765,10 @@ class SenseiRLBot(Bot):
             # Extract self car
             self._update_air_flip_timers(packet)
             my_car = packet.players[self.index]
-            is_on_ground = my_car.air_state == AirState.OnGround
+            recently_jumped = bool(self._ground_jump_tick
+                                   and self.tick_count - self._ground_jump_tick <= GROUND_JUMP_LAG_TICKS)
+            is_on_ground = is_car_grounded(my_car.air_state == AirState.OnGround, recently_jumped,
+                                           float(my_car.physics.location.z), float(my_car.physics.velocity.z))
             has_jump = is_on_ground or (not my_car.has_jumped)
             # Align with RocketSim training: has_flip is only True when airborne and flip is available
             has_flip = bool((not is_on_ground) and not self._flip_expired.get(self.index, False))
@@ -784,6 +877,14 @@ class SenseiRLBot(Bot):
                     obs_tensor = torch.tensor(obs, dtype=torch.float32, device=self.device).unsqueeze(0)
                     action, _, _, value = self.model.get_action_and_value(obs_tensor, deterministic=True)
                     self._diag_value = float(value.reshape(-1)[0])
+                    if LOG_JUMP_PROB and self.continuous_actions and getattr(self.model, "last_bin_logits", None) is not None:
+                        jump_p = float(torch.sigmoid(self.model.last_bin_logits.reshape(-1)[0]))
+                        if jump_p > 0.05:
+                            log_debug(
+                                f"[JUMP_PROB] tick={self.tick_count} p={jump_p:.3f} gnd={is_on_ground} "
+                                f"z={float(car_state.pos[2]):.0f} vz={float(car_state.vel[2]):.0f} "
+                                f"flip_avail={has_flip} last_ground_jump={self._ground_jump_tick}"
+                            )
                     if self.continuous_actions:
                         act = action.squeeze(0).cpu().numpy()
                     else:
@@ -901,7 +1002,7 @@ class SenseiRLBot(Bot):
             # 1. Suppress boost when momentum strongly opposes nose direction (fwd_speed < -150 uu/s).
             # 2. Suppress boost on the ground when already at supersonic speed (is_supersonic), preventing boost waste.
             controller.boost = bool(act[6] > 0.0 and fwd_speed > -150.0 and not (is_supersonic and is_on_ground))
-            controller.handbrake = bool(act[7] > 0.0 and is_on_ground)
+            controller.handbrake = handbrake_allowed(float(act[7]), is_on_ground, float(car_state.pos[2]))
 
             # Draw the readout once per policy step (15 Hz), not once per physics tick.
             if substep_tick == 0:
@@ -933,6 +1034,29 @@ class SenseiRLBot(Bot):
                         f"ignored={self._flips_ignored}/{self._flips_pressed}"
                     )
                     self._flip_press_tick = 0
+            # Liftoff verdict. RLBot's OnGround lags the jump by several ticks, so wait for
+            # has_jumped or a non-OnGround air state rather than trusting the stance right away.
+            if self._liftoff_press_tick:
+                age = self.tick_count - self._liftoff_press_tick
+                launched = bool(getattr(my_car, "has_jumped", False)
+                                or my_car.air_state != AirState.OnGround)
+                if launched or age >= 8:
+                    if launched:
+                        self._liftoffs_launched += 1
+                        tag, tally = "+++ LIFTOFF LAUNCHED +++", f"launched={self._liftoffs_launched}"
+                    else:
+                        self._liftoffs_ignored += 1
+                        tag, tally = "--- LIFTOFF IGNORED ---", f"ignored={self._liftoffs_ignored}"
+                    log_debug(
+                        f"[TICK {self.tick_count}] {tag} press at tick {self._liftoff_press_tick} "
+                        f"(z={self._liftoff_press_z:.0f}, up_z={self._liftoff_press_up_z:+.2f}) after {age} ticks: "
+                        f"now air={air_state_name} jumped={bool(getattr(my_car, 'has_jumped', False))} "
+                        f"z={float(car_state.pos[2]):.0f} vz={float(car_state.vel[2]):.0f} "
+                        f"pos=({float(car_state.pos[0]):.0f}, {float(car_state.pos[1]):.0f}). "
+                        f"{tally}/{self._liftoffs_pressed}"
+                    )
+                    self._liftoff_press_tick = 0
+            self._log_touch(my_car, car_state, ball_state, packet)
             ball_pos = ball_state.pos
             is_kickoff = bool(abs(ball_pos[0]) < 50.0 and abs(ball_pos[1]) < 50.0 and float(np.linalg.norm(ball_state.vel)) < 100.0)
             
@@ -947,10 +1071,19 @@ class SenseiRLBot(Bot):
             # landing, while spam shows presses with has_flip already False.
             if controller.jump and (substep_tick == 0 or (not is_on_ground and substep_tick == 2)):
                 action_type = "LIFTOFF JUMP" if is_on_ground else "AIRBORNE FLIP"
+                if action_type == "LIFTOFF JUMP":
+                    self._ground_jump_tick = self.tick_count
+                    self._liftoffs_pressed += 1
+                    self._liftoff_press_tick = self.tick_count
+                    self._liftoff_press_z = float(car_state.pos[2])
+                    self._liftoff_press_up_z = float(car_state.get_up_vector()[2])
                 consumed = bool(getattr(my_car, "has_dodged", False) or
                                 getattr(my_car, "has_double_jumped", False))
+                ball_rel = ball_state.pos - car_state.pos
                 log_debug(
                     f"[TICK {self.tick_count}] *** {action_type} PRESSED *** "
+                    f"ball_dist={float(np.linalg.norm(ball_rel)):.0f} ball_z={float(ball_state.pos[2]):.0f} "
+                    f"ball_rel_z={float(ball_rel[2]):+.0f} "
                     f"pit={controller.pitch:+.2f} yaw={controller.yaw:+.2f} rol={controller.roll:+.2f} "
                     f"z={float(car_state.pos[2]):.0f} gnd={is_on_ground} flip_avail={has_flip} "
                     f"already_dodged={consumed} spd={car_speed_total:.0f} "
@@ -974,8 +1107,11 @@ class SenseiRLBot(Bot):
                     self._flip_press_z = float(car_state.pos[2])
 
             if self.tick_count <= 10 or self.tick_count % 120 == 0 or is_kickoff:
+                foe = next((c for c in opponents if c.team != car_state.team), None)
+                foe_txt = f"({foe.pos[0]:.0f}, {foe.pos[1]:.0f})" if foe is not None else "none"
                 log_debug(
                     f"[TICK {self.tick_count}] pos=({car_state.pos[0]:.0f}, {car_state.pos[1]:.0f}) "
+                    f"boost={float(car_state.boost):.0f} spd={car_speed_total:.0f} opp={foe_txt} "
                     f"ball=({ball_pos[0]:.0f}, {ball_pos[1]:.0f}) kickoff={is_kickoff} -> "
                     f"thr={controller.throttle:.2f} str={controller.steer:+.2f} pit={controller.pitch:+.2f} "
                     f"yaw={controller.yaw:+.2f} rol={controller.roll:+.2f} jmp={controller.jump} bst={controller.boost} hnd={controller.handbrake}"

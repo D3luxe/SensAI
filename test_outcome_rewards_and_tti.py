@@ -264,10 +264,12 @@ class TestOutcomeRewardsAndTTI(unittest.TestCase):
 
     def test_boost_strike_zone_overspeed_suppression(self):
         rew = BoostReward(gain_weight=0.6, lose_weight=0.3)
+        # Approaching from the side (not lined up toward goal): the overspeed penalty applies.
+        # A lined-up approach is deliberately exempt; see test_strike_commit_and_air_touch.
         bot_prev = CarState(
             id=0, team=0,
-            pos=np.array([0.0, -200.0, 17.0], dtype=np.float32),
-            vel=np.array([0.0, 1200.0, 0.0], dtype=np.float32),
+            pos=np.array([-200.0, 0.0, 17.0], dtype=np.float32),
+            vel=np.array([1200.0, 0.0, 0.0], dtype=np.float32),
             boost=50.0,
             on_ground=True
         )
@@ -277,8 +279,8 @@ class TestOutcomeRewardsAndTTI(unittest.TestCase):
 
         bot_curr = CarState(
             id=0, team=0,
-            pos=np.array([0.0, -150.0, 17.0], dtype=np.float32),
-            vel=np.array([0.0, 1300.0, 0.0], dtype=np.float32),
+            pos=np.array([-150.0, 0.0, 17.0], dtype=np.float32),
+            vel=np.array([1300.0, 0.0, 0.0], dtype=np.float32),
             boost=45.0,
             on_ground=True
         )
@@ -289,10 +291,10 @@ class TestOutcomeRewardsAndTTI(unittest.TestCase):
     def test_handbrake_activation_threshold_logit(self):
         ac = ActorCritic(obs_dim=115, continuous_actions=True)
         handbrake_logit = float(ac.bin_thresh_logits[2])
-        self.assertAlmostEqual(handbrake_logit, 0.0800, places=3)
+        self.assertAlmostEqual(handbrake_logit, -0.4055, places=3)
         prob = float(torch.sigmoid(ac.bin_thresh_logits[2]))
-        self.assertGreater(prob, 0.519)
-        self.assertLess(prob, 0.521)
+        self.assertGreater(prob, 0.399)
+        self.assertLess(prob, 0.401)
 
 
 if __name__ == '__main__':

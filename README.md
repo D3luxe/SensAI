@@ -112,9 +112,8 @@ tensorboard --logdir=logs --port=6006
 | **`face_ball_weight`** | `0.5` | `0.1 - 2.0` | Directs the car nose toward the ball |
 | **`aligned_shot_weight`** | `2.0` | `1.0 - 5.0` | Incentivizes hitting the ball directly toward the goal |
 | **`aerial_height_weight`** | `0.8` | `0.2 - 3.0` | Encourages jumping and aerial maneuvers |
-| **`goal_weight`** | `20.0` | `10.0 - 50.0` | Large reward for scoring in the opponent's net |
-| **`goal_speed_multi`** | `2.0` | `0.0 - 5.0` | **Power Shot Multiplier**: Scales goal reward by shot velocity (up to (1 + multi)x for supersonic goals) |
-| **`concede_weight`** | `-20.0` | `-50.0 - -10.0`| Large penalty when the opponent scores |
-| **`save_weight`** | `10.0` | `5.0 - 25.0` | Reward for clearing the ball from the defensive net |
+| **`goal_weight`** | `5.0` | `2.0 - 15.0` | Base terminal reward for scoring, dynamically scaled up to 2x by ball speed and placement |
+| **`concede_weight`** | `-5.0` | `-15.0 - -2.0`| Base terminal penalty when conceding, dynamically scaled by opponent shot quality |
+| **`save_weight`** | `2.0` | `1.0 - 5.0` | Reward for clearing the ball from the defensive net |
 | **`boost_management_weight`** | `0.2` | `0.05 - 1.0` | Encourages boost pad collection and boost conservation |
 | **`velocity_weight`** | `0.1` | `0.05 - 1.0` | Encourages maintaining high general speed |

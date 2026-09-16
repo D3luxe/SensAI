@@ -389,6 +389,7 @@ class TestRewardRemediation(unittest.TestCase):
 
         self.assertGreater(r_urgent, r_unpressured, f"Urgent defensive clear ({r_urgent}) must earn higher reward than unpressured clear ({r_unpressured})")
 
+    @unittest.skip("Off-axis boost retreat penalty removed in defensive rotation rework (commit e51536f)")
     def test_boost_retreat_exemption_threat_gating(self):
         """Test that BoostReward retreat exemption is active under threat and penalizes boost burn when unpressured."""
         rew = BoostReward(gain_weight=0.6, lose_weight=0.3)
