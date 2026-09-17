@@ -379,6 +379,11 @@ def defensive_recovery_point(ball_pos: np.ndarray, car_team: int, depth: float =
 # ~40 uu/s costs ~0.005.
 KICKOFF_SPEED_LOSS_SCALE = 3.0
 KICKOFF_SPEED_LOSS_RAMP = 150.0   # uu/s over which the charge fades in
+# Car-contact exemption: a bump from another car is speed lost to it, not a brake. Octane hitboxes
+# are ~118 x 84 uu, so centres closer than ~200 uu are in contact; the charge fades back in by 350 uu.
+# Measured at the closer of this step and the last, since a bump can separate the cars within one step.
+KICKOFF_BUMP_CONTACT_DIST = 200.0
+KICKOFF_BUMP_CLEAR_DIST = 350.0
 
 # Own-net guard for PlayerToBallVelocityReward (raw units, scaled by the term's weight).
 OWN_NET_FADE_DEPTH = 150.0        # uu past the goal line over which closure pay fades to zero
@@ -979,6 +984,126 @@ def on_target_factor(arena: RocketSimArena, target_goal_y: float) -> float:
     return 1.0 - _clip(miss / ON_TARGET_FALLOFF, 0.0, 1.0)
 
 
+# ------------------------------------------------------------------------------
+# Attacking shot quality, shared by TouchBallReward and BallToGoalVelocityReward.
+#
+# Both terms used to pay for ball speed toward the goal with placement only as a bonus, so a hard
+# smash into the backboard from a corner with no angle earned most of what a shot on target did.
+# Deep in the attacking third a goalward ball is now valued by where it is actually going: into
+# the mouth (on_target_factor), or across to the slot in front of goal (centering_factor), which
+# counts for more the less of the mouth the ball can see. Every weight here is a smoothstep.
+# ------------------------------------------------------------------------------
+# Distance in front of the target goal line over which a ball counts as in the attacking third
+ATTACK_DEPTH_FULL = 3500.0
+ATTACK_DEPTH_NONE = 5000.0  # just short of midfield (5120)
+# Open angle of the effective mouth, seen from the ball, over which a direct shot becomes available
+OPEN_ANGLE_TIGHT_DEG = 12.0
+OPEN_ANGLE_OPEN_DEG = 30.0
+# With the mouth fully open a center is worth this fraction of a clean shot; with no angle, all of it
+CENTER_VALUE_WHEN_OPEN = 0.6
+# The slot: in front of goal, about the posts' width, low enough to finish on the ground or in the air
+SLOT_HALF_WIDTH_FULL = 700.0
+SLOT_HALF_WIDTH_NONE = 1500.0
+SLOT_DEPTH_MIN = (150.0, 500.0)    # fades in: on the goal line is already a shot
+SLOT_DEPTH_MAX = (3000.0, 4000.0)  # fades out: too far is not a center
+SLOT_HEIGHT = (700.0, 1300.0)      # fades out above what a car can meet in the air
+# Lateral distance the ball has to be moved toward the middle before it counts as a center
+CENTER_TRAVEL = (400.0, 1200.0)
+CENTER_HORIZON_S = 2.5
+# Fraction of the goalward strike an off-target, non-centering touch keeps deep in the attacking third
+SHOT_VALUE_FLOOR = 0.3
+# Flat center payout at full value, before the direction and height multipliers
+CENTER_PASS_BONUS = 1.2
+# Fraction of ball_to_goal progression an off-target ball keeps deep in the attacking third
+B2G_OFF_TARGET_FLOOR = 0.5
+
+
+def goal_mouth_open_angle(ball_pos: np.ndarray, target_goal_y: float) -> float:
+    """Degrees of the effective goal mouth (posts inset a ball radius) visible from the ball."""
+    sign = 1.0 if target_goal_y > 0.0 else -1.0
+    depth = sign * (target_goal_y - float(ball_pos[1]))
+    if depth <= 0.0:
+        return 0.0
+    bx = float(ball_pos[0])
+    left = math.atan2(depth, -EFFECTIVE_GOAL_HALF_WIDTH - bx)
+    right = math.atan2(depth, EFFECTIVE_GOAL_HALF_WIDTH - bx)
+    return math.degrees(abs(left - right))
+
+
+def attacking_third_weight(ball_pos: np.ndarray, target_goal_y: float) -> float:
+    """1 deep in the attacking third, fading to 0 by ATTACK_DEPTH_NONE uu in front of the goal line."""
+    depth = abs(target_goal_y - float(ball_pos[1]))
+    return 1.0 - _smoothstep(depth, ATTACK_DEPTH_FULL, ATTACK_DEPTH_NONE)
+
+
+def _slot_score(pos: np.ndarray, target_goal_y: float) -> float:
+    depth = abs(target_goal_y - float(pos[1]))
+    return (1.0 - _smoothstep(abs(float(pos[0])), SLOT_HALF_WIDTH_FULL, SLOT_HALF_WIDTH_NONE)) \
+        * _smoothstep(depth, *SLOT_DEPTH_MIN) \
+        * (1.0 - _smoothstep(depth, *SLOT_DEPTH_MAX)) \
+        * (1.0 - _smoothstep(float(pos[2]), *SLOT_HEIGHT))
+
+
+def centering_factor(arena: RocketSimArena, target_goal_y: float) -> float:
+    """
+    How well the ball's trajectory over the next CENTER_HORIZON_S carries it from wide into the
+    slot in front of the target goal, in [0, 1]. The best slot point along the path counts, scaled
+    by how far toward the middle the ball travelled to get there, so a ball already sitting in the
+    slot is not a center. Walks the RocketSim prediction, else a ballistic arc.
+    """
+    ball_pos = arena.ball.pos
+    x0 = abs(float(ball_pos[0]))
+    best = 0.0
+
+    def consider(pos) -> None:
+        nonlocal best
+        score = _slot_score(pos, target_goal_y)
+        if score > best:
+            score *= _smoothstep(x0 - abs(float(pos[0])), *CENTER_TRAVEL)
+            best = max(best, score)
+
+    max_slice = min(_ENDLINE_MAX_SLICE, int(CENTER_HORIZON_S * PREDICTION_TICK_RATE))
+    if hasattr(arena, "get_predicted_ball_pos") and predictions_trustworthy(arena):
+        # Only the flight the touch itself set up counts: stop where the ground track bends by more
+        # than ~30 degrees, which is a wall or backboard. A smash into the back wall that rebounds
+        # into the slot is not a center. Floor bounces leave the ground track straight.
+        prev = np.asarray(ball_pos, dtype=np.float32)
+        prev_step = None
+        for s in range(_ENDLINE_SCAN_STRIDE, max_slice + 1, _ENDLINE_SCAN_STRIDE):
+            pred = arena.get_predicted_ball_pos(s)
+            if pred is None:
+                break
+            step = (float(pred[0]) - float(prev[0]), float(pred[1]) - float(prev[1]))
+            step_len = math.hypot(*step)
+            if prev_step is not None and step_len > 1.0:
+                prev_len = math.hypot(*prev_step)
+                if prev_len > 1.0 and step[0] * prev_step[0] + step[1] * prev_step[1] < 0.87 * step_len * prev_len:
+                    break
+            consider(pred)
+            prev, prev_step = pred, (step if step_len > 1.0 else prev_step)
+        return best
+
+    vel = arena.ball.vel
+    for i in range(1, 16):
+        t = CENTER_HORIZON_S * i / 15.0
+        z = max(BALL_RADIUS, float(ball_pos[2]) + float(vel[2]) * t + 0.5 * (-650.0) * t * t)
+        consider((float(ball_pos[0]) + float(vel[0]) * t, float(ball_pos[1]) + float(vel[1]) * t, z))
+    return best
+
+
+def attacking_shot_value(arena: RocketSimArena, target_goal_y: float, placement: float) -> float:
+    """
+    Value of where a goalward ball is going, in [0, 1]: a clean shot on target is 1, a center into
+    the slot is up to 1 when the mouth cannot be seen and CENTER_VALUE_WHEN_OPEN when it can,
+    anything else 0.
+    """
+    if placement >= 1.0:
+        return 1.0
+    open_w = _smoothstep(goal_mouth_open_angle(arena.ball.pos, target_goal_y), OPEN_ANGLE_TIGHT_DEG, OPEN_ANGLE_OPEN_DEG)
+    center_scale = 1.0 - (1.0 - CENTER_VALUE_WHEN_OPEN) * open_w
+    return max(float(placement), center_scale * centering_factor(arena, target_goal_y))
+
+
 class BallToGoalVelocityReward(BaseReward):
     """
     Symmetric potential-based progression with goal-opening targeting and proximity falloff.
@@ -996,7 +1121,9 @@ class BallToGoalVelocityReward(BaseReward):
     the rebound, elevating the ball anywhere in the attacking third was net-negative, which
     foreclosed pops into aerial finishes, air dribbles and ceiling shots. The reverse multiplier
     is gone; own-goal danger is handled by OwnGoalThreatReward, which is localized to the
-    defensive third where it belongs.
+    defensive third where it belongs. The one exception is deep in the attacking third, where an
+    off-target ball keeps B2G_OFF_TARGET_FLOOR of its rate (smoothly, by depth and placement) so a
+    no-angle smash into the backboard stops out-earning working the ball to a shot.
 
     The bonus is applied to a rate rather than added per step deliberately. A flat additive
     on-target term integrates over time-in-flight, so a floating shot that takes 60 steps to
@@ -1064,10 +1191,16 @@ class BallToGoalVelocityReward(BaseReward):
         if ball_velocity_toward_goal <= 0.0:
             return proximity_factor * self.weight * normalized_progress
 
-        # Placement bonus on the progression rate, floored at 1.0 so a fast goalward ball is
-        # never worth what a motionless one is worth.
+        # Placement bonus on the progression rate. Deep in the attacking third an off-target ball
+        # also gives up part of its forward rate, down to B2G_OFF_TARGET_FLOOR: the aim point is
+        # already clamped inside the posts, but from a tight angle a smash into the backboard still
+        # has a large component toward it. Losses stay undiscounted, so a wasted smash whose rebound
+        # comes back out nets negative; the scale reaches 0 before midfield, where gain and loss
+        # still cancel. The trajectory scan behind on_target_factor still credits lobs off the ceiling.
         placement = on_target_factor(arena, target_goal_y)
-        return proximity_factor * self.weight * normalized_progress * (1.0 + ON_TARGET_BONUS * placement)
+        w_attack = attacking_third_weight(arena.ball.pos, target_goal_y)
+        off_target_scale = 1.0 - w_attack * (1.0 - B2G_OFF_TARGET_FLOOR) * (1.0 - placement)
+        return proximity_factor * self.weight * normalized_progress * off_target_scale * (1.0 + ON_TARGET_BONUS * placement)
 
 
 class OwnGoalThreatReward(BaseReward):
@@ -1141,6 +1274,7 @@ class PlayerToBallVelocityReward(BaseReward):
         self._reread_ticks: Dict[int, int] = {}
         self._prev_net_potential: Dict[int, float] = {}
         self._prev_kickoff_speed: Dict[int, float] = {}
+        self._prev_kickoff_car_dist: Dict[int, float] = {}
 
     def _calc_dist(self, car_pos: np.ndarray, ball_pos: np.ndarray) -> float:
         # If BOTH car and ball are near pitch floor (car Z <= 100, ball Z <= 120), evaluate horizontal (X, Y) distance
@@ -1386,6 +1520,7 @@ class PlayerToBallVelocityReward(BaseReward):
         self._prev_timing_err = {}
         self._reread_ticks = {car.id: 0 for car in initial_state.cars}
         self._prev_kickoff_speed = {}
+        self._prev_kickoff_car_dist = {}
         for car in initial_state.cars:
             to_ball = initial_state.ball.pos - car.pos
             self._prev_kickoff_speed[car.id] = float(np.dot(car.vel, to_ball)) / max(1e-4, _norm3(to_ball))
@@ -1485,7 +1620,13 @@ class PlayerToBallVelocityReward(BaseReward):
             prev_speed = self._prev_kickoff_speed.get(car.id, speed_toward)
             self._prev_kickoff_speed[car.id] = speed_toward
             speed_loss = max(0.0, prev_speed - speed_toward)
-            speed_loss_penalty = -KICKOFF_SPEED_LOSS_SCALE * (speed_loss / CAR_MAX_SPEED)                 * _smoothstep(speed_loss, 0.0, KICKOFF_SPEED_LOSS_RAMP)
+            # Speed taken by another car is not the policy's doing
+            nearest_car = min((_norm3(other.pos - car.pos) for other in arena.cars
+                               if other.id != car.id and not other.demoed), default=1e9)
+            prev_nearest = self._prev_kickoff_car_dist.get(car.id, nearest_car)
+            self._prev_kickoff_car_dist[car.id] = nearest_car
+            no_contact = _smoothstep(min(nearest_car, prev_nearest), KICKOFF_BUMP_CONTACT_DIST, KICKOFF_BUMP_CLEAR_DIST)
+            speed_loss_penalty = -KICKOFF_SPEED_LOSS_SCALE * (speed_loss / CAR_MAX_SPEED)                 * _smoothstep(speed_loss, 0.0, KICKOFF_SPEED_LOSS_RAMP) * no_contact
 
             # Symmetric distance delta with amplified backward penalty
             kickoff_mult = 1.5 if delta_dist > 0.0 else 3.0
@@ -1493,6 +1634,7 @@ class PlayerToBallVelocityReward(BaseReward):
 
         # ── General Open Play ─────────────────────────────────────────────────
         self._prev_kickoff_speed.pop(car.id, None)
+        self._prev_kickoff_car_dist.pop(car.id, None)
         ball_z = float(arena.ball.pos[2])
 
         # Precision Wall Geometry Detection:
@@ -1836,13 +1978,25 @@ class TouchBallReward(BaseReward):
             vy_forward = float(arena.ball.vel[1]) if car.team == 0 else -float(arena.ball.vel[1])
             ga = goal_alignment
             w_vy = _smoothstep(vy_forward, 40.0, 160.0)
+            placement = 0.0
             if w_vy > 0.0:
                 placement = on_target_factor(arena, target_goal_y) * w_vy
                 if placement > 0.0:
                     boosted = max(ga, 0.45 + 0.25 * placement) + 0.35 * placement
                     ga = ga + placement * (boosted - ga)
 
-            direction_multiplier = 1.0 + 1.5 * _clip(ga, 0.0, 1.0)  # 1.0x -> 2.5x
+            # Deep in the attacking third the goalward part of a strike is valued by where the ball
+            # goes: a shot on target or a center keeps it, a no-angle smash into the backboard keeps
+            # SHOT_VALUE_FLOOR of it. Possession payouts are untouched, so touching the ball still pays.
+            w_attack = attacking_third_weight(arena.ball.pos, target_goal_y) * (1.0 - kickoff_bounty)
+            shot_scale = 1.0
+            center_value = 0.0
+            if w_attack > 0.0:
+                shot_value = attacking_shot_value(arena, target_goal_y, placement)
+                shot_scale = 1.0 - w_attack * (1.0 - SHOT_VALUE_FLOOR) * (1.0 - shot_value)
+                center_value = w_attack * max(0.0, shot_value - placement)
+
+            direction_multiplier = 1.0 + 1.5 * _clip(ga, 0.0, 1.0) * shot_scale  # 1.0x -> 2.5x
 
             # Gentle ground push weight: slow relative contact on a grounded low ball
             w_gentle = (1.0 if car.on_ground else 0.0) \
@@ -1855,7 +2009,8 @@ class TouchBallReward(BaseReward):
             # Faded in over alignment 0.05..0.25 and out for gentle pushes.
             delta_v_goal = float(np.dot(delta_v_vec, unit_to_goal))
             strike_impulse = _clip(delta_v_goal / STRIKE_IMPULSE_REF, 0.0, STRIKE_IMPULSE_CAP) \
-                * _smoothstep(ga, 0.05, 0.25) * (1.0 - w_gentle)
+                * _smoothstep(ga, 0.05, 0.25) * (1.0 - w_gentle) * shot_scale
+            center_pass = CENTER_PASS_BONUS * center_value * (1.0 - w_gentle)
 
             clear_bonus = w_clear * 0.5 * clear_urgency * max(0.0, (clear_quality - 0.5) / 0.5)
 
@@ -1882,9 +2037,10 @@ class TouchBallReward(BaseReward):
             slip_scale = 1.0 - w_ground_contact * (1.0 - slip_factor)
             base_touch *= slip_scale
             strike_impulse *= slip_scale
+            center_pass *= slip_scale
             kickoff_fwd = kickoff_bounty * slip_scale
 
-            forward_rew = (base_touch + strike_impulse) * direction_multiplier * height_multiplier + airborne_bonus + kickoff_fwd
+            forward_rew = (base_touch + strike_impulse + center_pass) * direction_multiplier * height_multiplier + airborne_bonus + kickoff_fwd
 
         backward_rew = 0.0
         if w_fwd < 1.0:
@@ -2844,7 +3000,7 @@ class PowerslideReward(BaseReward):
 
         # Outcome-driven turning performance on ground (fwd_alignment < 0.60, steer > 0.25, speed > 50 uu/s)
         # Eliminates explicit button-checking (action[7] > 0) so any effective turnaround is rewarded,
-        # while straightaway powersliding is penalized by CombinedReward's economy penalty.
+        # while sliding without turning is charged by SlideWasteCost.
         speed = _norm3(car.vel)
         steer_mag = abs(float(action[1]))
 
@@ -2864,8 +3020,8 @@ class PowerslideReward(BaseReward):
         # anything, so sustained yaw with the stick held paid out on its own: a car circling more
         # than 300 uu from the ball sits under the 0.60 alignment gate for roughly two thirds of
         # every lap and collected on each of those steps, burning no boost. The handbrake economy
-        # penalty in CombinedReward could not offset it either, since that fires only when steer
-        # is UNDER 0.25, and the distance potential nets to zero around a closed loop.
+        # penalty of the time could not offset it either, since it fired only when steer was
+        # UNDER 0.25, and the distance potential nets to zero around a closed loop.
         alignment_rate = max(0.0, fwd_alignment - prev_align)
         if alignment_rate <= 0.02:
             return 0.0
@@ -3322,7 +3478,7 @@ class JumpCostReward(BaseReward):
 
     Why this exists. The three binary action channels are Bernoulli, and an entropy bonus
     pulls a Bernoulli with no reward gradient toward probability 0.5. Boost and handbrake are
-    both priced -- boost by its usage and waste penalties, handbrake by the economy penalty --
+    both priced -- boost by its usage and waste penalties, handbrake by the slide it causes --
     and both sit far from 0.5 in the learned policy. Jump was priced only by JumpBridgeReward,
     and once that weight went to zero nothing charged for pressing it at all. Measured at
     iteration 5360, raw P(jump) was 0.377 airborne and 0.613 one step after landing, against
@@ -3477,6 +3633,67 @@ class SpinCostReward(BaseReward):
         return -self.weight * min(1.0, excess / span)
 
 
+class LateralSlipCost(BaseReward):
+    """
+    Sliding sideways into the ball instead of striking it with traction.
+
+    The penalty is weight x slip x strike-zone weight, where the strike zone is the product of
+    smooth weights on distance to the ball, how squarely the car faces it and how low the ball
+    is. It replaces an inline check with a hard edge on each of those (220 uu, alignment 0.5,
+    ball z 180, slip 150), where a car one uu outside any of them paid nothing.
+    """
+    SLIP_START = 100.0
+    SLIP_FULL = 500.0
+
+    def __init__(self, weight: float = 0.20):
+        super().__init__(weight)
+
+    @staticmethod
+    def strike_zone_weight(car: CarState, arena: RocketSimArena) -> float:
+        car_to_ball = arena.ball.pos - car.pos
+        dist = _norm3(car_to_ball)
+        fwd_align = float(np.dot(car.get_forward_vector(), car_to_ball / max(1e-4, dist)))
+        return (1.0 - _smoothstep(dist, 180.0, 300.0))             * _smoothstep(fwd_align, 0.3, 0.7)             * (1.0 - _smoothstep(float(arena.ball.pos[2]), 140.0, 220.0))
+
+    def get_reward(self, car: CarState, arena: RocketSimArena, action: np.ndarray, is_goal: bool, scoring_team: Optional[int]) -> float:
+        if self.weight <= 1e-9 or not car.on_ground:
+            return 0.0
+        slip = abs(float(np.dot(car.vel[:2], car.get_right_vector()[:2])))
+        slip_w = _clip((slip - self.SLIP_START) / (self.SLIP_FULL - self.SLIP_START), 0.0, 1.0)
+        if slip_w <= 0.0:
+            return 0.0
+        return -self.weight * slip_w * self.strike_zone_weight(car, arena)
+
+
+class SlideWasteCost(BaseReward):
+    """
+    Sliding sideways on the ground without turning: momentum spent on a slide that is not
+    changing the car's heading.
+
+    Replaces the handbrake economy penalty, which read the handbrake and steer inputs and switched
+    off entirely above steer 0.25 (0.40 facing the ball), so turning the stick a little further
+    while dragging the handbrake erased it. This reads only the car's state: lateral slip, fading
+    out as the yaw rate shows a real turn, scaled by speed. A handbrake held on a straight line
+    with no physical effect costs nothing, and a powerslide cut that swings the nose is exempt.
+    Inside the strike zone LateralSlipCost already charges the slip, so this term steps back there.
+    """
+    def __init__(self, weight: float = 0.15):
+        super().__init__(weight)
+
+    def get_reward(self, car: CarState, arena: RocketSimArena, action: np.ndarray, is_goal: bool, scoring_team: Optional[int]) -> float:
+        if self.weight <= 1e-9 or not car.on_ground:
+            return 0.0
+        slip = abs(float(np.dot(car.vel[:2], car.get_right_vector()[:2])))
+        slip_w = _smoothstep(slip, 150.0, 450.0)
+        if slip_w <= 0.0:
+            return 0.0
+        yaw_rate = abs(float(np.dot(car.ang_vel, car.get_up_vector())))
+        not_turning = 1.0 - _smoothstep(yaw_rate, 0.8, 2.0)
+        speed_w = min(1.0, _norm2(car.vel) / 1500.0)
+        outside_strike = 1.0 - LateralSlipCost.strike_zone_weight(car, arena)
+        return -self.weight * slip_w * not_turning * speed_w * outside_strike
+
+
 # ==============================================================================
 # COMBINED MACRO REWARD ENGINE & MANAGER
 # ==============================================================================
@@ -3506,6 +3723,8 @@ REWARD_WEIGHT_SPECS: Tuple[Tuple[str, str, str, float], ...] = (
     ("time_cost_weight", "time_cost", "weight", 0.002),
     ("spin_cost_weight", "spin_cost", "weight", 0.015),
     ("spin_cost_deadband", "spin_cost", "deadband", 2.0),
+    ("lateral_slip_weight", "lateral_slip", "weight", 0.20),
+    ("slide_waste_weight", "slide_waste", "weight", 0.15),
     # Not a config reward key: PPO's discount, injected from hyperparameters.gamma so the boost
     # term's potential-based shaping telescopes under the gamma actually being optimised.
     ("gamma", "boost", "gamma", 0.995),
@@ -3536,6 +3755,8 @@ class CombinedReward:
             "jump_cost": JumpCostReward(),
             "time_cost": TimeCostReward(),
             "spin_cost": SpinCostReward(),
+            "lateral_slip": LateralSlipCost(),
+            "slide_waste": SlideWasteCost(),
         }
         self.update_weights({**REWARD_DEFAULTS, **(weights or {})})
 
@@ -3559,35 +3780,6 @@ class CombinedReward:
             total += rew
             if include_breakdown:
                 breakdown[name] = rew
-
-        # Strike-Zone Lateral Slip Regularization:
-        # Penalize sliding sideways into the ball in the immediate strike zone instead of biting the turf with traction
-        if car.on_ground:
-            car_to_ball = arena.ball.pos - car.pos
-            dist = _norm3(car_to_ball)
-            fwd = car.get_forward_vector()
-            fwd_align = float(np.dot(fwd, car_to_ball / max(1e-4, dist)))
-            lateral_slip = abs(float(np.dot(car.vel[:2], car.get_right_vector()[:2])))
-            if dist < 220.0 and fwd_align > 0.50 and arena.ball.pos[2] < 180.0 and lateral_slip > 150.0:
-                slip_pen = -0.20 * min(1.0, (lateral_slip - 100.0) / 400.0)
-                total += slip_pen
-                if include_breakdown:
-                    breakdown["lateral_slip_penalty"] = slip_pen
-
-        # Handbrake Economy Regularization:
-        # Penalize dragging handbrake while driving forward on straightaways or gentle curves
-        if car.on_ground and float(action[7]) > 0.10:
-            fwd = car.get_forward_vector()
-            fwd_speed = float(car.vel[0] * fwd[0] + car.vel[1] * fwd[1] + car.vel[2] * fwd[2])
-            steer_mag = abs(float(action[1]))
-            car_to_ball = arena.ball.pos - car.pos
-            dist = _norm3(car_to_ball)
-            fwd_align = float(np.dot(fwd, car_to_ball / max(1e-4, dist)))
-            if fwd_speed > 300.0 and (steer_mag < 0.25 or (fwd_align > 0.65 and steer_mag < 0.40)):
-                pen = -0.15 * float(action[7]) * min(1.0, fwd_speed / 1500.0)
-                total += pen
-                if include_breakdown:
-                    breakdown["handbrake_penalty"] = pen
 
         return float(total), breakdown if breakdown is not None else {}
 

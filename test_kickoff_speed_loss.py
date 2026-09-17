@@ -9,6 +9,7 @@ Guarantees:
   3. A full-brake stall earns clearly less over the kickoff than coasting the same distance.
   4. The charge is smooth in the amount of speed lost.
   5. It only applies during the kickoff (ball still at centre), not in open play.
+  6. Speed lost to a bump from another car is not charged, fading back in smoothly with car distance.
 """
 
 import unittest
@@ -74,6 +75,24 @@ class TestKickoffSpeedLoss(unittest.TestCase):
 
     def test_smooth_in_speed_loss(self):
         vals = [KickoffHarness().drive([1960.0, 1960.0 - loss])[0] for loss in np.linspace(0.0, 400.0, 401)]
+        self.assertLess(max_step(vals), 0.01, max_step(vals))
+
+    def _brake_with_car_ahead(self, gap):
+        h = KickoffHarness()
+        # Opponent parked `gap` uu ahead of where the braking step ends
+        end_y = -2300.0 + 1730.0 * DT
+        h.arena.cars[1].pos = np.array([0.0, end_y + gap, 17.0], dtype=np.float32)
+        return h.drive([1960.0, 1730.0])[0]
+
+    def test_bump_is_not_charged(self):
+        coast = KickoffHarness().drive([1960.0, 1960.0])[0]
+        bumped = self._brake_with_car_ahead(150.0)
+        clear = self._brake_with_car_ahead(1000.0)
+        self.assertGreater(bumped, clear + 0.25, f"bumped={bumped:.4f} clear={clear:.4f}")
+        self.assertGreater(bumped, coast - 0.05, f"bumped={bumped:.4f} coast={coast:.4f}")
+
+    def test_bump_exemption_is_smooth_in_car_distance(self):
+        vals = [self._brake_with_car_ahead(g) for g in np.linspace(150.0, 400.0, 251)]
         self.assertLess(max_step(vals), 0.01, max_step(vals))
 
     def test_open_play_unaffected(self):

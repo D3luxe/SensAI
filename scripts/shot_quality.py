@@ -49,7 +49,7 @@ os.environ.setdefault("RS_COLLISION_MESHES", os.path.join(ROOT, "collision_meshe
 from policy_health import load_agent, load_weights  # noqa: E402
 from env.rocket_env import RocketLeagueEnv  # noqa: E402
 from env.physics_engine import ARENA_EXTENT_Y  # noqa: E402
-from env.rewards import on_target_factor, EFFECTIVE_GOAL_HALF_WIDTH  # noqa: E402
+from env.rewards import goal_mouth_open_angle, on_target_factor  # noqa: E402
 
 GOAL_Y = ARENA_EXTENT_Y            # blue attacks +Y
 OUTCOME_WINDOW_STEPS = 60          # 4 s
@@ -77,15 +77,6 @@ def resolve_opponent(name):
     if key == "nexto":
         return "checkpoints/nexto-model.pt"
     return key if key in ("self", "heuristic") else name
-
-
-def open_angle(bx, by):
-    """Angle in degrees subtended by the effective goal mouth (posts inset a ball radius), seen from the ball."""
-    if by >= GOAL_Y:
-        return 0.0
-    left = math.atan2(GOAL_Y - by, -EFFECTIVE_GOAL_HALF_WIDTH - bx)
-    right = math.atan2(GOAL_Y - by, EFFECTIVE_GOAL_HALF_WIDTH - bx)
-    return math.degrees(abs(left - right))
 
 
 def classify(pre_ball, ball_pos, ball_vel, placement):
@@ -181,7 +172,7 @@ class Game:
                     pending.append(dict(
                         t=t, x=float(pre_ball[0]), y=float(pre_ball[1]),
                         goal_dist=float(math.hypot(pre_ball[0], GOAL_Y - pre_ball[1])),
-                        angle=open_angle(float(pre_ball[0]), float(pre_ball[1])),
+                        angle=goal_mouth_open_angle(pre_ball, GOAL_Y),
                         placement=placement, speed=float(np.linalg.norm(ball_vel)),
                         cat=classify(pre_ball, ball_pos, ball_vel, placement),
                         touch=breakdown.get("touch", 0.0), b2g=breakdown.get("ball_to_goal", 0.0),

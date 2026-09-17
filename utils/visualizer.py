@@ -193,16 +193,16 @@ REWARD_METADATA: Dict[str, Dict[str, Any]] = {
         "desc": "Penalty for dangerous fast ball movement towards own net",
         "priority": 12,
     },
-    "lateral_slip_penalty": {
+    "lateral_slip": {
         "label": "Strike-Zone Lateral Slip",
         "category": "Penalties & Costs",
-        "desc": "Penalty for sliding sideways across the strike zone",
+        "desc": "Penalty for sliding sideways into the ball instead of striking it with traction",
         "priority": 13,
     },
-    "handbrake_penalty": {
-        "label": "Handbrake Drag Penalty",
+    "slide_waste": {
+        "label": "Slide Without Turning",
         "category": "Penalties & Costs",
-        "desc": "Penalty for dragging handbrake during forward drives",
+        "desc": "Penalty for sliding sideways on the ground without the slide turning the car",
         "priority": 14,
     },
 }

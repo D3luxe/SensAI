@@ -89,11 +89,13 @@ rewards:
   goal_weight: 5.0
   jump_bridge_weight: 0.05
   jump_cost_weight: 0.05
+  lateral_slip_weight: 0.2
   own_goal_threat_weight: 0.0
   player_to_ball_weight: 0.35
   powerslide_weight: 0.0
   retreat_flip_weight: 0.4
   save_weight: 2.0
+  slide_waste_weight: 0.15
   spin_cost_deadband: 2.0
   spin_cost_weight: 0.015
   time_cost_weight: 0.002

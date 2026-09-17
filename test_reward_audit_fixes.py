@@ -1022,7 +1022,7 @@ class TestRewardAuditFixes(unittest.TestCase):
         self.arena.cars = [car_cut]
 
         total_r, breakdown = combined.get_reward(car_cut, self.arena, act, False, None, include_breakdown=True)
-        self.assertNotIn("handbrake_penalty", breakdown, "Active powerslide cut must not receive handbrake economy penalty")
+        self.assertEqual(breakdown["slide_waste"], 0.0, "A powerslide cut that turns the car is not a wasted slide")
         self.assertGreater(breakdown.get("powerslide", 0.0), 0.0, "PowerslideReward should be active")
 
     def test_reward_weight_zero_suppresses_bonuses(self):

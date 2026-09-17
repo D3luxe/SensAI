@@ -21,7 +21,7 @@ class TestSimulatorRewardCharts(unittest.TestCase):
             "goal", "ball_to_goal", "touch", "player_to_ball", "boost",
             "powerslide", "air_roll_recovery", "jump_bridge",
             "time_cost", "spin_cost", "jump_cost", "own_goal_threat",
-            "lateral_slip_penalty", "handbrake_penalty"
+            "lateral_slip", "slide_waste"
         ]
         for k in expected_keys:
             self.assertIn(k, REWARD_METADATA)

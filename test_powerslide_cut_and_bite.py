@@ -107,7 +107,7 @@ class TestPowerslideCutAndBite(unittest.TestCase):
         self.assertGreater(r_dist, 0.0)
 
     def test_combined_reward_lateral_slip_penalty(self):
-        """CombinedReward must apply lateral_slip_penalty if car is sliding sideways in the strike zone."""
+        """CombinedReward must charge lateral_slip if the car is sliding sideways in the strike zone."""
         combined = CombinedReward({})
         # Sliding sideways into the ball on ground (vel = [300, -300, 0] -> lateral slip = 300 uu/s)
         car = CarState(
@@ -127,8 +127,7 @@ class TestPowerslideCutAndBite(unittest.TestCase):
         act[1] = 0.5
 
         total_r, breakdown = combined.get_reward(car, arena, act, False, None, include_breakdown=True)
-        self.assertIn("lateral_slip_penalty", breakdown)
-        self.assertLess(breakdown["lateral_slip_penalty"], 0.0)
+        self.assertLess(breakdown["lateral_slip"], 0.0)
 
 
 if __name__ == "__main__":

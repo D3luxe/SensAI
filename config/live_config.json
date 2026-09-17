@@ -31,7 +31,9 @@
     "touch_weight": 0.4,
     "boost_gain_weight": 0.8,
     "boost_lose_weight": 0.25,
-    "boost_pathing_threshold": 50.0
+    "boost_pathing_threshold": 50.0,
+    "lateral_slip_weight": 0.2,
+    "slide_waste_weight": 0.15
   },
   "scenarios": {
     "kickoff_prob": 0.11,
