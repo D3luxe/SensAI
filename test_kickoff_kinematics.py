@@ -75,6 +75,9 @@ class TestKickoffKinematicsAndRewardBalance(unittest.TestCase):
             self.arena._rsim_cars[0].set_state(cs)
             self.arena._sync_from_rsim()
             car = self.arena.cars[0]
+            # Teleporting between velocities is not a physical deceleration: re-seed so the
+            # kickoff speed-loss charge doesn't bill a 2400 uu/s single-step "brake".
+            self.rew.reset(self.arena)
             r = self.rew.get_reward(car, self.arena, act_neutral, False, None)
             rewards_rev.append(r)
             self.assertLess(r, 0.0, f"Backward velocity {v} uu/s must receive negative penalty, got {r}")

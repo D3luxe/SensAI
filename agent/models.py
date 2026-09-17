@@ -237,11 +237,46 @@ class ActorCritic(nn.Module):
                 max=self.log_std_max.to(self.actor_log_std.device),
             )
 
+    def sanitize_log_std(self):
+        """
+        Bound actor_log_std to the configured exploration band. Safe on every load.
+
+        Touches nothing but actor_log_std, so deterministic actions -- the in-game bot, league
+        and TrueSkill evaluation -- are unchanged. Training resume and bot.py call this; they
+        used to call debias_symmetric_actions(), which also rescaled the actor weights and
+        biases, so the bot played (and every resumed run restarted from) a different policy
+        than the checkpoint that had been trained and evaluated.
+        """
+        if not self.continuous_actions or getattr(self, "actor_log_std", None) is None:
+            return
+        with torch.no_grad():
+            # Recover from underflow or parameter drift
+            if torch.isnan(self.actor_log_std).any() or (self.actor_log_std.abs() < 1e-6).any() or (self.actor_log_std > -0.5).any():
+                self.actor_log_std.data.fill_(-1.1)
+                self.actor_log_std.data[0, 2:5].clamp_(max=float(self.log_std_ceiling_rot))
+            else:
+                # Was a hardcoded -2.2, which predated the per-channel floor and
+                # silently overrode it on every reload: an axis that had sunk to
+                # log_std_min during a run came back at -2.2 regardless of what the
+                # floor was configured to be. Defer to log_std_min so the config is
+                # the single source of truth for how tight an axis may get.
+                self.actor_log_std.data.clamp_(min=self.log_std_min.to(self.actor_log_std.device))
+                self.actor_log_std.data.clamp_(max=self.log_std_max.to(self.actor_log_std.device))
+            # Guarantee healthy exploration on Pitch (index 2) to discover forward/diagonal/flick dodges.
+            # The floor tracks the rotational ceiling: a fixed -1.0 sat *above* an annealed
+            # ceiling and snapped trained pitch noise back up on every checkpoint reload,
+            # silently undoing the anneal with nothing in the logs to show for it.
+            pitch_floor = min(-1.0, float(self.log_std_ceiling_rot) - 0.3)
+            self.actor_log_std.data[0, 2] = max(pitch_floor, float(self.actor_log_std.data[0, 2]))
+
     def debias_symmetric_actions(self):
         """
-        Re-centers the actor output layer biases for antisymmetric action axes (steer, yaw, roll)
-        to strictly zero, defaults binary button biases (jump, boost, handbrake) to neutral 0.0,
-        and bounds actor_log_std within healthy exploration ranges.
+        Destructive reset of a policy's output heads, for migrations and fresh BC pretraining only.
+
+        Zeroes the steer/pitch/yaw/roll mean biases, clamps the button logit biases, caps the
+        actor_mean row norms at 1.5 and every backbone row norm at 3.0, then sanitizes log_std.
+        On a trained policy this changes deterministic actions substantially (throttle by ~0.18
+        on average at iter 116k), so never call it on a load path; use sanitize_log_std().
         """
         with torch.no_grad():
             if self.continuous_actions and hasattr(self, "actor_mean"):
@@ -258,26 +293,6 @@ class ActorCritic(nn.Module):
                     self.actor_binary.bias.data[1] = torch.clamp(self.actor_binary.bias.data[1], min=-0.5, max=0.5)
                     self.actor_binary.bias.data[2] = torch.clamp(self.actor_binary.bias.data[2], min=-0.5, max=0.5)
 
-                if hasattr(self, "actor_log_std") and self.actor_log_std is not None:
-                    # Recover from underflow or parameter drift
-                    if torch.isnan(self.actor_log_std).any() or (self.actor_log_std.abs() < 1e-6).any() or (self.actor_log_std > -0.5).any():
-                        self.actor_log_std.data.fill_(-1.1)
-                        self.actor_log_std.data[0, 2:5].clamp_(max=float(self.log_std_ceiling_rot))
-                    else:
-                        # Was a hardcoded -2.2, which predated the per-channel floor and
-                        # silently overrode it on every reload: an axis that had sunk to
-                        # log_std_min during a run came back at -2.2 regardless of what the
-                        # floor was configured to be. Defer to log_std_min so the config is
-                        # the single source of truth for how tight an axis may get.
-                        self.actor_log_std.data.clamp_(min=self.log_std_min.to(self.actor_log_std.device))
-                        self.actor_log_std.data.clamp_(max=self.log_std_max.to(self.actor_log_std.device))
-                    # Guarantee healthy exploration on Pitch (index 2) to discover forward/diagonal/flick dodges.
-                    # The floor tracks the rotational ceiling: a fixed -1.0 sat *above* an annealed
-                    # ceiling and snapped trained pitch noise back up on every checkpoint reload,
-                    # silently undoing the anneal with nothing in the logs to show for it.
-                    pitch_floor = min(-1.0, float(self.log_std_ceiling_rot) - 0.3)
-                    self.actor_log_std.data[0, 2] = max(pitch_floor, float(self.actor_log_std.data[0, 2]))
-
                 # Desaturate actor_mean weights if they exceeded linear analog range
                 weight_norm = self.actor_mean.weight.data.norm(dim=1, keepdim=True)
                 max_norm = 1.5
@@ -291,6 +306,8 @@ class ActorCritic(nn.Module):
                     w_max = 3.0
                     w_scale = torch.clamp(w_max / (w_norm + 1e-6), max=1.0)
                     module.weight.data *= w_scale
+
+        self.sanitize_log_std()
 
     def load_state_dict(self, state_dict, strict=True):
         # Auto-migrate legacy 8-channel continuous checkpoints into hybrid 5-continuous + 3-binary heads

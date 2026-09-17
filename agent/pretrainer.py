@@ -121,10 +121,14 @@ class BehavioralCloningTrainer:
         self,
         pool_path: str = "data/replays/replays_pool.npz",
         checkpoint_path: str = "checkpoints/latest_model.pt",
-        device: str = "cpu"
+        device: str = "cpu",
+        baseline_path: Optional[str] = None
     ):
         self.pool_path = pool_path
         self.checkpoint_path = checkpoint_path
+        # The BC anchor copy. Defaults to pretrained_baseline.pt beside checkpoint_path, so a
+        # trainer pointed at a scratch checkpoint writes its anchor there too, never into checkpoints/.
+        self.baseline_path = baseline_path or os.path.join(os.path.dirname(checkpoint_path), "pretrained_baseline.pt")
         self.device = torch.device(device)
         self.obs_builder = DefaultObservationBuilder(symmetric=True)
         self._is_running = False
@@ -819,8 +823,7 @@ class BehavioralCloningTrainer:
             "timestamp": time.strftime("%Y-%m-%d %H:%M:%S")
         }
         torch.save(payload, self.checkpoint_path)
-        baseline_path = os.path.join(os.path.dirname(self.checkpoint_path), "pretrained_baseline.pt")
-        torch.save(payload, baseline_path)
+        torch.save(payload, self.baseline_path)
 
         elapsed = round(time.time() - start_time, 1)
         self._is_running = False

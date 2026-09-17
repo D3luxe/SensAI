@@ -417,9 +417,9 @@ class PPOTrainer:
         for a latched channel is sitting on the old floor. Applying the floor here lifts
         those channels back into the band so the entropy bonus can move them again.
 
-        Runs before debias_symmetric_actions() so that the floor buffer is already synced
-        from config when debias clamps against it, and so the line logged here reports the
-        lift off the checkpoint's own value rather than off debias's intermediate result.
+        Runs before sanitize_log_std() so that the floor buffer is already synced
+        from config when the sanitizer clamps against it, and so the line logged here reports the
+        lift off the checkpoint's own value rather than off the sanitized result.
         """
         agent = self.agent
         if not self.continuous_actions or not hasattr(agent, "set_log_std_floor"):
@@ -968,7 +968,7 @@ class PPOTrainer:
             self._rot_anneal_start_ceiling = checkpoint.get("rot_anneal_start_ceiling")
             self._load_return_rms(checkpoint)
             self._apply_log_std_floor()
-            self.agent.debias_symmetric_actions()
+            self.agent.sanitize_log_std()
             print(f"[PPO Trainer] Successfully migrated weights to new dimensions (Obs: {self.obs_dim}, Act: {self.act_dim}) from {path} (Iter: {self.iteration})")
             return
 
@@ -985,7 +985,7 @@ class PPOTrainer:
         self._rot_anneal_start_ceiling = checkpoint.get("rot_anneal_start_ceiling")
         self._load_return_rms(checkpoint)
         self._apply_log_std_floor()
-        self.agent.debias_symmetric_actions()
+        self.agent.sanitize_log_std()
 
         # Sanitize any legacy subnormal floating-point numbers in weights and optimizer states
         # to prevent x86 microcode assist performance traps

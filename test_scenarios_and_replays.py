@@ -218,9 +218,17 @@ class TestScenariosAndReplays(unittest.TestCase):
         self.assertTrue(abs(self.arena.cars[0].pos[0]) <= 4096.0)
 
     def test_behavioral_cloning_pretrainer(self):
+        import tempfile
         from agent.pretrainer import BehavioralCloningTrainer
-        test_pool = "data/replays/test_bc_pool.npz"
-        test_ckpt = "checkpoints/test_bc_model.pt"
+
+        # Everything in a scratch dir: the trainer also writes a pretrained_baseline.pt beside its
+        # checkpoint, and a test checkpoint under checkpoints/ used to overwrite the real BC anchor.
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        test_pool = os.path.join(tmp.name, "test_bc_pool.npz")
+        test_ckpt = os.path.join(tmp.name, "test_bc_model.pt")
+        real_baseline = "checkpoints/pretrained_baseline.pt"
+        baseline_mtime = os.path.getmtime(real_baseline) if os.path.exists(real_baseline) else None
 
         # Create synthetic replay frames
         parser = ReplayParser(pool_path=test_pool)
@@ -241,12 +249,12 @@ class TestScenariosAndReplays(unittest.TestCase):
         self.assertFalse(trainer.is_running())
         self.assertEqual(status["epoch"], 2)
         self.assertTrue(os.path.exists(test_ckpt))
-
-        # Cleanup
-        if os.path.exists(test_pool):
-            os.remove(test_pool)
-        if os.path.exists(test_ckpt):
-            os.remove(test_ckpt)
+        self.assertEqual(trainer.baseline_path, os.path.join(tmp.name, "pretrained_baseline.pt"))
+        self.assertTrue(os.path.exists(trainer.baseline_path))
+        self.assertEqual(
+            os.path.getmtime(real_baseline) if os.path.exists(real_baseline) else None, baseline_mtime,
+            "the BC pretrainer test must not touch checkpoints/pretrained_baseline.pt",
+        )
 
     def test_inverse_dynamics_solver(self):
         from utils.inverse_dynamics import InverseDynamicsSolver

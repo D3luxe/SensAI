@@ -482,7 +482,7 @@ class SenseiRLBot(Bot):
                     self.model.load_state_dict(model_state)
                 else:
                     self.model.load_state_dict(saved_state)
-                self.model.debias_symmetric_actions()
+                self.model.sanitize_log_std()
                 self.model.eval()
                 self.loaded_ckpt_mtime = os.path.getmtime(ckpt_path) if os.path.exists(ckpt_path) else 0.0
                 msg = f"[SensAI] Successfully loaded in-game model from {ckpt_path} (Mode: {'Continuous' if self.continuous_actions else f'Discrete RLGym ({ckpt_act_dim} actions)'}, ObsDim: {obs_dim}, LayerNorm: {use_ln})"

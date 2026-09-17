@@ -735,7 +735,7 @@ class TestPhysicsAndControls(unittest.TestCase):
     def test_pitch_floor_matches_the_reload_time_guarantee(self):
         """
         Guarantees the pitch floor enforced every training step is no lower than the one
-        debias_symmetric_actions applies on load.
+        sanitize_log_std applies on load.
 
         These disagreed by 0.8 nats. The load path promised pitch >= ceiling_rot - 0.3 to keep
         flip exploration alive, while the training floor of -2.5 let the optimizer walk pitch
@@ -755,10 +755,10 @@ class TestPhysicsAndControls(unittest.TestCase):
         # lowering the pitch floor alongside it fails here instead of in a week of training.
         model.set_rot_log_std_ceiling(float(hp.get("rot_log_std_ceiling_final", -1.4)))
 
-        # Sink pitch, then load-path debias, which is where the reload guarantee is applied.
+        # Sink pitch, then the load-path sanitizer, which is where the reload guarantee is applied.
         with torch.no_grad():
             model.actor_log_std.data[0, 2] = -4.0
-        model.debias_symmetric_actions()
+        model.sanitize_log_std()
 
         reload_floor = float(model.actor_log_std.data[0, 2])
         training_floor = float(model.log_std_min.flatten()[2])
@@ -826,22 +826,22 @@ class TestPhysicsAndControls(unittest.TestCase):
             self.assertLessEqual(raw[idx], -1.4 + 1e-6,
                                  msg=f"{name} must be held at the annealed ceiling, not above it")
 
-    def test_log_std_floor_is_honoured_by_debias_and_survives_reload(self):
+    def test_log_std_floor_is_honoured_by_sanitize_and_survives_reload(self):
         """
         Guarantees the configured floor is the single source of truth for how tight an axis
-        may get: debias_symmetric_actions() must defer to it rather than to its own constant,
+        may get: sanitize_log_std() must defer to it rather than to its own constant,
         and the floor must survive a save/load round trip into evaluation and the in-game bot.
         """
         model = ActorCritic(obs_dim=OBS_DIM, act_dim=8, continuous_actions=True)
         with torch.no_grad():
             model.actor_log_std.data.fill_(-2.5)
 
-        model.debias_symmetric_actions()
+        model.sanitize_log_std()
         raw = model.actor_log_std.detach().flatten().tolist()
         self.assertAlmostEqual(raw[1], -2.0, places=5,
-                               msg="debias must clamp steer to the configured floor, not a hardcoded constant")
+                               msg="sanitize must clamp steer to the configured floor, not a hardcoded constant")
         self.assertAlmostEqual(raw[0], -2.5, places=5,
-                               msg="debias must not lift throttle above its own tighter floor")
+                               msg="sanitize must not lift throttle above its own tighter floor")
 
         # Round trip through a state dict, as evaluation and bot.py do.
         reloaded = ActorCritic(obs_dim=OBS_DIM, act_dim=8, continuous_actions=True)
