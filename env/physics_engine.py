@@ -8,7 +8,7 @@ import math
 import os
 import numpy as np
 from dataclasses import dataclass, field
-from typing import List, Tuple, Dict, Any, Optional
+from typing import Iterable, List, Tuple, Dict, Any, Optional
 
 try:
     import RocketSim as rsim
@@ -250,6 +250,60 @@ class CarState:
             -sy * sp * cr + cy * sr,
             cp * cr
         ], dtype=np.float32)
+
+
+def compute_shot_threat(
+    team: int,
+    ball_pos,
+    ball_vel,
+    trajectory: Optional[Iterable[Tuple[float, float, float, float]]] = None,
+) -> Tuple[bool, float, float]:
+    """
+    Shot threat on the net `team` defends: (is_threat, threat_intensity [0.1-1.0], entry_z_norm [0-1]).
+
+    The single implementation for training (RocketSimArena) and live play (bot.py's MockArena), so
+    the observation means the same thing in both. `trajectory` yields (seconds_ahead, x, y, z)
+    predicted ball positions from whichever predictor is available -- RocketSim slices in training,
+    the RLBot ball prediction live -- covering at most SHOT_THREAT_HORIZON_S. The first predicted
+    point past the goal line inside the mouth decides; a clean entry keeps full intensity, a grazing
+    one (inside the posts but not a ball radius clear) 0.45 of it, and intensity decays linearly with
+    time to arrival. With no trajectory, or none that enters, a ballistic raycast is used instead.
+    """
+    defending_goal_y = -ARENA_EXTENT_Y if team == 0 else ARENA_EXTENT_Y
+    ball_vy = float(ball_vel[1])
+    is_moving_to_net = (ball_vy < -100.0) if team == 0 else (ball_vy > 100.0)
+    if not is_moving_to_net:
+        return (False, 0.0, 0.0)
+
+    def classify(t_ahead: float, x: float, z: float):
+        is_clean = bool(abs(x) <= EFFECTIVE_GOAL_HALF_WIDTH and BALL_RADIUS <= z <= EFFECTIVE_GOAL_HEIGHT)
+        is_grazing = bool(not is_clean and abs(x) <= GOAL_HALF_WIDTH and BALL_RADIUS <= z <= GOAL_HEIGHT)
+        if not (is_clean or is_grazing):
+            return None
+        raw_intensity = max(0.1, 1.0 - (t_ahead / SHOT_THREAT_HORIZON_S))
+        return (True, raw_intensity if is_clean else raw_intensity * 0.45, min(1.0, max(0.0, z / GOAL_HEIGHT)))
+
+    if trajectory is not None:
+        try:
+            for t_ahead, x, y, z in trajectory:
+                if (team == 0 and y <= -ARENA_EXTENT_Y) or (team == 1 and y >= ARENA_EXTENT_Y):
+                    res = classify(float(t_ahead), float(x), float(z))
+                    if res is not None:
+                        return res
+        except Exception:
+            pass  # a broken prediction falls back to the raycast rather than hiding the threat
+
+    # Ballistic raycast fallback for long-range floating lobs
+    dy = defending_goal_y - float(ball_pos[1])
+    if abs(ball_vy) > 1e-4:
+        dt = dy / ball_vy
+        if 0.05 < dt < SHOT_THREAT_HORIZON_S:
+            pred_x = float(ball_pos[0]) + float(ball_vel[0]) * dt
+            pred_z = float(ball_pos[2]) + float(ball_vel[2]) * dt + 0.5 * GRAVITY * (dt ** 2)
+            res = classify(dt, pred_x, pred_z)
+            if res is not None:
+                return res
+    return (False, 0.0, 0.0)
 
 
 class RocketSimArena:
@@ -790,22 +844,13 @@ class RocketSimArena:
 
     def get_shot_threat(self, team: int) -> Tuple[bool, float, float]:
         """
-        Returns (is_threat, threat_intensity [0.0-1.0], entry_z_norm [0.0-1.0]).
-        Calculates exact goal threat on the defending net from RocketSim C++ prediction or raycast.
+        Returns (is_threat, threat_intensity [0.0-1.0], entry_z_norm [0.0-1.0]) for the net `team`
+        defends, from the RocketSim prediction with a ballistic fallback. See compute_shot_threat.
         """
         if hasattr(self, "_cached_threat") and team in self._cached_threat:
             return self._cached_threat[team]
 
-        defending_goal_y = -ARENA_EXTENT_Y if team == 0 else ARENA_EXTENT_Y
-        ball_vy = self.ball.vel[1]
-        is_moving_to_net = (ball_vy < -100.0) if team == 0 else (ball_vy > 100.0)
-        if not is_moving_to_net:
-            res = (False, 0.0, 0.0)
-            if hasattr(self, "_cached_threat"):
-                self._cached_threat[team] = res
-            return res
-
-        # Check RocketSim native prediction
+        trajectory = None
         if self._use_rsim and self._rsim_arena is not None:
             try:
                 if getattr(self, "_cached_rsim_preds", None) is None:
@@ -813,42 +858,12 @@ class RocketSimArena:
                 preds = self._cached_rsim_preds
                 if preds:
                     scan_len = min(len(preds), SHOT_THREAT_HORIZON_TICKS + 1)
-                    for i in range(scan_len):
-                        pos = preds[i].pos
-                        if (team == 0 and pos.y <= -5120.0) or (team == 1 and pos.y >= 5120.0):
-                            # Clean goal opening clearance inside posts and below crossbar
-                            is_clean_entry = bool(abs(pos.x) <= EFFECTIVE_GOAL_HALF_WIDTH and BALL_RADIUS <= pos.z <= EFFECTIVE_GOAL_HEIGHT)
-                            is_grazing_entry = bool(not is_clean_entry and abs(pos.x) <= GOAL_HALF_WIDTH and BALL_RADIUS <= pos.z <= GOAL_HEIGHT)
-                            if is_clean_entry or is_grazing_entry:
-                                raw_intensity = max(0.1, 1.0 - (i / SHOT_THREAT_HORIZON_TICKS))
-                                threat_intensity = raw_intensity if is_clean_entry else (raw_intensity * 0.45)
-                                entry_z_norm = min(1.0, max(0.0, pos.z / GOAL_HEIGHT))
-                                res = (True, threat_intensity, entry_z_norm)
-                                if hasattr(self, "_cached_threat"):
-                                    self._cached_threat[team] = res
-                                return res
+                    trajectory = ((i / PREDICTION_TICK_RATE, preds[i].pos.x, preds[i].pos.y, preds[i].pos.z)
+                                  for i in range(scan_len))
             except Exception:
-                pass
+                trajectory = None
 
-        # Ballistic raycast fallback for long-range floating lobs
-        dy = defending_goal_y - self.ball.pos[1]
-        if abs(ball_vy) > 1e-4:
-            dt = dy / ball_vy
-            if 0.05 < dt < SHOT_THREAT_HORIZON_S:
-                pred_x = self.ball.pos[0] + self.ball.vel[0] * dt
-                pred_z = self.ball.pos[2] + self.ball.vel[2] * dt + 0.5 * (-650.0) * (dt ** 2)
-                is_clean_entry = bool(abs(pred_x) <= EFFECTIVE_GOAL_HALF_WIDTH and BALL_RADIUS <= pred_z <= EFFECTIVE_GOAL_HEIGHT)
-                is_grazing_entry = bool(not is_clean_entry and abs(pred_x) <= GOAL_HALF_WIDTH and BALL_RADIUS <= pred_z <= GOAL_HEIGHT)
-                if is_clean_entry or is_grazing_entry:
-                    raw_intensity = max(0.1, 1.0 - (dt / SHOT_THREAT_HORIZON_S))
-                    threat_intensity = raw_intensity if is_clean_entry else (raw_intensity * 0.45)
-                    entry_z_norm = min(1.0, max(0.0, pred_z / GOAL_HEIGHT))
-                    res = (True, threat_intensity, entry_z_norm)
-                    if hasattr(self, "_cached_threat"):
-                        self._cached_threat[team] = res
-                    return res
-
-        res = (False, 0.0, 0.0)
+        res = compute_shot_threat(team, self.ball.pos, self.ball.vel, trajectory)
         if hasattr(self, "_cached_threat"):
             self._cached_threat[team] = res
         return res

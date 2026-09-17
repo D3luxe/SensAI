@@ -13,6 +13,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import torch
 import numpy as np
 from agent.models import ActorCritic
+from agent.checkpoint import read_checkpoint, migrate_state_dict
 from env.observations import OBS_DIM
 
 
@@ -33,13 +34,8 @@ def migrate_checkpoint(
         print(f"[Backup] Existing backup verified at: {backup_path}")
 
     # 2. Load Checkpoint
-    checkpoint = torch.load(src_path, map_location="cpu")
-    if isinstance(checkpoint, dict) and "model_state_dict" in checkpoint:
-        saved_state = checkpoint["model_state_dict"]
-    elif isinstance(checkpoint, dict):
-        saved_state = checkpoint
-    else:
-        saved_state = checkpoint
+    checkpoint = read_checkpoint(src_path)
+    saved_state = checkpoint["model_state_dict"]
 
     old_obs_dim = checkpoint.get("obs_dim", 80) if isinstance(checkpoint, dict) else 80
     if "actor_backbone.0.weight" in saved_state:
@@ -54,30 +50,19 @@ def migrate_checkpoint(
     # 3. Instantiate old and new models for verification
     old_model = ActorCritic(obs_dim=old_obs_dim, act_dim=8, continuous_actions=True, use_layer_norm=True)
     old_model.load_state_dict(saved_state)
-    old_model.debias_symmetric_actions()
+    old_model.sanitize_log_std()
     old_model.eval()
 
     new_model = ActorCritic(obs_dim=OBS_DIM, act_dim=8, continuous_actions=True, use_layer_norm=True)
-    new_state = new_model.state_dict()
+    current_state = new_model.state_dict()
 
-    # 4. Surgical weight transfer
-    migrated_keys = []
-    for k in list(saved_state.keys()):
-        if k in new_state:
-            saved_p = saved_state[k]
-            curr_p = new_state[k]
-            if saved_p.shape != curr_p.shape:
-                migrated_keys.append((k, saved_p.shape, curr_p.shape))
-                curr_p = curr_p.clone()
-                curr_p.zero_()  # Crucial: zero out new feature weights
-                slices = tuple(slice(0, min(s, c)) for s, c in zip(saved_p.shape, curr_p.shape))
-                curr_p[slices] = saved_p[slices]
-                new_state[k] = curr_p
-            else:
-                new_state[k] = saved_p
+    # 4. Surgical weight transfer: new feature columns are zero-initialized
+    new_state, _ = migrate_state_dict(saved_state, current_state)
+    migrated_keys = [(k, saved_state[k].shape, current_state[k].shape)
+                     for k in saved_state if k in current_state and saved_state[k].shape != current_state[k].shape]
 
     new_model.load_state_dict(new_state)
-    new_model.debias_symmetric_actions()
+    new_model.sanitize_log_std()
     new_model.eval()
 
     print(f"[Surgery] Migrated layers:")

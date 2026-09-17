@@ -229,9 +229,8 @@ class PPOTrainer:
         except Exception as e:
             raise RuntimeError(f"[PPO Trainer] Pre-Flight Physics Verification Failed: {e}") from e
 
-        # Initialize Vectorized Environment
-        self.baseline_opponent_ratio = float(env_cfg.get("baseline_opponent_ratio", 0.25))
-        self.baseline_opponent_type = str(env_cfg.get("baseline_opponent_type", "heuristic"))
+        # Initialize Vectorized Environment. Every env starts as self-play; the league manager assigns
+        # opponents (training_opponents, King, pool) right after, league enabled or not.
 
         # Rollout collection is pure-Python bound and cannot be threaded past the GIL,
         # so distribute environments across worker processes when asked.
@@ -244,8 +243,7 @@ class PPOTrainer:
             reward_weights=rew_cfg,
             continuous_actions=self.continuous_actions,
             self_play=self.self_play,
-            baseline_opponent_ratio=self.baseline_opponent_ratio,
-            baseline_opponent_type=self.baseline_opponent_type
+            baseline_opponent_ratio=0.0,
         )
         if self.num_env_workers > 1:
             from env.subproc_vec_env import SubprocVectorizedRocketEnv
@@ -256,9 +254,9 @@ class PPOTrainer:
         # Initialize League Manager (Stratified Vectorized League Self-Play)
         league_cfg = self.config.get("league", {})
         self.league_manager = LeagueManager(config=league_cfg)
+        # Disabled, the distribution is the fixed training_opponents share plus self-play
+        self.env.set_stratified_opponents(self.league_manager.get_stratified_distribution(self.num_envs))
         if self.league_manager.enabled:
-            strat_assignments = self.league_manager.get_stratified_distribution(self.num_envs)
-            self.env.set_stratified_opponents(strat_assignments)
             print(f"[PPO Trainer] Stratified League Self-Play active across {self.num_envs} envs (King: {self.league_manager.king_of_the_hill})")
 
         sc_cfg = self.config.get("scenarios", {})
@@ -609,25 +607,6 @@ class PPOTrainer:
                     self.env.update_scenarios(live["scenarios"])
                     print(f"[Live Config] Scenario distributions dynamically updated.")
 
-                # Update baseline opponent ratio & bot type
-                ratio_changed = False
-                type_changed = False
-                if "baseline_opponent_ratio" in live:
-                    new_ratio = float(live["baseline_opponent_ratio"])
-                    if abs(new_ratio - getattr(self, "baseline_opponent_ratio", 0.25)) > 1e-4:
-                        self.baseline_opponent_ratio = new_ratio
-                        ratio_changed = True
-                
-                new_opp_type = live.get("baseline_opponent_type", live.get("baseline_opponent_model", None))
-                if new_opp_type is not None and str(new_opp_type) != getattr(self, "baseline_opponent_type", "heuristic"):
-                    self.baseline_opponent_type = str(new_opp_type)
-                    type_changed = True
-
-                if ratio_changed or type_changed:
-                    if not (hasattr(self, "league_manager") and self.league_manager.enabled):
-                        self.env.update_baseline_opponent(self.baseline_opponent_ratio, self.baseline_opponent_type)
-                        print(f"[Live Config] Opponent bot dynamically updated: Ratio={self.baseline_opponent_ratio:.2f}, Type='{self.baseline_opponent_type}'")
-
                 # Update League Manager dynamic parameters
                 if hasattr(self, "league_manager"):
                     league_changed = False
@@ -699,8 +678,11 @@ class PPOTrainer:
                                 f"Pool={lm.pool_ratio * rest:.0%} of envs (actual: {envs_note} of {len(strat_assignments)})"
                             )
                         else:
-                            self.env.update_baseline_opponent(self.baseline_opponent_ratio, self.baseline_opponent_type)
-                            print(f"[Live Config] Stratified League disabled. Reverted to static baseline ratio.")
+                            strat_assignments = self.league_manager.get_stratified_distribution(self.num_envs)
+                            self.env.set_stratified_opponents(strat_assignments)
+                            n_fixed = sum(a is not None for a in strat_assignments)
+                            print(f"[Live Config] Stratified League disabled: {n_fixed} envs on training_opponents, "
+                                  f"{len(strat_assignments) - n_fixed} self-play.")
 
                 # Update action masking parameters
                 if "use_action_masking" in live:

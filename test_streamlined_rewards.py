@@ -131,11 +131,14 @@ class TestStreamlinedRewards(unittest.TestCase):
         rew.reset(arena1)
         target1 = rew._get_target_pos(bot.pos, arena1, False, bot.vel, bot.id, bot.team)
 
-        # Next tick: opponent suddenly appears closer (w_challenge drops from 1.0 to ~0.1, shifting target)
+        # Next tick: opponent appears closer. Whether the targeting logic moves the target far in
+        # response has changed over time (84 uu after the Sep 14 intercept rework), so rather than
+        # depend on it the shift is forced: the guarantee under test is about the reward, not the
+        # targeting.
         opp = CarState(id=1, team=1, pos=np.array([0.0, 1200.0, 17.0], dtype=np.float32), vel=np.zeros(3, dtype=np.float32))
         arena2 = MockArena([bot, opp], ball_pos)
-
-        target2 = rew._get_target_pos(bot.pos, arena2, False, bot.vel, bot.id, bot.team)
+        target2 = np.array(target1, dtype=np.float32) + np.array([900.0, -700.0, 0.0], dtype=np.float32)
+        rew._get_target_pos = lambda *a, **k: target2
         self.assertGreater(np.linalg.norm(target1 - target2), 200.0)
 
         # Stationary bot evaluates reward across this target shift

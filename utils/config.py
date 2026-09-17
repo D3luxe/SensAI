@@ -49,7 +49,7 @@ LIVE_LEAGUE_KEYS = {  # live key -> league key
     "training_opponent_ratio": "training_opponent_ratio",
     "contender_series_per_step": "contender_series_per_step",
 }
-LIVE_ENVIRONMENT_KEYS = ("baseline_opponent_ratio", "baseline_opponent_type", "torch_num_threads")
+LIVE_ENVIRONMENT_KEYS = ("torch_num_threads",)
 
 CONFIG_REWARD_KEYS = tuple(k for k in REWARD_DEFAULTS if k not in REWARD_KEYS_NOT_IN_CONFIG)
 
@@ -108,8 +108,6 @@ def overlay_live(base: Mapping[str, Any], live: Mapping[str, Any]) -> Dict[str, 
     for key in LIVE_ENVIRONMENT_KEYS:
         if key in live:
             env[key] = live[key]
-    if "baseline_opponent_type" not in live and "baseline_opponent_model" in live:
-        env["baseline_opponent_type"] = live["baseline_opponent_model"]
     return cfg
 
 

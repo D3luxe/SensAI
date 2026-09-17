@@ -74,7 +74,7 @@ class TestEffectiveConfig(unittest.TestCase):
                 "league": {"king_ratio": 0.25}}
         live = {"rewards": {"touch_weight": 0.9}, "scenarios": {"aerial_prob": 0.3}, "ent_coef": 0.002,
                 "league_enabled": False, "king_ratio": 0.4, "use_action_masking": False,
-                "baseline_opponent_model": "checkpoints/nexto-model.pt"}
+                "torch_num_threads": 6}
         cfg = overlay_live(base, live)
         self.assertEqual(cfg["rewards"]["touch_weight"], 0.9)
         self.assertEqual(cfg["scenarios"]["aerial_prob"], 0.3)
@@ -82,7 +82,7 @@ class TestEffectiveConfig(unittest.TestCase):
         self.assertEqual(cfg["hyperparameters"]["gamma"], 0.995)
         self.assertEqual(cfg["league"], {"king_ratio": 0.4, "enabled": False})
         self.assertFalse(cfg["model"]["use_action_masking"])
-        self.assertEqual(cfg["environment"]["baseline_opponent_type"], "checkpoints/nexto-model.pt")
+        self.assertEqual(cfg["environment"]["torch_num_threads"], 6)
         self.assertEqual(base["rewards"]["touch_weight"], 0.4, "inputs must not be modified")
 
     def test_annealing_uses_the_checkpoint_clocks(self):

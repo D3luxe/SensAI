@@ -127,11 +127,7 @@ class LeagueManager:
         self.training_opponents: List[str] = [
             self._normalize_path(x) for x in self.config.get("training_opponents", []) if x
         ]
-        self.training_opponent_ratio = float(self.config.get(
-            "training_opponent_ratio",
-            # Migration: this control used to be a single model plus a weight.
-            self.config.get("baseline_opponent_ratio", 0.0)
-        ))
+        self.training_opponent_ratio = float(self.config.get("training_opponent_ratio", 0.0))
         self.training_opponent_ratio = max(0.0, min(1.0, self.training_opponent_ratio))
         self._training_opp_cycle_idx: int = 0
         self.protect_top_k = int(self.config.get("protect_top_k", 20))
@@ -1495,7 +1491,16 @@ class LeagueManager:
         - str path = Current Learner vs Specified Opponent Bot
         """
         if not self.enabled:
-            return [None] * num_envs
+            # No King or pool without the league, but the operator's fixed training opponents
+            # still hold their share; everything else is self-play.
+            live_training_opps = self._live_training_opponents()
+            n_training = 0
+            if live_training_opps and self.training_opponent_ratio > 0.0:
+                n_training = min(num_envs, int(round(num_envs * self.training_opponent_ratio)))
+            n_training, n_self_play, _, _ = snap_tiers_to_worker_slices(
+                num_envs, n_training, num_envs - n_training, 0, 0, self.pool_group_size
+            )
+            return self._training_opponent_assignments(n_training, live_training_opps) + [None] * n_self_play
 
         self.refresh_pool()
 
@@ -1533,10 +1538,7 @@ class LeagueManager:
         # divided by the standard ratios. So the list squashes the default split rather
         # than competing inside one tier, and a ratio of 0.0 reproduces the old
         # behaviour exactly.
-        live_training_opps = [
-            op for op in self.training_opponents
-            if op == "heuristic" or os.path.exists(op)
-        ]
+        live_training_opps = self._live_training_opponents()
         n_training = 0
         if live_training_opps and self.training_opponent_ratio > 0.0:
             n_training = min(num_envs, int(round(num_envs * self.training_opponent_ratio)))
@@ -1588,25 +1590,8 @@ class LeagueManager:
             num_envs, n_training, n_self_play, n_king, n_pool, self.pool_group_size
         )
 
-        assignments: List[Optional[str]] = []
-
         # 0. Tier 0: Explicit training opponents, split evenly.
-        #
-        # Allocated by even division rather than by pool_group_size runs: with 6 envs and
-        # two opponents, contiguous runs of 4 would hand one of them 4 and the other 2.
-        # Each opponent's block is still contiguous, so opponent inference stays batched.
-        # Any remainder rotates between refreshes so it does not always favour the same
-        # entry.
-        if n_training and live_training_opps:
-            k = len(live_training_opps)
-            base, extra = divmod(n_training, k)
-            rotated = [
-                live_training_opps[(self._training_opp_cycle_idx + i) % k] for i in range(k)
-            ]
-            for i, opp in enumerate(rotated):
-                assignments.extend([opp] * (base + (1 if i < extra else 0)))
-            if extra:
-                self._training_opp_cycle_idx = (self._training_opp_cycle_idx + extra) % k
+        assignments: List[Optional[str]] = self._training_opponent_assignments(n_training, live_training_opps)
 
         # 1. Tier 1: Self-Play (None)
         assignments.extend([None] * n_self_play)
@@ -1643,6 +1628,33 @@ class LeagueManager:
             assignments.extend([choice] * run)
             assigned += run
 
+        return assignments
+
+    def _live_training_opponents(self) -> List[str]:
+        """The configured training_opponents that can actually be loaded."""
+        return [op for op in self.training_opponents if op == "heuristic" or os.path.exists(op)]
+
+    def _training_opponent_assignments(self, n_training: int, live_training_opps: List[str]) -> List[Optional[str]]:
+        """
+        Tier 0: n_training envs split evenly across the explicit training opponents.
+
+        Allocated by even division rather than by pool_group_size runs: with 6 envs and
+        two opponents, contiguous runs of 4 would hand one of them 4 and the other 2.
+        Each opponent's block is still contiguous, so opponent inference stays batched.
+        Any remainder rotates between refreshes so it does not always favour the same
+        entry.
+        """
+        assignments: List[Optional[str]] = []
+        if n_training and live_training_opps:
+            k = len(live_training_opps)
+            base, extra = divmod(n_training, k)
+            rotated = [
+                live_training_opps[(self._training_opp_cycle_idx + i) % k] for i in range(k)
+            ]
+            for i, opp in enumerate(rotated):
+                assignments.extend([opp] * (base + (1 if i < extra else 0)))
+            if extra:
+                self._training_opp_cycle_idx = (self._training_opp_cycle_idx + extra) % k
         return assignments
 
     def get_telemetry(self) -> Dict[str, Any]:

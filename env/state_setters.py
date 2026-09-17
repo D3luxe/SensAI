@@ -12,13 +12,9 @@ from typing import List, Dict, Any, Optional, Tuple
 import RocketSim as rsim
 
 from utils.replay_parser import ReplayParser
-
-
-ARENA_EXTENT_X = 4096.0
-ARENA_EXTENT_Y = 5120.0
-ARENA_HEIGHT_Z = 2044.0
-GOAL_HEIGHT = 642.775
-GOAL_HALF_WIDTH = 892.755
+# Field geometry has one definition, in the physics engine (physics_engine imports this module lazily,
+# so there is no cycle)
+from env.physics_engine import ARENA_EXTENT_X, ARENA_EXTENT_Y, ARENA_HEIGHT_Z, GOAL_HEIGHT, GOAL_HALF_WIDTH  # noqa: F401
 
 
 def rotation_to_rot_mat(pitch: float, yaw: float, roll: float) -> np.ndarray:
@@ -106,6 +102,7 @@ class AerialScenarioSetter(BaseStateSetter):
         target_team = random.choice([0, 1])
         sign = 1.0 if target_team == 0 else -1.0
         mode = random.choices(["stationary_float", "rising_popup", "low_popup_double_jump", "dynamic_intercept"], weights=[0.20, 0.25, 0.20, 0.35])[0]
+        self.last_mode = mode  # read by tests to apply each mode's own guarantees
 
         if mode == "stationary_float":
             # Mode 1: High floating ball with zero horizontal velocity; ideal for discovering initial jump+boost liftoff

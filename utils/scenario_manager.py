@@ -23,7 +23,11 @@ from env.physics_engine import (
     BoostPad
 )
 
-SCENARIOS_CONFIG_PATH = "config/custom_scenarios.json"
+# Resolved against the repo root, not the working directory. Relative to the cwd, a process started
+# from scripts/ found no file, silently trained on the 4 built-in defaults instead of the configured
+# scenarios, and wrote them out as a stray scripts/config/custom_scenarios.json.
+REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+SCENARIOS_CONFIG_PATH = os.path.join(REPO_ROOT, "config", "custom_scenarios.json")
 
 DEFAULT_CUSTOM_SCENARIOS: List[Dict[str, Any]] = [
     {
@@ -165,7 +169,7 @@ class ScenarioManager:
     _instance: Optional[ScenarioManager] = None
 
     def __init__(self, config_path: str = SCENARIOS_CONFIG_PATH):
-        self.config_path = config_path
+        self.config_path = config_path if os.path.isabs(config_path) else os.path.join(REPO_ROOT, config_path)
         self.scenarios: Dict[str, Dict[str, Any]] = {}
         self.load()
 

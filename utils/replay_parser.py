@@ -95,7 +95,10 @@ def get_default_demo_dir() -> str:
 
 
 DEFAULT_DEMO_DIR = get_default_demo_dir()
-DEFAULT_POOL_PATH = os.path.join("data", "replays", "replays_pool.npz")
+# Relative pool paths resolve against the repo root, not the working directory: run from scripts/,
+# the old relative default created and read a separate scripts/data/replays/ pool.
+REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+DEFAULT_POOL_PATH = os.path.join(REPO_ROOT, "data", "replays", "replays_pool.npz")
 
 # Keep the most recent frames only. At 30 Hz one 1v1 replay is ~5-7k frames.
 MAX_POOL_FRAMES = 2_000_000
@@ -196,7 +199,7 @@ class ReplayParser:
     frame_stride: int = 1
 
     def __init__(self, pool_path: str = DEFAULT_POOL_PATH, demo_dir: Optional[str] = None):
-        self.pool_path = pool_path
+        self.pool_path = pool_path if os.path.isabs(pool_path) else os.path.join(REPO_ROOT, pool_path)
         self.demo_dir = demo_dir or DEFAULT_DEMO_DIR
         os.makedirs(os.path.dirname(self.pool_path), exist_ok=True)
         self.states_buffer: Optional[Dict[str, np.ndarray]] = None

@@ -167,7 +167,11 @@ class TestOutcomeRewardsAndTTI(unittest.TestCase):
         act_brake = np.array([-1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0], dtype=np.float32)
         r_brake = rew.get_reward(car_overspeed, arena_fast, act_brake, False, None)
         self.assertEqual(r_brake, r_thr, 'No artificial input bounty for holding reverse')
-        self.assertGreater(r_matched, r_thr, 'Paced approach must exceed overspeeding approach due to penalty avoidance')
+        # The term pays realized position change only (see the note above), so with the cars held in
+        # place neither approach speed earns or loses anything. The old "paced beats overspeeding"
+        # assertion described the velocity-based pacing penalty that was removed.
+        self.assertEqual(r_matched, 0.0, 'Velocity alone, without position change, must not be paid')
+        self.assertEqual(r_thr, 0.0, 'Velocity alone, without position change, must not be charged')
 
     def test_touch_ball_soft_catch_bonus(self):
         rew = TouchBallReward(weight=1.0)

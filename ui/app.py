@@ -814,12 +814,11 @@ def build_full_diagnostic_export() -> tuple[str, str]:
     env = default_cfg["environment"]
     rew = default_cfg["rewards"]
 
-    # What the environments actually face, which is the league split rather than the
-    # legacy baseline_opponent_* keys the trainer ignores while the league is running.
+    # What the environments actually face: the league split, or with the league disabled the
+    # fixed training_opponents share plus self-play.
     opponent_mix = describe_opponent_mix(
         default_cfg.get("league", {}) or {},
         metrics.get("league", {}) or {},
-        fallback=str(env.get("baseline_opponent_type", "heuristic")),
         num_envs=int(env.get("num_envs", 0) or 0),
     )
 
@@ -1153,20 +1152,19 @@ def _pct(value: float) -> str:
 def describe_opponent_mix(
     league: Dict[str, Any],
     telemetry: Optional[Dict[str, Any]] = None,
-    fallback: str = "heuristic",
     num_envs: Optional[int] = None,
 ) -> str:
     """
-    One line naming what the training environments are really facing.
-
-    Not the legacy baseline_opponent_* pair. Those two keys only take effect when the
-    league is disabled, and the trainer ignores them otherwise, so quoting them while the
-    league runs reports a matchup nobody is playing. This panel advertised Nexto at 5%
-    through an entire session in which no environment faced Nexto at all, which is worse
-    than saying nothing while the opponent mix is the thing under investigation.
+    One line naming what the training environments are really facing, with each tier's share
+    as the scheduler actually snaps it.
     """
     if not league.get("enabled", True):
-        return f"League disabled. Static baseline: `{fallback}`"
+        # Without the league there is no King or pool: the fixed list keeps its share, the rest self-play
+        fixed = float(opponent_mix_shares(league, num_envs)["fixed"])
+        listed = ", ".join(os.path.basename(str(x)) for x in league.get("training_opponents") or [])
+        if fixed:
+            return f"League disabled | Fixed `{_pct(fixed)}` ({listed}) | Self-play `{_pct(100.0 - fixed)}`"
+        return "League disabled | Self-play `100%`"
 
     telemetry = telemetry or {}
     shares = opponent_mix_shares(league, num_envs)
@@ -2093,8 +2091,7 @@ def create_ui():
                                         f"rollout &middot; {blocks} of {ui_workers} workers")
 
                             _opp_start = int(round(float(league_cfg_ui.get(
-                                "training_opponent_ratio",
-                                env_cfg.get("baseline_opponent_ratio", 0.0)
+                                "training_opponent_ratio", 0.0
                             ) or 0.0) * ui_num_envs))
                             _opp_start = min(ui_num_envs, (_opp_start // env_block) * env_block)
                             with gr.Row():
@@ -2974,9 +2971,6 @@ def create_ui():
                     base_cfg["league"] = {}
                 base_cfg["league"]["training_opponents"] = selected
                 base_cfg["league"]["training_opponent_ratio"] = float(opp_ratio)
-                # Retire the single-model control this replaces, so the two cannot drift.
-                base_cfg.get("environment", {}).pop("baseline_opponent_type", None)
-                base_cfg.get("environment", {}).pop("baseline_opponent_ratio", None)
                 save_yaml_config(base_cfg, "config/default_config.yaml")
             except Exception:
                 pass

@@ -305,27 +305,39 @@ class TestScenariosAndReplays(unittest.TestCase):
         self.assertGreater(batch_acts[0, 0], 0.5)
 
     def test_aerial_scenario_setter_physics_guarantees(self):
-        """Verify AerialScenarioSetter mathematically guarantees hang time >= 1.75s, ceiling clearance, and aligned heading."""
+        """
+        Verify AerialScenarioSetter's per-mode guarantees: the high modes hang >= 1.75 s above Z=250
+        with ceiling clearance; the low double-jump popup (added Sep 15) spawns inside double-jump
+        reach with little vertical speed instead. Every mode aims a moving attacker along its heading.
+        """
         setter = AerialScenarioSetter()
         arena = rsim.Arena(rsim.GameMode.SOCCAR)
         arena.add_car(rsim.Team.BLUE)
         arena.add_car(rsim.Team.ORANGE)
+        modes_seen = set()
 
         for sample_idx in range(300):
             setter.reset(arena, num_players=2)
+            mode = setter.last_mode
+            modes_seen.add(mode)
             bs = arena.ball.get_state()
             z0 = float(bs.pos.z)
             vz0 = float(bs.vel.z)
 
-            # Quadratic formula to find t when z(t) = 250: 325*t^2 - vz0*t - (z0 - 250) = 0
-            disc = vz0 ** 2 + 4.0 * 325.0 * (z0 - 250.0)
-            self.assertGreaterEqual(disc, 0.0, f"Sample {sample_idx}: Ball should be above 250 Z initially")
-            t_hang = (vz0 + math.sqrt(disc)) / 650.0
-
-            self.assertGreaterEqual(
-                t_hang, 1.75,
-                f"Sample {sample_idx}: Hang time {t_hang:.2f}s is below 1.75s minimum (z0={z0:.1f}, vz0={vz0:.1f})"
-            )
+            if mode == "low_popup_double_jump":
+                self.assertTrue(320.0 <= z0 <= 520.0, f"Sample {sample_idx}: low popup spawned at z={z0:.1f}")
+                self.assertTrue(-80.0 <= vz0 <= 120.0, f"Sample {sample_idx}: low popup vz={vz0:.1f}")
+                min_speed = 650.0
+            else:
+                # Quadratic formula to find t when z(t) = 250: 325*t^2 - vz0*t - (z0 - 250) = 0
+                disc = vz0 ** 2 + 4.0 * 325.0 * (z0 - 250.0)
+                self.assertGreaterEqual(disc, 0.0, f"Sample {sample_idx}: Ball should be above 250 Z initially")
+                t_hang = (vz0 + math.sqrt(disc)) / 650.0
+                self.assertGreaterEqual(
+                    t_hang, 1.75,
+                    f"Sample {sample_idx} ({mode}): Hang time {t_hang:.2f}s is below 1.75s minimum (z0={z0:.1f}, vz0={vz0:.1f})"
+                )
+                min_speed = 700.0
 
             # Apex check: apex height must be < 1750 uu (well below 1951 uu ceiling barrier)
             z_apex = z0 + (max(0.0, vz0) ** 2) / 1300.0
@@ -341,7 +353,7 @@ class TestScenariosAndReplays(unittest.TestCase):
             for car in attacking_cars:
                 cs = car.get_state()
                 car_speed = math.hypot(cs.vel.x, cs.vel.y)
-                self.assertGreaterEqual(car_speed, 700.0, f"Sample {sample_idx}: Attacking car speed too low ({car_speed})")
+                self.assertGreaterEqual(car_speed, min_speed - 1e-3, f"Sample {sample_idx} ({mode}): Attacking car speed too low ({car_speed})")
 
                 # Check velocity angle matches forward yaw
                 vel_yaw = math.atan2(cs.vel.y, cs.vel.x)
@@ -350,6 +362,8 @@ class TestScenariosAndReplays(unittest.TestCase):
                 body_yaw = math.atan2(fwd_y, fwd_x)
                 angle_diff = abs(math.atan2(math.sin(vel_yaw - body_yaw), math.cos(vel_yaw - body_yaw)))
                 self.assertLess(angle_diff, 1e-3, f"Sample {sample_idx}: Car velocity not aligned with yaw ({angle_diff:.4f} rad)")
+
+        self.assertEqual(modes_seen, {"stationary_float", "rising_popup", "low_popup_double_jump", "dynamic_intercept"})
 
     def test_wall_bounce_rebound_guarantees(self):
         """Verify WallBounceReboundSetter reaches wall/backboard/ceiling cleanly without premature turf bounces."""

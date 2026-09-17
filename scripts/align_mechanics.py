@@ -13,7 +13,7 @@ import torch
 import numpy as np
 
 sys.path.insert(0, ".")
-from agent.models import ActorCritic
+from agent.checkpoint import load_policy
 from agent.pretrainer import BehavioralCloningTrainer
 
 
@@ -34,13 +34,11 @@ def align_checkpoint(
         print(f"[Alignment] Backed up {ckpt_path} -> {backup_path}")
 
     # 2. Load checkpoint
-    ckpt = torch.load(ckpt_path, map_location=device)
-    iteration = ckpt.get("iteration", 33620)
-    global_step = ckpt.get("global_step", 275406848)
+    # Shared loader: architecture from the checkpoint, strict weights (was hardcoded to 74-dim obs)
+    model, ckpt = load_policy(ckpt_path, device=str(device))
+    iteration = ckpt.get("iteration", 0)
+    global_step = ckpt.get("global_step", 0)
     print(f"[Alignment] Loaded checkpoint at Iteration {iteration:,}, Global Step {global_step:,}")
-
-    model = ActorCritic(obs_dim=74, act_dim=8, continuous_actions=True, use_layer_norm=True).to(device)
-    model.load_state_dict(ckpt["model_state_dict"], strict=False)
 
     # 3. Generate balanced demonstration dataset
     trainer = BehavioralCloningTrainer(device=device)
@@ -99,8 +97,9 @@ def align_checkpoint(
             avg_pitch_err = epoch_pitch_err / num_batches
             print(f"[Alignment] Epoch {epoch:2d}/{epochs:2d} | Loss: {avg_loss:.4f} | Pitch L1 Error: {avg_pitch_err:.4f}")
 
-    # 5. Debias symmetric heads & enforce healthy exploration bounds
-    model.debias_symmetric_actions()
+    # 5. Enforce healthy exploration bounds. Not debias_symmetric_actions(): its weight rescaling
+    # would be saved into the checkpoint and change the policy beyond what this alignment trained.
+    model.sanitize_log_std()
 
     # 6. Save aligned checkpoint preserving all metadata
     ckpt["model_state_dict"] = model.state_dict()

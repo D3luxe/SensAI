@@ -16,7 +16,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import RocketSim as rsim
 from env.physics_engine import CarState, BallState, BoostPad, RocketSimArena
 from env.observations import DefaultObservationBuilder
-from agent.models import ActorCritic
+from agent.checkpoint import load_policy
 from bot import SenseiRLBot, rotation_to_rot_mat
 
 
@@ -37,11 +37,8 @@ def run_scenario_simulation(
         print(f"[Error] Model checkpoint not found at {model_path}")
         return
 
-    ckpt = torch.load(model_path, map_location="cpu")
-    model = ActorCritic(obs_dim=74, act_dim=8, continuous_actions=True)
-    model.load_state_dict(ckpt["model_state_dict"])
-    model.debias_symmetric_actions()
-    model.eval()
+    # The shared loader, so this replays exactly the policy the in-game bot runs
+    model, _ = load_policy(model_path)
 
     obs_builder = DefaultObservationBuilder(symmetric=True)
     arena = RocketSimArena(num_players=2, game_mode="1v1")

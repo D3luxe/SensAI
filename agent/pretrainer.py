@@ -712,21 +712,12 @@ class BehavioralCloningTrainer:
         orig_global_step = 0
         if base_checkpoint and os.path.exists(base_checkpoint):
             try:
-                ckpt = torch.load(base_checkpoint, map_location=self.device)
-                saved_state = ckpt["model_state_dict"] if isinstance(ckpt, dict) and "model_state_dict" in ckpt else (ckpt if isinstance(ckpt, dict) else ckpt)
-                model_state = model.state_dict()
-                migrated = False
-                for k in list(saved_state.keys()):
-                    if k in model_state:
-                        saved_param = saved_state[k]
-                        curr_param = model_state[k]
-                        if saved_param.shape != curr_param.shape:
-                            migrated = True
-                            slices = tuple(slice(0, min(s, c)) for s, c in zip(saved_param.shape, curr_param.shape))
-                            curr_param[slices] = saved_param[slices]
-                            model_state[k] = curr_param
-                        else:
-                            model_state[k] = saved_param
+                from agent.checkpoint import read_checkpoint, migrate_state_dict
+                ckpt = read_checkpoint(base_checkpoint, device=str(self.device))
+                # A warm start, so shapes are migrated rather than refused; say so when it happens
+                model_state, migrated = migrate_state_dict(ckpt["model_state_dict"], model.state_dict())
+                if migrated:
+                    print(f"[Pretrainer] Warning: {base_checkpoint} shape-migrated onto the BC model")
                 model.load_state_dict(model_state, strict=False)
                 if isinstance(ckpt, dict):
                     orig_iteration = ckpt.get("iteration", 0)

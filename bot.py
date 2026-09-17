@@ -72,6 +72,7 @@ from env.physics_engine import (
     CAR_MAX_SPEED, BALL_MAX_SPEED, GOAL_HALF_WIDTH, GOAL_HEIGHT,
     EFFECTIVE_GOAL_HALF_WIDTH, EFFECTIVE_GOAL_HEIGHT, BALL_RADIUS,
     PREDICTION_TICK_RATE, SHOT_THREAT_HORIZON_TICKS, SHOT_THREAT_HORIZON_S,
+    compute_shot_threat,
 )
 
 # Identifies this bot to the RLBot server when it is started manually rather than by the
@@ -237,45 +238,16 @@ class MockArena:
         return self._predictor.pos_at_tick(slice_idx)
 
     def get_shot_threat(self, team: int):
-        defending_goal_y = -ARENA_EXTENT_Y if team == 0 else ARENA_EXTENT_Y
-        ball_vy = self.ball.vel[1]
-        is_moving_to_net = (ball_vy < -100.0) if team == 0 else (ball_vy > 100.0)
-        if not is_moving_to_net:
-            return False, 0.0, 0.0
-
+        """Same computation as training (compute_shot_threat), fed from the RLBot ball prediction."""
+        trajectory = None
         if self._predictor:
-            # Scan the same amount of future time the training scan covers, and decay
-            # intensity over the same ramp. Both are expressed in seconds here, so the
-            # publishing rate of the prediction cannot change what an intensity means.
             pred = self._predictor
             last = pred.index_at_tick(SHOT_THREAT_HORIZON_TICKS)
-            for i in range(last + 1):
-                loc = pred.slices[i].physics.location
-                if (team == 0 and loc.y <= -5120.0) or (team == 1 and loc.y >= 5120.0):
-                    is_clean_entry = bool(abs(loc.x) <= EFFECTIVE_GOAL_HALF_WIDTH and BALL_RADIUS <= loc.z <= EFFECTIVE_GOAL_HEIGHT)
-                    is_grazing_entry = bool(not is_clean_entry and abs(loc.x) <= GOAL_HALF_WIDTH and BALL_RADIUS <= loc.z <= GOAL_HEIGHT)
-                    if is_clean_entry or is_grazing_entry:
-                        t_ahead = i * pred.dt
-                        raw_intensity = max(0.1, 1.0 - (t_ahead / SHOT_THREAT_HORIZON_S))
-                        threat_intensity = raw_intensity if is_clean_entry else (raw_intensity * 0.45)
-                        entry_z_norm = min(1.0, max(0.0, loc.z / GOAL_HEIGHT))
-                        return True, threat_intensity, entry_z_norm
-
-        dy = defending_goal_y - self.ball.pos[1]
-        if abs(ball_vy) > 1e-4:
-            dt = dy / ball_vy
-            if 0.05 < dt < SHOT_THREAT_HORIZON_S:
-                pred_x = self.ball.pos[0] + self.ball.vel[0] * dt
-                pred_z = self.ball.pos[2] + self.ball.vel[2] * dt + 0.5 * (-650.0) * (dt ** 2)
-                is_clean_entry = bool(abs(pred_x) <= EFFECTIVE_GOAL_HALF_WIDTH and BALL_RADIUS <= pred_z <= EFFECTIVE_GOAL_HEIGHT)
-                is_grazing_entry = bool(not is_clean_entry and abs(pred_x) <= GOAL_HALF_WIDTH and BALL_RADIUS <= pred_z <= GOAL_HEIGHT)
-                if is_clean_entry or is_grazing_entry:
-                    raw_intensity = max(0.1, 1.0 - (dt / SHOT_THREAT_HORIZON_S))
-                    threat_intensity = raw_intensity if is_clean_entry else (raw_intensity * 0.45)
-                    entry_z_norm = min(1.0, max(0.0, pred_z / GOAL_HEIGHT))
-                    return True, threat_intensity, entry_z_norm
-
-        return False, 0.0, 0.0
+            # Time is taken from the slice spacing, so the prediction's publishing rate cannot
+            # change what an intensity means.
+            trajectory = ((i * pred.dt, pred.slices[i].physics.location.x, pred.slices[i].physics.location.y,
+                           pred.slices[i].physics.location.z) for i in range(last + 1))
+        return compute_shot_threat(team, self.ball.pos, self.ball.vel, trajectory)
 
 
 class SenseiRLBot(Bot):

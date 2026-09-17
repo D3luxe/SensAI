@@ -24,7 +24,10 @@ class TestDodgeDeadzoneAndDoubleJump(unittest.TestCase):
     def test_physics_engine_deadzone_preservation(self):
         """Verify that pitch/yaw < 0.50 are NOT scaled to 0.90 in the substep loop, allowing neutral double jumps."""
         arena = RocketSimArena(num_players=2)
-        arena.reset()
+        # A fixed kickoff, and an upright, non-spinning car: reset() otherwise samples a random
+        # scenario whose car orientation and spin carry over, which tilts the double-jump impulse
+        # off vertical and made the vz check below fail about half the time.
+        arena.reset(random_kickoff=False)
         
         # Position car airborne
         cs = arena.cars[0]
@@ -32,6 +35,8 @@ class TestDodgeDeadzoneAndDoubleJump(unittest.TestCase):
         r_cs = r_car.get_state()
         r_cs.pos = rsim.Vec(0, 0, 250)
         r_cs.vel = rsim.Vec(0, 0, 100)
+        r_cs.rot_mat = rsim.Angle(yaw=math.pi / 2, pitch=0.0, roll=0.0).as_rot_mat()
+        r_cs.ang_vel = rsim.Vec(0, 0, 0)
         r_cs.is_on_ground = False
         r_car.set_state(r_cs)
         
@@ -53,12 +58,14 @@ class TestDodgeDeadzoneAndDoubleJump(unittest.TestCase):
     def test_physics_engine_dodge_scaling(self):
         """Verify that stick deflection >= 0.50 scales to >= 0.90 for intentional dodges."""
         arena = RocketSimArena(num_players=2)
-        arena.reset()
+        arena.reset(random_kickoff=False)
         
         r_car = arena._rsim_arena.get_cars()[0]
         r_cs = r_car.get_state()
         r_cs.pos = rsim.Vec(0, 0, 250)
         r_cs.vel = rsim.Vec(0, 500, 50)
+        r_cs.rot_mat = rsim.Angle(yaw=math.pi / 2, pitch=0.0, roll=0.0).as_rot_mat()
+        r_cs.ang_vel = rsim.Vec(0, 0, 0)
         r_cs.is_on_ground = False
         r_car.set_state(r_cs)
         

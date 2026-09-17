@@ -930,9 +930,9 @@ class TestLeagueManager(unittest.TestCase):
         """
         The panel must name the tiers actually running.
 
-        baseline_opponent_type and baseline_opponent_ratio only take effect when the
-        league is disabled. Quoting them while it runs advertised Nexto at 5% through a
-        whole session in which no environment faced Nexto.
+        The removed baseline_opponent_* keys were once quoted here while the league ran,
+        advertising Nexto at 5% through a whole session in which no environment faced Nexto.
+        With the league disabled the panel names the fixed list and self-play.
         """
         from ui.app import describe_opponent_mix, opponent_mix_shares
 
@@ -943,7 +943,7 @@ class TestLeagueManager(unittest.TestCase):
         }
         line = describe_opponent_mix(
             league, {"king_of_the_hill": "checkpoint_iter_10", "elite_pool_size": 10},
-            fallback="checkpoints/nexto-model.pt", num_envs=128,
+            num_envs=128,
         )
         self.assertIn("Self-play", line)
         self.assertIn("checkpoint_iter_10", line)
@@ -955,9 +955,11 @@ class TestLeagueManager(unittest.TestCase):
         self.assertAlmostEqual(opponent_mix_shares(with_fixed)["fixed"], 20.0)
         self.assertAlmostEqual(opponent_mix_shares(with_fixed, 128)["fixed"], 18.75)
 
-        off = dict(league, enabled=False)
-        self.assertIn("nexto", describe_opponent_mix(
-            off, {}, fallback="checkpoints/nexto-model.pt", num_envs=128))
+        off = dict(with_fixed, enabled=False)
+        line_off = describe_opponent_mix(off, {}, num_envs=128)
+        self.assertIn("necto-model.pt", line_off)
+        self.assertIn("Self-play", line_off)
+        self.assertNotIn("King", line_off)
 
     def test_how_it_works_reads_live_config(self):
         """
