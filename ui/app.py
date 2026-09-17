@@ -42,6 +42,10 @@ from utils.scenario_manager import (
 )
 from utils.trueskill_evaluator import TrueSkillEvaluator, get_model_display_name
 from utils.league_manager import snap_tiers_to_worker_slices
+from utils.config import effective_config, effective_reward_weights, effective_reward_weights_for_checkpoint
+from agent.checkpoint import read_checkpoint
+from env.rewards import REWARD_DEFAULTS
+from env.state_setters import SCENARIO_DEFAULTS
 
 
 def load_yaml_config(path: str = "config/default_config.yaml") -> dict:
@@ -57,30 +61,28 @@ CONFIG_SYNC_FILES = ("config/default_config.yaml", "config/live_config.json")
 def read_effective_ui_config() -> dict:
     """
     Flat {key: value} view of the dial values the trainer actually runs with: the yaml base with
-    live_config.json layered on top, exactly as the page builds its initial slider values.
+    live_config.json layered on top (utils.config.effective_config), exactly as the page builds
+    its initial slider values.
     Keys: reward weights and scenario probabilities by name, plus the live hyperparameters
     (learning_rate, ent_coef, clip_range, bc_regularization_weight, bc_decay_steps).
     """
-    cfg = load_yaml_config("config/default_config.yaml") or {}
+    cfg = effective_config()
     flat = {}
-    flat.update(cfg.get("rewards", {}) or {})
-    flat.update(cfg.get("scenarios", {}) or {})
-    hp = cfg.get("hyperparameters", {}) or {}
+    flat.update(cfg["rewards"])
+    flat.update(cfg["scenarios"])
+    hp = cfg["hyperparameters"]
     for k in ("learning_rate", "ent_coef", "clip_range", "bc_regularization_weight", "bc_decay_steps"):
         if k in hp:
             flat[k] = hp[k]
-    if os.path.exists("config/live_config.json"):
-        try:
-            with open("config/live_config.json", "r", encoding="utf-8") as f:
-                live = json.load(f)
-            flat.update(live.get("rewards", {}) or {})
-            flat.update(live.get("scenarios", {}) or {})
-            for k in ("learning_rate", "ent_coef", "clip_range", "bc_regularization_weight", "bc_decay_steps"):
-                if k in live:
-                    flat[k] = live[k]
-        except Exception:
-            pass  # mid-write or malformed: keep the yaml view, the next tick retries
     return flat
+
+
+def _active_reward_weights() -> dict:
+    """Reward weights as the trainer applies them right now, annealing included (latest checkpoint's clocks)."""
+    try:
+        return effective_reward_weights_for_checkpoint(read_checkpoint("checkpoints/latest_model.pt"))
+    except Exception:
+        return effective_reward_weights()
 
 
 def config_files_mtime() -> tuple:
@@ -807,30 +809,10 @@ def build_full_diagnostic_export() -> tuple[str, str]:
     engine_str = "C++ RocketSim (High Speed Bullet Physics ~4000+ SPS)" if ROCKETSIM_AVAILABLE else "Pure-Python Fallback (~1100 SPS)"
 
     # 2. Hyperparameters & Environment Config
-    default_cfg = load_yaml_config("config/default_config.yaml")
-    hp = default_cfg.get("hyperparameters", {})
-    env = default_cfg.get("environment", {})
-    rew = default_cfg.get("rewards", {})
-    
-    # Overlay live config
-    if os.path.exists("config/live_config.json"):
-        try:
-            with open("config/live_config.json", "r") as f:
-                ld = json.load(f)
-                if "rewards" in ld and isinstance(ld["rewards"], dict):
-                    rew.update(ld["rewards"])
-                if "learning_rate" in ld:
-                    hp["learning_rate"] = ld["learning_rate"]
-                if "ent_coef" in ld:
-                    hp["ent_coef"] = ld["ent_coef"]
-                if "clip_range" in ld:
-                    hp["clip_range"] = ld["clip_range"]
-                if "baseline_opponent_type" in ld:
-                    env["baseline_opponent_type"] = ld["baseline_opponent_type"]
-                if "baseline_opponent_ratio" in ld:
-                    env["baseline_opponent_ratio"] = ld["baseline_opponent_ratio"]
-        except Exception:
-            pass
+    default_cfg = effective_config()
+    hp = default_cfg["hyperparameters"]
+    env = default_cfg["environment"]
+    rew = default_cfg["rewards"]
 
     # What the environments actually face, which is the league split rather than the
     # legacy baseline_opponent_* keys the trainer ignores while the league is running.
@@ -1222,7 +1204,7 @@ def build_how_it_works_html(league_state: Optional[Dict[str, Any]] = None) -> st
     reveals on :hover and :focus-within, so it costs nothing per frame and is reachable
     from the keyboard.
     """
-    cfg = (load_yaml_config("config/default_config.yaml") or {})
+    cfg = effective_config()
     league = cfg.get("league", {}) or {}
     logging_cfg = cfg.get("logging", {}) or {}
 
@@ -1972,41 +1954,14 @@ def build_league_wire_and_queue_html(evaluator: TrueSkillEvaluator, league_state
 def create_ui():
     mgr = TrainingProcessManager.get_instance()
     bc_trainer = BehavioralCloningTrainer()
-    default_cfg = load_yaml_config("config/default_config.yaml")
+    # yaml + live overrides, with code defaults for any reward/scenario key neither file carries
+    default_cfg = effective_config()
 
-    hp_cfg = default_cfg.get("hyperparameters", {})
-    env_cfg = default_cfg.get("environment", {})
-    rew_cfg = default_cfg.get("rewards", {})
-    log_cfg = default_cfg.get("logging", {})
-    sc_cfg = default_cfg.get("scenarios", {})
-
-    # Overlay latest live config values so they persist across reloads
-    if os.path.exists("config/live_config.json"):
-        try:
-            with open("config/live_config.json", "r") as f:
-                live_data = json.load(f)
-                if "rewards" in live_data and isinstance(live_data["rewards"], dict):
-                    rew_cfg.update(live_data["rewards"])
-                if "scenarios" in live_data and isinstance(live_data["scenarios"], dict):
-                    sc_cfg.update(live_data["scenarios"])
-                if "learning_rate" in live_data:
-                    hp_cfg["learning_rate"] = float(live_data["learning_rate"])
-                if "ent_coef" in live_data:
-                    hp_cfg["ent_coef"] = float(live_data["ent_coef"])
-                if "clip_range" in live_data:
-                    hp_cfg["clip_range"] = float(live_data["clip_range"])
-                if "baseline_opponent_ratio" in live_data:
-                    env_cfg["baseline_opponent_ratio"] = float(live_data["baseline_opponent_ratio"])
-                if "baseline_opponent_type" in live_data:
-                    env_cfg["baseline_opponent_type"] = str(live_data["baseline_opponent_type"])
-                elif "baseline_opponent_model" in live_data:
-                    env_cfg["baseline_opponent_type"] = str(live_data["baseline_opponent_model"])
-                if "bc_regularization_weight" in live_data:
-                    hp_cfg["bc_regularization_weight"] = float(live_data["bc_regularization_weight"])
-                if "bc_decay_steps" in live_data:
-                    hp_cfg["bc_decay_steps"] = int(live_data["bc_decay_steps"])
-        except Exception:
-            pass
+    hp_cfg = default_cfg["hyperparameters"]
+    env_cfg = default_cfg["environment"]
+    rew_cfg = default_cfg["rewards"]
+    log_cfg = default_cfg.get("logging", {}) or {}
+    sc_cfg = default_cfg["scenarios"]
 
     # Dial values this page is built with; baseline for the config file sync below.
     ui_build_config_values = read_effective_ui_config()
@@ -2220,17 +2175,17 @@ def create_ui():
                         with gr.Group():
                             gr.Markdown("### 🎛️ Quick Live Reward Weights")
                             with gr.Row():
-                                goal_slider = gr.Slider(0.0, 50.0, value=float(rew_cfg.get("goal_weight", 5.0)), step=0.5, label="Goal Score (goal_weight)", info="Terminal reward for scoring a goal (+5.0 base, scales up to 2x with speed & placement).")
-                                concede_slider = gr.Slider(-50.0, 0.0, value=float(rew_cfg.get("concede_weight", -5.0)), step=0.5, label="Concede Penalty (concede_weight)", info="Terminal penalty for conceding a goal (-5.0 base, scales with opponent shot quality).")
-                                save_slider = gr.Slider(0.0, 20.0, value=float(rew_cfg.get("save_weight", 2.0)), step=0.5, label="Defensive Save (save_weight)", info="Reward for goal-line saves (+2.0 standard).")
+                                goal_slider = gr.Slider(0.0, 50.0, value=float(rew_cfg.get("goal_weight", REWARD_DEFAULTS["goal_weight"])), step=0.5, label="Goal Score (goal_weight)", info="Terminal reward for scoring a goal (+5.0 base, scales up to 2x with speed & placement).")
+                                concede_slider = gr.Slider(-50.0, 0.0, value=float(rew_cfg.get("concede_weight", REWARD_DEFAULTS["concede_weight"])), step=0.5, label="Concede Penalty (concede_weight)", info="Terminal penalty for conceding a goal (-5.0 base, scales with opponent shot quality).")
+                                save_slider = gr.Slider(0.0, 20.0, value=float(rew_cfg.get("save_weight", REWARD_DEFAULTS["save_weight"])), step=0.5, label="Defensive Save (save_weight)", info="Reward for goal-line saves (+2.0 standard).")
                             with gr.Row():
-                                ball_to_goal_slider = gr.Slider(0.0, 5.0, value=float(rew_cfg.get("ball_to_goal_weight", 0.25)), step=0.05, label="Ball to Goal Velocity (ball_to_goal_weight)", info="Reward for projecting ball velocity towards opponent goal.")
-                                player_to_ball_slider = gr.Slider(0.0, 3.0, value=float(rew_cfg.get("player_to_ball_weight", 0.5)), step=0.05, label="Player to Ball Approach (player_to_ball_weight)", info="Potential-based reward for closing distance to ball.")
-                                touch_slider = gr.Slider(0.0, 5.0, value=float(rew_cfg.get("touch_weight", 0.5)), step=0.1, label="Ball Touch Quality (touch_weight)", info="Impulse-scaled reward for clean strikes, clears, and soft catches.")
+                                ball_to_goal_slider = gr.Slider(0.0, 5.0, value=float(rew_cfg.get("ball_to_goal_weight", REWARD_DEFAULTS["ball_to_goal_weight"])), step=0.05, label="Ball to Goal Velocity (ball_to_goal_weight)", info="Reward for projecting ball velocity towards opponent goal.")
+                                player_to_ball_slider = gr.Slider(0.0, 3.0, value=float(rew_cfg.get("player_to_ball_weight", REWARD_DEFAULTS["player_to_ball_weight"])), step=0.05, label="Player to Ball Approach (player_to_ball_weight)", info="Potential-based reward for closing distance to ball.")
+                                touch_slider = gr.Slider(0.0, 5.0, value=float(rew_cfg.get("touch_weight", REWARD_DEFAULTS["touch_weight"])), step=0.1, label="Ball Touch Quality (touch_weight)", info="Impulse-scaled reward for clean strikes, clears, and soft catches.")
                             with gr.Row():
-                                boost_gain_slider = gr.Slider(0.0, 2.0, value=float(rew_cfg.get("boost_gain_weight", 0.8)), step=0.05, label="Boost Pad Collection (boost_gain_weight)", info="Potential-based reward for collecting boost pads.")
-                                boost_lose_slider = gr.Slider(0.0, 2.0, value=float(rew_cfg.get("boost_lose_weight", 0.25)), step=0.05, label="Boost Consumption (boost_lose_weight)", info="Potential-based penalty for expending boost.")
-                                time_cost_slider = gr.Slider(0.0, 0.01, value=float(rew_cfg.get("time_cost_weight", 0.002)), step=0.0005, label="Living Time Cost (time_cost_weight)", info="Flat per-step cost that drives decisiveness. Keep a full 600-step episode well under a quarter of the concede penalty (<= ~0.002 at -5).")
+                                boost_gain_slider = gr.Slider(0.0, 2.0, value=float(rew_cfg.get("boost_gain_weight", REWARD_DEFAULTS["boost_gain_weight"])), step=0.05, label="Boost Pad Collection (boost_gain_weight)", info="Potential-based reward for collecting boost pads.")
+                                boost_lose_slider = gr.Slider(0.0, 2.0, value=float(rew_cfg.get("boost_lose_weight", REWARD_DEFAULTS["boost_lose_weight"])), step=0.05, label="Boost Consumption (boost_lose_weight)", info="Potential-based penalty for expending boost.")
+                                time_cost_slider = gr.Slider(0.0, 0.01, value=float(rew_cfg.get("time_cost_weight", REWARD_DEFAULTS["time_cost_weight"])), step=0.0005, label="Living Time Cost (time_cost_weight)", info="Flat per-step cost that drives decisiveness. Keep a full 600-step episode well under a quarter of the concede penalty (<= ~0.002 at -5).")
                             apply_live_rewards_btn = gr.Button("⚡ Apply Live Rewards", variant="primary")
                             live_rewards_msg = gr.Markdown("")
                             gr.Markdown("<span style='color: #94a3b8; font-size: 0.88em;'>💡 For flight mechanics, takeoff/spin action costs, and custom scenario probabilities, visit the <b>🎛️ Rewards & Curriculum</b> tab.</span>")
@@ -2300,11 +2255,11 @@ def create_ui():
                 with gr.Group():
                     gr.Markdown("### 🚀 Flight Mechanics & Action Cost Regularizers")
                     with gr.Row():
-                        jump_cost_slider = gr.Slider(0.0, 0.10, value=float(rew_cfg.get("jump_cost_weight", 0.025)), step=0.005, label="Jump Takeoff Fee (jump_cost_weight)", info="Single-shot fee charged on takeoff to prevent 15 Hz coin-flip jumping.")
-                        spin_cost_slider = gr.Slider(0.0, 0.10, value=float(rew_cfg.get("spin_cost_weight", 0.015)), step=0.005, label="Air Spin Penalty (spin_cost_weight)", info="Per-step fee on excessive airborne tumbling above 2.0 rad/s deadband.")
+                        jump_cost_slider = gr.Slider(0.0, 0.10, value=float(rew_cfg.get("jump_cost_weight", REWARD_DEFAULTS["jump_cost_weight"])), step=0.005, label="Jump Takeoff Fee (jump_cost_weight)", info="Single-shot fee charged on takeoff to prevent 15 Hz coin-flip jumping.")
+                        spin_cost_slider = gr.Slider(0.0, 0.10, value=float(rew_cfg.get("spin_cost_weight", REWARD_DEFAULTS["spin_cost_weight"])), step=0.005, label="Air Spin Penalty (spin_cost_weight)", info="Per-step fee on excessive airborne tumbling above 2.0 rad/s deadband.")
                     with gr.Row():
-                        jump_bridge_slider = gr.Slider(0.0, 1.0, value=float(rew_cfg.get("jump_bridge_weight", 0.0)), step=0.05, label="Aerial Challenge Bridge (jump_bridge_weight)", info="Takeoff & 50/50 contest incentive on elevated aerials.")
-                        air_roll_recovery_slider = gr.Slider(0.0, 1.0, value=float(rew_cfg.get("air_roll_recovery_weight", 0.0)), step=0.05, label="Landing Recovery (air_roll_recovery_weight)", info="Rewards wheels-down recovery on pitch or wall descent.")
+                        jump_bridge_slider = gr.Slider(0.0, 1.0, value=float(rew_cfg.get("jump_bridge_weight", REWARD_DEFAULTS["jump_bridge_weight"])), step=0.05, label="Aerial Challenge Bridge (jump_bridge_weight)", info="Takeoff & 50/50 contest incentive on elevated aerials.")
+                        air_roll_recovery_slider = gr.Slider(0.0, 1.0, value=float(rew_cfg.get("air_roll_recovery_weight", REWARD_DEFAULTS["air_roll_recovery_weight"])), step=0.05, label="Landing Recovery (air_roll_recovery_weight)", info="Rewards wheels-down recovery on pitch or wall descent.")
 
                 with gr.Group():
                     with gr.Row():
@@ -2327,32 +2282,32 @@ def create_ui():
                             with gr.Column():
                                 with gr.Row():
                                     pop_lock_k = gr.Checkbox(label="Lock Kickoff", value=False)
-                                    pop_val_k = gr.Number(label="Kickoff %", value=int(round(float(sc_cfg.get("kickoff_prob", 0.20)) * 100)), minimum=0, maximum=100, step=1)
+                                    pop_val_k = gr.Number(label="Kickoff %", value=int(round(float(sc_cfg.get("kickoff_prob", SCENARIO_DEFAULTS["kickoff_prob"])) * 100)), minimum=0, maximum=100, step=1)
                                 with gr.Row():
                                     pop_lock_r = gr.Checkbox(label="Lock Replay", value=False)
-                                    pop_val_r = gr.Number(label="Replay %", value=int(round(float(sc_cfg.get("replay_prob", 0.15)) * 100)), minimum=0, maximum=100, step=1)
+                                    pop_val_r = gr.Number(label="Replay %", value=int(round(float(sc_cfg.get("replay_prob", SCENARIO_DEFAULTS["replay_prob"])) * 100)), minimum=0, maximum=100, step=1)
                                 with gr.Row():
                                     pop_lock_a = gr.Checkbox(label="Lock Aerial", value=False)
-                                    pop_val_a = gr.Number(label="Aerial %", value=int(round(float(sc_cfg.get("aerial_prob", 0.11)) * 100)), minimum=0, maximum=100, step=1)
+                                    pop_val_a = gr.Number(label="Aerial %", value=int(round(float(sc_cfg.get("aerial_prob", SCENARIO_DEFAULTS["aerial_prob"])) * 100)), minimum=0, maximum=100, step=1)
                                 with gr.Row():
                                     pop_lock_c = gr.Checkbox(label="Lock Custom", value=False)
-                                    pop_val_c = gr.Number(label="Custom %", value=int(round(float(sc_cfg.get("custom_prob", 0.15)) * 100)), minimum=0, maximum=100, step=1)
+                                    pop_val_c = gr.Number(label="Custom %", value=int(round(float(sc_cfg.get("custom_prob", SCENARIO_DEFAULTS["custom_prob"])) * 100)), minimum=0, maximum=100, step=1)
                             with gr.Column():
                                 with gr.Row():
                                     pop_lock_tr = gr.Checkbox(label="Lock Turnaround", value=False)
-                                    pop_val_tr = gr.Number(label="Turnaround %", value=int(round(float(sc_cfg.get("turnaround_prob", 0.13)) * 100)), minimum=0, maximum=100, step=1)
+                                    pop_val_tr = gr.Number(label="Turnaround %", value=int(round(float(sc_cfg.get("turnaround_prob", SCENARIO_DEFAULTS["turnaround_prob"])) * 100)), minimum=0, maximum=100, step=1)
                                 with gr.Row():
                                     pop_lock_w = gr.Checkbox(label="Lock Wall Play", value=False)
-                                    pop_val_w = gr.Number(label="Wall Play %", value=int(round(float(sc_cfg.get("wall_prob", 0.07)) * 100)), minimum=0, maximum=100, step=1)
+                                    pop_val_w = gr.Number(label="Wall Play %", value=int(round(float(sc_cfg.get("wall_prob", SCENARIO_DEFAULTS["wall_prob"])) * 100)), minimum=0, maximum=100, step=1)
                                 with gr.Row():
                                     pop_lock_wr = gr.Checkbox(label="Lock Wall Rebound", value=False)
-                                    pop_val_wr = gr.Number(label="Wall Rebound %", value=int(round(float(sc_cfg.get("wall_rebound_prob", 0.08)) * 100)), minimum=0, maximum=100, step=1)
+                                    pop_val_wr = gr.Number(label="Wall Rebound %", value=int(round(float(sc_cfg.get("wall_rebound_prob", SCENARIO_DEFAULTS["wall_rebound_prob"])) * 100)), minimum=0, maximum=100, step=1)
                                 with gr.Row():
                                     pop_lock_s = gr.Checkbox(label="Lock Goalie Save", value=False)
-                                    pop_val_s = gr.Number(label="Goalie Save %", value=int(round(float(sc_cfg.get("save_prob", 0.07)) * 100)), minimum=0, maximum=100, step=1)
+                                    pop_val_s = gr.Number(label="Goalie Save %", value=int(round(float(sc_cfg.get("save_prob", SCENARIO_DEFAULTS["save_prob"])) * 100)), minimum=0, maximum=100, step=1)
                                 with gr.Row():
                                     pop_lock_df = gr.Checkbox(label="Lock Dribble & Flick", value=False)
-                                    pop_val_df = gr.Number(label="Dribble & Flick %", value=int(round(float(sc_cfg.get("dribble_flick_prob", 0.08)) * 100)), minimum=0, maximum=100, step=1)
+                                    pop_val_df = gr.Number(label="Dribble & Flick %", value=int(round(float(sc_cfg.get("dribble_flick_prob", SCENARIO_DEFAULTS["dribble_flick_prob"])) * 100)), minimum=0, maximum=100, step=1)
 
                         with gr.Row():
                             pop_sync_btn = gr.Button("🔄 Sync from Sliders", variant="secondary", size="sm")
@@ -2362,17 +2317,17 @@ def create_ui():
 
                     with gr.Row():
                         with gr.Column():
-                            kickoff_prob_slider = gr.Slider(0.0, 1.0, value=float(sc_cfg.get("kickoff_prob", 0.20)), step=0.01, label="Kickoff Scenario Probability", info="Standard 1v1 kickoff formations.")
-                            replay_prob_slider = gr.Slider(0.0, 1.0, value=float(sc_cfg.get("replay_prob", 0.15)), step=0.01, label="Human Replay Scenario Probability", info="Authentic match situations sampled from replays.")
-                            aerial_prob_slider = gr.Slider(0.0, 1.0, value=float(sc_cfg.get("aerial_prob", 0.11)), step=0.01, label="High Aerial Scenario Probability", info="Floating & rising balls for aerial training.")
-                            custom_prob_slider = gr.Slider(0.0, 1.0, value=float(sc_cfg.get("custom_prob", 0.15)), step=0.01, label="🎯 Custom Scenarios Probability", info="User-designed custom situations.")
+                            kickoff_prob_slider = gr.Slider(0.0, 1.0, value=float(sc_cfg.get("kickoff_prob", SCENARIO_DEFAULTS["kickoff_prob"])), step=0.01, label="Kickoff Scenario Probability", info="Standard 1v1 kickoff formations.")
+                            replay_prob_slider = gr.Slider(0.0, 1.0, value=float(sc_cfg.get("replay_prob", SCENARIO_DEFAULTS["replay_prob"])), step=0.01, label="Human Replay Scenario Probability", info="Authentic match situations sampled from replays.")
+                            aerial_prob_slider = gr.Slider(0.0, 1.0, value=float(sc_cfg.get("aerial_prob", SCENARIO_DEFAULTS["aerial_prob"])), step=0.01, label="High Aerial Scenario Probability", info="Floating & rising balls for aerial training.")
+                            custom_prob_slider = gr.Slider(0.0, 1.0, value=float(sc_cfg.get("custom_prob", SCENARIO_DEFAULTS["custom_prob"])), step=0.01, label="🎯 Custom Scenarios Probability", info="User-designed custom situations.")
 
                         with gr.Column():
-                            turnaround_prob_slider = gr.Slider(0.0, 1.0, value=float(sc_cfg.get("turnaround_prob", 0.13)), step=0.01, label="Turnaround Recovery Probability", info="Fast downfield spawns moving away from ball.")
-                            wall_prob_slider = gr.Slider(0.0, 1.0, value=float(sc_cfg.get("wall_prob", 0.07)), step=0.01, label="Wall Play Scenario Probability", info="Sidewall rolling and backboard rides.")
-                            wall_rebound_prob_slider = gr.Slider(0.0, 1.0, value=float(sc_cfg.get("wall_rebound_prob", 0.08)), step=0.01, label="Wall Rebound & Bounce Probability", info="High-speed sidewall & backboard clears to practice reading rebounds.")
-                            save_prob_slider = gr.Slider(0.0, 1.0, value=float(sc_cfg.get("save_prob", 0.07)), step=0.01, label="Goalie Save Scenario Probability", info="Fast opponent shots into defending net.")
-                            dribble_flick_prob_slider = gr.Slider(0.0, 1.0, value=float(sc_cfg.get("dribble_flick_prob", 0.08)), step=0.01, label="Dribble & Flick Scenario Probability", info="Settled roof carry moving downfield against challenging defender or goalie.")
+                            turnaround_prob_slider = gr.Slider(0.0, 1.0, value=float(sc_cfg.get("turnaround_prob", SCENARIO_DEFAULTS["turnaround_prob"])), step=0.01, label="Turnaround Recovery Probability", info="Fast downfield spawns moving away from ball.")
+                            wall_prob_slider = gr.Slider(0.0, 1.0, value=float(sc_cfg.get("wall_prob", SCENARIO_DEFAULTS["wall_prob"])), step=0.01, label="Wall Play Scenario Probability", info="Sidewall rolling and backboard rides.")
+                            wall_rebound_prob_slider = gr.Slider(0.0, 1.0, value=float(sc_cfg.get("wall_rebound_prob", SCENARIO_DEFAULTS["wall_rebound_prob"])), step=0.01, label="Wall Rebound & Bounce Probability", info="High-speed sidewall & backboard clears to practice reading rebounds.")
+                            save_prob_slider = gr.Slider(0.0, 1.0, value=float(sc_cfg.get("save_prob", SCENARIO_DEFAULTS["save_prob"])), step=0.01, label="Goalie Save Scenario Probability", info="Fast opponent shots into defending net.")
+                            dribble_flick_prob_slider = gr.Slider(0.0, 1.0, value=float(sc_cfg.get("dribble_flick_prob", SCENARIO_DEFAULTS["dribble_flick_prob"])), step=0.01, label="Dribble & Flick Scenario Probability", info="Settled roof carry moving downfield against challenging defender or goalie.")
 
                     custom_sc_count = len(ScenarioManager.get_instance().get_active_scenarios())
                     gr.HTML(
@@ -3056,7 +3011,7 @@ def create_ui():
             st = mgr.get_status_info()
             est = gauntlet_budget_estimate(
                 step,
-                load_yaml_config("config/default_config.yaml").get("league", {}) or {},
+                effective_config()["league"],
                 default_cfg.get("logging", {}) or {},
                 default_cfg.get("hyperparameters", {}) or {},
                 float((st.get("metrics") or {}).get("sps") or 0.0),
@@ -3369,37 +3324,38 @@ def create_ui():
 
         # Reset Rewards to Balanced Defaults
         def on_reset_rewards():
-            def_cfg = load_yaml_config("config/default_config.yaml")
-            rew = def_cfg.get("rewards", {})
-            sc = def_cfg.get("scenarios", {})
+            # The code-side defaults (REWARD_DEFAULTS / SCENARIO_DEFAULTS), not the yaml: the apply
+            # buttons write the yaml, so "reset" to it would just reload the current dials.
+            rew = REWARD_DEFAULTS
+            sc = SCENARIO_DEFAULTS
             badge_html = """
             <div style="display: flex; justify-content: flex-end; align-items: center; height: 100%;">
                 <span class="status-badge-running" style="font-size: 1.0em; padding: 6px 16px;">● Total Mix: 100%</span>
             </div>
             """
             return (
-                rew.get("goal_weight", 30.0),
-                rew.get("concede_weight", -30.0),
-                rew.get("save_weight", 6.0),
-                rew.get("ball_to_goal_weight", 0.25),
-                rew.get("player_to_ball_weight", 0.5),
-                rew.get("touch_weight", 0.5),
-                rew.get("boost_gain_weight", 0.8),
-                rew.get("boost_lose_weight", 0.25),
-                rew.get("time_cost_weight", 0.002),
-                rew.get("jump_cost_weight", 0.025),
-                rew.get("spin_cost_weight", 0.015),
-                rew.get("jump_bridge_weight", 0.0),
-                rew.get("air_roll_recovery_weight", 0.0),
-                sc.get("kickoff_prob", 0.10),
-                sc.get("replay_prob", 0.45),
-                sc.get("aerial_prob", 0.04),
-                sc.get("custom_prob", 0.16),
-                sc.get("turnaround_prob", 0.04),
-                sc.get("wall_prob", 0.04),
-                sc.get("wall_rebound_prob", 0.04),
-                sc.get("save_prob", 0.08),
-                sc.get("dribble_flick_prob", 0.05),
+                rew.get("goal_weight", REWARD_DEFAULTS["goal_weight"]),
+                rew.get("concede_weight", REWARD_DEFAULTS["concede_weight"]),
+                rew.get("save_weight", REWARD_DEFAULTS["save_weight"]),
+                rew.get("ball_to_goal_weight", REWARD_DEFAULTS["ball_to_goal_weight"]),
+                rew.get("player_to_ball_weight", REWARD_DEFAULTS["player_to_ball_weight"]),
+                rew.get("touch_weight", REWARD_DEFAULTS["touch_weight"]),
+                rew.get("boost_gain_weight", REWARD_DEFAULTS["boost_gain_weight"]),
+                rew.get("boost_lose_weight", REWARD_DEFAULTS["boost_lose_weight"]),
+                rew.get("time_cost_weight", REWARD_DEFAULTS["time_cost_weight"]),
+                rew.get("jump_cost_weight", REWARD_DEFAULTS["jump_cost_weight"]),
+                rew.get("spin_cost_weight", REWARD_DEFAULTS["spin_cost_weight"]),
+                rew.get("jump_bridge_weight", REWARD_DEFAULTS["jump_bridge_weight"]),
+                rew.get("air_roll_recovery_weight", REWARD_DEFAULTS["air_roll_recovery_weight"]),
+                sc.get("kickoff_prob", SCENARIO_DEFAULTS["kickoff_prob"]),
+                sc.get("replay_prob", SCENARIO_DEFAULTS["replay_prob"]),
+                sc.get("aerial_prob", SCENARIO_DEFAULTS["aerial_prob"]),
+                sc.get("custom_prob", SCENARIO_DEFAULTS["custom_prob"]),
+                sc.get("turnaround_prob", SCENARIO_DEFAULTS["turnaround_prob"]),
+                sc.get("wall_prob", SCENARIO_DEFAULTS["wall_prob"]),
+                sc.get("wall_rebound_prob", SCENARIO_DEFAULTS["wall_rebound_prob"]),
+                sc.get("save_prob", SCENARIO_DEFAULTS["save_prob"]),
+                sc.get("dribble_flick_prob", SCENARIO_DEFAULTS["dribble_flick_prob"]),
                 badge_html,
                 "🔄 **Reset dials to balanced standard configuration.**"
             )
@@ -3942,14 +3898,7 @@ def create_ui():
 
         def on_refresh_diagnostics(window_size):
             telem = extract_rolling_telemetry("logs/history.jsonl", window=int(window_size))
-            live_cfg = mgr.get_live_config() if hasattr(mgr, "get_live_config") else {}
-            if not live_cfg and os.path.exists("config/live_config.json"):
-                try:
-                    with open("config/live_config.json", "r") as f:
-                        live_cfg = json.load(f)
-                except Exception:
-                    live_cfg = {}
-            active_rewards = live_cfg.get("rewards", {})
+            active_rewards = _active_reward_weights()
             coach_md = generate_ai_coach_diagnostics(telem, active_rewards=active_rewards)
             action_fig = render_action_biases_plot(telem)
             pos_fig = render_positional_biases_plot(telem)

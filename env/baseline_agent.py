@@ -165,7 +165,7 @@ class CheckpointOpponentBot(BaseOpponent):
         self._load_checkpoint()
 
     def _load_checkpoint(self):
-        from agent.models import ActorCritic
+        from agent.checkpoint import load_policy
         try:
             norm_path = os.path.normpath(self.model_path).replace("\\", "/")
             curr_mtime = os.path.getmtime(self.model_path) if os.path.exists(self.model_path) else 0.0
@@ -178,44 +178,8 @@ class CheckpointOpponentBot(BaseOpponent):
                     self.continuous_actions = cached_cont
                     return
 
-            ckpt = torch.load(self.model_path, map_location=self.device, weights_only=False)
-            if not isinstance(ckpt, dict) or "model_state_dict" not in ckpt:
-                raise ValueError(f"Invalid ActorCritic checkpoint format in {self.model_path}")
-
-            self.continuous_actions = ckpt.get("continuous_actions", True)
-            obs_dim = self.obs_builder.obs_dim
-            act_dim = 8 if self.continuous_actions else self.discrete_parser.action_dim
-
-            self.model = ActorCritic(
-                obs_dim=obs_dim,
-                act_dim=act_dim,
-                continuous_actions=self.continuous_actions,
-                use_layer_norm=ckpt.get("use_layer_norm", True)
-            ).to(self.device)
-
-            saved_state = ckpt["model_state_dict"]
-            model_state = self.model.state_dict()
-
-            # Flexible parameter migration
-            migrated = False
-            for k in list(saved_state.keys()):
-                if k in model_state:
-                    saved_p = saved_state[k]
-                    curr_p = model_state[k]
-                    if saved_p.shape != curr_p.shape:
-                        migrated = True
-                        slices = tuple(slice(0, min(s, c)) for s, c in zip(saved_p.shape, curr_p.shape))
-                        curr_p[slices] = saved_p[slices]
-                        model_state[k] = curr_p
-                    else:
-                        model_state[k] = saved_p
-
-            if migrated:
-                self.model.load_state_dict(model_state)
-            else:
-                self.model.load_state_dict(saved_state)
-
-            self.model.eval()
+            self.model, _ = load_policy(self.model_path, device=str(self.device))
+            self.continuous_actions = bool(self.model.continuous_actions)
             _CHECKPOINT_MODEL_CACHE[cache_key] = (curr_mtime, self.model, self.continuous_actions)
             print(f"[Opponent Bot] Successfully loaded Sensei Checkpoint opponent: {os.path.basename(self.model_path)}")
         except Exception as e:

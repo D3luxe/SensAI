@@ -959,33 +959,33 @@ class DribbleFlickScenarioSetter(BaseStateSetter):
             arena_wrapper._sync_from_rsim()
 
 
+# Scenario sampling weights, in sampling order. The single code-side default: the setter, the
+# trainer's config fallbacks and the UI all read from here. config/default_config.yaml carries the
+# values training actually runs with (and must list every key -- see test_config_single_source).
+SCENARIO_DEFAULTS: Dict[str, float] = {
+    "kickoff_prob": 0.11,
+    "replay_prob": 0.23,
+    "aerial_prob": 0.13,
+    "wall_prob": 0.08,
+    "save_prob": 0.08,
+    "turnaround_prob": 0.08,
+    "wall_rebound_prob": 0.08,
+    "dribble_flick_prob": 0.08,
+    "custom_prob": 0.13,
+}
+
+
 class WeightedScenarioSetter:
     """
     Composite Scenario Manager. Samples across kickoffs, replays, aerials, wall plays, saves, turnarounds,
     wall rebounds, dribble flick setups, and user custom scenarios according to live user-configured probability weights.
     """
-    def __init__(
-        self,
-        kickoff_prob: float = 0.22,
-        replay_prob: float = 0.15,
-        aerial_prob: float = 0.10,
-        wall_prob: float = 0.09,
-        save_prob: float = 0.09,
-        turnaround_prob: float = 0.08,
-        wall_rebound_prob: float = 0.08,
-        dribble_flick_prob: float = 0.09,
-        custom_prob: float = 0.10,
-        replay_parser: Optional[ReplayParser] = None
-    ):
-        self.kickoff_prob = kickoff_prob
-        self.replay_prob = replay_prob
-        self.aerial_prob = aerial_prob
-        self.wall_prob = wall_prob
-        self.save_prob = save_prob
-        self.turnaround_prob = turnaround_prob
-        self.wall_rebound_prob = wall_rebound_prob
-        self.dribble_flick_prob = dribble_flick_prob
-        self.custom_prob = custom_prob
+    def __init__(self, replay_parser: Optional[ReplayParser] = None, **probs: float):
+        unknown = set(probs) - set(SCENARIO_DEFAULTS)
+        if unknown:
+            raise TypeError(f"unknown scenario probabilities: {sorted(unknown)}")
+        for key, default in SCENARIO_DEFAULTS.items():
+            setattr(self, key, float(probs.get(key, default)))
 
         self.kickoff_setter = KickoffSetter()
         self.aerial_setter = AerialScenarioSetter()
@@ -1000,32 +1000,16 @@ class WeightedScenarioSetter:
     def update_weights(self, config_dict: Dict[str, Any]):
         """Dynamically updates scenario distribution from live config."""
         sc = config_dict.get("scenarios", config_dict)
-        if "kickoff_prob" in sc: self.kickoff_prob = float(sc["kickoff_prob"])
-        if "replay_prob" in sc: self.replay_prob = float(sc["replay_prob"])
-        if "aerial_prob" in sc: self.aerial_prob = float(sc["aerial_prob"])
-        if "wall_prob" in sc: self.wall_prob = float(sc["wall_prob"])
-        if "save_prob" in sc: self.save_prob = float(sc["save_prob"])
-        if "turnaround_prob" in sc: self.turnaround_prob = float(sc["turnaround_prob"])
-        if "wall_rebound_prob" in sc: self.wall_rebound_prob = float(sc["wall_rebound_prob"])
-        if "dribble_flick_prob" in sc: self.dribble_flick_prob = float(sc["dribble_flick_prob"])
-        if "custom_prob" in sc: self.custom_prob = float(sc["custom_prob"])
+        for key in SCENARIO_DEFAULTS:
+            if key in sc:
+                setattr(self, key, float(sc[key]))
 
     def reset(self, rsim_arena: Any, num_players: int) -> str:
         """
         Samples a scenario based on current distribution and resets the RocketSim arena.
         Returns the chosen scenario name.
         """
-        weights = [
-            self.kickoff_prob,
-            self.replay_prob,
-            self.aerial_prob,
-            self.wall_prob,
-            self.save_prob,
-            self.turnaround_prob,
-            self.wall_rebound_prob,
-            self.dribble_flick_prob,
-            self.custom_prob
-        ]
+        weights = [getattr(self, key) for key in SCENARIO_DEFAULTS]
         total = sum(weights)
         if total <= 1e-6:
             self.kickoff_setter.reset(rsim_arena, num_players)

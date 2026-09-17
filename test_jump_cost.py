@@ -24,7 +24,7 @@ import unittest
 import numpy as np
 
 from env.physics_engine import CarState, BallState
-from env.rewards import JumpCostReward, CombinedReward
+from env.rewards import JumpCostReward, CombinedReward, REWARD_DEFAULTS
 
 FEE = 0.025
 
@@ -174,7 +174,8 @@ class TestAgainstTheSimulator(unittest.TestCase):
 
         self.assertTrue(airborne_seen, "the scripted jump never left the ground; test is invalid")
         self.assertEqual(charges, 1, "one takeoff must produce exactly one charge")
-        self.assertAlmostEqual(total, -FEE, places=6)
+        # The env was built without weights, so it charges the code default from the reward table
+        self.assertAlmostEqual(total, -REWARD_DEFAULTS["jump_cost_weight"], places=6)
 
 
 if __name__ == "__main__":

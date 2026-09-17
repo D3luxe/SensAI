@@ -54,7 +54,6 @@ import time
 
 import numpy as np
 import torch
-import yaml
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ROOT)
@@ -70,58 +69,37 @@ COLUMNS = [
 ]
 
 
-def load_weights(global_step=None):
-    """Reward weights exactly as the trainer applies them.
+def load_agent(path):
+    """(agent, checkpoint dict) through the shared loader, exactly as the in-game bot loads it."""
+    from agent.checkpoint import load_policy
+    return load_policy(path)
+
+
+def load_weights(checkpoint=None):
+    """Reward weights exactly as the trainer applies them at this checkpoint.
 
     Three layers, and missing the third made every earlier reading of this wrong. The yaml is
     the base, live_config.json overrides it at runtime, and then reward_annealing decays the
-    named targets toward their goals over decay_steps. Reading only the first two reports the
-    weight a term STARTED with. At global_step 392M of a 400M schedule that put powerslide at
-    its config 0.2 when training was actually applying 0.0039, a factor of 51.
+    named targets toward their goals over decay_steps, each on the clock the checkpoint saved.
+    Reading only the first two reports the weight a term STARTED with. At global_step 392M of a
+    400M schedule that put powerslide at its config 0.2 when training was actually applying
+    0.0039, a factor of 51. utils.config owns all three layers.
     """
-    cfg = yaml.safe_load(io.open(os.path.join(ROOT, "config/default_config.yaml"),
-                                 encoding="utf-8").read())
-    rw = dict(cfg.get("rewards", {}))
-    rw.setdefault("gamma", float((cfg.get("hyperparameters", {}) or {}).get("gamma", 0.99)))  # as PPOTrainer does
-    try:
-        live = json.load(io.open(os.path.join(ROOT, "config/live_config.json"),
-                                 encoding="utf-8"))
-        rw.update(live.get("rewards", {}))
-    except Exception as e:
-        print("warning: could not read live_config.json (%s); using yaml weights only" % e)
-
-    anneal = cfg.get("reward_annealing", {}) or {}
-    notes = []
-    if anneal.get("enabled") and global_step is not None:
-        decay = max(1, int(anneal.get("decay_steps", 300000000)))
-        progress = min(1.0, max(0.0, float(global_step) / decay))
-        for key, target in (anneal.get("targets", {}) or {}).items():
-            start = float(rw.get(key, 0.0))
-            rw[key] = start + (float(target) - start) * progress
-            notes.append("%s %.4f (from %.3f, %.0f%% annealed)"
-                         % (key, rw[key], start, 100.0 * progress))
-    if notes:
-        print("annealed weights: " + " | ".join(notes))
-    return rw
-
-
-def load_agent(path):
-    from agent.models import ActorCritic
-    ck = torch.load(path, map_location="cpu", weights_only=False)
-    agent = ActorCritic(obs_dim=ck.get("obs_dim", 108), act_dim=ck.get("act_dim", 8),
-                        continuous_actions=ck.get("continuous_actions", True),
-                        use_layer_norm=ck.get("use_layer_norm", True),
-                        activation=ck.get("activation", "leaky_relu"))
-    agent.load_state_dict(ck["model_state_dict"])
-    agent.eval()
-    return agent, ck.get("iteration", -1), ck.get("global_step", None)
+    from utils.config import effective_reward_weights, effective_reward_weights_for_checkpoint
+    if checkpoint is None:
+        return effective_reward_weights(verbose=True)
+    return effective_reward_weights_for_checkpoint(checkpoint, verbose=True)
 
 
 def run(agent, rw, n_envs, n_steps):
     from env.rocket_env import RocketLeagueEnv
 
+    from utils.config import effective_config
+    scenarios = effective_config()["scenarios"]
     envs = [RocketLeagueEnv(game_mode="1v1", max_episode_steps=600, reward_weights=rw)
             for _ in range(n_envs)]
+    for e in envs:
+        e.update_scenarios(scenarios)  # the scenario mix training samples, not the code defaults
     obs = [e.reset() for e in envs]
 
     terms = collections.Counter()
@@ -341,8 +319,9 @@ def main():
         print("no checkpoint at %s" % path)
         sys.exit(1)
 
-    agent, iteration, global_step = load_agent(path)
-    rw = load_weights(global_step)
+    agent, ckpt = load_agent(path)
+    iteration = ckpt.get("iteration", -1)
+    rw = load_weights(ckpt)
     print("policy iteration %s   %d envs x %d steps" % (iteration, args.envs, steps))
     if args.quick:
         print("QUICK mode: fewer episodes, so treat every number as indicative only.")

@@ -18,6 +18,8 @@ from typing import Dict, Any, Optional, List, Set
 from env.rocket_env import VectorizedRocketEnv
 from env.observations import OBS_MIRROR_MASK_NP, ACT_MIRROR_MASK_NP
 from agent.models import ActorCritic, LOG_STD_FLOOR_DEFAULT
+from agent.checkpoint import migrate_state_dict
+from utils.config import anneal_progress, annealed_weights
 from utils.league_manager import LeagueManager
 
 
@@ -480,10 +482,11 @@ class PPOTrainer:
         weights = dict(self.base_reward_weights)
 
         if self.reward_anneal_enabled and self.reward_anneal_targets:
-            for key, final_value in self.reward_anneal_targets.items():
-                start_value = float(self.base_reward_weights.get(key, 0.0))
-                progress = self._reward_anneal_progress(key)
-                weights[key] = start_value + (float(final_value) - start_value) * progress
+            weights = annealed_weights(
+                self.base_reward_weights,
+                {"enabled": True, "targets": self.reward_anneal_targets},
+                {key: self._reward_anneal_progress(key) for key in self.reward_anneal_targets},
+            )
 
         prev = self._last_pushed_reward_weights
         moved = prev is None or any(
@@ -548,8 +551,7 @@ class PPOTrainer:
         if start is None:
             start = int(self.global_step)
             self._reward_anneal_start_steps[key] = start
-        elapsed = max(0, int(self.global_step) - start)
-        return min(1.0, elapsed / max(1, self.reward_anneal_steps))
+        return anneal_progress(self.global_step, start, self.reward_anneal_steps)
 
     def check_live_config(self):
         """
@@ -941,23 +943,8 @@ class PPOTrainer:
             saved_state = checkpoint
         else:
             saved_state = checkpoint
-        model_state = self.agent.state_dict()
-
         # Seamless dimension expansion migration (e.g. 64 -> 70 obs_dim, 19 -> 24 act_dim)
-        migrated = False
-        for k in list(saved_state.keys()):
-            if k in model_state:
-                saved_param = saved_state[k]
-                curr_param = model_state[k]
-                if saved_param.shape != curr_param.shape:
-                    migrated = True
-                    curr_param = curr_param.clone()
-                    curr_param.zero_()
-                    slices = tuple(slice(0, min(s, c)) for s, c in zip(saved_param.shape, curr_param.shape))
-                    curr_param[slices] = saved_param[slices]
-                    model_state[k] = curr_param
-                else:
-                    model_state[k] = saved_param
+        model_state, migrated = migrate_state_dict(saved_state, self.agent.state_dict())
 
         if migrated:
             self.agent.load_state_dict(model_state)

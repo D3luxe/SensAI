@@ -46,7 +46,6 @@ from policy_health import load_agent, load_weights  # noqa: E402
 from env.rocket_env import RocketLeagueEnv  # noqa: E402
 from env.baseline_agent import BaselineChaser, create_opponent_bot  # noqa: E402
 
-GAMMA = 0.995
 RETREAT_DROP_UU = 800.0
 RETREAT_WINDOW_STEPS = 45      # 3 s at 15 Hz
 RETREAT_TOUCH_GRACE_STEPS = 30  # a touch within 2 s means it went for the ball
@@ -100,6 +99,7 @@ def sample_setup(rng, opponent_active):
 class Harness:
     def __init__(self, agent, weights, opponent_path):
         self.agent = agent
+        self.gamma = float(weights["gamma"])  # the trainer's discount, from config
         self.opponent_path = opponent_path
         self.env = RocketLeagueEnv(
             game_mode="1v1", max_episode_steps=100000, reward_weights=weights,
@@ -170,7 +170,7 @@ class Harness:
             for k, v in (info.get("reward_breakdown") or {}).items():
                 terms[k] += g * v
             ret += g * float(r[0])
-            g *= GAMMA
+            g *= self.gamma
             if t < RETREAT_WINDOW_STEPS:
                 min_y = min(min_y, float(a.cars[0].pos[1]))
             if first_touch is None and a.cars[0].ball_touches > 0:
@@ -189,8 +189,9 @@ class Harness:
 
 def main():
     args = parse_args()
-    agent, it, gstep = load_agent(args.checkpoint)
-    weights = load_weights(gstep)
+    agent, ckpt = load_agent(args.checkpoint)
+    it = ckpt.get("iteration", -1)
+    weights = load_weights(ckpt)
     opponent_path = resolve_opponent(args.opponent, args.checkpoint)
     harness = Harness(agent, weights, opponent_path)
     rng = np.random.default_rng(args.seed)

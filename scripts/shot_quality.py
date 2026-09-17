@@ -18,8 +18,8 @@ opponent and reports:
   whiffs       jumps/flips within 600 uu of the ball with no touch by either car in the next
                10 steps; "aimed" whiffs were driving at the ball and passed within 300 uu
 
---debias applies ActorCritic.debias_symmetric_actions() after loading, the way bot.py does on
-every load, so the live bot's version of the policy can be compared with the trained one.
+--debias applies ActorCritic.debias_symmetric_actions() after loading, the way bot.py used to on
+every load before it switched to sanitize_log_std(), for comparing against that older live policy.
 
 Usage:
     python scripts/shot_quality.py
@@ -51,7 +51,6 @@ from env.rocket_env import RocketLeagueEnv  # noqa: E402
 from env.physics_engine import ARENA_EXTENT_Y  # noqa: E402
 from env.rewards import on_target_factor, EFFECTIVE_GOAL_HALF_WIDTH  # noqa: E402
 
-GAMMA = 0.995
 GOAL_Y = ARENA_EXTENT_Y            # blue attacks +Y
 OUTCOME_WINDOW_STEPS = 60          # 4 s
 WHIFF_RADIUS = 600.0
@@ -67,7 +66,7 @@ def parse_args():
     p.add_argument("--opponent", default="necto")
     p.add_argument("--steps", type=int, default=20000, help="policy steps (15 Hz)")
     p.add_argument("--seed", type=int, default=3)
-    p.add_argument("--debias", action="store_true", help="apply bot.py's load-time debias_symmetric_actions()")
+    p.add_argument("--debias", action="store_true", help="apply the destructive debias_symmetric_actions() bot.py used to run on load")
     return p.parse_args()
 
 
@@ -104,6 +103,7 @@ def classify(pre_ball, ball_pos, ball_vel, placement):
 class Game:
     def __init__(self, agent, weights, opponent):
         self.agent = agent
+        self.gamma = float(weights["gamma"])  # the trainer's discount, from config
         self.selfplay = opponent == "self"
         self.env = RocketLeagueEnv(
             game_mode="1v1", max_episode_steps=10 ** 9, reward_weights=weights,
@@ -159,7 +159,7 @@ class Game:
 
             still = []
             for ev in pending:
-                ev["b2g"] += GAMMA ** (t - ev["t"]) * breakdown.get("ball_to_goal", 0.0)
+                ev["b2g"] += self.gamma ** (t - ev["t"]) * breakdown.get("ball_to_goal", 0.0)
                 if opp_touched:
                     ev["outcome"] = "opp_touch"
                 elif sensai_touched:
@@ -275,14 +275,15 @@ def main():
     args = parse_args()
     np.random.seed(args.seed)
     torch.manual_seed(args.seed)
-    agent, it, gstep = load_agent(args.checkpoint)
+    agent, ckpt = load_agent(args.checkpoint)
+    it = ckpt.get("iteration", -1)
     if args.debias:
         agent.debias_symmetric_actions()
-    weights = load_weights(gstep)
+    weights = load_weights(ckpt)
     opponent = resolve_opponent(args.opponent)
 
     print(f"checkpoint {args.checkpoint} (iteration {it})  opponent {args.opponent}  steps {args.steps}"
-          f"{'  [debiased, as bot.py loads it]' if args.debias else ''}")
+          f"{'  [debiased, as bot.py used to load it]' if args.debias else ''}")
     report(*Game(agent, weights, opponent).run(args.steps))
 
 

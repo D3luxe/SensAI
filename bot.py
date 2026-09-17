@@ -63,6 +63,7 @@ except ImportError:
     GamePacket = object
 
 from agent.models import ActorCritic
+from agent.checkpoint import load_policy
 from env.observations import DefaultObservationBuilder, OBS_MIRROR_MASK_NP, ACT_MIRROR_MASK_NP
 from env.actions import DiscreteActionParser, ContinuousActionParser
 from env.physics_engine import (
@@ -423,83 +424,31 @@ class SenseiRLBot(Bot):
 
     def initialize_agent(self):
         ckpt_path = self.get_latest_checkpoint()
-        obs_dim = self.obs_builder.obs_dim
-        act_dim = self.discrete_parser.action_dim
+        if not ckpt_path:
+            # Playing an untrained network looks like a badly behaved bot rather than a missing
+            # file, so refuse outright.
+            msg = "[SensAI] No checkpoint found in checkpoints/; refusing to play with an untrained network."
+            log_debug(f"[INIT_ERROR] {msg}")
+            raise RuntimeError(msg)
+        try:
+            model, ckpt = load_policy(ckpt_path, device=str(self.device))
+        except Exception as e:
+            if self.model is not None:
+                # Mid-game hot reload racing a trainer save: keep playing the policy already loaded.
+                log_debug(f"[RELOAD_ERROR] [SensAI] Keeping current model; could not reload {ckpt_path}: {e}")
+                return
+            msg = f"[SensAI] Could not load {ckpt_path}: {e}"
+            log_debug(f"[INIT_ERROR] {msg}")
+            raise RuntimeError(msg) from e
 
-        if ckpt_path:
-            try:
-                # Read into memory buffer first to avoid holding file locks on Windows
-                ckpt_bytes = None
-                for attempt in range(5):
-                    try:
-                        with open(ckpt_path, "rb") as f:
-                            ckpt_bytes = f.read()
-                        break
-                    except (PermissionError, OSError):
-                        time.sleep(0.05)
-                
-                if ckpt_bytes is None:
-                    with open(ckpt_path, "rb") as f:
-                        ckpt_bytes = f.read()
-
-                buffer = io.BytesIO(ckpt_bytes)
-                ckpt = torch.load(buffer, map_location=self.device)
-                saved_state = ckpt.get("model_state_dict", {})
-                
-                # Robust continuous actions detection
-                has_mean = "actor_mean.weight" in saved_state
-                self.continuous_actions = ckpt.get("continuous_actions", has_mean)
-                ckpt_act_dim = 8 if self.continuous_actions else self.discrete_parser.action_dim
-                
-                # Check if checkpoint contains LayerNorm parameters (1D tensor weights inside backbone)
-                has_ln = any("LayerNorm" in k or (len(v.shape) == 1 and "bias" not in k and "log_std" not in k) for k, v in saved_state.items())
-                use_ln = ckpt.get("use_layer_norm", has_ln)
-
-                self.model = ActorCritic(
-                    obs_dim=obs_dim,
-                    act_dim=ckpt_act_dim,
-                    continuous_actions=self.continuous_actions,
-                    use_layer_norm=use_ln
-                ).to(self.device)
-                
-                model_state = self.model.state_dict()
-                migrated = False
-                for k in list(saved_state.keys()):
-                    if k in model_state:
-                        saved_param = saved_state[k]
-                        curr_param = model_state[k]
-                        if saved_param.shape != curr_param.shape:
-                            migrated = True
-                            curr_param = curr_param.clone()
-                            curr_param.zero_()
-                            slices = tuple(slice(0, min(s, c)) for s, c in zip(saved_param.shape, curr_param.shape))
-                            curr_param[slices] = saved_param[slices]
-                            model_state[k] = curr_param
-                        else:
-                            model_state[k] = saved_param
-
-                if migrated:
-                    self.model.load_state_dict(model_state)
-                else:
-                    self.model.load_state_dict(saved_state)
-                self.model.sanitize_log_std()
-                self.model.eval()
-                self.loaded_ckpt_mtime = os.path.getmtime(ckpt_path) if os.path.exists(ckpt_path) else 0.0
-                msg = f"[SensAI] Successfully loaded in-game model from {ckpt_path} (Mode: {'Continuous' if self.continuous_actions else f'Discrete RLGym ({ckpt_act_dim} actions)'}, ObsDim: {obs_dim}, LayerNorm: {use_ln})"
-                print(msg)
-                log_debug(f"[INIT] {msg}")
-            except Exception as e:
-                msg = f"[SensAI] Warning: Could not load weights from {ckpt_path}: {e}"
-                print(msg)
-                log_debug(f"[INIT_ERROR] {msg}")
-                self.model = ActorCritic(obs_dim=obs_dim, act_dim=act_dim, continuous_actions=self.continuous_actions).to(self.device)
-                self.model.eval()
-        else:
-            msg = "[SensAI] Warning: No checkpoint found, initialized default ActorCritic network."
-            print(msg)
-            log_debug(f"[INIT_WARN] {msg}")
-            self.model = ActorCritic(obs_dim=obs_dim, act_dim=act_dim, continuous_actions=self.continuous_actions).to(self.device)
-            self.model.eval()
+        self.model = model
+        self.continuous_actions = bool(model.continuous_actions)
+        self.loaded_ckpt_mtime = os.path.getmtime(ckpt_path) if os.path.exists(ckpt_path) else 0.0
+        msg = (f"[SensAI] Successfully loaded in-game model from {ckpt_path} (iteration {ckpt.get('iteration', '?')}, "
+               f"Mode: {'Continuous' if self.continuous_actions else f'Discrete ({model.act_dim} actions)'}, "
+               f"ObsDim: {model.obs_dim}, LayerNorm: {model.use_layer_norm})")
+        print(msg)
+        log_debug(f"[INIT] {msg}")
 
     def _update_air_flip_timers(self, packet) -> None:
         """Integrate per-car air and flip timers, which the RLBot packet does not carry.

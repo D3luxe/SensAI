@@ -3480,61 +3480,64 @@ class SpinCostReward(BaseReward):
 # ==============================================================================
 # COMBINED MACRO REWARD ENGINE & MANAGER
 # ==============================================================================
+# Every tunable reward parameter: (config key, reward term, attribute on that term, default).
+# The single code-side source for reward defaults -- CombinedReward builds and live-updates its
+# terms from it, and the UI and diagnostics take their fallbacks from REWARD_DEFAULTS.
+# config/default_config.yaml carries the values training actually runs with; the defaults match it
+# so anything built without a config (tests, ad-hoc scripts) behaves like training.
+REWARD_WEIGHT_SPECS: Tuple[Tuple[str, str, str, float], ...] = (
+    ("goal_weight", "goal", "weight", 5.0),
+    ("concede_weight", "goal", "concede_weight", -5.0),
+    ("save_weight", "goal", "save_weight", 2.0),
+    ("ball_to_goal_weight", "ball_to_goal", "weight", 0.25),
+    ("ball_to_goal_near_dist", "ball_to_goal", "near_dist", 500.0),
+    ("ball_to_goal_far_dist", "ball_to_goal", "far_dist", 1500.0),
+    ("own_goal_threat_weight", "own_goal_threat", "weight", 0.0),
+    ("player_to_ball_weight", "player_to_ball", "weight", 0.35),
+    ("boost_pathing_threshold", "player_to_ball", "boost_pathing_threshold", 50.0),
+    ("jump_bridge_weight", "jump_bridge", "weight", 0.05),
+    ("touch_weight", "touch", "weight", 0.4),
+    ("boost_gain_weight", "boost", "gain_weight", 0.8),
+    ("boost_lose_weight", "boost", "lose_weight", 0.25),
+    ("powerslide_weight", "powerslide", "weight", 0.0),
+    ("air_roll_recovery_weight", "air_roll_recovery", "weight", 0.05),
+    ("retreat_flip_weight", "retreat_flip", "weight", 0.4),
+    ("jump_cost_weight", "jump_cost", "weight", 0.05),
+    ("time_cost_weight", "time_cost", "weight", 0.002),
+    ("spin_cost_weight", "spin_cost", "weight", 0.015),
+    ("spin_cost_deadband", "spin_cost", "deadband", 2.0),
+    # Not a config reward key: PPO's discount, injected from hyperparameters.gamma so the boost
+    # term's potential-based shaping telescopes under the gamma actually being optimised.
+    ("gamma", "boost", "gamma", 0.995),
+)
+REWARD_DEFAULTS: Dict[str, float] = {key: default for key, _, _, default in REWARD_WEIGHT_SPECS}
+# Keys derived from elsewhere or fixed in code rather than listed under `rewards:` in the configs
+REWARD_KEYS_NOT_IN_CONFIG = frozenset({"gamma", "ball_to_goal_near_dist", "ball_to_goal_far_dist"})
+
+
 class CombinedReward:
     """
     Unified Macro Potential-Based Reward Manager.
     Aggregates Macro Goal, Ball-to-Goal, Player-to-Ball, Speed/Flip, Face-Ball, Jump-Bridge, Touch Quality, Boost, Powerslide, and Air Roll Recovery.
     """
     def __init__(self, weights: Dict[str, float]):
+        # Evaluation order is the breakdown order; each term's parameters come from REWARD_WEIGHT_SPECS.
         self.rewards: Dict[str, BaseReward] = {
-            "goal": GoalReward(
-                goal_weight=weights.get("goal_weight", 5.0),
-                concede_weight=weights.get("concede_weight", -5.0),
-                save_weight=weights.get("save_weight", 2.0)
-            ),
-            "ball_to_goal": BallToGoalVelocityReward(
-                weight=weights.get("ball_to_goal_weight", 1.5),
-                near_dist=weights.get("ball_to_goal_near_dist", 500.0),
-                far_dist=weights.get("ball_to_goal_far_dist", 1500.0),
-            ),
-            "own_goal_threat": OwnGoalThreatReward(
-                weight=weights.get("own_goal_threat_weight", 0.0)
-            ),
-            "player_to_ball": PlayerToBallVelocityReward(
-                weight=weights.get("player_to_ball_weight", 0.6),
-                boost_pathing_threshold=weights.get("boost_pathing_threshold", 50.0)
-            ),
-            "jump_bridge": JumpBridgeReward(
-                weight=weights.get("jump_bridge_weight", 0.35)
-            ),
-            "touch": TouchBallReward(
-                weight=weights.get("touch_weight", 1.2)
-            ),
-            "boost": BoostReward(
-                gain_weight=weights.get("boost_gain_weight", 0.6),
-                lose_weight=weights.get("boost_lose_weight", 0.3),
-                gamma=weights.get("gamma", 0.99)
-            ),
-            "powerslide": PowerslideReward(
-                weight=weights.get("powerslide_weight", 0.0)
-            ),
-            "air_roll_recovery": AirRollRecoveryReward(
-                weight=weights.get("air_roll_recovery_weight", 0.10)
-            ),
-            "retreat_flip": RetreatFlipReward(
-                weight=weights.get("retreat_flip_weight", 0.4)
-            ),
-            "jump_cost": JumpCostReward(
-                weight=weights.get("jump_cost_weight", 0.025)
-            ),
-            "time_cost": TimeCostReward(
-                weight=weights.get("time_cost_weight", 0.01)
-            ),
-            "spin_cost": SpinCostReward(
-                weight=weights.get("spin_cost_weight", 0.03),
-                deadband=weights.get("spin_cost_deadband", 2.0)
-            )
+            "goal": GoalReward(),
+            "ball_to_goal": BallToGoalVelocityReward(),
+            "own_goal_threat": OwnGoalThreatReward(),
+            "player_to_ball": PlayerToBallVelocityReward(),
+            "jump_bridge": JumpBridgeReward(),
+            "touch": TouchBallReward(),
+            "boost": BoostReward(),
+            "powerslide": PowerslideReward(),
+            "air_roll_recovery": AirRollRecoveryReward(),
+            "retreat_flip": RetreatFlipReward(),
+            "jump_cost": JumpCostReward(),
+            "time_cost": TimeCostReward(),
+            "spin_cost": SpinCostReward(),
         }
+        self.update_weights({**REWARD_DEFAULTS, **(weights or {})})
 
     def reset(self, initial_state: RocketSimArena):
         for r in self.rewards.values():
@@ -3542,62 +3545,11 @@ class CombinedReward:
 
     def update_weights(self, new_weights: Dict[str, float]):
         """
-        Dynamically update macro weights from UI or live config.
+        Dynamically update macro weights from UI or live config. Unknown keys are ignored.
         """
-        if "goal_weight" in new_weights and "goal" in self.rewards:
-            self.rewards["goal"].weight = float(new_weights["goal_weight"])
-        if "concede_weight" in new_weights and "goal" in self.rewards:
-            self.rewards["goal"].concede_weight = float(new_weights["concede_weight"])
-        if "save_weight" in new_weights and "goal" in self.rewards:
-            self.rewards["goal"].save_weight = float(new_weights["save_weight"])
-
-        if "ball_to_goal_weight" in new_weights and "ball_to_goal" in self.rewards:
-            self.rewards["ball_to_goal"].weight = float(new_weights["ball_to_goal_weight"])
-        if "ball_to_goal_near_dist" in new_weights and "ball_to_goal" in self.rewards:
-            self.rewards["ball_to_goal"].near_dist = float(new_weights["ball_to_goal_near_dist"])
-        if "ball_to_goal_far_dist" in new_weights and "ball_to_goal" in self.rewards:
-            self.rewards["ball_to_goal"].far_dist = float(new_weights["ball_to_goal_far_dist"])
-
-        if "own_goal_threat_weight" in new_weights and "own_goal_threat" in self.rewards:
-            self.rewards["own_goal_threat"].weight = float(new_weights["own_goal_threat_weight"])
-
-        if "player_to_ball_weight" in new_weights and "player_to_ball" in self.rewards:
-            self.rewards["player_to_ball"].weight = float(new_weights["player_to_ball_weight"])
-        if "boost_pathing_threshold" in new_weights and "player_to_ball" in self.rewards:
-            self.rewards["player_to_ball"].boost_pathing_threshold = float(new_weights["boost_pathing_threshold"])
-
-        if "powerslide_weight" in new_weights and "powerslide" in self.rewards:
-            self.rewards["powerslide"].weight = float(new_weights["powerslide_weight"])
-
-        if "retreat_flip_weight" in new_weights and "retreat_flip" in self.rewards:
-            self.rewards["retreat_flip"].weight = float(new_weights["retreat_flip_weight"])
-
-        if "jump_cost_weight" in new_weights and "jump_cost" in self.rewards:
-            self.rewards["jump_cost"].weight = float(new_weights["jump_cost_weight"])
-
-        if "time_cost_weight" in new_weights and "time_cost" in self.rewards:
-            self.rewards["time_cost"].weight = float(new_weights["time_cost_weight"])
-
-        if "spin_cost_weight" in new_weights and "spin_cost" in self.rewards:
-            self.rewards["spin_cost"].weight = float(new_weights["spin_cost_weight"])
-        if "spin_cost_deadband" in new_weights and "spin_cost" in self.rewards:
-            self.rewards["spin_cost"].deadband = float(new_weights["spin_cost_deadband"])
-
-        if "jump_bridge_weight" in new_weights and "jump_bridge" in self.rewards:
-            self.rewards["jump_bridge"].weight = float(new_weights["jump_bridge_weight"])
-
-        if "air_roll_recovery_weight" in new_weights and "air_roll_recovery" in self.rewards:
-            self.rewards["air_roll_recovery"].weight = float(new_weights["air_roll_recovery_weight"])
-
-        if "touch_weight" in new_weights and "touch" in self.rewards:
-            self.rewards["touch"].weight = float(new_weights["touch_weight"])
-
-        if "boost_gain_weight" in new_weights and "boost" in self.rewards:
-            self.rewards["boost"].gain_weight = float(new_weights["boost_gain_weight"])
-        if "boost_lose_weight" in new_weights and "boost" in self.rewards:
-            self.rewards["boost"].lose_weight = float(new_weights["boost_lose_weight"])
-        if "gamma" in new_weights and "boost" in self.rewards:
-            self.rewards["boost"].gamma = float(new_weights["gamma"])
+        for key, term, attr, _ in REWARD_WEIGHT_SPECS:
+            if key in new_weights and term in self.rewards:
+                setattr(self.rewards[term], attr, float(new_weights[key]))
 
     def get_reward(self, car: CarState, arena: RocketSimArena, action: np.ndarray, is_goal: bool, scoring_team: Optional[int], include_breakdown: bool = True) -> Tuple[float, Dict[str, float]]:
         total = 0.0

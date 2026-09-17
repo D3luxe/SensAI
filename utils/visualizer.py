@@ -22,7 +22,8 @@ from env.actions import ContinuousActionParser, DiscreteActionParser
 from env.rewards import RewardManager
 from env.baseline_agent import BaseOpponent, BaselineChaser, NectoNextoOpponentBot, create_opponent_bot
 from agent.models import ActorCritic
-import json
+from agent.checkpoint import load_policy, read_checkpoint
+from utils.config import effective_reward_weights, effective_reward_weights_for_checkpoint
 
 
 def draw_rocket_league_pitch(ax):
@@ -89,48 +90,27 @@ def draw_rocket_league_pitch(ax):
 
 
 def load_model(model_path: Optional[str], device: str = "cpu") -> Optional[ActorCritic]:
-    if model_path:
-        norm_path = os.path.normpath(model_path.strip().strip('"').strip("'"))
-        if os.path.exists(norm_path):
-            discrete_parser = DiscreteActionParser()
-            for attempt in range(3):
-                try:
-                    ckpt = torch.load(norm_path, map_location=device)
-                    obs_builder = DefaultObservationBuilder(symmetric=True)
-                    obs_dim = obs_builder.obs_dim
-                    continuous = ckpt.get("continuous_actions", False)
-                    act_dim = 8 if continuous else discrete_parser.action_dim
-                    model = ActorCritic(obs_dim=obs_dim, act_dim=act_dim, continuous_actions=continuous).to(device)
-                    
-                    saved_state = ckpt["model_state_dict"]
-                    model_state = model.state_dict()
-                    
-                    # Universal dimension migration (obs_dim 64 -> 70, act_dim 19 -> 24)
-                    migrated = False
-                    for k in list(saved_state.keys()):
-                        if k in model_state:
-                            saved_param = saved_state[k]
-                            curr_param = model_state[k]
-                            if saved_param.shape != curr_param.shape:
-                                migrated = True
-                                slices = tuple(slice(0, min(s, c)) for s, c in zip(saved_param.shape, curr_param.shape))
-                                curr_param[slices] = saved_param[slices]
-                                model_state[k] = curr_param
-                            else:
-                                model_state[k] = saved_param
+    """The checkpoint's policy through the shared loader, or None if there is none to load."""
+    if not model_path:
+        return None
+    norm_path = os.path.normpath(model_path.strip().strip('"').strip("'"))
+    if not os.path.exists(norm_path):
+        return None
+    try:
+        return load_policy(norm_path, device=device)[0]
+    except Exception as e:
+        print(f"[Visualizer] Could not load model {norm_path}: {e}")
+        return None
 
-                    if migrated:
-                        model.load_state_dict(model_state)
-                    else:
-                        model.load_state_dict(saved_state)
-                    model.eval()
-                    return model
-                except Exception as e:
-                    if attempt == 2:
-                        print(f"[Visualizer] Could not load model {norm_path}: {e}")
-                    import time
-                    time.sleep(0.05)
-    return None
+
+def _reward_weights_for(model_path: Optional[str]) -> Dict[str, float]:
+    """Reward weights as training applies them, at the given checkpoint's step when it has one."""
+    if model_path and os.path.exists(model_path):
+        try:
+            return effective_reward_weights_for_checkpoint(read_checkpoint(model_path))
+        except Exception:
+            pass
+    return effective_reward_weights()
 
 
 # Canonical metadata for all reward components and regularization terms
@@ -426,15 +406,9 @@ def simulate_match(
     obs_builder = DefaultObservationBuilder(symmetric=True)
     action_parser = ContinuousActionParser()
 
-    # Load active reward weights for breakdown calculation
-    active_rewards = {}
-    if os.path.exists("config/live_config.json"):
-        try:
-            with open("config/live_config.json", "r") as f:
-                cfg_data = json.load(f)
-                active_rewards = cfg_data.get("rewards", {})
-        except Exception:
-            pass
+    # Reward weights exactly as training applies them (yaml + live + annealing, gamma), so the
+    # breakdown charts show what the trainer would pay for this match
+    active_rewards = _reward_weights_for(blue_model_path)
 
     # Use isolated reward managers for each team to ensure zero potential cross-talk
     blue_reward_mgr = RewardManager(active_rewards)
