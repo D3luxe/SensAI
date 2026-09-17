@@ -673,12 +673,29 @@ class PPOTrainer:
                         if self.league_manager.enabled:
                             strat_assignments = self.league_manager.get_stratified_distribution(self.num_envs)
                             self.env.set_stratified_opponents(strat_assignments)
-                            fixed = self.league_manager.training_opponents
-                            fixed_note = (
-                                f", Fixed={len(fixed)}@{self.league_manager.training_opponent_ratio:.2f}"
-                                if fixed and self.league_manager.training_opponent_ratio > 0 else ""
+                            lm = self.league_manager
+                            fixed = lm.training_opponents
+                            fixed_r = lm.training_opponent_ratio if fixed else 0.0
+                            # Fixed opponents come off the top; SP/King/Pool split the rest.
+                            tier_total = (lm.self_play_ratio + lm.king_ratio + lm.pool_ratio) or 1.0
+                            rest = (1.0 - fixed_r) / tier_total
+                            n_by_tier = {"Fixed": 0, "SP": 0, "King": 0, "Pool": 0}
+                            for a in strat_assignments:
+                                if a is None:
+                                    n_by_tier["SP"] += 1
+                                elif a in fixed:
+                                    n_by_tier["Fixed"] += 1
+                                elif a == lm.king_of_the_hill:
+                                    n_by_tier["King"] += 1
+                                else:
+                                    n_by_tier["Pool"] += 1
+                            fixed_note = f"Fixed({len(fixed)})={fixed_r:.0%}, " if fixed_r > 0 else ""
+                            envs_note = "/".join(f"{k} {v}" for k, v in n_by_tier.items() if v)
+                            print(
+                                f"[Live Config] Stratified League reconfigured: {fixed_note}"
+                                f"SP={lm.self_play_ratio * rest:.0%}, King={lm.king_ratio * rest:.0%}, "
+                                f"Pool={lm.pool_ratio * rest:.0%} of envs (actual: {envs_note} of {len(strat_assignments)})"
                             )
-                            print(f"[Live Config] Stratified League reconfigured: SP={self.league_manager.self_play_ratio:.2f}, King={self.league_manager.king_ratio:.2f}, Pool={self.league_manager.pool_ratio:.2f}{fixed_note}")
                         else:
                             self.env.update_baseline_opponent(self.baseline_opponent_ratio, self.baseline_opponent_type)
                             print(f"[Live Config] Stratified League disabled. Reverted to static baseline ratio.")

@@ -20,7 +20,7 @@ from env.physics_engine import (
 from env.observations import DefaultObservationBuilder, OBS_MIRROR_MASK_NP, ACT_MIRROR_MASK_NP
 from env.actions import ContinuousActionParser, DiscreteActionParser
 from env.rewards import RewardManager
-from env.baseline_agent import BaseOpponent, BaselineChaser, create_opponent_bot
+from env.baseline_agent import BaseOpponent, BaselineChaser, NectoNextoOpponentBot, create_opponent_bot
 from agent.models import ActorCritic
 import json
 
@@ -454,6 +454,10 @@ def simulate_match(
         orange_bot = create_opponent_bot(orange_model_path, device=device)
         match_type = "Checkpoint / Model Comparison"
 
+    # Necto/Nexto emit raw per-tick controls; like training and TrueSkill, they must bypass
+    # SenseiBot's jump sequencer or their jumps/flips get mangled and they never reach the ball.
+    bot_mask = [isinstance(blue_bot, NectoNextoOpponentBot), isinstance(orange_bot, NectoNextoOpponentBot)]
+
     blue_traj_x, blue_traj_y = [], []
     orange_traj_x, orange_traj_y = [], []
     ball_traj_x, ball_traj_y = [], []
@@ -483,7 +487,7 @@ def simulate_match(
         act1 = orange_bot.get_action(arena.cars[1], arena)
 
         actions = [act0, act1]
-        goal, scoring_team = arena.step(actions, dt=1.0 / 15.0)
+        goal, scoring_team = arena.step(actions, dt=1.0 / 15.0, bot_mask=bot_mask)
 
         # Calculate reward breakdowns with isolated managers
         r0, b0 = blue_reward_mgr.get_reward(arena.cars[0], arena, act0, goal, scoring_team)

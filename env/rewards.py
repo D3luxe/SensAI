@@ -374,6 +374,35 @@ def defensive_recovery_point(ball_pos: np.ndarray, car_team: int, depth: float =
     ], dtype=np.float32)
 
 
+# Kickoff speed-loss charge for PlayerToBallVelocityReward (raw units, scaled by the term's weight).
+# A full brake for one 8-tick step sheds ~230 uu/s -> ~0.30 raw; a gentle steering correction of
+# ~40 uu/s costs ~0.005.
+KICKOFF_SPEED_LOSS_SCALE = 3.0
+KICKOFF_SPEED_LOSS_RAMP = 150.0   # uu/s over which the charge fades in
+
+# Own-net guard for PlayerToBallVelocityReward (raw units, scaled by the term's weight).
+OWN_NET_FADE_DEPTH = 150.0        # uu past the goal line over which closure pay fades to zero
+OWN_NET_PENALTY_DEPTH = 300.0     # depth at which the per-step penalty reaches full strength
+OWN_NET_DEPTH_PENALTY = 0.03      # per step at full depth
+OWN_NET_EXIT_POTENTIAL = 0.40     # potential drop from the goal line to OWN_NET_EXIT_DEPTH
+OWN_NET_EXIT_DEPTH = 600.0
+
+
+def own_net_depth_factor(car_pos: np.ndarray, car_team: int, depth_hi: float) -> float:
+    """
+    Smooth 0..1 measure of how far the car sits inside its OWN net, reaching 1 at `depth_hi`
+    uu past the goal line. Faded out beyond the posts and above the crossbar, so a car on the
+    backboard or out beside the goal never registers.
+    """
+    defend_goal_y = -ARENA_EXTENT_Y if car_team == 0 else ARENA_EXTENT_Y
+    depth = (defend_goal_y - float(car_pos[1])) if car_team == 0 else (float(car_pos[1]) - defend_goal_y)
+    if depth <= 0.0:
+        return 0.0
+    w_lat = 1.0 - _smoothstep(abs(float(car_pos[0])), GOAL_HALF_WIDTH, GOAL_HALF_WIDTH + 150.0)
+    w_z = 1.0 - _smoothstep(float(car_pos[2]), GOAL_HEIGHT, GOAL_HEIGHT + 100.0)
+    return _smoothstep(depth, 0.0, depth_hi) * w_lat * w_z
+
+
 def shot_line_factor(car_pos: np.ndarray, ball_pos: np.ndarray, car_team: int) -> float:
     """
     How squarely the car is lined up behind the ball toward the opponent's goal, in [0, 1].
@@ -1110,6 +1139,8 @@ class PlayerToBallVelocityReward(BaseReward):
         self._was_in_strike_zone: Dict[int, bool] = {}
         self._prev_timing_err: Dict[int, float] = {}
         self._reread_ticks: Dict[int, int] = {}
+        self._prev_net_potential: Dict[int, float] = {}
+        self._prev_kickoff_speed: Dict[int, float] = {}
 
     def _calc_dist(self, car_pos: np.ndarray, ball_pos: np.ndarray) -> float:
         # If BOTH car and ball are near pitch floor (car Z <= 100, ball Z <= 120), evaluate horizontal (X, Y) distance
@@ -1354,6 +1385,14 @@ class PlayerToBallVelocityReward(BaseReward):
         self._was_in_strike_zone = {car.id: False for car in initial_state.cars}
         self._prev_timing_err = {}
         self._reread_ticks = {car.id: 0 for car in initial_state.cars}
+        self._prev_kickoff_speed = {}
+        for car in initial_state.cars:
+            to_ball = initial_state.ball.pos - car.pos
+            self._prev_kickoff_speed[car.id] = float(np.dot(car.vel, to_ball)) / max(1e-4, _norm3(to_ball))
+        self._prev_net_potential = {
+            car.id: -OWN_NET_EXIT_POTENTIAL * own_net_depth_factor(car.pos, car.team, OWN_NET_EXIT_DEPTH)
+            for car in initial_state.cars
+        }
 
     def get_reward(self, car: CarState, arena: RocketSimArena, action: np.ndarray, is_goal: bool, scoring_team: Optional[int]) -> float:
         if is_goal:
@@ -1435,11 +1474,25 @@ class PlayerToBallVelocityReward(BaseReward):
             car_fwd_vel = float(np.dot(car.vel[:2], car.get_forward_vector()[:2]))
             wheel_progress = (car_fwd_vel / 2300.0) * 0.10 * max(0.0, fwd_alignment)
 
+            # Kickoff speed-loss charge (output-driven): forward speed toward the ball shed since the
+            # last step. Boosting forces full throttle, so the throttle output gets no gradient while
+            # boost lasts and its sign drifts; the step boost runs out, a slightly negative throttle
+            # is a full brake and the car stalls mid-kickoff. Closure pay only registers that as a
+            # few percent less income spread over later steps. Charging the speed actually lost, on
+            # the step it is lost, prices the outcome however it happened (brake, bad flip, turning
+            # away) and leaves coasting free. Soft ramp so small losses from steering cost ~nothing.
+            speed_toward = float(np.dot(car.vel, unit_to_ball))
+            prev_speed = self._prev_kickoff_speed.get(car.id, speed_toward)
+            self._prev_kickoff_speed[car.id] = speed_toward
+            speed_loss = max(0.0, prev_speed - speed_toward)
+            speed_loss_penalty = -KICKOFF_SPEED_LOSS_SCALE * (speed_loss / CAR_MAX_SPEED)                 * _smoothstep(speed_loss, 0.0, KICKOFF_SPEED_LOSS_RAMP)
+
             # Symmetric distance delta with amplified backward penalty
             kickoff_mult = 1.5 if delta_dist > 0.0 else 3.0
-            return self.weight * (delta_dist * kickoff_mult + vel_toward_ball + wheel_progress)
+            return self.weight * (delta_dist * kickoff_mult + vel_toward_ball + wheel_progress + speed_loss_penalty)
 
         # ── General Open Play ─────────────────────────────────────────────────
+        self._prev_kickoff_speed.pop(car.id, None)
         ball_z = float(arena.ball.pos[2])
 
         # Precision Wall Geometry Detection:
@@ -1607,11 +1660,37 @@ class PlayerToBallVelocityReward(BaseReward):
                 if dist_ball_to_defend < 1800.0:
                     wrong_side_push_penalty = -0.35 * (car_vy_defend / 1500.0)
 
+        # Own-Net Guard:
+        # Closure pay rewards ANY path that shortens the distance, including cutting along our own
+        # goal line and through the net toward a ball rolling into the corner. The net's side wall
+        # then blocks the car, the delta drops to zero, and a flat zero never says "get out".
+        #   1. Positive closure fades to zero inside the net and while driving hard at the goal
+        #      line near it, unless the target itself sits in the goal mouth (a save).
+        #   2. A small per-step penalty for depth inside the net.
+        #   3. An exit potential: entering costs what leaving pays back, so it telescopes and cannot
+        #      be farmed by bobbing in and out, but gives a gradient back toward the field.
+        # All gates are smoothsteps; negative deltas are never scaled, so this only removes income.
+        w_net_fade = own_net_depth_factor(car.pos, car.team, OWN_NET_FADE_DEPTH)
+        dist_car_to_line = max(0.0, dist_car_to_defend)
+        target_line_dist = abs(float(target_pos[1]) - defend_goal_y)
+        w_save = (1.0 - _smoothstep(abs(float(target_pos[0])), GOAL_HALF_WIDTH, GOAL_HALF_WIDTH + 400.0))             * (1.0 - _smoothstep(target_line_dist, 400.0, 900.0))
+        w_line = (1.0 - _smoothstep(dist_car_to_line, 150.0, 700.0))             * _smoothstep(float(car_vy_defend), 200.0, 600.0)             * (1.0 - _smoothstep(abs(float(car.pos[0])), GOAL_HALF_WIDTH + 200.0, GOAL_HALF_WIDTH + 600.0))
+        w_fade = max(w_net_fade, w_line) * (1.0 - w_save)
+        if delta_dist > 0.0 and w_fade > 0.0:
+            delta_dist *= 1.0 - w_fade
+
+        net_depth_penalty = -OWN_NET_DEPTH_PENALTY * own_net_depth_factor(car.pos, car.team, OWN_NET_PENALTY_DEPTH)
+        net_potential = -OWN_NET_EXIT_POTENTIAL * own_net_depth_factor(car.pos, car.team, OWN_NET_EXIT_DEPTH)
+        prev_net_potential = self._prev_net_potential.get(car.id, net_potential)
+        self._prev_net_potential[car.id] = net_potential
+        net_exit_shaping = net_potential - prev_net_potential
+
         # The distance potential, plus penalties that can only subtract. Nothing here pays
         # positive income per step, so the term telescopes: over any path that returns to its
         # starting distance the delta sums to zero, and what survives is ground actually
         # gained. That bounds the whole class near 1.25 per episode at weight 0.5.
-        total_reward = self.weight * (delta_dist + ceiling_penalty + wrong_side_push_penalty)
+        total_reward = self.weight * (delta_dist + ceiling_penalty + wrong_side_push_penalty
+                                      + net_depth_penalty + net_exit_shaping)
         return float(total_reward)
 
 

@@ -694,7 +694,9 @@ def simulate_custom_scenario(
         else:
             actions = [act_blue]
 
-        goal, scoring_team = arena.step(actions, dt=1.0 / 15.0)
+        from env.baseline_agent import NectoNextoOpponentBot
+        bot_mask = [isinstance(bot, NectoNextoOpponentBot)] + [False] * (len(actions) - 1)
+        goal, scoring_team = arena.step(actions, dt=1.0 / 15.0, bot_mask=bot_mask)
         if arena.cars[0].ball_touches > touches:
             touches = arena.cars[0].ball_touches
         if goal:
