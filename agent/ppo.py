@@ -784,6 +784,13 @@ class PPOTrainer:
             "return_rms": self.ret_rms.state_dict(),
             "critic_warmup_remaining": self._critic_warmup_remaining,
         }
+        # Which reward produced this checkpoint (env/reward_version.py). Never fatal: a checkpoint
+        # without the stamp is still a checkpoint, and the eval suite reports it as unknown.
+        try:
+            from env.reward_version import reward_identity
+            data["reward_identity"] = reward_identity()   # yaml + live overrides as applied now
+        except Exception as e:
+            print(f"[PPO Trainer] Could not stamp reward identity: {e}")
         # Atomic save on Windows: write to .tmp file then replace with retry to avoid file lock conflict (Error 1224)
         tmp_path = path + f".tmp.{os.getpid()}"
         try:

@@ -404,7 +404,9 @@ class Game:
         self.env.scenario_timeout = 10 ** 9
         return obs
 
-    def run(self, steps):
+    def run(self, steps, observer=None):
+        """observer(t, arena, sensai_touched, opp_touched) is called every live step (eval_suite uses it);
+        observer.episode_end() after each goal, before the next kickoff."""
         env = self.env
         obs = self.kickoff()
         arena = env.arena
@@ -442,6 +444,8 @@ class Game:
                     ev["outcome"] = outcome
                     events.append(ev)
                 pending, watch = [], []
+                if observer is not None and hasattr(observer, "episode_end"):
+                    observer.episode_end()
                 pos.reset()
                 obs = self.kickoff()
                 kicks.start(t + 1)
@@ -458,6 +462,8 @@ class Game:
             pos.step(t, car, ball_pos, sensai_touched, opp_touched,
                      overshoot_charge=breakdown.get("overshoot", 0.0))
             kicks.step(t, arena, sensai_touched, opp_touched, breakdown.get("touch", 0.0))
+            if observer is not None:
+                observer(t, arena, sensai_touched, opp_touched)
             hist.append(dict(t=t, car_pos=car.pos.copy(), on_ground=bool(car.on_ground),
                              on_wall=bool(is_car_on_wall(car)), boost=float(car.boost),
                              ball_pos=ball_pos.copy(), ball_vel=ball_vel.copy(),

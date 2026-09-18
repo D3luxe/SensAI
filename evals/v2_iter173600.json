@@ -1,0 +1,1417 @@
+{
+ "suite_version": 1,
+ "checkpoint": "checkpoints/baselines/v2_iter173600.pt",
+ "iteration": 173600,
+ "global_step": 2844262400,
+ "reward_identity": {
+  "version": "v2",
+  "code_sha": "7c5d7a2b15e057d7",
+  "settings_sha": "20d320a8ec343cca"
+ },
+ "git_commit": "f46251d",
+ "quick": false,
+ "created": "2026-09-18 19:25:57",
+ "match_steps": 12000,
+ "scenario_trials": 24,
+ "seeds": [
+  11,
+  12,
+  13
+ ],
+ "wall_seconds": 36.91925311088562,
+ "results": {
+  "necto": {
+   "goals_for": {
+    "mean": 0.6666666666666666,
+    "min": 0.0,
+    "max": 1.0,
+    "per_seed": [
+     1,
+     1,
+     0
+    ]
+   },
+   "goals_against": {
+    "mean": 60.0,
+    "min": 58.0,
+    "max": 64.0,
+    "per_seed": [
+     64,
+     58,
+     58
+    ]
+   },
+   "goal_diff_per_10min": {
+    "mean": -44.5,
+    "min": -47.25,
+    "max": -42.74999999999999,
+    "per_seed": [
+     -47.25,
+     -42.74999999999999,
+     -43.5
+    ]
+   },
+   "goals_for_per_10min": {
+    "mean": 0.5,
+    "min": 0.0,
+    "max": 0.75,
+    "per_seed": [
+     0.75,
+     0.75,
+     0.0
+    ]
+   },
+   "goals_against_per_10min": {
+    "mean": 45.0,
+    "min": 43.5,
+    "max": 48.0,
+    "per_seed": [
+     48.0,
+     43.5,
+     43.5
+    ]
+   },
+   "touches_per_min": {
+    "mean": 6.6499999999999995,
+    "min": 6.5249999999999995,
+    "max": 6.75,
+    "per_seed": [
+     6.75,
+     6.675,
+     6.5249999999999995
+    ]
+   },
+   "on_target_per_100_touches": {
+    "mean": 0.7449022055763629,
+    "min": 0.0,
+    "max": 1.1235955056179776,
+    "per_seed": [
+     1.1111111111111112,
+     1.1235955056179776,
+     0.0
+    ]
+   },
+   "shot_conversion_pct": {
+    "mean": 33.333333333333336,
+    "min": 0.0,
+    "max": 100.0,
+    "per_seed": [
+     100.0,
+     0.0,
+     0.0
+    ]
+   },
+   "whiffs_per_100_touches": {
+    "mean": 93.96444100047354,
+    "min": 87.64044943820225,
+    "max": 100.0,
+    "per_seed": [
+     100.0,
+     87.64044943820225,
+     94.25287356321839
+    ]
+   },
+   "aimed_whiffs_per_100_touches": {
+    "mean": 44.704751244851984,
+    "min": 42.5287356321839,
+    "max": 48.88888888888889,
+    "per_seed": [
+     48.88888888888889,
+     42.69662921348315,
+     42.5287356321839
+    ]
+   },
+   "overshoots_aimed_per_100_touches": {
+    "mean": 63.839310057830005,
+    "min": 57.30337078651686,
+    "max": 74.44444444444444,
+    "per_seed": [
+     74.44444444444444,
+     57.30337078651686,
+     59.770114942528735
+    ]
+   },
+   "kickoffs": {
+    "mean": 60.666666666666664,
+    "min": 58.0,
+    "max": 65.0,
+    "per_seed": [
+     65,
+     59,
+     58
+    ]
+   },
+   "kickoff_first_touch_pct": {
+    "mean": 3.233376792698826,
+    "min": 0.0,
+    "max": 5.084745762711864,
+    "per_seed": [
+     4.615384615384615,
+     5.084745762711864,
+     0.0
+    ]
+   },
+   "kickoff_goals_for": {
+    "mean": 0.3333333333333333,
+    "min": 0.0,
+    "max": 1.0,
+    "per_seed": [
+     1,
+     0,
+     0
+    ]
+   },
+   "kickoff_goals_against": {
+    "mean": 25.666666666666668,
+    "min": 21.0,
+    "max": 31.0,
+    "per_seed": [
+     31,
+     21,
+     25
+    ]
+   },
+   "retreat_dodges_per_100_touches": {
+    "mean": 187.62954353035715,
+    "min": 182.22222222222223,
+    "max": 191.01123595505618,
+    "per_seed": [
+     182.22222222222223,
+     191.01123595505618,
+     189.65517241379308
+    ]
+   },
+   "retreat_dodge_not_wheels_down_pct": {
+    "mean": 7.29100964395082,
+    "min": 5.384615384615385,
+    "max": 10.606060606060606,
+    "per_seed": [
+     5.384615384615385,
+     5.882352941176471,
+     10.606060606060606
+    ]
+   },
+   "backwall_climbs_per_100_touches": {
+    "mean": 31.968659864824144,
+    "min": 28.08988764044944,
+    "max": 34.48275862068965,
+    "per_seed": [
+     33.333333333333336,
+     28.08988764044944,
+     34.48275862068965
+    ]
+   },
+   "wall_time_pct": {
+    "mean": 13.668849274050023,
+    "min": 12.325094260578132,
+    "max": 14.763021269469101,
+    "per_seed": [
+     12.325094260578132,
+     13.918432292102839,
+     14.763021269469101
+    ]
+   },
+   "ga_cause_caught_upfield_pct": {
+    "mean": 26.670258620689655,
+    "min": 25.862068965517242,
+    "max": 27.586206896551722,
+    "per_seed": [
+     26.5625,
+     27.586206896551722,
+     25.862068965517242
+    ]
+   },
+   "ga_cause_back_wall_climb_pct": {
+    "mean": 19.4683908045977,
+    "min": 17.24137931034483,
+    "max": 22.413793103448278,
+    "per_seed": [
+     18.75,
+     17.24137931034483,
+     22.413793103448278
+    ]
+   },
+   "ga_cause_goal_side_far_pct": {
+    "mean": 1.0955459770114941,
+    "min": 0.0,
+    "max": 1.7241379310344827,
+    "per_seed": [
+     1.5625,
+     1.7241379310344827,
+     0.0
+    ]
+   },
+   "ga_cause_beaten_goal_side_pct": {
+    "mean": 8.566810344827587,
+    "min": 1.5625,
+    "max": 15.517241379310345,
+    "per_seed": [
+     1.5625,
+     15.517241379310345,
+     8.620689655172415
+    ]
+   },
+   "ga_cause_own_touch_last_pct": {
+    "mean": 1.6163793103448274,
+    "min": 0.0,
+    "max": 3.125,
+    "per_seed": [
+     3.125,
+     1.7241379310344827,
+     0.0
+    ]
+   },
+   "ga_cause_off_the_kickoff_pct": {
+    "mean": 42.58261494252873,
+    "min": 36.206896551724135,
+    "max": 48.4375,
+    "per_seed": [
+     48.4375,
+     36.206896551724135,
+     43.10344827586207
+    ]
+   },
+   "air_time_pct": {
+    "mean": 44.460934246301775,
+    "min": 43.85362585831519,
+    "max": 44.87898835943388,
+    "per_seed": [
+     44.65018852115627,
+     44.87898835943388,
+     43.85362585831519
+    ]
+   },
+   "boost_mean": {
+    "mean": 13.553486253927424,
+    "min": 11.659315541928146,
+    "max": 14.926066993469071,
+    "per_seed": [
+     14.075076226385058,
+     14.926066993469071,
+     11.659315541928146
+    ]
+   },
+   "boost_empty_pct": {
+    "mean": 44.10312891912047,
+    "min": 42.30414746543779,
+    "max": 47.43761513984257,
+    "per_seed": [
+     42.30414746543779,
+     42.567624152081066,
+     47.43761513984257
+    ]
+   },
+   "boost_spent_per_min": {
+    "mean": 254.31733184699695,
+    "min": 239.3971368438374,
+    "max": 276.0880704619268,
+    "per_seed": [
+     276.0880704619268,
+     247.46678823522663,
+     239.3971368438374
+    ]
+   },
+   "supersonic_pct": {
+    "mean": 1.6639879841219354,
+    "min": 1.5659018589850946,
+    "max": 1.7679095098449937,
+    "per_seed": [
+     1.7679095098449937,
+     1.6581525835357174,
+     1.5659018589850946
+    ]
+   },
+   "retreat_time_pct": {
+    "mean": 39.591779567710596,
+    "min": 38.95494891977893,
+    "max": 40.607989280629766,
+    "per_seed": [
+     39.212400502723085,
+     40.607989280629766,
+     38.95494891977893
+    ]
+   },
+   "retreat_boosting_pct": {
+    "mean": 3.018391085521125,
+    "min": 1.752021563342318,
+    "max": 3.810504634397528,
+    "per_seed": [
+     3.810504634397528,
+     3.4926470588235294,
+     1.752021563342318
+    ]
+   },
+   "flights_per_min": {
+    "mean": 18.091469917545908,
+    "min": 17.86132976050913,
+    "max": 18.315048990871787,
+    "per_seed": [
+     18.098031001256807,
+     18.315048990871787,
+     17.86132976050913
+    ]
+   },
+   "landing_not_wheels_down_pct": {
+    "mean": 6.2698598739386355,
+    "min": 4.1666666666666625,
+    "max": 9.704641350210974,
+    "per_seed": [
+     4.1666666666666625,
+     4.938271604938271,
+     9.704641350210974
+    ]
+   },
+   "landing_speed_kept_median": {
+    "mean": 0.9367422984620246,
+    "min": 0.9149396582374243,
+    "max": 0.9524677129595529,
+    "per_seed": [
+     0.9149396582374243,
+     0.9524677129595529,
+     0.9428195241890966
+    ]
+   }
+  },
+  "scenario_drop": {
+   "n": {
+    "mean": 24.0,
+    "min": 24.0,
+    "max": 24.0,
+    "per_seed": [
+     24
+    ]
+   },
+   "sensai_first_touch_pct": {
+    "mean": 58.333333333333336,
+    "min": 58.333333333333336,
+    "max": 58.333333333333336,
+    "per_seed": [
+     58.333333333333336
+    ]
+   },
+   "opp_first_touch_pct": {
+    "mean": 33.33333333333333,
+    "min": 33.33333333333333,
+    "max": 33.33333333333333,
+    "per_seed": [
+     33.33333333333333
+    ]
+   },
+   "time_to_first_touch_s": {
+    "mean": 1.261904761904762,
+    "min": 1.261904761904762,
+    "max": 1.261904761904762,
+    "per_seed": [
+     1.261904761904762
+    ]
+   },
+   "ran_under_ball_pct": {
+    "mean": 75.0,
+    "min": 75.0,
+    "max": 75.0,
+    "per_seed": [
+     75.0
+    ]
+   },
+   "touch_ball_speed": {
+    "mean": 1253.9248831612724,
+    "min": 1253.9248831612724,
+    "max": 1253.9248831612724,
+    "per_seed": [
+     1253.9248831612724
+    ]
+   },
+   "touch_goalward_pct": {
+    "mean": 71.42857142857143,
+    "min": 71.42857142857143,
+    "max": 71.42857142857143,
+    "per_seed": [
+     71.42857142857143
+    ]
+   },
+   "opp_next_touch_pct": {
+    "mean": 78.57142857142857,
+    "min": 78.57142857142857,
+    "max": 78.57142857142857,
+    "per_seed": [
+     78.57142857142857
+    ]
+   },
+   "conceded_pct": {
+    "mean": 0.0,
+    "min": 0.0,
+    "max": 0.0,
+    "per_seed": [
+     0.0
+    ]
+   },
+   "scored_pct": {
+    "mean": 0.0,
+    "min": 0.0,
+    "max": 0.0,
+    "per_seed": [
+     0.0
+    ]
+   },
+   "boost_used": {
+    "mean": 10.861144145329794,
+    "min": 10.861144145329794,
+    "max": 10.861144145329794,
+    "per_seed": [
+     10.861144145329794
+    ]
+   },
+   "dodges_per_trial": {
+    "mean": 1.4583333333333333,
+    "min": 1.4583333333333333,
+    "max": 1.4583333333333333,
+    "per_seed": [
+     1.4583333333333333
+    ]
+   },
+   "bad_landing_pct": {
+    "mean": 0.0,
+    "min": 0.0,
+    "max": 0.0,
+    "per_seed": [
+     0.0
+    ]
+   }
+  },
+  "scenario_bounce": {
+   "n": {
+    "mean": 24.0,
+    "min": 24.0,
+    "max": 24.0,
+    "per_seed": [
+     24
+    ]
+   },
+   "sensai_first_touch_pct": {
+    "mean": 29.166666666666668,
+    "min": 29.166666666666668,
+    "max": 29.166666666666668,
+    "per_seed": [
+     29.166666666666668
+    ]
+   },
+   "opp_first_touch_pct": {
+    "mean": 62.5,
+    "min": 62.5,
+    "max": 62.5,
+    "per_seed": [
+     62.5
+    ]
+   },
+   "time_to_first_touch_s": {
+    "mean": 1.3238095238095238,
+    "min": 1.3238095238095238,
+    "max": 1.3238095238095238,
+    "per_seed": [
+     1.3238095238095238
+    ]
+   },
+   "ran_under_ball_pct": {
+    "mean": 37.5,
+    "min": 37.5,
+    "max": 37.5,
+    "per_seed": [
+     37.5
+    ]
+   },
+   "touch_ball_speed": {
+    "mean": 2211.7452566964284,
+    "min": 2211.7452566964284,
+    "max": 2211.7452566964284,
+    "per_seed": [
+     2211.7452566964284
+    ]
+   },
+   "touch_goalward_pct": {
+    "mean": 28.57142857142857,
+    "min": 28.57142857142857,
+    "max": 28.57142857142857,
+    "per_seed": [
+     28.57142857142857
+    ]
+   },
+   "opp_next_touch_pct": {
+    "mean": 14.285714285714285,
+    "min": 14.285714285714285,
+    "max": 14.285714285714285,
+    "per_seed": [
+     14.285714285714285
+    ]
+   },
+   "conceded_pct": {
+    "mean": 12.5,
+    "min": 12.5,
+    "max": 12.5,
+    "per_seed": [
+     12.5
+    ]
+   },
+   "scored_pct": {
+    "mean": 0.0,
+    "min": 0.0,
+    "max": 0.0,
+    "per_seed": [
+     0.0
+    ]
+   },
+   "boost_used": {
+    "mean": 9.784724553426107,
+    "min": 9.784724553426107,
+    "max": 9.784724553426107,
+    "per_seed": [
+     9.784724553426107
+    ]
+   },
+   "dodges_per_trial": {
+    "mean": 1.125,
+    "min": 1.125,
+    "max": 1.125,
+    "per_seed": [
+     1.125
+    ]
+   },
+   "bad_landing_pct": {
+    "mean": 0.0,
+    "min": 0.0,
+    "max": 0.0,
+    "per_seed": [
+     0.0
+    ]
+   }
+  },
+  "nexto": {
+   "goals_for": {
+    "mean": 3.0,
+    "min": 3.0,
+    "max": 3.0,
+    "per_seed": [
+     3
+    ]
+   },
+   "goals_against": {
+    "mean": 45.0,
+    "min": 45.0,
+    "max": 45.0,
+    "per_seed": [
+     45
+    ]
+   },
+   "goal_diff_per_10min": {
+    "mean": -31.5,
+    "min": -31.5,
+    "max": -31.5,
+    "per_seed": [
+     -31.5
+    ]
+   },
+   "goals_for_per_10min": {
+    "mean": 2.25,
+    "min": 2.25,
+    "max": 2.25,
+    "per_seed": [
+     2.25
+    ]
+   },
+   "goals_against_per_10min": {
+    "mean": 33.75,
+    "min": 33.75,
+    "max": 33.75,
+    "per_seed": [
+     33.75
+    ]
+   },
+   "touches_per_min": {
+    "mean": 5.475,
+    "min": 5.475,
+    "max": 5.475,
+    "per_seed": [
+     5.475
+    ]
+   },
+   "on_target_per_100_touches": {
+    "mean": 4.10958904109589,
+    "min": 4.10958904109589,
+    "max": 4.10958904109589,
+    "per_seed": [
+     4.10958904109589
+    ]
+   },
+   "shot_conversion_pct": {
+    "mean": 33.333333333333336,
+    "min": 33.333333333333336,
+    "max": 33.333333333333336,
+    "per_seed": [
+     33.333333333333336
+    ]
+   },
+   "whiffs_per_100_touches": {
+    "mean": 75.34246575342465,
+    "min": 75.34246575342465,
+    "max": 75.34246575342465,
+    "per_seed": [
+     75.34246575342465
+    ]
+   },
+   "aimed_whiffs_per_100_touches": {
+    "mean": 15.068493150684931,
+    "min": 15.068493150684931,
+    "max": 15.068493150684931,
+    "per_seed": [
+     15.068493150684931
+    ]
+   },
+   "overshoots_aimed_per_100_touches": {
+    "mean": 41.0958904109589,
+    "min": 41.0958904109589,
+    "max": 41.0958904109589,
+    "per_seed": [
+     41.0958904109589
+    ]
+   },
+   "kickoffs": {
+    "mean": 48.0,
+    "min": 48.0,
+    "max": 48.0,
+    "per_seed": [
+     48
+    ]
+   },
+   "kickoff_first_touch_pct": {
+    "mean": 2.0833333333333335,
+    "min": 2.0833333333333335,
+    "max": 2.0833333333333335,
+    "per_seed": [
+     2.0833333333333335
+    ]
+   },
+   "kickoff_goals_for": {
+    "mean": 2.0,
+    "min": 2.0,
+    "max": 2.0,
+    "per_seed": [
+     2
+    ]
+   },
+   "kickoff_goals_against": {
+    "mean": 5.0,
+    "min": 5.0,
+    "max": 5.0,
+    "per_seed": [
+     5
+    ]
+   },
+   "retreat_dodges_per_100_touches": {
+    "mean": 147.94520547945206,
+    "min": 147.94520547945206,
+    "max": 147.94520547945206,
+    "per_seed": [
+     147.94520547945206
+    ]
+   },
+   "retreat_dodge_not_wheels_down_pct": {
+    "mean": 3.488372093023256,
+    "min": 3.488372093023256,
+    "max": 3.488372093023256,
+    "per_seed": [
+     3.488372093023256
+    ]
+   },
+   "backwall_climbs_per_100_touches": {
+    "mean": 21.91780821917808,
+    "min": 21.91780821917808,
+    "max": 21.91780821917808,
+    "per_seed": [
+     21.91780821917808
+    ]
+   },
+   "wall_time_pct": {
+    "mean": 13.25301204819277,
+    "min": 13.25301204819277,
+    "max": 13.25301204819277,
+    "per_seed": [
+     13.25301204819277
+    ]
+   },
+   "ga_cause_caught_upfield_pct": {
+    "mean": 57.77777777777778,
+    "min": 57.77777777777778,
+    "max": 57.77777777777778,
+    "per_seed": [
+     57.77777777777778
+    ]
+   },
+   "ga_cause_back_wall_climb_pct": {
+    "mean": 20.0,
+    "min": 20.0,
+    "max": 20.0,
+    "per_seed": [
+     20.0
+    ]
+   },
+   "ga_cause_goal_side_far_pct": {
+    "mean": 4.444444444444445,
+    "min": 4.444444444444445,
+    "max": 4.444444444444445,
+    "per_seed": [
+     4.444444444444445
+    ]
+   },
+   "ga_cause_beaten_goal_side_pct": {
+    "mean": 6.666666666666667,
+    "min": 6.666666666666667,
+    "max": 6.666666666666667,
+    "per_seed": [
+     6.666666666666667
+    ]
+   },
+   "ga_cause_own_touch_last_pct": {
+    "mean": 0.0,
+    "min": 0.0,
+    "max": 0.0,
+    "per_seed": [
+     0.0
+    ]
+   },
+   "ga_cause_off_the_kickoff_pct": {
+    "mean": 11.11111111111111,
+    "min": 11.11111111111111,
+    "max": 11.11111111111111,
+    "per_seed": [
+     11.11111111111111
+    ]
+   },
+   "air_time_pct": {
+    "mean": 38.094042838018744,
+    "min": 38.094042838018744,
+    "max": 38.094042838018744,
+    "per_seed": [
+     38.094042838018744
+    ]
+   },
+   "boost_mean": {
+    "mean": 15.191667404888545,
+    "min": 15.191667404888545,
+    "max": 15.191667404888545,
+    "per_seed": [
+     15.191667404888545
+    ]
+   },
+   "boost_empty_pct": {
+    "mean": 35.05689424364123,
+    "min": 35.05689424364123,
+    "max": 35.05689424364123,
+    "per_seed": [
+     35.05689424364123
+    ]
+   },
+   "boost_spent_per_min": {
+    "mean": 231.22499500771605,
+    "min": 231.22499500771605,
+    "max": 231.22499500771605,
+    "per_seed": [
+     231.22499500771605
+    ]
+   },
+   "supersonic_pct": {
+    "mean": 2.3678045515394914,
+    "min": 2.3678045515394914,
+    "max": 2.3678045515394914,
+    "per_seed": [
+     2.3678045515394914
+    ]
+   },
+   "retreat_time_pct": {
+    "mean": 32.33768406961178,
+    "min": 32.33768406961178,
+    "max": 32.33768406961178,
+    "per_seed": [
+     32.33768406961178
+    ]
+   },
+   "retreat_boosting_pct": {
+    "mean": 5.191740412979351,
+    "min": 5.191740412979351,
+    "max": 5.191740412979351,
+    "per_seed": [
+     5.191740412979351
+    ]
+   },
+   "flights_per_min": {
+    "mean": 15.66265060240964,
+    "min": 15.66265060240964,
+    "max": 15.66265060240964,
+    "per_seed": [
+     15.66265060240964
+    ]
+   },
+   "landing_not_wheels_down_pct": {
+    "mean": 5.769230769230771,
+    "min": 5.769230769230771,
+    "max": 5.769230769230771,
+    "per_seed": [
+     5.769230769230771
+    ]
+   },
+   "landing_speed_kept_median": {
+    "mean": 1.0076930236777935,
+    "min": 1.0076930236777935,
+    "max": 1.0076930236777935,
+    "per_seed": [
+     1.0076930236777935
+    ]
+   }
+  },
+  "scenario_wall": {
+   "n": {
+    "mean": 24.0,
+    "min": 24.0,
+    "max": 24.0,
+    "per_seed": [
+     24
+    ]
+   },
+   "sensai_first_touch_pct": {
+    "mean": 100.0,
+    "min": 100.0,
+    "max": 100.0,
+    "per_seed": [
+     100.0
+    ]
+   },
+   "opp_first_touch_pct": {
+    "mean": 0.0,
+    "min": 0.0,
+    "max": 0.0,
+    "per_seed": [
+     0.0
+    ]
+   },
+   "time_to_first_touch_s": {
+    "mean": 2.036111111111111,
+    "min": 2.036111111111111,
+    "max": 2.036111111111111,
+    "per_seed": [
+     2.036111111111111
+    ]
+   },
+   "ran_under_ball_pct": {
+    "mean": 0.0,
+    "min": 0.0,
+    "max": 0.0,
+    "per_seed": [
+     0.0
+    ]
+   },
+   "touch_ball_speed": {
+    "mean": 2155.8389282226562,
+    "min": 2155.8389282226562,
+    "max": 2155.8389282226562,
+    "per_seed": [
+     2155.8389282226562
+    ]
+   },
+   "touch_goalward_pct": {
+    "mean": 100.0,
+    "min": 100.0,
+    "max": 100.0,
+    "per_seed": [
+     100.0
+    ]
+   },
+   "opp_next_touch_pct": {
+    "mean": 87.5,
+    "min": 87.5,
+    "max": 87.5,
+    "per_seed": [
+     87.5
+    ]
+   },
+   "conceded_pct": {
+    "mean": 0.0,
+    "min": 0.0,
+    "max": 0.0,
+    "per_seed": [
+     0.0
+    ]
+   },
+   "scored_pct": {
+    "mean": 0.0,
+    "min": 0.0,
+    "max": 0.0,
+    "per_seed": [
+     0.0
+    ]
+   },
+   "boost_used": {
+    "mean": 3.1203813552856445,
+    "min": 3.1203813552856445,
+    "max": 3.1203813552856445,
+    "per_seed": [
+     3.1203813552856445
+    ]
+   },
+   "dodges_per_trial": {
+    "mean": 1.4583333333333333,
+    "min": 1.4583333333333333,
+    "max": 1.4583333333333333,
+    "per_seed": [
+     1.4583333333333333
+    ]
+   },
+   "bad_landing_pct": {
+    "mean": 18.51851851851852,
+    "min": 18.51851851851852,
+    "max": 18.51851851851852,
+    "per_seed": [
+     18.51851851851852
+    ]
+   }
+  },
+  "scenario_retreat": {
+   "n": {
+    "mean": 24.0,
+    "min": 24.0,
+    "max": 24.0,
+    "per_seed": [
+     24
+    ]
+   },
+   "sensai_first_touch_pct": {
+    "mean": 33.33333333333333,
+    "min": 33.33333333333333,
+    "max": 33.33333333333333,
+    "per_seed": [
+     33.33333333333333
+    ]
+   },
+   "opp_first_touch_pct": {
+    "mean": 0.0,
+    "min": 0.0,
+    "max": 0.0,
+    "per_seed": [
+     0.0
+    ]
+   },
+   "time_to_first_touch_s": {
+    "mean": 5.241666666666666,
+    "min": 5.241666666666666,
+    "max": 5.241666666666666,
+    "per_seed": [
+     5.241666666666666
+    ]
+   },
+   "ran_under_ball_pct": {
+    "mean": 0.0,
+    "min": 0.0,
+    "max": 0.0,
+    "per_seed": [
+     0.0
+    ]
+   },
+   "touch_ball_speed": {
+    "mean": 1676.5118255615234,
+    "min": 1676.5118255615234,
+    "max": 1676.5118255615234,
+    "per_seed": [
+     1676.5118255615234
+    ]
+   },
+   "touch_goalward_pct": {
+    "mean": 50.0,
+    "min": 50.0,
+    "max": 50.0,
+    "per_seed": [
+     50.0
+    ]
+   },
+   "opp_next_touch_pct": {
+    "mean": 0.0,
+    "min": 0.0,
+    "max": 0.0,
+    "per_seed": [
+     0.0
+    ]
+   },
+   "conceded_pct": {
+    "mean": 45.83333333333333,
+    "min": 45.83333333333333,
+    "max": 45.83333333333333,
+    "per_seed": [
+     45.83333333333333
+    ]
+   },
+   "scored_pct": {
+    "mean": 0.0,
+    "min": 0.0,
+    "max": 0.0,
+    "per_seed": [
+     0.0
+    ]
+   },
+   "boost_used": {
+    "mean": 4.953980048497518,
+    "min": 4.953980048497518,
+    "max": 4.953980048497518,
+    "per_seed": [
+     4.953980048497518
+    ]
+   },
+   "dodges_per_trial": {
+    "mean": 2.375,
+    "min": 2.375,
+    "max": 2.375,
+    "per_seed": [
+     2.375
+    ]
+   },
+   "bad_landing_pct": {
+    "mean": 0.0,
+    "min": 0.0,
+    "max": 0.0,
+    "per_seed": [
+     0.0
+    ]
+   },
+   "retreat_boosting_pct": {
+    "mean": 7.031621889232298,
+    "min": 7.031621889232298,
+    "max": 7.031621889232298,
+    "per_seed": [
+     7.031621889232298
+    ]
+   },
+   "reached_goalside_pct": {
+    "mean": 58.333333333333336,
+    "min": 58.333333333333336,
+    "max": 58.333333333333336,
+    "per_seed": [
+     58.333333333333336
+    ]
+   },
+   "time_to_goalside_s": {
+    "mean": 4.952380952380953,
+    "min": 4.952380952380953,
+    "max": 4.952380952380953,
+    "per_seed": [
+     4.952380952380953
+    ]
+   },
+   "conceded_pct_facing_home": {
+    "mean": 43.75,
+    "min": 43.75,
+    "max": 43.75,
+    "per_seed": [
+     43.75
+    ]
+   },
+   "conceded_pct_facing_away": {
+    "mean": 50.0,
+    "min": 50.0,
+    "max": 50.0,
+    "per_seed": [
+     50.0
+    ]
+   }
+  }
+ },
+ "raw": [
+  {
+   "job": {
+    "kind": "match",
+    "group": "necto",
+    "opponent": "checkpoints/necto-model.pt",
+    "seed": 11,
+    "steps": 12000,
+    "checkpoint": "checkpoints/baselines/v2_iter173600.pt"
+   },
+   "metrics": {
+    "goals_for": 1,
+    "goals_against": 64,
+    "goal_diff_per_10min": -47.25,
+    "goals_for_per_10min": 0.75,
+    "goals_against_per_10min": 48.0,
+    "touches_per_min": 6.75,
+    "on_target_per_100_touches": 1.1111111111111112,
+    "shot_conversion_pct": 100.0,
+    "whiffs_per_100_touches": 100.0,
+    "aimed_whiffs_per_100_touches": 48.88888888888889,
+    "overshoots_aimed_per_100_touches": 74.44444444444444,
+    "kickoffs": 65,
+    "kickoff_first_touch_pct": 4.615384615384615,
+    "kickoff_goals_for": 1,
+    "kickoff_goals_against": 31,
+    "retreat_dodges_per_100_touches": 182.22222222222223,
+    "retreat_dodge_not_wheels_down_pct": 5.384615384615385,
+    "backwall_climbs_per_100_touches": 33.333333333333336,
+    "wall_time_pct": 12.325094260578132,
+    "ga_cause_caught_upfield_pct": 26.5625,
+    "ga_cause_back_wall_climb_pct": 18.75,
+    "ga_cause_goal_side_far_pct": 1.5625,
+    "ga_cause_beaten_goal_side_pct": 1.5625,
+    "ga_cause_own_touch_last_pct": 3.125,
+    "ga_cause_off_the_kickoff_pct": 48.4375,
+    "air_time_pct": 44.65018852115627,
+    "boost_mean": 14.075076226385058,
+    "boost_empty_pct": 42.30414746543779,
+    "boost_spent_per_min": 276.0880704619268,
+    "supersonic_pct": 1.7679095098449937,
+    "retreat_time_pct": 39.212400502723085,
+    "retreat_boosting_pct": 3.810504634397528,
+    "flights_per_min": 18.098031001256807,
+    "landing_not_wheels_down_pct": 4.1666666666666625,
+    "landing_speed_kept_median": 0.9149396582374243
+   }
+  },
+  {
+   "job": {
+    "kind": "match",
+    "group": "necto",
+    "opponent": "checkpoints/necto-model.pt",
+    "seed": 12,
+    "steps": 12000,
+    "checkpoint": "checkpoints/baselines/v2_iter173600.pt"
+   },
+   "metrics": {
+    "goals_for": 1,
+    "goals_against": 58,
+    "goal_diff_per_10min": -42.74999999999999,
+    "goals_for_per_10min": 0.75,
+    "goals_against_per_10min": 43.5,
+    "touches_per_min": 6.675,
+    "on_target_per_100_touches": 1.1235955056179776,
+    "shot_conversion_pct": 0.0,
+    "whiffs_per_100_touches": 87.64044943820225,
+    "aimed_whiffs_per_100_touches": 42.69662921348315,
+    "overshoots_aimed_per_100_touches": 57.30337078651686,
+    "kickoffs": 59,
+    "kickoff_first_touch_pct": 5.084745762711864,
+    "kickoff_goals_for": 0,
+    "kickoff_goals_against": 21,
+    "retreat_dodges_per_100_touches": 191.01123595505618,
+    "retreat_dodge_not_wheels_down_pct": 5.882352941176471,
+    "backwall_climbs_per_100_touches": 28.08988764044944,
+    "wall_time_pct": 13.918432292102839,
+    "ga_cause_caught_upfield_pct": 27.586206896551722,
+    "ga_cause_back_wall_climb_pct": 17.24137931034483,
+    "ga_cause_goal_side_far_pct": 1.7241379310344827,
+    "ga_cause_beaten_goal_side_pct": 15.517241379310345,
+    "ga_cause_own_touch_last_pct": 1.7241379310344827,
+    "ga_cause_off_the_kickoff_pct": 36.206896551724135,
+    "air_time_pct": 44.87898835943388,
+    "boost_mean": 14.926066993469071,
+    "boost_empty_pct": 42.567624152081066,
+    "boost_spent_per_min": 247.46678823522663,
+    "supersonic_pct": 1.6581525835357174,
+    "retreat_time_pct": 40.607989280629766,
+    "retreat_boosting_pct": 3.4926470588235294,
+    "flights_per_min": 18.315048990871787,
+    "landing_not_wheels_down_pct": 4.938271604938271,
+    "landing_speed_kept_median": 0.9524677129595529
+   }
+  },
+  {
+   "job": {
+    "kind": "match",
+    "group": "necto",
+    "opponent": "checkpoints/necto-model.pt",
+    "seed": 13,
+    "steps": 12000,
+    "checkpoint": "checkpoints/baselines/v2_iter173600.pt"
+   },
+   "metrics": {
+    "goals_for": 0,
+    "goals_against": 58,
+    "goal_diff_per_10min": -43.5,
+    "goals_for_per_10min": 0.0,
+    "goals_against_per_10min": 43.5,
+    "touches_per_min": 6.5249999999999995,
+    "on_target_per_100_touches": 0.0,
+    "shot_conversion_pct": 0.0,
+    "whiffs_per_100_touches": 94.25287356321839,
+    "aimed_whiffs_per_100_touches": 42.5287356321839,
+    "overshoots_aimed_per_100_touches": 59.770114942528735,
+    "kickoffs": 58,
+    "kickoff_first_touch_pct": 0.0,
+    "kickoff_goals_for": 0,
+    "kickoff_goals_against": 25,
+    "retreat_dodges_per_100_touches": 189.65517241379308,
+    "retreat_dodge_not_wheels_down_pct": 10.606060606060606,
+    "backwall_climbs_per_100_touches": 34.48275862068965,
+    "wall_time_pct": 14.763021269469101,
+    "ga_cause_caught_upfield_pct": 25.862068965517242,
+    "ga_cause_back_wall_climb_pct": 22.413793103448278,
+    "ga_cause_goal_side_far_pct": 0.0,
+    "ga_cause_beaten_goal_side_pct": 8.620689655172415,
+    "ga_cause_own_touch_last_pct": 0.0,
+    "ga_cause_off_the_kickoff_pct": 43.10344827586207,
+    "air_time_pct": 43.85362585831519,
+    "boost_mean": 11.659315541928146,
+    "boost_empty_pct": 47.43761513984257,
+    "boost_spent_per_min": 239.3971368438374,
+    "supersonic_pct": 1.5659018589850946,
+    "retreat_time_pct": 38.95494891977893,
+    "retreat_boosting_pct": 1.752021563342318,
+    "flights_per_min": 17.86132976050913,
+    "landing_not_wheels_down_pct": 9.704641350210974,
+    "landing_speed_kept_median": 0.9428195241890966
+   }
+  },
+  {
+   "job": {
+    "kind": "scenario",
+    "group": "scenario_drop",
+    "scenario": "drop",
+    "seed": 1000,
+    "trials": 24,
+    "checkpoint": "checkpoints/baselines/v2_iter173600.pt"
+   },
+   "metrics": {
+    "n": 24,
+    "sensai_first_touch_pct": 58.333333333333336,
+    "opp_first_touch_pct": 33.33333333333333,
+    "time_to_first_touch_s": 1.261904761904762,
+    "ran_under_ball_pct": 75.0,
+    "touch_ball_speed": 1253.9248831612724,
+    "touch_goalward_pct": 71.42857142857143,
+    "opp_next_touch_pct": 78.57142857142857,
+    "conceded_pct": 0.0,
+    "scored_pct": 0.0,
+    "boost_used": 10.861144145329794,
+    "dodges_per_trial": 1.4583333333333333,
+    "bad_landing_pct": 0.0
+   }
+  },
+  {
+   "job": {
+    "kind": "scenario",
+    "group": "scenario_bounce",
+    "scenario": "bounce",
+    "seed": 1001,
+    "trials": 24,
+    "checkpoint": "checkpoints/baselines/v2_iter173600.pt"
+   },
+   "metrics": {
+    "n": 24,
+    "sensai_first_touch_pct": 29.166666666666668,
+    "opp_first_touch_pct": 62.5,
+    "time_to_first_touch_s": 1.3238095238095238,
+    "ran_under_ball_pct": 37.5,
+    "touch_ball_speed": 2211.7452566964284,
+    "touch_goalward_pct": 28.57142857142857,
+    "opp_next_touch_pct": 14.285714285714285,
+    "conceded_pct": 12.5,
+    "scored_pct": 0.0,
+    "boost_used": 9.784724553426107,
+    "dodges_per_trial": 1.125,
+    "bad_landing_pct": 0.0
+   }
+  },
+  {
+   "job": {
+    "kind": "match",
+    "group": "nexto",
+    "opponent": "checkpoints/nexto-model.pt",
+    "seed": 11,
+    "steps": 12000,
+    "checkpoint": "checkpoints/baselines/v2_iter173600.pt"
+   },
+   "metrics": {
+    "goals_for": 3,
+    "goals_against": 45,
+    "goal_diff_per_10min": -31.5,
+    "goals_for_per_10min": 2.25,
+    "goals_against_per_10min": 33.75,
+    "touches_per_min": 5.475,
+    "on_target_per_100_touches": 4.10958904109589,
+    "shot_conversion_pct": 33.333333333333336,
+    "whiffs_per_100_touches": 75.34246575342465,
+    "aimed_whiffs_per_100_touches": 15.068493150684931,
+    "overshoots_aimed_per_100_touches": 41.0958904109589,
+    "kickoffs": 48,
+    "kickoff_first_touch_pct": 2.0833333333333335,
+    "kickoff_goals_for": 2,
+    "kickoff_goals_against": 5,
+    "retreat_dodges_per_100_touches": 147.94520547945206,
+    "retreat_dodge_not_wheels_down_pct": 3.488372093023256,
+    "backwall_climbs_per_100_touches": 21.91780821917808,
+    "wall_time_pct": 13.25301204819277,
+    "ga_cause_caught_upfield_pct": 57.77777777777778,
+    "ga_cause_back_wall_climb_pct": 20.0,
+    "ga_cause_goal_side_far_pct": 4.444444444444445,
+    "ga_cause_beaten_goal_side_pct": 6.666666666666667,
+    "ga_cause_own_touch_last_pct": 0.0,
+    "ga_cause_off_the_kickoff_pct": 11.11111111111111,
+    "air_time_pct": 38.094042838018744,
+    "boost_mean": 15.191667404888545,
+    "boost_empty_pct": 35.05689424364123,
+    "boost_spent_per_min": 231.22499500771605,
+    "supersonic_pct": 2.3678045515394914,
+    "retreat_time_pct": 32.33768406961178,
+    "retreat_boosting_pct": 5.191740412979351,
+    "flights_per_min": 15.66265060240964,
+    "landing_not_wheels_down_pct": 5.769230769230771,
+    "landing_speed_kept_median": 1.0076930236777935
+   }
+  },
+  {
+   "job": {
+    "kind": "scenario",
+    "group": "scenario_wall",
+    "scenario": "wall",
+    "seed": 1002,
+    "trials": 24,
+    "checkpoint": "checkpoints/baselines/v2_iter173600.pt"
+   },
+   "metrics": {
+    "n": 24,
+    "sensai_first_touch_pct": 100.0,
+    "opp_first_touch_pct": 0.0,
+    "time_to_first_touch_s": 2.036111111111111,
+    "ran_under_ball_pct": 0.0,
+    "touch_ball_speed": 2155.8389282226562,
+    "touch_goalward_pct": 100.0,
+    "opp_next_touch_pct": 87.5,
+    "conceded_pct": 0.0,
+    "scored_pct": 0.0,
+    "boost_used": 3.1203813552856445,
+    "dodges_per_trial": 1.4583333333333333,
+    "bad_landing_pct": 18.51851851851852
+   }
+  },
+  {
+   "job": {
+    "kind": "scenario",
+    "group": "scenario_retreat",
+    "scenario": "retreat",
+    "seed": 1003,
+    "trials": 24,
+    "checkpoint": "checkpoints/baselines/v2_iter173600.pt"
+   },
+   "metrics": {
+    "n": 24,
+    "sensai_first_touch_pct": 33.33333333333333,
+    "opp_first_touch_pct": 0.0,
+    "time_to_first_touch_s": 5.241666666666666,
+    "ran_under_ball_pct": 0.0,
+    "touch_ball_speed": 1676.5118255615234,
+    "touch_goalward_pct": 50.0,
+    "opp_next_touch_pct": 0.0,
+    "conceded_pct": 45.83333333333333,
+    "scored_pct": 0.0,
+    "boost_used": 4.953980048497518,
+    "dodges_per_trial": 2.375,
+    "bad_landing_pct": 0.0,
+    "retreat_boosting_pct": 7.031621889232298,
+    "reached_goalside_pct": 58.333333333333336,
+    "time_to_goalside_s": 4.952380952380953,
+    "conceded_pct_facing_home": 43.75,
+    "conceded_pct_facing_away": 50.0
+   }
+  }
+ ]
+}
