@@ -715,6 +715,98 @@ def cached_intercept_point(
     return hit
 
 
+# Contact point for a dropping ball, and the standoff the pursuit target holds in front of it.
+#
+# The intercept solver answers "where is the earliest the car can meet the ball", and nothing in the
+# pursuit potential cared whether the car was there early: parked under a falling ball scored as well
+# as arriving on time, and inside 250 uu the target collapsed onto the live ball, whose height made
+# jumping early pay too. Measured against Necto, half of all bouncing-ball whiffs were the car running
+# under the ball -- early, fast (~1200 uu/s) and already airborne -- while touches came at 450-1200 uu/s
+# from beside it. The contact point is where and when the ball comes down to a height a car plays off
+# the floor or a small hop; the standoff is how far back from it the car should be right now.
+CONTACT_Z_UU = 220.0          # ball centre height that is hittable on the way down
+CONTACT_SCAN_TICKS = 12       # prediction scan spacing (0.1 s), refined to one tick by bisection
+CONTACT_HORIZON_TICKS = 360
+HOLD_APPROACH_UU_S = 1000.0   # pace of the approach the standoff is laid out for (touches came at 450-1200)
+HOLD_LEAD_S = 0.25            # the car should already be moving in this long before contact
+HOLD_MAX_UU = 1200.0
+HOLD_HOME_BIAS_UU = 400.0     # near the contact point the standoff side leans goal-side of the ball
+HOLD_INSIDE_WEIGHT = 0.35     # share of the shortfall charged when the car is inside the standoff
+
+
+def solve_contact_point(arena: RocketSimArena) -> Optional[Tuple[np.ndarray, float]]:
+    """(position, seconds from now) of the ball next coming down to CONTACT_Z_UU, or None.
+
+    Returns (ball.pos, 0.0) when the ball is already at or below that height, and None when there is
+    no trusted prediction or the ball stays above it for the whole horizon.
+    """
+    ball = arena.ball.pos
+    if float(ball[2]) <= CONTACT_Z_UU:
+        return np.asarray(ball, dtype=np.float32), 0.0
+    if not hasattr(arena, "get_predicted_ball_pos") or not predictions_trustworthy(arena):
+        return None
+    prev = 0
+    for ticks in range(CONTACT_SCAN_TICKS, CONTACT_HORIZON_TICKS + 1, CONTACT_SCAN_TICKS):
+        p = arena.get_predicted_ball_pos(ticks)
+        if p is None:
+            return None
+        if float(p[2]) <= CONTACT_Z_UU:
+            lo, hi, hi_p = prev, ticks, p
+            while hi - lo > 1:
+                mid = (lo + hi) // 2
+                mp = arena.get_predicted_ball_pos(mid)
+                if mp is None:
+                    break
+                if float(mp[2]) <= CONTACT_Z_UU:
+                    hi, hi_p = mid, mp
+                else:
+                    lo = mid
+            return np.asarray(hi_p, dtype=np.float32).copy(), hi / PREDICTION_TICK_RATE
+        prev = ticks
+    return None
+
+
+def cached_contact_point(arena: RocketSimArena) -> Optional[Tuple[np.ndarray, float]]:
+    """Per-step memo around solve_contact_point: it depends only on the ball, so every car shares it."""
+    step = getattr(arena, "step_count", -1)
+    if getattr(arena, "_contact_cache_step", None) != step:
+        arena._contact_cache_step = step
+        arena._contact_cache = solve_contact_point(arena)
+    return arena._contact_cache
+
+
+def hold_point(car_pos: np.ndarray, contact_pos: np.ndarray, contact_t: float, car_team: int) -> np.ndarray:
+    """Where the car should be now to arrive at the contact point on time.
+
+    Back from the contact point by HOLD_APPROACH_UU_S x (time to contact - HOLD_LEAD_S), capped at
+    HOLD_MAX_UU, along the car's own approach; near the contact point the side leans goal-side of the
+    ball (HOLD_HOME_BIAS_UU), so the direction stays stable while the car is under or beside it. As the
+    ball falls the point slides in along that line and reaches the contact point HOLD_LEAD_S early.
+    Height is the contact height, so a jump toward a ball still far overhead earns nothing.
+
+    Being short of the standoff (too close, too early) is charged at HOLD_INSIDE_WEIGHT of the
+    shortfall rather than all of it: arriving early still loses, but a car that is already close
+    is not told to reverse the whole way out -- waiting where it is costs little. Beyond the
+    standoff (late) the full distance counts, as for any pursuit target.
+    """
+    defend_goal_y = -ARENA_EXTENT_Y if car_team == 0 else ARENA_EXTENT_Y
+    home = np.array([0.0 - float(contact_pos[0]), defend_goal_y - float(contact_pos[1])], dtype=np.float32)
+    home /= max(1e-4, _norm2(home))
+    rel = np.array([float(car_pos[0]) - float(contact_pos[0]), float(car_pos[1]) - float(contact_pos[1])],
+                   dtype=np.float32) + HOLD_HOME_BIAS_UU * home
+    direction = rel / max(1e-4, _norm2(rel))
+    standoff = min(HOLD_MAX_UU, HOLD_APPROACH_UU_S * max(0.0, float(contact_t) - HOLD_LEAD_S))
+    along = max(0.0, float(rel[0] - HOLD_HOME_BIAS_UU * home[0]) * float(direction[0])
+                + float(rel[1] - HOLD_HOME_BIAS_UU * home[1]) * float(direction[1]))
+    if along < standoff:
+        standoff = along + HOLD_INSIDE_WEIGHT * (standoff - along)
+    return np.array([
+        _clip(float(contact_pos[0]) + float(direction[0]) * standoff, -ARENA_EXTENT_X + 100.0, ARENA_EXTENT_X - 100.0),
+        _clip(float(contact_pos[1]) + float(direction[1]) * standoff, -ARENA_EXTENT_Y + 100.0, ARENA_EXTENT_Y - 100.0),
+        float(contact_pos[2]),
+    ], dtype=np.float32)
+
+
 def compute_opponent_threats(
     car: CarState,
     arena: RocketSimArena,
@@ -1651,6 +1743,23 @@ class PlayerToBallVelocityReward(BaseReward):
         v_opp = _norm3(fastest_opp.vel) if fastest_opp is not None else 0.0
         w_slow_opp = _clip((1400.0 - v_opp) / 1000.0, 0.0, 1.0) * 0.45
         w_challenge = max(w_challenge, w_slow_opp)
+
+        # Dropping ball: pursue the hold point instead of the intercept -- which inside 250 uu is the
+        # live ball, wherever it is overhead -- so arriving early scores worse than arriving on time.
+        # Faded in while the ball is above contact height, out when the opponent reaches it first
+        # (waiting then only hands it over), on a wall (walls are played by climbing them), and once
+        # the car itself is committed in the air.
+        contact = cached_contact_point(arena)
+        if contact is not None and contact[1] > 0.0:
+            contact_pos, contact_t = contact
+            w_hold = _smoothstep(float(arena.ball.pos[2]), CONTACT_Z_UU - 40.0, CONTACT_Z_UU + 80.0) \
+                * (1.0 - wall_surface_weight(arena.ball.pos)) \
+                * (1.0 - _smoothstep(float(car_pos[2]), 150.0, 400.0))
+            if t_opp < float("inf"):
+                w_hold *= _smoothstep(t_opp - contact_t, 0.0, 0.4)
+            if w_hold > 0.0:
+                hold = hold_point(car_pos, contact_pos, contact_t, car_team)
+                clamped_intercept = ((1.0 - w_hold) * clamped_intercept + w_hold * hold).astype(np.float32)
 
         # 3. Dynamic Defensive Shadow Anchor along true ball-to-own-goal vector
         # Tactical shadow separation: stay contestably goalside (850 uu) along true defensive line
@@ -3727,12 +3836,21 @@ class OvershootCost(BaseReward):
     approach, as a product of smooth weights (no cutoffs anywhere):
         commitment:  how squarely the car was driving at the ball, over alignment 0.4..0.8
         gettable:    how close it got, full at 150 uu and nothing by 450 uu
-        reachable:   fades out over ball height 300..600 uu, where a miss is an aerial attempt
+        reachable:   fades out over ball height 300..600 uu, where a miss is an aerial attempt --
+                     or over 450..700 uu (double-jump reach) for a car on the floor, below
         own doing:   the fastest the car's own velocity carried it away from the ball during the
                      pass, over 100..500 uu/s. Measured against Necto at 136k, 115 of 142 closed
                      approaches were the ball simply outrunning the car (ball 1615 uu/s against car
                      1142) while the car still drove at it. That is not a miss and pays nothing;
                      only the car taking itself past the ball does.
+    Measured two ways, blended by the car's height (full ground form below 150 uu, full air form
+    above 300 uu):
+        ground:  distance, aim and recede taken horizontally. In 3D a car on the floor directly
+                 under a ball 500 uu up is ~480 uu away and aimed well below it, so running under a
+                 dropping ball and out the other side -- half of all bouncing-ball whiffs against
+                 Necto -- never even opened an approach.
+        air:     all three in 3D, as before, so aerials and air dribbles are charged exactly as they
+                 always were (nothing above 600 uu).
     Never charged when either car touched the ball during the approach: losing a 50/50 is priced
     by possession and progression. A new approach needs a touch or RESET_UU of separation first,
     so the charge cannot compound per step or be farmed in reverse.
@@ -3771,24 +3889,33 @@ class OvershootCost(BaseReward):
             self._approach.pop(car.id, None)   # somebody played it; nothing was missed
             return 0.0
 
+        w_ground = 1.0 - _smoothstep(float(car.pos[2]), 150.0, 300.0)
         car_to_ball = arena.ball.pos - car.pos
-        dist = _norm3(car_to_ball)
-        unit_to_ball = car_to_ball / max(1e-4, dist)
-        speed = _norm3(car.vel)
-        aim = float(np.dot(car.vel, unit_to_ball)) / speed if speed > 150.0 else 0.0
+        dist3 = _norm3(car_to_ball)
+        unit3 = car_to_ball / max(1e-4, dist3)
+        dist2 = _norm2(car_to_ball)
+        unit2 = np.array([car_to_ball[0], car_to_ball[1], 0.0], dtype=np.float32) / max(1e-4, dist2)
+        dist = w_ground * dist2 + (1.0 - w_ground) * dist3
+        speed3 = _norm3(car.vel)
+        speed2 = _norm2(car.vel)
+        aim3 = float(np.dot(car.vel, unit3)) / speed3 if speed3 > 150.0 else 0.0
+        aim2 = float(np.dot(car.vel, unit2)) / speed2 if speed2 > 150.0 else 0.0
+        aim = w_ground * aim2 + (1.0 - w_ground) * aim3
+        recede = -(w_ground * float(np.dot(car.vel, unit2)) + (1.0 - w_ground) * float(np.dot(car.vel, unit3)))
 
         state = self._approach.get(car.id)
         if state is None:
             if dist < self.NEAR_UU and aim > 0.0:
                 self._approach[car.id] = {"min_d": dist, "aim": aim, "recede": 0.0,
-                                          "ball_z": float(arena.ball.pos[2])}
+                                          "ball_z": float(arena.ball.pos[2]), "w_ground": w_ground}
             return 0.0
 
         if dist < state["min_d"]:
             state["min_d"] = dist
             state["ball_z"] = float(arena.ball.pos[2])
+            state["w_ground"] = w_ground
         state["aim"] = max(state["aim"], aim)
-        state["recede"] = max(state["recede"], -float(np.dot(car.vel, unit_to_ball)))
+        state["recede"] = max(state["recede"], recede)
 
         if dist > self.RESET_UU:
             self._approach.pop(car.id, None)
@@ -3799,7 +3926,8 @@ class OvershootCost(BaseReward):
         self._approach.pop(car.id, None)
         w_commit = _smoothstep(state["aim"], 0.4, 0.8)
         w_gettable = 1.0 - _smoothstep(state["min_d"], 150.0, 450.0)
-        w_reachable = 1.0 - _smoothstep(state["ball_z"], 300.0, 600.0)
+        w_g = state.get("w_ground", 0.0)
+        w_reachable = w_g * (1.0 - _smoothstep(state["ball_z"], 450.0, 700.0))             + (1.0 - w_g) * (1.0 - _smoothstep(state["ball_z"], 300.0, 600.0))
         w_self = _smoothstep(state["recede"], 100.0, 500.0)
         return -self.weight * w_commit * w_gettable * w_reachable * w_self
 
