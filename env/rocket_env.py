@@ -114,11 +114,18 @@ class RocketLeagueEnv:
         actions_to_parse = raw_actions.copy()
 
         # If baseline environment in 1v1, override Orange bot action with BaselineChaser / Opponent Bot
+        opp_ticks = None
         if self.is_baseline_env and len(self.arena.cars) > 1:
-            if opponent_action is not None:
-                actions_to_parse[1] = opponent_action
-            elif self.baseline_bot is not None:
-                actions_to_parse[1] = self.baseline_bot.get_action(self.arena.cars[1], self.arena)
+            opp = opponent_action
+            if opp is None and self.baseline_bot is not None:
+                opp = self.baseline_bot.get_action(self.arena.cars[1], self.arena)
+            if opp is not None:
+                if np.ndim(opp) == 2:
+                    # Per-tick script (Necto/Nexto kickoff): played raw by the arena, one row per
+                    # tick; its final row stands in for the step's action everywhere else
+                    opp_ticks = np.asarray(opp, dtype=np.float32)
+                    opp = opp_ticks[-1]
+                actions_to_parse[1] = opp
 
         parsed_actions = self.action_parser.parse_actions(actions_to_parse)
 
@@ -132,7 +139,10 @@ class RocketLeagueEnv:
             bot_mask[1] = True  # Orange slot (index 1) is always the external bot in 1v1
 
         # Execute physics sub-ticks (full tick_skip interval)
-        is_goal, scoring_team = self.arena.step(parsed_actions, dt=float(self.tick_skip) / 120.0, bot_mask=bot_mask)
+        step_actions = parsed_actions
+        if opp_ticks is not None and bot_mask is not None:
+            step_actions = [parsed_actions[0], opp_ticks] + [parsed_actions[k] for k in range(2, len(parsed_actions))]
+        is_goal, scoring_team = self.arena.step(step_actions, dt=float(self.tick_skip) / 120.0, bot_mask=bot_mask)
 
         # Calculate rewards and observations
         if out_obs is None:
@@ -357,7 +367,7 @@ class VectorizedRocketEnv:
             for k, i in enumerate(self._nexto_envs):
                 act = acts[k]
                 self._batched_opp_actions[i] = act
-                self._opponent_prev_actions[i] = act.copy()
+                self._opponent_prev_actions[i] = act[-1] if act.ndim == 2 else act
 
         # 2. Necto (batched)
         if self._necto_envs:
@@ -369,7 +379,7 @@ class VectorizedRocketEnv:
             for k, i in enumerate(self._necto_envs):
                 act = acts[k]
                 self._batched_opp_actions[i] = act
-                self._opponent_prev_actions[i] = act.copy()
+                self._opponent_prev_actions[i] = act[-1] if act.ndim == 2 else act
 
         # 3. Checkpoint bots (grouped by checkpoint model)
         for path, indices in self._checkpoint_groups.items():

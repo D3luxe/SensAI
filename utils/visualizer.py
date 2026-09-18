@@ -193,6 +193,12 @@ REWARD_METADATA: Dict[str, Dict[str, Any]] = {
         "desc": "Penalty for dangerous fast ball movement towards own net",
         "priority": 12,
     },
+    "overshoot": {
+        "label": "Committed Miss",
+        "category": "Penalties & Costs",
+        "desc": "Penalty for driving at the ball, getting inside touching range and carrying past it untouched",
+        "priority": 12,
+    },
     "lateral_slip": {
         "label": "Strike-Zone Lateral Slip",
         "category": "Penalties & Costs",
@@ -464,8 +470,9 @@ def simulate_match(
         goal, scoring_team = arena.step(actions, dt=1.0 / 15.0, bot_mask=bot_mask)
 
         # Calculate reward breakdowns with isolated managers
-        r0, b0 = blue_reward_mgr.get_reward(arena.cars[0], arena, act0, goal, scoring_team)
-        r1, b1 = orange_reward_mgr.get_reward(arena.cars[1], arena, act1, goal, scoring_team)
+        # A scripted Necto/Nexto kickoff comes back as a (ticks, 8) block; score its last row
+        r0, b0 = blue_reward_mgr.get_reward(arena.cars[0], arena, act0 if np.ndim(act0) == 1 else act0[-1], goal, scoring_team)
+        r1, b1 = orange_reward_mgr.get_reward(arena.cars[1], arena, act1 if np.ndim(act1) == 1 else act1[-1], goal, scoring_team)
         for k, v in b0.items():
             blue_rewards[k] = blue_rewards.get(k, 0.0) + v
         for k, v in b1.items():

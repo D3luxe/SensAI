@@ -22,7 +22,8 @@ import numpy as np
 from env.physics_engine import CarState
 from env.rewards import (
     BoostReward, PlayerToBallVelocityReward, RetreatFlipReward, CombinedReward,
-    defensive_recovery_point, go_around_offset, _best_active_pad_score, ARENA_EXTENT_Y,
+    defensive_recovery_point, go_around_offset, _best_active_pad_score, ARENA_EXTENT_X, ARENA_EXTENT_Y,
+    RECOVERY_STANDOFF,
 )
 from test_boost_trajectory_and_urgency import MockArena
 
@@ -48,6 +49,14 @@ class TestRecoveryPoint(unittest.TestCase):
         cross = (p[0] - ball[0]) * gy - (p[1] - ball[1]) * gx
         self.assertAlmostEqual(cross / math.hypot(gx, gy), 0.0, places=2)
         self.assertAlmostEqual(math.hypot(p[0] - ball[0], p[1] - ball[1]), 700.0, places=1)
+
+    def test_point_is_held_clear_of_the_goal_line_and_walls(self):
+        # A ball deep in our own corner used to put the point ~200 uu off the back wall, so the
+        # distance gradient aimed a retreating car at the backboard
+        for ball in ([300.0, -4900.0, 93.0], [3900.0, -4600.0, 93.0], [-3900.0, -5000.0, 93.0]):
+            p = defensive_recovery_point(np.array(ball, dtype=np.float32), car_team=0)
+            self.assertGreaterEqual(float(p[1]), -ARENA_EXTENT_Y + RECOVERY_STANDOFF - 1.0, ball)
+            self.assertLessEqual(abs(float(p[0])), ARENA_EXTENT_X - RECOVERY_STANDOFF + 1.0, ball)
 
     def test_continuous_near_goal(self):
         ys = np.linspace(-4000.0, -5000.0, 101)
@@ -195,6 +204,21 @@ class TestRetreatFlipReward(unittest.TestCase):
     def test_goalside_or_away_flip_pays_nothing(self):
         self.assertEqual(self._dodge([0.0, -2000.0, 17.0], [0.0, -1000.0, 0.0], [0.0, -1500.0, 0.0]), 0.0)
         self.assertEqual(self._dodge([1500.0, 2500.0, 17.0], [0.0, 1000.0, 0.0], [0.0, 1500.0, 0.0]), 0.0)
+
+    def test_flip_into_the_back_wall_pays_far_less_than_one_that_lands_home(self):
+        home = self._dodge([1500.0, 2500.0, 17.0], [-300.0, -1000.0, 0.0], [-450.0, -1500.0, 0.0])
+        into_wall = self._dodge([1500.0, -3600.0, 17.0], [-300.0, -1000.0, 0.0], [-450.0, -1800.0, 0.0],
+                                ball_pos=(1200.0, -2600.0, 93.0))
+        self.assertGreater(home, 0.3)
+        self.assertLess(into_wall, 0.5 * home, f"home={home:.3f} into_wall={into_wall:.3f}")
+
+    def test_still_ball_in_our_half_pays_little(self):
+        # The old 0.4 threat baseline paid a full-speed flip home at a ball sitting still
+        still = self._dodge([1500.0, 2500.0, 17.0], [-300.0, -1000.0, 0.0], [-450.0, -1500.0, 0.0],
+                            ball_vel=(0.0, 0.0, 0.0))
+        incoming = self._dodge([1500.0, 2500.0, 17.0], [-300.0, -1000.0, 0.0], [-450.0, -1500.0, 0.0])
+        self.assertGreater(incoming, 0.3)
+        self.assertLess(still, 0.15 * incoming, f"still={still:.3f} incoming={incoming:.3f}")
 
     def test_no_payout_without_dodge(self):
         car = make_car([1500.0, 2500.0, 17.0], [0.0, -1500.0, 0.0], -math.pi / 2)

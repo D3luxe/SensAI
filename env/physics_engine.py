@@ -667,6 +667,9 @@ class RocketSimArena:
 
                     # External bot pass-through: bypass jump sequencer and axis negations
                     if bot_mask and i < len(bot_mask) and bot_mask[i]:
+                        # A (ticks, 8) block is a per-tick script (the EARL ports' kickoff)
+                        if np.ndim(act) == 2:
+                            act = act[min(tick, len(act) - 1)]
                         r_car.set_controls(rsim.CarControls(
                             throttle=float(act[0]),
                             steer=float(act[1]),

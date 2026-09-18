@@ -282,8 +282,20 @@ class TestRewardAuditFixes(unittest.TestCase):
         # Authorship gate: BallToGoalVelocityReward only prices ball motion the
         # acting team caused, so register our touch before reading it.
         car.ball_touches = 1
+
+        # The bonus is what an on-target ball is worth against THIS defence (shot_clearance), so
+        # the defender is upfield here: with one sitting on the entry point the same ball is a pass.
+        defender = [c for c in self.arena.cars if c.team != car.team][0]
+        home = defender.pos.copy()
+        defender.pos = np.array([0.0, -2000.0, 17.0], dtype=np.float32)
         r = rew.get_reward(car, self.arena, action, False, None)
         self.assertGreater(r, 0.5, f"On-target shot should receive strong progression bonus, got {r}")
+
+        defender.pos = home
+        self.arena.step_count += 1  # shot_clearance caches per step
+        r_covered = rew.get_reward(car, self.arena, action, False, None)
+        self.assertLess(r_covered, r, "A ball the defender is already sitting on is not a shot")
+        self.assertGreater(r_covered, 0.3 * r, "...but it is still progression toward goal")
 
     def test_touch_ball_power_strike_vs_gentle_push(self):
         """Test that a high-speed power strike on goal significantly out-rewards a gentle grounded nose push."""

@@ -6,7 +6,11 @@ Guarantees for attacking shot value and the smooth, state-based slide costs.
   2. From the same tight-angle spot, TouchBallReward pays the center and the shot on target more
      than the backboard smash, and ball_to_goal keeps only B2G_OFF_TARGET_FLOOR of an off-target rate.
   3. Outside the attacking third and on kickoff touches nothing changes.
-  4. LateralSlipCost and SlideWasteCost have no cliffs at their old thresholds, and SlideWasteCost
+  4. An on-target ball is only paid as a shot when the defence cannot reach the entry point
+     first, which is what makes a long shot a pass; a goal that goes in is never discounted.
+  5. A committed miss -- drove at the ball, got inside touching range, carried itself past
+     without a touch -- is charged once, and only when it was really a miss.
+  6. LateralSlipCost and SlideWasteCost have no cliffs at their old thresholds, and SlideWasteCost
      reads only car state: the same state with different inputs costs the same.
 """
 
@@ -18,8 +22,10 @@ import numpy as np
 import env.rewards as rewards
 from env.physics_engine import ARENA_EXTENT_Y, BallState, CarState
 from env.rewards import (
-    B2G_OFF_TARGET_FLOOR, BallToGoalVelocityReward, LateralSlipCost, SlideWasteCost, TouchBallReward,
-    attacking_shot_value, attacking_third_weight, centering_factor, goal_mouth_open_angle, on_target_factor,
+    B2G_OFF_TARGET_FLOOR, SHOT_CLEARANCE_FLOOR, SHOT_COVERED_FLOOR, BallToGoalVelocityReward, GoalReward,
+    LateralSlipCost, OvershootCost, SlideWasteCost, TouchBallReward, attacking_shot_value, attacking_third_weight,
+    centering_factor, covered_shot_scale, goal_mouth_open_angle, on_target_factor,
+    project_ball_to_endline, shot_clearance,
 )
 
 GOAL_Y = ARENA_EXTENT_Y  # blue attacks +Y
@@ -146,6 +152,142 @@ class TestTouchAndProgressionPay(unittest.TestCase):
         self.assertGreater(fwd, 0.0)
         self.assertLess(fwd + back, 0.0)
         self.assertEqual(attacking_third_weight(np.array([0.0, 0.0, 93.0]), GOAL_Y), 0.0, "midfield still cancels")
+
+
+class TestShotClearance(unittest.TestCase):
+    """Blue shoots at +Y from `dist` uu out; the defender sits at (opp_x, opp_y)."""
+
+    def _arena(self, dist, opp_x=0.0, opp_y=4900.0, vx=0.0):
+        y = GOAL_Y - dist
+        arena = BallisticArena([0.0, y, 93.0], [vx, 2300.0, 60.0])
+        car = CarState(id=0, team=0, pos=np.array([0.0, y - 120.0, 17.0], dtype=np.float32),
+                       vel=np.array([0.0, 900.0, 0.0], dtype=np.float32), rot=np.array([0.0, 1.5708, 0.0]))
+        arena.cars = [car, CarState(id=1, team=1, pos=np.array([opp_x, opp_y, 17.0], dtype=np.float32))]
+        return arena, car
+
+    def test_endline_projection_reports_flight_time(self):
+        arena, _ = self._arena(2300.0)
+        x_i, z_i, t_i = project_ball_to_endline(arena, GOAL_Y)
+        self.assertAlmostEqual(abs(x_i), 0.0, delta=20.0)
+        self.assertAlmostEqual(t_i, 1.0, delta=0.15)  # 2300 uu at 2300 uu/s
+        self.assertGreater(z_i, 0.0)
+
+    def test_defender_on_the_entry_point_floors_it(self):
+        arena, car = self._arena(5500.0)
+        self.assertAlmostEqual(shot_clearance(car, arena, GOAL_Y), SHOT_CLEARANCE_FLOOR, delta=0.02)
+
+    def test_the_same_shot_is_clear_with_the_defender_upfield(self):
+        arena, car = self._arena(5500.0, opp_y=-2000.0)
+        self.assertGreater(shot_clearance(car, arena, GOAL_Y), 0.95)
+
+    def test_placement_away_from_the_defender_earns_clearance(self):
+        centred, car_c = self._arena(1200.0)
+        far_post, car_f = self._arena(1200.0, vx=1100.0)
+        self.assertGreater(shot_clearance(car_f, far_post, GOAL_Y), shot_clearance(car_c, centred, GOAL_Y) + 0.2)
+
+    def test_clearance_is_smooth_in_defender_position(self):
+        vals = []
+        for opp_y in np.linspace(4900.0, 1000.0, 200):
+            arena, car = self._arena(3000.0, opp_y=opp_y)
+            vals.append(shot_clearance(car, arena, GOAL_Y))
+        self.assertLess(max(abs(b - a) for a, b in zip(vals, vals[1:])), 0.05)
+
+    def test_a_ball_not_on_frame_keeps_its_full_strike_credit(self):
+        arena, car = self._arena(5500.0, vx=1800.0)
+        self.assertEqual(on_target_factor(arena, GOAL_Y), 0.0)
+        self.assertEqual(covered_shot_scale(car, arena, GOAL_Y, 0.0), 1.0)
+
+    def test_covered_on_target_strike_keeps_the_floor(self):
+        arena, car = self._arena(5500.0)
+        self.assertAlmostEqual(covered_shot_scale(car, arena, GOAL_Y, 1.0), SHOT_COVERED_FLOOR, delta=0.02)
+
+    def test_touch_pays_a_covered_long_shot_less_than_an_open_one(self):
+        def touch(**kw):
+            arena, car = self._arena(5500.0, **kw)
+            r = TouchBallReward(weight=1.0)
+            r.reset(arena)
+            car.ball_touches += 1
+            return r.get_reward(car, arena, np.zeros(8, dtype=np.float32), False, None)
+        covered, open_net = touch(), touch(opp_y=-2000.0)
+        # The strike credit takes the floor; the possession payout for touching it does not
+        self.assertLess(covered, 0.85 * open_net)
+        self.assertGreater(covered, 0.5 * open_net)
+
+    def test_ball_to_goal_keeps_its_progression_but_loses_the_bonus(self):
+        covered_arena, covered_car = self._arena(5500.0)
+        open_arena, open_car = self._arena(5500.0, opp_y=-2000.0)
+        b2g = BallToGoalVelocityReward(weight=1.0)
+        covered = b2g.get_reward(covered_car, covered_arena, np.zeros(8), False, None)
+        clear = b2g.get_reward(open_car, open_arena, np.zeros(8), False, None)
+        self.assertLess(covered, clear)
+        self.assertGreater(covered, 0.7 * clear, "progression itself must survive")
+
+    def test_a_goal_is_never_discounted_for_being_covered(self):
+        # GoalReward is the only term that pays on the scoring step, and it prices where the ball
+        # entered relative to the defenders itself -- shot clearance must not compound with it
+        arena, car = self._arena(5500.0)
+        goal = GoalReward(goal_weight=5.0)
+        goal.reset(arena)
+        scored = goal.get_reward(car, arena, np.zeros(8), True, 0)
+        self.assertGreaterEqual(scored, 5.0)
+        b2g = BallToGoalVelocityReward(weight=1.0)
+        self.assertEqual(b2g.get_reward(car, arena, np.zeros(8), True, 0), 0.0)
+
+
+class TestOvershootCost(unittest.TestCase):
+    """Drives a car in a straight line past a ball and sums what the pass costs it."""
+
+    def _drive(self, ball_pos=(0.0, 0.0, 93.0), ball_vel=(0.0, 0.0, 0.0), lateral=150.0,
+               speed=1400.0, touch_at=None, opp_touch_at=None, steps=24):
+        arena = BallisticArena(list(ball_pos), list(ball_vel))
+        car = CarState(id=0, team=0, pos=np.array([lateral, -700.0, 17.0], dtype=np.float32),
+                       vel=np.array([0.0, speed, 0.0], dtype=np.float32), rot=np.array([0.0, 1.5708, 0.0]))
+        opp = CarState(id=1, team=1, pos=np.array([0.0, 4000.0, 17.0], dtype=np.float32))
+        arena.cars = [car, opp]
+        cost = OvershootCost(weight=1.0)
+        cost.reset(arena)
+        dt = 8.0 / 120.0
+        charges = []
+        for i in range(steps):
+            car.pos = car.pos + car.vel * dt
+            arena.ball.pos = arena.ball.pos + arena.ball.vel * dt
+            arena.step_count += 1
+            if touch_at == i:
+                car.ball_touches += 1
+            if opp_touch_at == i:
+                opp.ball_touches += 1
+            charges.append(cost.get_reward(car, arena, np.zeros(8, dtype=np.float32), False, None))
+        return charges
+
+    def test_committed_miss_is_charged_once(self):
+        charges = self._drive()
+        charged = [c for c in charges if c != 0.0]
+        self.assertEqual(len(charged), 1, charges)
+        self.assertLess(charged[0], -0.3)
+
+    def test_a_touch_during_the_approach_is_never_charged(self):
+        self.assertEqual([c for c in self._drive(touch_at=8) if c != 0.0], [])
+
+    def test_an_opponent_touch_during_the_approach_is_never_charged(self):
+        self.assertEqual([c for c in self._drive(opp_touch_at=8) if c != 0.0], [])
+
+    def test_a_ball_out_of_reach_overhead_is_not_a_miss(self):
+        self.assertEqual([c for c in self._drive(ball_pos=(0.0, 0.0, 700.0)) if c != 0.0], [])
+
+    def test_a_ball_that_rolls_away_from_a_slow_car_is_not_a_miss(self):
+        # Car barely moving, ball leaving on its own: the separation is not the car's doing
+        charges = self._drive(ball_vel=(0.0, 1500.0, 0.0), speed=200.0, lateral=100.0, steps=30)
+        self.assertGreater(min(charges, default=0.0), -0.05, charges)
+
+    def test_a_peel_off_across_the_ball_costs_almost_nothing(self):
+        # Passing 330 uu wide, never really driving at it
+        charges = self._drive(lateral=330.0)
+        self.assertGreater(min(charges, default=0.0), -0.1, charges)
+
+    def test_charge_is_smooth_in_how_close_it_came(self):
+        # Slowly, so which 15 Hz sample lands closest to the ball does not dominate the sweep
+        totals = [sum(self._drive(lateral=x, speed=400.0, steps=70)) for x in np.linspace(100.0, 380.0, 57)]
+        self.assertLess(max(abs(b - a) for a, b in zip(totals, totals[1:])), 0.08, totals)
 
 
 class TestSlideCosts(unittest.TestCase):

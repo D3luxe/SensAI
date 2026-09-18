@@ -282,6 +282,56 @@ EARL_NORM = np.array([1.] * 5 + [2300] * 6 + [1] * 6 + [5.5] * 3 + [1] * 4, dtyp
 EARL_INVERT = np.array([1] * 5 + [-1, -1, 1] * 5 + [1] * 4, dtype=np.float32)
 
 
+# The kickoff the RLBot v5 ports of Necto and Nexto actually play (VirxEC/NectoFamily, bot.py,
+# hardcoded_kickoffs = True): a scripted speed-flip, one row per 120 Hz tick, that overrides the
+# model from the moment the kickoff starts until the script runs out or the ball moves. The model
+# on its own takes a slow, boost-conserving kickoff; without this the simulated Necto/Nexto arrived
+# 0.3-0.5 s behind the live ones and SensAI never met a contested kickoff in training.
+EARL_TICK_SKIP = 8
+EARL_KICKOFF_TICKS = np.array(
+    11 * 4 * [[1, 0, 0, 0, 0, 0, 1, 0]]
+    + 4 * 4 * [[1, -1, 0, 0, 0, 0, 1, 0]]
+    + 2 * 4 * [[1, 0, 0, 0, 0, 1, 1, 0]]
+    + 1 * 4 * [[1, 0, 0, 0, 0, 0, 1, 0]]
+    + 1 * 4 * [[1, 0, -0.7, 0.8, 0, 1, 1, 0]]
+    + 13 * 4 * [[1, 0, 1, 0, 0, 0, 1, 0]]
+    + 10 * 4 * [[1, 0, 0.5, 0, 1, 0, 0, 0]],
+    dtype=np.float32,
+)
+
+
+def _earl_kickoff_phase(arena: RocketSimArena) -> bool:
+    """RLBot's MatchPhase.Kickoff as the ports test it: the ball still resting on the centre spot."""
+    b = arena.ball
+    return bool(abs(float(b.pos[0])) < 1.0 and abs(float(b.pos[1])) < 1.0 and float(np.linalg.norm(b.vel)) < 1.0)
+
+
+def _earl_is_kickoff_taker(car: CarState, arena: RocketSimArena) -> bool:
+    """The ports' rule: the car nearest the ball goes; between equidistant teammates, the left one."""
+    dist = {id(c): float(np.linalg.norm(c.pos[:2] - arena.ball.pos[:2])) for c in arena.cars}
+    mine = dist[id(car)]
+    if mine - min(dist.values()) > 10.0:
+        return False
+    for c in arena.cars:
+        if c is not car and c.team == car.team and abs(dist[id(c)] - mine) <= 10.0:
+            other_left = (c.pos[0] < car.pos[0]) if car.team == 0 else (c.pos[0] > car.pos[0])
+            if not other_left:
+                return False
+    return True
+
+
+def _earl_has_flip(car: CarState) -> float:
+    """has_flip as Necto and Nexto were trained on it: True on the ground.
+
+    CarState.has_flip is False whenever the car is grounded (the sim's own convention, which SensAI's
+    observation was trained with). RLGym and rlgym_compat -- what these models trained and run live
+    on -- report a grounded car as having its flip. Fed the sim's value, the models believe their
+    flip is spent every time their wheels are down and never plan a ground dodge: no kickoff flips,
+    no challenge dodges, no flicks.
+    """
+    return 1.0 if (car.on_ground or car.has_flip) else 0.0
+
+
 class NectoNextoOpponentBot(BaseOpponent):
     """
     Opponent Bot powered by a TorchScript model (Necto, Nexto, or standard EARL Perceiver models).
@@ -293,7 +343,38 @@ class NectoNextoOpponentBot(BaseOpponent):
         self.is_nexto = False
         self.nexto_action_table: Optional[torch.Tensor] = None
         self.prev_action = np.zeros(8, dtype=np.float32)
+        # Position in EARL_KICKOFF_TICKS per (arena, car), so one bot can script several batched
+        # envs, or both cars of a mirror match
+        self._kickoff_tick: Dict[Tuple[int, int], int] = {}
         self._load_torchscript()
+
+    def kickoff_controls(self, car: CarState, arena: RocketSimArena) -> Optional[np.ndarray]:
+        """
+        The next EARL_TICK_SKIP ticks of the scripted kickoff, shape (EARL_TICK_SKIP, 8), or None
+        once the model is in control. The script starts when the kickoff does (car at rest, ball on
+        the spot) and stops for good when the ball moves or the script runs out, as in the ports.
+        """
+        key = (id(arena), car.id)
+        if not _earl_kickoff_phase(arena):
+            self._kickoff_tick.pop(key, None)
+            return None
+        if float(np.linalg.norm(car.vel)) < 1.0:
+            self._kickoff_tick[key] = 0 if _earl_is_kickoff_taker(car, arena) else len(EARL_KICKOFF_TICKS)
+        tick = self._kickoff_tick.get(key)
+        if tick is None or tick >= len(EARL_KICKOFF_TICKS):
+            return None
+        self._kickoff_tick[key] = tick + EARL_TICK_SKIP
+        block = EARL_KICKOFF_TICKS[tick:tick + EARL_TICK_SKIP]
+        if len(block) < EARL_TICK_SKIP:
+            block = np.concatenate([block, np.repeat(block[-1:], EARL_TICK_SKIP - len(block), axis=0)])
+        return block.copy()
+
+    def _nexto_pick(self, logits: torch.Tensor, arena: RocketSimArena) -> int:
+        # The Nexto port samples (beta 0.5, i.e. the raw policy distribution) for the whole kickoff
+        # phase instead of taking the argmax, so its kickoff follow-ups vary
+        if _earl_kickoff_phase(arena):
+            return int(torch.distributions.Categorical(logits=logits.reshape(-1)).sample().item())
+        return int(torch.argmax(logits, dim=-1).item())
 
     def _load_torchscript(self):
         try:
@@ -346,7 +427,7 @@ class NectoNextoOpponentBot(BaseOpponent):
             kv[0, idx, 17:20] = p.ang_vel
             kv[0, idx, 20] = p.boost / 100.0
             kv[0, idx, 22] = 1.0 if p.on_ground else 0.0
-            kv[0, idx, 23] = 1.0 if p.has_flip else 0.0
+            kv[0, idx, 23] = _earl_has_flip(p)
 
         if car.team == 1:
             kv *= EARL_INVERT
@@ -409,7 +490,7 @@ class NectoNextoOpponentBot(BaseOpponent):
             qkv[0, n, 20] = p.boost / 100.0
             qkv[0, n, 21] = 0.0  # demo timer
             qkv[0, n, 22] = 1.0 if p.on_ground else 0.0
-            qkv[0, n, 23] = 1.0 if p.has_flip else 0.0
+            qkv[0, n, 23] = _earl_has_flip(p)
 
         # 3. Boost pads
         n_boost_start = 1 + n_players
@@ -445,13 +526,20 @@ class NectoNextoOpponentBot(BaseOpponent):
         if self.model is None or not isinstance(arena_or_ball, RocketSimArena):
             return BaselineChaser().get_action(car, arena_or_ball)
 
+        block = self.kickoff_controls(car, arena_or_ball)
+        if block is not None:
+            # A (ticks, 8) block: arena.step plays it one row per tick. The model sees the
+            # scripted controls as its previous action, as the live bot's does.
+            self.prev_action = block[-1].copy()
+            return block
+
         try:
             if self.is_nexto:
                 q_t, kv_t, mask_t = self._build_nexto_inputs(car, arena_or_ball)
                 with torch.no_grad():
                     out = self.model((q_t, kv_t, mask_t))
                 logits = out[0] if isinstance(out, (tuple, list)) else out
-                best_idx = int(torch.argmax(logits, dim=-1).item())
+                best_idx = self._nexto_pick(logits, arena_or_ball)
                 action = self.nexto_action_table[best_idx].numpy().copy()
             else:
                 q_t, kv_t, mask_t = self._build_necto_inputs(car, arena_or_ball)
@@ -487,6 +575,14 @@ class NectoNextoOpponentBot(BaseOpponent):
         except Exception as e:
             return BaselineChaser().get_action(car, arena_or_ball)
 
+    def _apply_kickoff_scripts(self, cars, arenas, actions: List[np.ndarray]) -> List[np.ndarray]:
+        """Replaces the model's action with the scripted (ticks, 8) block wherever a kickoff is running."""
+        for k, (c, a) in enumerate(zip(cars, arenas)):
+            block = self.kickoff_controls(c, a)
+            if block is not None:
+                actions[k] = block
+        return actions
+
     def batch_get_actions(
         self,
         cars: List[CarState],
@@ -516,12 +612,12 @@ class NectoNextoOpponentBot(BaseOpponent):
                 with torch.no_grad():
                     out = self.model((q_b, kv_b, mask_b))
                 logits = out[0] if isinstance(out, (tuple, list)) else out
-                best_indices = torch.argmax(logits, dim=-1).cpu().numpy()
-
+                logits = logits.reshape(len(cars), -1)
                 actions = []
-                for idx in best_indices:
+                for k, a in enumerate(arenas):
+                    idx = self._nexto_pick(logits[k], a)
                     actions.append(self.nexto_action_table[idx].numpy().copy())
-                return actions
+                return self._apply_kickoff_scripts(cars, arenas, actions)
             else:
                 qs, kvs, masks = [], [], []
                 for i, (c, a) in enumerate(zip(cars, arenas)):
@@ -566,7 +662,7 @@ class NectoNextoOpponentBot(BaseOpponent):
                     parsed[6] = parsed_actions_all[k, 3]
                     parsed[7] = parsed_actions_all[k, 4]
                     actions.append(parsed)
-                return actions
+                return self._apply_kickoff_scripts(cars, arenas, actions)
         except Exception:
             return [self.get_action(c, a) for c, a in zip(cars, arenas)]
 
