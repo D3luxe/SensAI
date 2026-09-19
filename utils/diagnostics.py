@@ -1,399 +1,228 @@
 """
-Behavioral Diagnostics and AI Training Coach.
-Analyzes rolling telemetry from PPO rollouts and checkpoints to visualize action biases,
-spatial tendencies, and automatically flag bad habits with actionable reward recommendations.
-"""
+Behaviour diagnostics from the trainer's per-iteration telemetry (logs/history.jsonl).
 
+Everything here reads the current reward run only (utils/run_history.py): mean reward and losses
+change scale with the reward version, and behaviour under v2 says nothing about v3's policy.
+
+  run_telemetry(window)        mean telemetry over the last `window` iterations of the run, and over
+                               its first `window` (what the policy did when the run started)
+  render_behaviour_plot        now vs run start, controls and pitch/state side by side
+  behaviour_flags_markdown     habits worth a look, each pointing at the eval metric that measures
+                               it. Rewards are frozen per version (docs/reward_v3_spec.md, R1/R7), so
+                               there are no weight nudges: a finding is checked on the eval suite
+                               and, if real, becomes a candidate for the next version.
+  render_training_curves_plot  reward, losses, entropy, throughput for the run / recent / all history
+
+Telemetry is sampled from the training rollouts (every opponent type mixed together), so it
+describes training behaviour, not a match against Necto. The eval suite measures that.
+"""
 from __future__ import annotations
-import os
-import json
-from typing import Dict, Any, List, Optional, Tuple
+
+from typing import Any, Dict, List, Optional, Tuple
+
 import numpy as np
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
-from env.rewards import REWARD_DEFAULTS
+
+from utils import run_history
+
+BG, PANEL, GRID, TEXT, MUTED = "#0f172a", "#111c2e", "#64748b", "#e2e8f0", "#94a3b8"
+
+CONTROLS = [
+    ("throttle_forward_pct", "Throttle forward"), ("throttle_reverse_pct", "Reversing"),
+    ("steer_left_pct", "Steering left"), ("steer_right_pct", "Steering right"),
+    ("jump_rate_pct", "Jump held"), ("boost_rate_pct", "Boost held"), ("handbrake_rate_pct", "Handbrake held"),
+]
+STATE = [
+    ("defensive_third_pct", "In own third"), ("midfield_third_pct", "In midfield"),
+    ("offensive_third_pct", "In attacking third"), ("corner_zone_pct", "In a corner"),
+    ("air_time_pct", "Airborne"), ("zero_boost_pct", "Empty boost"), ("mean_boost_tank", "Mean boost (0-100)"),
+]
 
 
-def extract_rolling_telemetry(history_file: str = "logs/history.jsonl", window: int = 8) -> Dict[str, Any]:
-    """
-    Reads the last window iterations from history.jsonl and calculates the mean behavioral telemetry.
-    """
-    if not os.path.exists(history_file):
+def _style(ax):
+    ax.set_facecolor(PANEL)
+    for s in ("top", "right"):
+        ax.spines[s].set_visible(False)
+    for s in ("left", "bottom"):
+        ax.spines[s].set_color("#334155")
+    ax.tick_params(colors=MUTED, labelsize=8)
+    ax.grid(True, linestyle=":", alpha=0.3, color=GRID)
+
+
+def _mean_telemetry(records: List[Dict[str, Any]]) -> Dict[str, float]:
+    tel = [r["telemetry"] for r in records if isinstance(r.get("telemetry"), dict)]
+    if not tel:
         return {}
-
-    records = []
-    try:
-        with open(history_file, "r", encoding="utf-8") as f:
-            for line in f:
-                if line.strip():
-                    try:
-                        records.append(json.loads(line.strip()))
-                    except Exception:
-                        pass
-    except Exception:
-        return {}
-
-    if not records:
-        return {}
-
-    recent = records[-window:]
-    telemetries = [r.get("telemetry", {}) for r in recent if "telemetry" in r]
-
-    if not telemetries:
-        telemetries = [r for r in recent if "jump_rate_pct" in r]
-
-    if not telemetries:
-        return {}
-
-    avg_telemetry: Dict[str, float] = {}
-    keys = telemetries[0].keys()
-    for k in keys:
-        vals = [t[k] for t in telemetries if k in t and isinstance(t[k], (int, float))]
+    out = {}
+    for k in tel[0]:
+        vals = [t[k] for t in tel if isinstance(t.get(k), (int, float))]
         if vals:
-            avg_telemetry[k] = float(np.mean(vals))
-
-    avg_telemetry["sample_iterations"] = len(telemetries)
-    avg_telemetry["latest_iteration"] = recent[-1].get("iteration", 0)
-    avg_telemetry["latest_step"] = recent[-1].get("global_step", 0)
-    return avg_telemetry
+            out[k] = float(np.mean(vals))
+    return out
 
 
-def render_action_biases_plot(telemetry: Dict[str, Any]) -> plt.Figure:
-    """
-    Renders a dark-themed horizontal bar chart of the 8 controller action distributions.
-    """
-    fig, ax = plt.subplots(figsize=(9, 4.6), dpi=100)
-    fig.patch.set_facecolor("#1a202c")
-    ax.set_facecolor("#2d3748")
-
-    if not telemetry:
-        ax.text(0.5, 0.5, "No Behavioral Telemetry Recorded Yet\n(Will appear as training iterations complete)",
-                color="#a0aec0", fontsize=12, ha="center", va="center")
-        ax.set_axis_off()
-        plt.tight_layout()
-        return fig
-
-    items = [
-        ("Forward Throttle (>20%)", telemetry.get("throttle_forward_pct", 0.0), "#48bb78"),
-        ("Coast / Neutral Throttle", telemetry.get("throttle_coast_pct", 0.0), "#a0aec0"),
-        ("Reverse / Braking (<-20%)", telemetry.get("throttle_reverse_pct", 0.0), "#f56565"),
-        ("Left Steering (<-20%)", telemetry.get("steer_left_pct", 0.0), "#4299e1"),
-        ("Straight Driving (|steer|<=20%)", telemetry.get("steer_straight_pct", 0.0), "#cbd5e0"),
-        ("Right Steering (>20%)", telemetry.get("steer_right_pct", 0.0), "#ed8936"),
-        ("Jump Activation Rate", telemetry.get("jump_rate_pct", 0.0), "#9f7aea"),
-        ("Boost Usage Rate", telemetry.get("boost_rate_pct", 0.0), "#ecc94b"),
-        ("Handbrake / Drift Rate", telemetry.get("handbrake_rate_pct", 0.0), "#ed64a6"),
-    ]
-
-    labels = [it[0] for it in items]
-    vals = [it[1] for it in items]
-    colors = [it[2] for it in items]
-    y_pos = np.arange(len(items))
-
-    bars = ax.barh(y_pos, vals, height=0.55, color=colors, alpha=0.9, edgecolor="#ffffff", linewidth=0.5)
-
-    ax.set_yticks(y_pos)
-    ax.set_yticklabels(labels, color="#e2e8f0", fontsize=10)
-    ax.set_xlim(0, 105)
-    ax.set_xlabel("Usage Frequency (% of Simulation Steps)", color="#e2e8f0", fontsize=10, fontweight="bold")
-    ax.set_title("Action & Control Biases (Rolling Average)", color="white", fontsize=12, fontweight="bold", pad=10)
-
-    ax.spines["top"].set_visible(False)
-    ax.spines["right"].set_visible(False)
-    ax.spines["left"].set_color("#4a5568")
-    ax.spines["bottom"].set_color("#4a5568")
-    ax.grid(axis="x", linestyle=":", alpha=0.4, color="#718096")
-    ax.tick_params(colors="#cbd5e0")
-
-    for bar, val in zip(bars, vals):
-        ax.annotate(f"{val:.1f}%", (val + 1.2, bar.get_y() + bar.get_height() / 2),
-                    color="#ffffff", fontsize=9, va="center", fontweight="bold")
-
-    plt.tight_layout()
-    return fig
+def run_telemetry(window: int = 10, history_file: str = run_history.HISTORY_FILE) -> Dict[str, Any]:
+    run = run_history.current_run(history_file)
+    recs = run["records"]
+    if not recs:
+        return {}
+    version, start = run["key"] or ("?", 0)
+    return {
+        "now": _mean_telemetry(recs[-window:]),
+        "start": _mean_telemetry(recs[:window]) if len(recs) >= 2 * window else {},
+        "window": window,
+        "version": version,
+        "run_steps": int(recs[-1].get("global_step", 0)) - int(start or 0),
+        "iteration": recs[-1].get("iteration", 0),
+        "iterations_in_run": len(recs),
+    }
 
 
-def render_positional_biases_plot(telemetry: Dict[str, Any]) -> plt.Figure:
-    """
-    Renders a dark-themed bar chart of pitch territorial distribution and vehicle physical state.
-    """
-    fig, ax = plt.subplots(figsize=(9, 4.6), dpi=100)
-    fig.patch.set_facecolor("#1a202c")
-    ax.set_facecolor("#2d3748")
-
-    if not telemetry:
-        ax.text(0.5, 0.5, "No Positional Telemetry Recorded Yet",
-                color="#a0aec0", fontsize=12, ha="center", va="center")
-        ax.set_axis_off()
-        plt.tight_layout()
-        return fig
-
-    items = [
-        ("Defensive Third (Y < -33%)", telemetry.get("defensive_third_pct", 0.0), "#3182ce"),
-        ("Midfield Neutral Third", telemetry.get("midfield_third_pct", 0.0), "#38b2ac"),
-        ("Offensive Third (Y > +33%)", telemetry.get("offensive_third_pct", 0.0), "#dd6b20"),
-        ("Corner Dead-Zone Time", telemetry.get("corner_zone_pct", 0.0), "#e53e3e"),
-        ("Airborne Time (Off Ground)", telemetry.get("air_time_pct", 0.0), "#805ad5"),
-        ("Ground Driving Time", telemetry.get("ground_time_pct", 0.0), "#48bb78"),
-        ("Empty Boost Time (<1% Boost)", telemetry.get("zero_boost_pct", 0.0), "#d69e2e"),
-        ("Average Boost Tank Level", telemetry.get("mean_boost_tank", 0.0), "#319795"),
-    ]
-
-    labels = [it[0] for it in items]
-    vals = [it[1] for it in items]
-    colors = [it[2] for it in items]
-    y_pos = np.arange(len(items))
-
-    bars = ax.barh(y_pos, vals, height=0.55, color=colors, alpha=0.9, edgecolor="#ffffff", linewidth=0.5)
-
-    ax.set_yticks(y_pos)
-    ax.set_yticklabels(labels, color="#e2e8f0", fontsize=10)
-    ax.set_xlim(0, 105)
-    ax.set_xlabel("Time Spent (% of Steps) / Level", color="#e2e8f0", fontsize=10, fontweight="bold")
-    ax.set_title("Pitch Territorial & Physical State Biases", color="white", fontsize=12, fontweight="bold", pad=10)
-
-    ax.spines["top"].set_visible(False)
-    ax.spines["right"].set_visible(False)
-    ax.spines["left"].set_color("#4a5568")
-    ax.spines["bottom"].set_color("#4a5568")
-    ax.grid(axis="x", linestyle=":", alpha=0.4, color="#718096")
-    ax.tick_params(colors="#cbd5e0")
-
-    for bar, val in zip(bars, vals):
-        unit = "%" if "Level" not in labels[int(bar.get_y())] else " boost"
-        ax.annotate(f"{val:.1f}{unit}", (val + 1.2, bar.get_y() + bar.get_height() / 2),
-                    color="#ffffff", fontsize=9, va="center", fontweight="bold")
-
-    plt.tight_layout()
-    return fig
-
-
-# Suggested adjustments are a step relative to the weight in force, not absolute ranges: the old
-# fixed "recommended 1.0 - 1.4" style values belonged to an earlier reward scale and drifted to
-# 4-8x the weights actually being trained with.
-COACH_NUDGE = 1.25
-
-
-def _nudge(active_rewards: Dict[str, float], key: str, label: str) -> str:
-    cur = float(active_rewards.get(key, REWARD_DEFAULTS[key]))
-    return f"**{label} (`{key}`)** a step at a time, e.g. `{cur:.3g}` -> `{cur * COACH_NUDGE:.3g}`"
-
-
-def generate_ai_coach_diagnostics(telemetry: Dict[str, Any], active_rewards: Optional[Dict[str, float]] = None) -> str:
-    """
-    Analyzes telemetry to produce automated alerts, bad habit warnings, and tuning tips.
-    """
-    if not telemetry:
-        return "### ⏳ Waiting for Behavioral Telemetry Data...\nRun training for at least 1-2 iterations to generate rolling habit diagnostics."
-
-    active_rewards = active_rewards or {}
-
-    alerts = []
-    healthy = []
-    tips = []
-
-    samples = telemetry.get("sample_iterations", 1)
-    iter_num = telemetry.get("latest_iteration", 0)
-
-    corner_pct = telemetry.get("corner_zone_pct", 0.0)
-    if corner_pct > 25.0:
-        alerts.append(f"🚨 **High Corner Trapping ({corner_pct:.1f}%)**: The bot is spending over a quarter of the match trapped in corner dead-zones.")
-        tips.append(f"🔧 **Fix:** Raise {_nudge(active_rewards, 'ball_to_goal_weight', 'Ball-to-Goal Velocity')} to incentivize centering and clearing the ball.")
-    else:
-        healthy.append(f"✅ **Good Field Spacing**: Corner trapping is low ({corner_pct:.1f}%).")
-
-    jump_pct = telemetry.get("jump_rate_pct", 0.0)
-    air_pct = telemetry.get("air_time_pct", 0.0)
-    if jump_pct < 1.5 and air_pct < 3.0:
-        alerts.append(f"🚨 **Grounded / Low Aerial Rate (Jump: {jump_pct:.1f}%, Air: {air_pct:.1f}%)**: The bot is staying glued to the floor.")
-        tips.append("🔧 **Fix:** Raise **Aerial Scenario Probability (`aerial_prob`)** by a few points in Scenario Settings to train airborne challenges.")
-    elif jump_pct > 65.0:
-        alerts.append(f"⚠️ **Jump Spamming ({jump_pct:.1f}%)**: The bot is spamming jump constantly, losing ground steering traction.")
-        tips.append(f"🔧 **Fix:** Raise {_nudge(active_rewards, 'jump_cost_weight', 'Jump Cost')}, which charges each takeoff, to discourage needless jumps.")
-    else:
-        healthy.append(f"✅ **Active Aerial Play**: Jump rate is {jump_pct:.1f}% with {air_pct:.1f}% airtime.")
-
-    left_pct = telemetry.get("steer_left_pct", 0.0)
-    right_pct = telemetry.get("steer_right_pct", 0.0)
-    steer_diff = abs(left_pct - right_pct)
-    if steer_diff > 30.0:
-        dominant = "Left" if left_pct > right_pct else "Right"
-        alerts.append(f"🚨 **Steer Asymmetry / Donut Bias**: Turning {dominant} {max(left_pct, right_pct):.1f}% vs {min(left_pct, right_pct):.1f}%. The bot has developed a circular driving habit.")
-        tips.append(f"🔧 **Fix:** Raise {_nudge(active_rewards, 'player_to_ball_weight', 'Player-to-Ball Pursuit')} to reward direct approaches. Note it is annealed toward its `reward_annealing` target.")
-    else:
-        healthy.append(f"✅ **Balanced Steering**: Left ({left_pct:.1f}%) and Right ({right_pct:.1f}%) steering are well-balanced.")
-
-    zero_boost = telemetry.get("zero_boost_pct", 0.0)
-    mean_boost = telemetry.get("mean_boost_tank", 33.3)
-    if zero_boost > 35.0 or mean_boost < 15.0:
-        alerts.append(f"🚨 **Boost Starvation (Empty: {zero_boost:.1f}%, Avg: {mean_boost:.1f} boost)**: The bot is frequently driving on empty tanks.")
-        tips.append(f"🔧 **Fix:** Raise {_nudge(active_rewards, 'boost_gain_weight', 'Boost Pickup Gain')} or {_nudge(active_rewards, 'boost_lose_weight', 'Boost Waste Penalty')}.")
-    else:
-        healthy.append(f"✅ **Healthy Boost Reserves**: Average tank is {mean_boost:.1f} boost ({zero_boost:.1f}% empty).")
-
-    rev_pct = telemetry.get("throttle_reverse_pct", 0.0)
-    fwd_pct = telemetry.get("throttle_forward_pct", 0.0)
-    if rev_pct > 30.0:
-        alerts.append(f"⚠️ **Excessive Reversing ({rev_pct:.1f}%)**: The bot is spending significant time backing up rather than rotating forward.")
-        tips.append(f"🔧 **Fix:** Raise {_nudge(active_rewards, 'player_to_ball_weight', 'Player-to-Ball Pursuit')}.")
-    else:
-        healthy.append(f"✅ **Forward Aggression**: Driving forward {fwd_pct:.1f}% of the time.")
-
-    report = f"### 🧠 AI Coach Behavioral Diagnosis (Averaged over last {samples} iters | Iter #{iter_num})\n\n#### 🚨 Detected Bad Habits & Alerts:\n"
-    if alerts:
-        for a in alerts:
-            report += f"* {a}\n"
-    else:
-        report += "* *No critical bad habits detected! Bot behavior is well-balanced.*\n"
-
-    report += "\n#### 🟢 Healthy Mechanics:\n"
-    for h in healthy:
-        report += f"* {h}\n"
-
-    if tips:
-        report += "\n#### 🎯 Recommended Reward Adjustments:\n"
-        for t in tips:
-            report += f"* {t}\n"
-
-    return report
-
-
-def render_training_curves_plot(history_file: str = "logs/history.jsonl", max_points: int = 100, mode: str = "recent") -> plt.Figure:
-    """
-    Renders a 4-panel dark-themed live training progress chart:
-    1. Mean Reward Curve
-    2. Policy & Value Losses
-    3. Policy Entropy (Exploration)
-    4. Throughput (SPS) & Ball Touches
-    Uses O(1) seek-from-tail for recent iterations (<1ms) or byte-stepped downsampling for full run history.
-    """
+def render_behaviour_plot(tel: Dict[str, Any]) -> plt.Figure:
     plt.close("all")
-    fig, axes = plt.subplots(2, 2, figsize=(11, 6.0), dpi=100)
-    fig.patch.set_facecolor("#1a202c")
+    fig, axes = plt.subplots(1, 2, figsize=(12, 4.2), dpi=100)
+    fig.patch.set_facecolor(BG)
+    now, start = tel.get("now") or {}, tel.get("start") or {}
+    if not now:
+        for ax in axes:
+            ax.set_axis_off()
+        fig.text(0.5, 0.5, "No telemetry for this run yet: it appears after the first training iterations.",
+                 ha="center", va="center", color=MUTED, fontsize=11)
+        return fig
+    for ax, items, title in ((axes[0], CONTROLS, "Controls (% of steps)"), (axes[1], STATE, "Where it is (% of steps)")):
+        _style(ax)
+        y = np.arange(len(items))
+        nv = [now.get(k, 0.0) for k, _ in items]
+        ax.barh(y + (0.2 if start else 0), nv, height=0.38 if start else 0.6, color="#38bdf8", label="now")
+        if start:
+            sv = [start.get(k, 0.0) for k, _ in items]
+            ax.barh(y - 0.2, sv, height=0.38, color="#475569", label="run start")
+        for yi, v in zip(y, nv):
+            ax.text(v + 1, yi + (0.2 if start else 0), f"{v:.0f}", va="center", color=TEXT, fontsize=8)
+        ax.set_yticks(y)
+        ax.set_yticklabels([lbl for _, lbl in items], color=TEXT, fontsize=9)
+        ax.invert_yaxis()
+        ax.set_xlim(0, 105)
+        ax.set_title(title, color=TEXT, fontsize=10, loc="left")
+        ax.grid(axis="y", visible=False)
+    if start:
+        axes[1].legend(loc="lower right", facecolor=BG, edgecolor="#334155", labelcolor=TEXT, fontsize=8)
+    fig.tight_layout()
+    return fig
+
+
+# (telemetry key, test(now) -> bool, headline, what to check)
+_FLAGS = [
+    ("corner_zone_pct", lambda v: v > 20.0, "Spends {v:.0f}% of steps in the corners",
+     "Goals-against causes and touches/min on the Evaluation page."),
+    ("zero_boost_pct", lambda v: v > 35.0, "Empty boost {v:.0f}% of the time",
+     "Boosting while retreating and the retreat scenario on the Evaluation page (T5 values boost held)."),
+    ("throttle_reverse_pct", lambda v: v > 25.0, "Reversing {v:.0f}% of the time",
+     "Time to first touch in the scenarios; reversing is sometimes right (backwards retreats)."),
+    ("jump_rate_pct", lambda v: v > 60.0, "Jump held {v:.0f}% of steps",
+     "Landing quality (landings not on wheels, speed kept after landing)."),
+    ("air_time_pct", lambda v: v < 3.0, "Almost never airborne ({v:.1f}% of steps)",
+     "Scenario first-touch rates on drops and bounces."),
+]
+
+
+def behaviour_flags_markdown(tel: Dict[str, Any]) -> str:
+    if not tel or not tel.get("now"):
+        return "#### Waiting for telemetry\nFlags appear after the first iterations of the run."
+    now, start = tel["now"], tel.get("start") or {}
+    lines = [f"#### Reward {tel['version']} run · {tel['run_steps'] / 1e6:,.1f}M steps · "
+             f"last {tel['window']} iterations"]
+    flagged = False
+    for key, test, head, check in _FLAGS:
+        v = now.get(key)
+        if v is None or not test(v):
+            continue
+        flagged = True
+        was = f" (was {start[key]:.0f}% at run start)" if key in start else ""
+        lines.append(f"- **{head.format(v=v)}**{was}. Check: {check}")
+    lr = abs(now.get("steer_left_pct", 0.0) - now.get("steer_right_pct", 0.0))
+    if lr > 25.0:
+        flagged = True
+        lines.append(f"- **Steering is one-sided** ({now.get('steer_left_pct', 0):.0f}% left vs "
+                     f"{now.get('steer_right_pct', 0):.0f}% right). The trainer augments with left-right mirrored "
+                     "samples, so a lasting imbalance is unusual and worth a look.")
+    if not flagged:
+        lines.append("- Nothing out of range.")
+    lines.append("\n<span style='color:#94a3b8'>Rewards are frozen for the run, so these are things to check on "
+                 "the eval suite, not dials to turn. A confirmed problem becomes a candidate for the next reward "
+                 "version (spec §8).</span>")
+    return "\n".join(lines)
+
+
+# ---------------------------------------------------------------------------------------------
+# Training curves
+# ---------------------------------------------------------------------------------------------
+def _thin(recs: List[Dict[str, Any]], n: int = 500) -> List[Dict[str, Any]]:
+    if len(recs) <= n:
+        return recs
+    idx = np.linspace(0, len(recs) - 1, n).astype(int)
+    return [recs[i] for i in idx]
+
+
+def curve_records(mode: str = "run", history_file: str = run_history.HISTORY_FILE) -> Tuple[List[Dict[str, Any]], str]:
+    if mode == "recent":
+        return run_history.recent(history_file, 100), "last 100 iterations"
+    if mode == "full":
+        return run_history.sampled(history_file, 400), "all history (sampled; mixes reward versions)"
+    run = run_history.current_run(history_file)
+    v = run["key"][0] if run["key"] else "?"
+    return _thin(run["records"]), f"reward {v} run"
+
+
+def render_training_curves_plot(history_file: str = run_history.HISTORY_FILE, mode: str = "run") -> plt.Figure:
+    plt.close("all")
+    recs, scope = curve_records(mode, history_file)
+    fig, axes = plt.subplots(2, 2, figsize=(11, 5.6), dpi=100, sharex=True)
+    fig.patch.set_facecolor(BG)
     for ax in axes.flat:
-        ax.set_facecolor("#2d3748")
-        ax.spines["top"].set_visible(False)
-        ax.spines["right"].set_visible(False)
-        ax.spines["left"].set_color("#4a5568")
-        ax.spines["bottom"].set_color("#4a5568")
-        ax.grid(True, linestyle=":", alpha=0.35, color="#718096")
-        ax.tick_params(colors="#cbd5e0", labelsize=8)
-
-    if not os.path.exists(history_file):
+        _style(ax)
+    if not recs:
         for ax in axes.flat:
             ax.set_axis_off()
-        axes[0, 0].set_axis_on()
-        axes[0, 0].text(0.5, 0.5, "Waiting for Training Data...\n(Metrics will display once training is active)",
-                        color="#a0aec0", fontsize=11, ha="center", va="center")
-        plt.tight_layout()
+        fig.text(0.5, 0.5, "Waiting for training data", ha="center", va="center", color=MUTED, fontsize=11)
         return fig
 
-    records = []
-    try:
-        file_size = os.path.getsize(history_file)
-        if file_size > 0:
-            if mode == "full" and file_size > max_points * 1500:
-                # Byte-stepped seek downsampling across massive files (O(1) memory, ~5ms)
-                step = file_size / max_points
-                with open(history_file, "rb") as f:
-                    for i in range(max_points):
-                        f.seek(int(i * step))
-                        if i > 0:
-                            f.readline()  # Skip partial line
-                        line = f.readline().decode("utf-8", errors="ignore").strip()
-                        if line:
-                            try:
-                                records.append(json.loads(line))
-                            except Exception:
-                                pass
-            else:
-                # Seek from tail for recent window (O(1) time & memory, <1ms regardless of file size)
-                buf_size = min(file_size, max(8192, max_points * 2500))
-                with open(history_file, "rb") as f:
-                    f.seek(file_size - buf_size)
-                    raw = f.read().decode("utf-8", errors="ignore")
-                    lines = raw.splitlines()
-                    if file_size > buf_size and lines:
-                        lines.pop(0)  # Discard partial initial line
-                    lines = lines[-max_points:]
-                    for l in lines:
-                        l = l.strip()
-                        if l:
-                            try:
-                                records.append(json.loads(l))
-                            except Exception:
-                                pass
-    except Exception:
-        pass
+    x_is_run = mode == "run" and recs[0].get("reward_run_start_step") is not None
+    start = int(recs[0].get("reward_run_start_step") or 0)
+    xs = np.array([(r.get("global_step", 0) - start) / 1e6 if x_is_run else r.get("iteration", 0) for r in recs])
+    xlabel = "M steps into the run" if x_is_run else "iteration"
 
-    if not records:
-        for ax in axes.flat:
-            ax.set_axis_off()
-        axes[0, 0].set_axis_on()
-        axes[0, 0].text(0.5, 0.5, "No Training Data Found", color="#a0aec0", fontsize=11, ha="center", va="center")
-        plt.tight_layout()
-        return fig
+    def series(key):
+        return np.array([float(r.get(key, np.nan) or 0.0) for r in recs])
 
-    iters = [r.get("iteration", i + 1) for i, r in enumerate(records)]
-    rewards = [r.get("mean_reward", 0.0) for r in records]
-    p_losses = [r.get("policy_loss", 0.0) for r in records]
-    v_losses = [r.get("value_loss", 0.0) for r in records]
-    entropies = [r.get("entropy", 0.0) for r in records]
-    sps_vals = [r.get("sps", 0) for r in records]
-    touches = [r.get("ball_touches", 0.0) for r in records]
-    title_suffix = " (Full Run)" if mode == "full" else f" (Recent {len(iters)} Iters)"
+    def smooth(y, k=9):
+        if len(y) < k:
+            return y
+        pad = np.pad(y, (k // 2, k // 2), mode="edge")
+        return np.convolve(pad, np.ones(k) / k, mode="valid")
 
-    # Panel 1: Mean Reward
-    ax_rew = axes[0, 0]
-    ax_rew.plot(iters, rewards, color="#38bdf8", linewidth=1.8, label="Mean Reward")
-    if len(rewards) >= 5:
-        # 5-step rolling moving average
-        kernel = np.ones(5) / 5.0
-        smooth = np.convolve(rewards, kernel, mode="valid")
-        smooth_iters = iters[len(iters) - len(smooth):]
-        ax_rew.plot(smooth_iters, smooth, color="#0284c7", linewidth=2.5, linestyle="--", alpha=0.85, label="Trend (MA-5)")
-    ax_rew.set_title(f"Mean Reward{title_suffix}", color="white", fontsize=10, fontweight="bold", pad=6)
-    ax_rew.set_ylabel("Reward Points", color="#cbd5e0", fontsize=8)
-    ax_rew.legend(loc="upper left", facecolor="#1e293b", edgecolor="#475569", labelcolor="white", fontsize=7)
-
-    # Panel 2: Losses
-    ax_loss = axes[0, 1]
-    ax_loss.plot(iters, p_losses, color="#f87171", linewidth=1.5, label="Policy Loss")
-    ax_loss.set_title("Losses (Policy & Value)", color="white", fontsize=10, fontweight="bold", pad=6)
-    ax_loss.set_ylabel("Policy Loss", color="#f87171", fontsize=8)
-    ax_loss.tick_params(axis="y", labelcolor="#f87171")
-    
-    ax_vloss = ax_loss.twinx()
-    ax_vloss.plot(iters, v_losses, color="#facc15", linewidth=1.5, linestyle=":", label="Value Loss")
-    ax_vloss.set_ylabel("Value Loss", color="#facc15", fontsize=8)
-    ax_vloss.tick_params(axis="y", labelcolor="#facc15", labelsize=8)
-    ax_vloss.spines["top"].set_visible(False)
-    ax_vloss.spines["left"].set_visible(False)
-    ax_vloss.spines["right"].set_color("#4a5568")
-
-    # Panel 3: Policy Entropy
-    ax_ent = axes[1, 0]
-    ax_ent.plot(iters, entropies, color="#c084fc", linewidth=1.8, label="Policy Entropy")
-    ax_ent.set_title("Policy Entropy (Exploration)", color="white", fontsize=10, fontweight="bold", pad=6)
-    ax_ent.set_xlabel("Training Iteration", color="#cbd5e0", fontsize=8)
-    ax_ent.set_ylabel("Entropy", color="#cbd5e0", fontsize=8)
-
-    # Panel 4: SPS Throughput & Ball Touches
-    ax_sps = axes[1, 1]
-    ax_sps.plot(iters, sps_vals, color="#4ade80", linewidth=1.5, label="Throughput (SPS)")
-    ax_sps.set_title("Throughput (SPS) & Ball Touches", color="white", fontsize=10, fontweight="bold", pad=6)
-    ax_sps.set_xlabel("Training Iteration", color="#cbd5e0", fontsize=8)
-    ax_sps.set_ylabel("SPS (Steps/Sec)", color="#4ade80", fontsize=8)
-    ax_sps.tick_params(axis="y", labelcolor="#4ade80")
-
-    ax_tch = ax_sps.twinx()
-    ax_tch.plot(iters, touches, color="#60a5fa", linewidth=1.5, linestyle="--", label="Touches")
-    ax_tch.set_ylabel("Avg Touches", color="#60a5fa", fontsize=8)
-    ax_tch.tick_params(axis="y", labelcolor="#60a5fa", labelsize=8)
-    ax_tch.spines["top"].set_visible(False)
-    ax_tch.spines["left"].set_visible(False)
-    ax_tch.spines["right"].set_color("#4a5568")
-
-    plt.tight_layout()
+    panels = [
+        (axes[0, 0], "mean_reward", "Mean episode reward", "#38bdf8"),
+        (axes[0, 1], "value_loss", "Value loss", "#facc15"),
+        (axes[1, 0], "entropy", "Policy entropy", "#c084fc"),
+        (axes[1, 1], "ball_touches", "Touches per episode", "#4ade80"),
+    ]
+    warm = np.array([bool(r.get("critic_warmup")) for r in recs])
+    for ax, key, title, colour in panels:
+        y = series(key)
+        ax.plot(xs, y, color=colour, alpha=0.3, linewidth=1)
+        ax.plot(xs, smooth(y), color=colour, linewidth=1.8)
+        ax.set_title(title, color=TEXT, fontsize=9.5, loc="left")
+        if warm.any():
+            ax.axvspan(xs[warm].min(), xs[warm].max(), color="#a78bfa", alpha=0.12, lw=0)
+    sps = series("sps")
+    axes[1, 1].text(0.99, 0.04, f"{np.nanmean(sps[-20:]):,.0f} steps/s", transform=axes[1, 1].transAxes,
+                    ha="right", color=MUTED, fontsize=8)
+    for ax in axes[1]:
+        ax.set_xlabel(xlabel, color=MUTED, fontsize=8)
+    note = scope + (" · purple: critic warm-up (policy frozen)" if warm.any() else "")
+    fig.text(0.995, 0.005, note, ha="right", va="bottom", color="#64748b", fontsize=7.5)
+    fig.tight_layout(rect=(0, 0.02, 1, 1))
     return fig

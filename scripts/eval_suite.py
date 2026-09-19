@@ -455,24 +455,14 @@ def compare(path_a, path_b):
         print(f"{p}: iteration {x.get('iteration')}  reward {x.get('reward_identity')}")
     print("\nA difference is marked * when the ranges over seeds do not overlap (matches), or when it exceeds")
     print("two binomial standard errors (scenario rates). Everything else is inside the noise.")
-    for g in a["results"]:
-        if g not in b["results"]:
-            continue
-        print(f"\n== {g} ==")
-        n = a["results"][g].get("n", {}).get("mean")
-        for k, sa in a["results"][g].items():
-            sb = b["results"][g].get(k)
-            if sb is None or k == "n":
-                continue
-            d = sb["mean"] - sa["mean"]
-            clear = False
-            if len(sa["per_seed"]) > 1 and len(sb["per_seed"]) > 1:
-                clear = sb["min"] > sa["max"] or sb["max"] < sa["min"]
-            elif k.endswith("_pct") and n:
-                pa, pb = sa["mean"] / 100.0, sb["mean"] / 100.0
-                se = math.sqrt(max(1e-9, pa * (1 - pa) / n + pb * (1 - pb) / n)) * 100.0
-                clear = not math.isnan(d) and abs(d) > 2.0 * se
-            print(f"  {k:42s} {_fmt(sa['mean'])} -> {_fmt(sb['mean'])}   {'+' if d >= 0 else ''}{_fmt(d).strip():>7s} {'*' if clear else ''}")
+    from utils.eval_results import compare_results   # one noise rule, shared with the UI
+    group = None
+    for r in compare_results(a, b):
+        if r["group"] != group:
+            group = r["group"]
+            print(f"\n== {group} ==")
+        d = r["delta"]
+        print(f"  {r['metric']:42s} {_fmt(r['a'])} -> {_fmt(r['b'])}   {'+' if d >= 0 else ''}{_fmt(d).strip():>7s} {'*' if r['clear'] else ''}")
 
 
 def main():

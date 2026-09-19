@@ -1,162 +1,129 @@
 """
-Automated Test Suite Runner & Subsystem Health Diagnostics.
-Runs all unit and integration test suites programmatically and provides structured health metrics
-for the SensAI Diagnostic & Evaluation Hub.
+Runs the unit test suite for the dashboard and remembers the last result.
+
+The suite runs in a separate Python process (`python -m unittest discover`), so a five-minute run
+that loads RocketSim, torch models and replay pools never touches the UI process. The result is
+cached in logs/test_results.json with the git commit and the newest source-file time it ran
+against, so the dashboard can say when a result no longer describes the code.
 """
 
 from __future__ import annotations
-import os
-import sys
-import io
-import time
+
+import glob
 import json
-import unittest
-from typing import Dict, Any, List, Optional
+import os
+import re
+import subprocess
+import sys
+import time
+from typing import Any, Dict, List, Optional
 
-
-_LATEST_TEST_RESULTS_CACHE: Optional[Dict[str, Any]] = None
 CACHE_FILE = "logs/test_results.json"
+_cache: Optional[Dict[str, Any]] = None
+
+
+def _git_head() -> str:
+    try:
+        return subprocess.run(["git", "rev-parse", "--short", "HEAD"], capture_output=True, text=True,
+                              timeout=10).stdout.strip()
+    except Exception:
+        return ""
+
+
+def _newest_source_mtime() -> float:
+    newest = 0.0
+    for pattern in ("*.py", "agent/*.py", "env/*.py", "utils/*.py", "ui/*.py", "scripts/*.py", "config/*.yaml",
+                    "config/reward_versions/*.json"):
+        for p in glob.glob(pattern):
+            try:
+                newest = max(newest, os.path.getmtime(p))
+            except OSError:
+                pass
+    return newest
 
 
 def _load_cache() -> Optional[Dict[str, Any]]:
-    global _LATEST_TEST_RESULTS_CACHE
-    if _LATEST_TEST_RESULTS_CACHE is not None:
-        return _LATEST_TEST_RESULTS_CACHE
-    if os.path.exists(CACHE_FILE):
+    global _cache
+    if _cache is None and os.path.exists(CACHE_FILE):
         try:
-            with open(CACHE_FILE, "r", encoding="utf-8") as f:
-                _LATEST_TEST_RESULTS_CACHE = json.load(f)
-                return _LATEST_TEST_RESULTS_CACHE
-        except Exception:
-            pass
-    return None
+            with open(CACHE_FILE, encoding="utf-8") as f:
+                _cache = json.load(f)
+        except (OSError, ValueError):
+            _cache = None
+    return _cache
 
 
 def _save_cache(data: Dict[str, Any]):
-    global _LATEST_TEST_RESULTS_CACHE
-    _LATEST_TEST_RESULTS_CACHE = data
+    global _cache
+    _cache = data
     try:
         os.makedirs("logs", exist_ok=True)
         with open(CACHE_FILE, "w", encoding="utf-8") as f:
             json.dump(data, f, indent=2)
-    except Exception:
+    except OSError:
         pass
 
 
+def parse_unittest_output(text: str) -> Dict[str, Any]:
+    ran = re.search(r"^Ran (\d+) tests? in ([\d.]+)s", text, re.M)
+    total = int(ran.group(1)) if ran else 0
+    summary = re.search(r"^(OK|FAILED)(?: \((.*)\))?\s*$", text, re.M)
+    counts = {"failures": 0, "errors": 0, "skipped": 0}
+    if summary and summary.group(2):
+        for part in summary.group(2).split(","):
+            k, _, v = part.strip().partition("=")
+            if k in counts and v.isdigit():
+                counts[k] = int(v)
+    failing: List[Dict[str, str]] = []
+    for kind, name, where in re.findall(r"^(FAIL|ERROR): (\S+) \(([^)]+)\)", text, re.M):
+        failing.append({"kind": kind, "test": f"{where}"})
+    passed = total - counts["failures"] - counts["errors"] - counts["skipped"]
+    return {"total_tests": total, "passed": passed, **counts, "failing": failing,
+            "all_passed": bool(summary and summary.group(1) == "OK" and total > 0)}
+
+
 def run_all_unit_tests(verbose: bool = False) -> Dict[str, Any]:
-    """
-    Discovers and executes all unit test suites (test_*.py) in the workspace.
-    Returns structured results dictionary with subsystem breakdowns.
-    """
-    start_time = time.time()
-
-    # Capture stdout / stderr from test runner
-    stream = io.StringIO()
-    runner = unittest.TextTestRunner(stream=stream, verbosity=2 if verbose else 1)
-
-    loader = unittest.TestLoader()
-    suite = loader.discover(start_dir=".", pattern="test_*.py")
-
-    result = runner.run(suite)
-    duration = round(time.time() - start_time, 2)
-    output_log = stream.getvalue()
-
-    total_tests = result.testsRun
-    failures_count = len(result.failures)
-    errors_count = len(result.errors)
-    passed_count = total_tests - failures_count - errors_count
-    pass_rate = round((passed_count / total_tests) * 100.0, 1) if total_tests > 0 else 0.0
-
-    # Categorize Subsystem Health
-    physics_passed = not any("test_physics" in str(f[0]) for f in result.failures + result.errors)
-    neural_passed = not any("layer_norm" in str(f[0]) or "model" in str(f[0]) for f in result.failures + result.errors)
-    scenarios_passed = not any("test_scenarios" in str(f[0]) for f in result.failures + result.errors)
-    replay_passed = not any("replay" in str(f[0]) for f in result.failures + result.errors)
-
-    subsystems = [
-        {
-            "name": "🏎️ Physics & Controls Pipeline",
-            "description": "Pitch/Yaw/Steer sign alignment, 4-2-2 tick jump timing, and ground-dodge cooldowns.",
-            "status": "PASS" if physics_passed else "FAIL",
-            "icon": "✅" if physics_passed else "❌"
-        },
-        {
-            "name": "🧠 Neural Architecture & Regularization",
-            "description": "LayerNorm bounded activations, LeakyReLU gradient flow, and output head desaturation.",
-            "status": "PASS" if neural_passed else "FAIL",
-            "icon": "✅" if neural_passed else "❌"
-        },
-        {
-            "name": "🎯 Scenario Setters & Dynamic Resets",
-            "description": "Kickoffs, Aerials, Wall Plays, and Goalie Save scenario generators.",
-            "status": "PASS" if scenarios_passed else "FAIL",
-            "icon": "✅" if scenarios_passed else "❌"
-        },
-        {
-            "name": "📁 Replay Ingestion & Frame Dataset",
-            "description": "Replay parsing, frame dataset buffering, and batch ingestion limits.",
-            "status": "PASS" if replay_passed else "FAIL",
-            "icon": "✅" if replay_passed else "❌"
-        }
-    ]
-
-    res_payload = {
-        "timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),
-        "total_tests": total_tests,
-        "passed": passed_count,
-        "failures": failures_count,
-        "errors": errors_count,
-        "pass_rate_pct": pass_rate,
-        "duration_seconds": duration,
-        "all_passed": (failures_count == 0 and errors_count == 0 and total_tests > 0),
-        "subsystems": subsystems,
-        "raw_output": output_log
-    }
-
-    _save_cache(res_payload)
-    return res_payload
+    """Run the whole suite in a subprocess; returns (and caches) the parsed result."""
+    start = time.time()
+    proc = subprocess.run([sys.executable, "-m", "unittest", "discover", "-p", "test_*.py"],
+                          capture_output=True, text=True, encoding="utf-8", errors="replace")
+    out = proc.stderr + ("\n" + proc.stdout if proc.stdout.strip() else "")
+    res = parse_unittest_output(out)
+    res.update(timestamp=time.strftime("%Y-%m-%d %H:%M:%S"), ran_at=time.time(), duration_seconds=round(time.time() - start, 1),
+               git_head=_git_head(), raw_output=out[-60000:])
+    _save_cache(res)
+    return res
 
 
 def get_cached_or_run_tests(force_refresh: bool = False) -> Dict[str, Any]:
-    """Returns cached test results instantly without blocking unless force_refresh is True."""
+    """The last result without running anything (unless force_refresh), with a staleness note."""
     if force_refresh:
         return run_all_unit_tests()
-    cached = _load_cache()
-    if cached is not None:
-        if "total" not in cached and "total_tests" in cached:
-            cached["total"] = cached["total_tests"]
-        return cached
-
-    # No cache exists and no tests have been run yet
-    return {
-        "timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),
-        "status": "NOT_RUN",
-        "total_tests": 0,
-        "total": 0,
-        "passed": 0,
-        "failures": 0,
-        "errors": 0,
-        "pass_rate_pct": 0.0,
-        "duration_seconds": 0.0,
-        "all_passed": False,
-        "subsystems": [],
-        "raw_output": "No test run has been executed yet. Click '🧪 Run All Unit Tests' to run the full test suite."
-    }
+    res = _load_cache()
+    if not res or "ran_at" not in res:
+        # Nothing cached, or a result from the old in-process runner, which did not record what it ran against
+        return {"status": "NOT_RUN", "total_tests": 0, "passed": 0, "failing": [], "all_passed": False,
+                "raw_output": "No test run recorded yet.", "stale": True}
+    res = dict(res)
+    head = _git_head()
+    res["stale"] = bool((head and res.get("git_head") and head != res.get("git_head"))
+                        or _newest_source_mtime() > float(res.get("ran_at", 0)))
+    return res
 
 
 def format_test_results_markdown(res: Dict[str, Any]) -> str:
-    """Formats structured test results into rich Markdown for the dashboard."""
-    all_passed = res.get("all_passed", False)
-    status_badge = "🟢 ALL SUBSYSTEMS OPERATIONAL" if all_passed else "⚠️ SUBSYSTEM FAILURES DETECTED"
-    
-    md = f"""
-### 🧪 Automated Test Suite Health: {status_badge}
-* **Test Execution Summary:** **{res.get('passed', 0)} / {res.get('total_tests', 0)} Tests Passed** ({res.get('pass_rate_pct', 0.0)}%) in **{res.get('duration_seconds', 0.0)}s** (Last Run: `{res.get('timestamp', 'N/A')}`)
-
-| Subsystem Area | Health Status | Details |
-| :--- | :---: | :--- |
-"""
-    for sub in res.get("subsystems", []):
-        md += f"| **{sub['name']}** | {sub['icon']} **{sub['status']}** | {sub['description']} |\n"
-
-    return md.strip()
+    if res.get("status") == "NOT_RUN":
+        return "No test run recorded yet. **Run all** runs the suite in the background (about 5 minutes)."
+    total, passed = res.get("total_tests", 0), res.get("passed", 0)
+    head = ("**All tests pass**" if res.get("all_passed") else f"**{len(res.get('failing', []))} failing**")
+    lines = [f"{head}: {passed} of {total} passed"
+             + (f", {res.get('skipped')} skipped" if res.get("skipped") else "")
+             + f" · {res.get('duration_seconds', 0):.0f} s · run {res.get('timestamp', '?')}"
+             + (f" on {res['git_head']}" if res.get("git_head") else "")]
+    if res.get("stale"):
+        lines.append("<span style='color:#fbbf24'>The code has changed since this run; run again for a current result.</span>")
+    for f in res.get("failing", [])[:25]:
+        lines.append(f"- {f['kind']}: `{f['test']}`")
+    if len(res.get("failing", [])) > 25:
+        lines.append(f"- … and {len(res['failing']) - 25} more (see the output)")
+    return "\n\n".join(lines[:2]) + ("\n\n" + "\n".join(lines[2:]) if len(lines) > 2 else "")

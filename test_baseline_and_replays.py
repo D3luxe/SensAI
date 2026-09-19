@@ -70,8 +70,8 @@ class TestBaselineAndReplays(unittest.TestCase):
     def test_test_runner_not_run_when_cache_absent(self):
         """Fix #2: get_cached_or_run_tests() must return NOT_RUN and all_passed=False when cache is absent."""
         import utils.test_runner as tr
-        old_mem_cache = tr._LATEST_TEST_RESULTS_CACHE
-        tr._LATEST_TEST_RESULTS_CACHE = None
+        old_mem_cache = tr._cache
+        tr._cache = None
 
         cache_backup = None
         if os.path.exists(CACHE_FILE):
@@ -85,9 +85,9 @@ class TestBaselineAndReplays(unittest.TestCase):
             self.assertEqual(res["total_tests"], 0)
             self.assertEqual(res["passed"], 0)
             self.assertFalse(res["all_passed"])
-            self.assertEqual(len(res["subsystems"]), 0)
+            self.assertEqual(res["failing"], [])
         finally:
-            tr._LATEST_TEST_RESULTS_CACHE = old_mem_cache
+            tr._cache = old_mem_cache
             if cache_backup is not None:
                 with open(CACHE_FILE, "w") as f:
                     f.write(cache_backup)

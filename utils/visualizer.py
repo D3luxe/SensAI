@@ -215,6 +215,25 @@ REWARD_METADATA: Dict[str, Dict[str, Any]] = {
 
 CORE_REWARD_KEYS = ["goal", "ball_to_goal", "touch", "player_to_ball", "boost"]
 
+# Reward v3's five terms (env/rewards_v3.py, docs/reward_v3_spec.md). A breakdown carrying
+# "ball_position" is a v3 breakdown and is labelled from here.
+REWARD_METADATA_V3: Dict[str, Dict[str, Any]] = {
+    "goal": {"label": "Goal (T1)", "category": "Outcome",
+             "desc": "+10 for scoring, -7.5 for conceding (aggression_bias 0.25)", "priority": 1},
+    "ball_position": {"label": "Ball position (T2)", "category": "Outcome",
+                      "desc": "Potential: ball nearer their goal than ours, weight 5", "priority": 2},
+    "touch": {"label": "Touch (T3)", "category": "Outcome",
+              "desc": "0.5 x ball speed change / 2300 on a touch", "priority": 3},
+    "closeness": {"label": "Closeness to ball (T4)", "category": "Shaping",
+                  "desc": "Potential: minus car-ball distance, annealed to 0 over 300M steps", "priority": 4},
+    "boost": {"label": "Boost held (T5)", "category": "Shaping",
+              "desc": "Potential: sqrt(boost / 100)", "priority": 5},
+}
+
+
+def reward_metadata_for(breakdown: Dict[str, float]) -> Dict[str, Dict[str, Any]]:
+    return REWARD_METADATA_V3 if "ball_position" in breakdown else REWARD_METADATA
+
 
 def render_reward_breakdown_plot(
     blue_rewards: Dict[str, float],
@@ -231,12 +250,14 @@ def render_reward_breakdown_plot(
     """
     # 1. Dynamically select all relevant active reward categories
     all_keys: List[str] = []
-    for k in REWARD_METADATA:
+    meta = reward_metadata_for(blue_rewards)
+    core = list(meta) if meta is REWARD_METADATA_V3 else CORE_REWARD_KEYS
+    for k in meta:
         b_val = blue_rewards.get(k, 0.0)
         o_val = orange_rewards.get(k, 0.0) if orange_rewards else 0.0
         # Include core categories or any category with non-negligible activity
         # core categories only when this reward version has them (v3 names its own terms)
-        if (k in CORE_REWARD_KEYS and k in blue_rewards) or abs(b_val) >= 0.005 or abs(o_val) >= 0.005:
+        if (k in core and k in blue_rewards) or abs(b_val) >= 0.005 or abs(o_val) >= 0.005:
             all_keys.append(k)
 
     # Capture any custom / non-standard keys returned by RewardManager
@@ -248,9 +269,9 @@ def render_reward_breakdown_plot(
                 all_keys.append(k)
 
     # Order logically by defined priority (Objectives -> Mechanics -> Costs)
-    all_keys.sort(key=lambda k: REWARD_METADATA.get(k, {}).get("priority", 999))
+    all_keys.sort(key=lambda k: meta.get(k, {}).get("priority", 999))
 
-    labels = [REWARD_METADATA.get(k, {}).get("label", k.replace("_", " ").title()) for k in all_keys]
+    labels = [meta.get(k, {}).get("label", k.replace("_", " ").title()) for k in all_keys]
     blue_vals = [blue_rewards.get(k, 0.0) for k in all_keys]
     orange_vals = [orange_rewards.get(k, 0.0) if orange_rewards else 0.0 for k in all_keys]
 

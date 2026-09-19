@@ -1388,6 +1388,10 @@ class PPOTrainer:
                 "iteration": self.iteration,
                 "global_step": self.global_step,
                 "reward_anneal_start_steps": dict(self._reward_anneal_start_steps),
+                # which reward run this record belongs to: mean_reward is only comparable within one
+                "reward_version": self.reward_version,
+                "reward_run_start_step": self.reward_run_start_step,
+                "critic_warmup": bool(critic_warmup),
                 "mean_reward": round(mean_ep_rew, 3),
                 "policy_loss": round(mean_pg_loss, 5),
                 "value_loss": round(mean_v_loss, 5),
