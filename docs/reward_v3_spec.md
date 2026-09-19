@@ -133,7 +133,7 @@ starts. Training opponent mix is unchanged (self-play 0.5, king 0.25, pool 0.25,
 
 - **Start:** policy weights from `checkpoints/baselines/v2_iter173600.pt` — the v2 king when v2
   training was stopped (iteration 173,600, 2.84B steps, stamped v2 `7c5d7a2b15e057d7` /
-  `20d320a8ec343cca`). Its eval, `evals/v2_iter173600.json`, is the baseline v3 is judged against,
+  `20d320a8ec343cca`). Its eval, `evals/baselines/v2_iter173600.json`, is the baseline v3 is judged against,
   so the baseline is exactly the policy v3 starts from. The value function was
   trained on v2's returns and is wrong for v3: run the existing critic warm-up
   (`critic_warmup_iterations`, policy frozen) and reset the return normaliser before the first
@@ -145,8 +145,8 @@ starts. Training opponent mix is unchanged (self-play 0.5, king 0.25, pool 0.25,
 ## 6. How v3 is judged
 
 The eval suite (`scripts/eval_suite.py`, suite v1) is run on:
-- the baseline: the pinned v2 start checkpoint → `evals/v2_iter173600.json`
-  (`evals/v2_iter172000.json` was taken when the suite was built and is kept for reference)
+- the baseline: the pinned v2 start checkpoint → `evals/baselines/v2_iter173600.json`
+  (`evals/baselines/v2_iter172000.json` was taken when the suite was built and is kept for reference)
 - v3 every 50M steps (~2 h at current throughput), named `v3_<steps>M`
 
 and compared with `--compare`. Differences inside the seed spread are not differences.
@@ -194,3 +194,29 @@ climbs and being caught upfield.
 - A height potential near an airborne ball, if aerial touches regress.
 
 Each would enter alone, in its own version, justified by an eval metric.
+
+## 9. Outcome (run closed at ~505M steps, 2026-09-19)
+
+**Adopted.** King: iteration 198000 (399M steps into the run), pinned as
+`checkpoints/baselines/v3_iter198000.pt`. Its eval, `evals/baselines/v3_iter198000.json`, is the
+baseline v4 is judged against.
+
+- Head to head against the v2 king it wins +15.0 goals per 10 min (seeds +9.8, +9.8, +25.5). The
+  500M checkpoint (iteration 204200) is level with v2 head to head (−2.8; seeds +4.5, −0.8, −12.0).
+- Against Necto: v2 −44.5; v3 −31 to −39 in every eval from ~100M on; 399M −26.2 and −28.0 on two
+  runs; 500M −30 to −32. The suite is not deterministic under fixed seeds, so a re-run is a second
+  sample.
+- Fixed: retreat dodges (188 → ~50 per 100 touches), retreat boosting in the retreat scenario
+  (7% → ~70%), reaching goal-side (58% → 88–100%), kickoff concessions (43% → ~10–25% of goals
+  against), back-wall climbs (32 → 7.5 per 100 touches at 399M).
+- Regressed or not fixed:
+  - first touch on a loose ball. Drop scenario 58% → 12–25% from 150M on; bounce 29% → ~12–21%;
+    wall 100% → 75–83%.
+  - caught upfield: 27% → ~50% of goals against.
+  - boost starvation unchanged (empty ~47% of the time; T5 did not move it).
+- After 399M the policy went passive: at 500M touches fell to ~4.7 per min, kickoff first touch
+  to 0% and goals for to ~0.5 per 10 min, and retreat-scenario concessions returned to v2's 46%.
+  The closeness term finished annealing at 300M, which leaves nothing in v3 that pays for going
+  to a ball the other car is not contesting.
+
+v4's single addition targets contesting the ball.

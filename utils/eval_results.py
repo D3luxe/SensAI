@@ -86,7 +86,7 @@ def humanize(metric: str) -> str:
 def list_results(eval_dir: str = EVAL_DIR) -> List[Dict[str, Any]]:
     """Every result file with its metadata, newest first."""
     out = []
-    for p in glob.glob(os.path.join(eval_dir, "*.json")):
+    for p in glob.glob(os.path.join(eval_dir, "*.json")) + glob.glob(os.path.join(eval_dir, "baselines", "*.json")):
         try:
             with open(p, encoding="utf-8") as fh:
                 d = json.load(fh)
@@ -97,7 +97,8 @@ def list_results(eval_dir: str = EVAL_DIR) -> List[Dict[str, Any]]:
         steps = d.get("global_step")
         out.append({
             "path": p.replace("\\", "/"),
-            "name": os.path.splitext(os.path.basename(p))[0],
+            "name": ("baseline " if os.path.basename(os.path.dirname(p)) == "baselines" else "")
+                    + os.path.splitext(os.path.basename(p))[0],
             "version": stamp.get("version") or "unstamped",
             "iteration": d.get("iteration"),
             "run_steps_m": (steps - start) / 1e6 if (steps is not None and start is not None) else None,

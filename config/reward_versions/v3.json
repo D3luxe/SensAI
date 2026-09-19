@@ -2,7 +2,7 @@
   "version": "v3",
   "spec": "docs/reward_v3_spec.md",
   "start_checkpoint": "checkpoints/baselines/v2_iter173600.pt",
-  "baseline_eval": "evals/v2_iter173600.json",
+  "baseline_eval": "evals/baselines/v2_iter173600.json",
   "identity": {
     "version": "v3",
     "code_sha": "9243332689bd95fa",

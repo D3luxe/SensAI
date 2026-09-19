@@ -90,9 +90,9 @@ class TestEvalResults(unittest.TestCase):
         self.assertEqual(eval_results.compare_results(a, c)[0]["verdict"], "noise")
 
     def test_real_baselines_match_the_cli(self):
-        if not all(os.path.exists(p) for p in ("evals/v2_iter172000.json", "evals/v2_iter173600.json")):
+        if not all(os.path.exists(p) for p in ("evals/baselines/v2_iter172000.json", "evals/baselines/v2_iter173600.json")):
             self.skipTest("baseline evals not present")
-        a, b = eval_results.load("evals/v2_iter172000.json"), eval_results.load("evals/v2_iter173600.json")
+        a, b = eval_results.load("evals/baselines/v2_iter172000.json"), eval_results.load("evals/baselines/v2_iter173600.json")
         self.assertEqual(sum(r["clear"] for r in eval_results.compare_results(a, b)), 17)
         html = eval_results.scorecard_html(b, a, "b", "a")
         for section in eval_results.HEADLINE:
