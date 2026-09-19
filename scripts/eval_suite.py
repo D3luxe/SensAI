@@ -478,7 +478,8 @@ def compare(path_a, path_b):
 def main():
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--checkpoint", default="checkpoints/latest_model.pt")
-    p.add_argument("--name", default=None, help="output name (default iter<N>)")
+    p.add_argument("--name", default=None,
+                   help="output name (default <version>_<M>M: the reward version and millions of steps into its run)")
     p.add_argument("--reference", default=None, help="also play this checkpoint head to head")
     p.add_argument("--no-nexto", action="store_true")
     p.add_argument("--quick", action="store_true", help="one seed, quarter size: a smoke test, not a result")
@@ -497,6 +498,7 @@ def main():
         "iteration": ckpt.get("iteration"),
         "global_step": ckpt.get("global_step"),
         "reward_identity": ckpt.get("reward_identity", "unstamped"),
+        "reward_run_start_step": ckpt.get("reward_run_start_step"),
         "git_commit": subprocess.run(["git", "rev-parse", "--short", "HEAD"], capture_output=True, text=True).stdout.strip(),
         "quick": bool(args.quick),
         "created": time.strftime("%Y-%m-%d %H:%M:%S"),
@@ -514,7 +516,14 @@ def main():
     summary = {**meta, "wall_seconds": time.time() - t0, "results": aggregate(results),
                "raw": [{"job": r["job"], "metrics": r["metrics"]} for r in results]}
     os.makedirs("evals", exist_ok=True)
-    name = args.name or f"iter{meta['iteration']}"
+    stamp = meta["reward_identity"] if isinstance(meta["reward_identity"], dict) else {}
+    if args.name:
+        name = args.name
+    elif stamp.get("version") and meta["reward_run_start_step"] is not None:
+        # steps into this reward version's run, the clock the spec's decision points use
+        name = f"{stamp['version']}_{(meta['global_step'] - meta['reward_run_start_step']) // 1_000_000}M"
+    else:
+        name = f"iter{meta['iteration']}"
     if args.quick:
         name += "_quick"
     out = os.path.join("evals", name + ".json")

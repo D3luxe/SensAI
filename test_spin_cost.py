@@ -147,17 +147,10 @@ class TestWiring(unittest.TestCase):
         self.assertAlmostEqual(c.rewards["spin_cost"].weight, 0.0)
 
     def test_both_configs_carry_it(self):
-        import io
-        import json
-        import yaml
-        cfg = yaml.safe_load(io.open("config/default_config.yaml", encoding="utf-8").read())
-        live = json.load(io.open("config/live_config.json", encoding="utf-8"))
+        from env.reward_registry import load_snapshot
+        cfg = {"rewards": load_snapshot("v2")["settings"]["rewards"]}   # v2's weights are frozen there
         for key in ("spin_cost_weight", "spin_cost_deadband"):
             self.assertIn(key, cfg["rewards"])
-            self.assertIn(key, live["rewards"],
-                          "live_config overrides the yaml at runtime; a weight missing here is "
-                          "silently the class default")
-            self.assertAlmostEqual(cfg["rewards"][key], live["rewards"][key])
 
 
 if __name__ == "__main__":

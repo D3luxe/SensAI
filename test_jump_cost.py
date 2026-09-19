@@ -126,17 +126,9 @@ class TestWiring(unittest.TestCase):
         self.assertAlmostEqual(c.rewards["jump_cost"].weight, 0.0)
 
     def test_both_configs_carry_the_weight(self):
-        import io
-        import json
-        import yaml
-        cfg = yaml.safe_load(io.open("config/default_config.yaml", encoding="utf-8").read())
-        live = json.load(io.open("config/live_config.json", encoding="utf-8"))
+        from env.reward_registry import load_snapshot
+        cfg = {"rewards": load_snapshot("v2")["settings"]["rewards"]}   # v2's weights are frozen there
         self.assertIn("jump_cost_weight", cfg["rewards"])
-        self.assertIn("jump_cost_weight", live["rewards"],
-                      "live_config overrides the yaml at runtime; a weight missing here is "
-                      "silently the class default")
-        self.assertAlmostEqual(cfg["rewards"]["jump_cost_weight"],
-                               live["rewards"]["jump_cost_weight"])
 
 
 class TestAgainstTheSimulator(unittest.TestCase):
@@ -153,7 +145,7 @@ class TestAgainstTheSimulator(unittest.TestCase):
 
         np.random.seed(17)
         random.seed(17)
-        env = RocketLeagueEnv(game_mode="1v1", max_episode_steps=600)
+        env = RocketLeagueEnv(game_mode="1v1", max_episode_steps=600, reward_version="v2")
         env.reset()
 
         total = 0.0

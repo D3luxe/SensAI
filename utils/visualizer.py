@@ -19,7 +19,7 @@ from env.physics_engine import (
 )
 from env.observations import DefaultObservationBuilder, OBS_MIRROR_MASK_NP, ACT_MIRROR_MASK_NP
 from env.actions import ContinuousActionParser, DiscreteActionParser
-from env.rewards import RewardManager
+from env.reward_registry import make_reward_manager
 from env.baseline_agent import BaseOpponent, BaselineChaser, NectoNextoOpponentBot, create_opponent_bot
 from agent.models import ActorCritic
 from agent.checkpoint import load_policy, read_checkpoint
@@ -235,7 +235,8 @@ def render_reward_breakdown_plot(
         b_val = blue_rewards.get(k, 0.0)
         o_val = orange_rewards.get(k, 0.0) if orange_rewards else 0.0
         # Include core categories or any category with non-negligible activity
-        if k in CORE_REWARD_KEYS or abs(b_val) >= 0.005 or abs(o_val) >= 0.005:
+        # core categories only when this reward version has them (v3 names its own terms)
+        if (k in CORE_REWARD_KEYS and k in blue_rewards) or abs(b_val) >= 0.005 or abs(o_val) >= 0.005:
             all_keys.append(k)
 
     # Capture any custom / non-standard keys returned by RewardManager
@@ -417,9 +418,9 @@ def simulate_match(
     active_rewards = _reward_weights_for(blue_model_path)
 
     # Use isolated reward managers for each team to ensure zero potential cross-talk
-    blue_reward_mgr = RewardManager(active_rewards)
+    blue_reward_mgr = make_reward_manager(None, active_rewards)   # the active reward version
     blue_reward_mgr.reset(arena)
-    orange_reward_mgr = RewardManager(active_rewards)
+    orange_reward_mgr = make_reward_manager(None, active_rewards)
     orange_reward_mgr.reset(arena)
 
     blue_bot = create_opponent_bot(blue_model_path, device=device) if blue_model_path else BaselineChaser()

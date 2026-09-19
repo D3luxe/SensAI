@@ -73,9 +73,10 @@ class TestEveryWeightIsConfigured(unittest.TestCase):
     """Catch a dropped key on the next test run instead of after a wasted training block."""
 
     def _weights(self):
-        cfg = yaml.safe_load(io.open("config/default_config.yaml", encoding="utf-8").read())
+        # v2's weights are frozen in its snapshot now; the yaml names a reward version instead
+        from env.reward_registry import load_snapshot
         live = json.load(io.open("config/live_config.json", encoding="utf-8"))
-        return cfg.get("rewards", {}), live.get("rewards", {})
+        return load_snapshot("v2")["settings"]["rewards"], live.get("rewards", {})
 
     def test_cost_terms_present_in_both_files(self):
         cfg, live = self._weights()

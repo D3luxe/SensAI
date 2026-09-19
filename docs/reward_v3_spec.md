@@ -1,7 +1,9 @@
 # Reward v3 — specification
 
-Status: **agreed 2026-09-18** (weights, aggression_bias, scenario mix, start point); not yet implemented. v2 is frozen (git tag `reward-v2`,
-`config/reward_versions/v2.json`, `test_reward_v2_frozen.py`) and stays runnable beside v3.
+Status: **agreed and implemented 2026-09-18**; frozen as `config/reward_versions/v3.json` (code
+`9243332689bd95fa`, settings `646c9927726c7f82`). v2 is frozen (git tag `reward-v2`,
+`config/reward_versions/v2.json`) and stays runnable beside v3; `test_reward_versions_frozen.py`
+guards both.
 
 ## 1. Why a v3, and what went wrong twice before
 
@@ -163,17 +165,26 @@ climbs and being caught upfield.
   v2-problem metrics are better. Otherwise its results inform v4 — a single, measured addition
   (one term or one scenario) chosen from the eval, not from a log.
 
-## 7. Implementation (after this spec is agreed)
+## 7. Implementation
 
-- `env/rewards_v3.py`: the five terms and a combiner, target < 300 lines. v2's `env/rewards.py` is
-  not edited (its hash is under test). Shared helpers v3 needs are imported read-only or copied.
-- `env/reward_registry.py`: picks v2 or v3 from a new `reward_version` config key; `RewardManager`
-  construction goes through it. `env/reward_version.py` hashes the active version's files.
-- `config/reward_versions/v3.json`: the frozen settings above; the run's config points at it.
-- Two training setters, `BounceDropSetter` and `RetreatSetter`, in `env/state_setters.py`.
-- Trainer: return-normaliser reset + critic warm-up on a version change; anneal clock for T4.
-- Tests: each term's formula; potential telescoping (any closed loop sums to ~0); `Φ(terminal)=0`
-  on goals; action-independence (R2); v2 still frozen.
+- `env/rewards_v3.py`: the five terms and `RewardManagerV3` (~150 lines). v2's `env/rewards.py` is
+  not edited (its hash is under test).
+- `env/reward_registry.py`: `config/default_config.yaml` names the version (`reward_version: v3`);
+  the version's `rewards`, `reward_annealing` and `scenarios` sections come from
+  `config/reward_versions/<v>.json` and nowhere else. The yaml no longer carries them, and live
+  (UI) edits to them are ignored with a message. A gamma that differs from the version's is refused.
+- `env/scenarios_v3.py`: `BounceDropSetter` and `RetreatSetter`, sampled by `WeightedScenarioSetter`
+  under `bounce_drop_prob` / `retreat_prob` (zero by default, so v2's sampling is unchanged). In
+  their own file rather than `env/state_setters.py` so they are hashed into v3's identity without
+  freezing every other setter.
+- Trainer (`PPOTrainer._check_reward_version`): loading a checkpoint stamped with another version
+  (unstamped = v2) resets the return normaliser, starts a fresh optimizer, restarts the anneal
+  clocks and runs the critic warm-up. Checkpoints record `reward_run_start_step`, and the eval suite
+  names results `v3_<M>M` by steps into the run.
+- UI resume picks the newest checkpoint of the active version, or the snapshot's
+  `start_checkpoint` when there is none yet.
+- Tests: `test_rewards_v3.py` (term formulas, potential telescoping, `Φ(terminal)=0`, R2, the new
+  starts, the version change) and `test_reward_versions_frozen.py`.
 
 ## 8. Parking lot (candidates for v4, only if the v3 eval shows the need)
 

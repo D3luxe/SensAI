@@ -2877,19 +2877,31 @@ def create_ui():
                 candidates.extend(glob.glob("checkpoints/checkpoint_iter_*.pt"))
                 candidates.extend(glob.glob("checkpoints/**/*.pt", recursive=True))
                 
+                # Only checkpoints trained on the active reward version continue its run; the
+                # first start of a version resumes from the checkpoint its snapshot pins
+                # (config/reward_versions/<v>.json "start_checkpoint"). An unstamped checkpoint
+                # predates versioning and was v2.
+                from env.reward_registry import active_version, load_snapshot
+                version = active_version()
                 best_ckpt = None
                 best_iter = -1
                 for c_path in candidates:
+                    if os.path.normpath(c_path).startswith(os.path.normpath("checkpoints/baselines")):
+                        continue
                     try:
                         data = torch.load(c_path, map_location="cpu", weights_only=False)
                         if isinstance(data, dict):
+                            stamp = data.get("reward_identity")
+                            if (stamp.get("version") if isinstance(stamp, dict) else "v2") != version:
+                                continue
                             it = int(data.get("iteration", 0))
                             if it > best_iter:
                                 best_iter = it
                                 best_ckpt = c_path
                     except Exception:
                         pass
-                ckpt = best_ckpt if best_ckpt else ("checkpoints/latest_model.pt" if os.path.exists("checkpoints/latest_model.pt") else None)
+                start = load_snapshot(version).get("start_checkpoint")
+                ckpt = best_ckpt or (start if start and os.path.exists(start) else None)
 
             success, msg = mgr.start_training(checkpoint_path=ckpt)
             time.sleep(0.3)

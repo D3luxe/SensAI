@@ -969,6 +969,10 @@ SCENARIO_DEFAULTS: Dict[str, float] = {
     "wall_rebound_prob": 0.08,
     "dribble_flick_prob": 0.08,
     "custom_prob": 0.13,
+    # Added with reward v3 (env/scenarios_v3.py). Zero by default so a version that never names
+    # them (v2) samples exactly as it always did.
+    "bounce_drop_prob": 0.0,
+    "retreat_prob": 0.0,
 }
 
 
@@ -993,6 +997,9 @@ class WeightedScenarioSetter:
         self.dribble_flick_setter = DribbleFlickScenarioSetter()
         self.replay_setter = ReplayStateSetter(parser=replay_parser)
         self.custom_setter = CustomScenarioSetter()
+        from env.scenarios_v3 import BounceDropSetter, RetreatSetter   # imports this module
+        self.bounce_drop_setter = BounceDropSetter()
+        self.retreat_setter = RetreatSetter()
 
     def update_weights(self, config_dict: Dict[str, Any]):
         """Dynamically updates scenario distribution from live config."""
@@ -1067,7 +1074,19 @@ class WeightedScenarioSetter:
             self.kickoff_setter.reset(rsim_arena, num_players)
             return "kickoff"
 
-        # 9. Goalie Save
+        # 9-10. Reward v3's starts. Skipped outright at zero weight, so v2's sampling is untouched.
+        if self.bounce_drop_prob > 0.0:
+            cumulative += self.bounce_drop_prob
+            if r <= cumulative:
+                self.bounce_drop_setter.reset(rsim_arena, num_players)
+                return "bounce_drop"
+        if self.retreat_prob > 0.0:
+            cumulative += self.retreat_prob
+            if r <= cumulative:
+                self.retreat_setter.reset(rsim_arena, num_players)
+                return "retreat"
+
+        # 11. Goalie Save
         self.goalie_setter.reset(rsim_arena, num_players)
         return "goalie_save"
 

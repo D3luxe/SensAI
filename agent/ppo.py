@@ -20,6 +20,7 @@ from env.observations import OBS_MIRROR_MASK_NP, ACT_MIRROR_MASK_NP
 from agent.models import ActorCritic, LOG_STD_FLOOR_DEFAULT
 from agent.checkpoint import migrate_state_dict
 from utils.config import anneal_progress, annealed_weights
+from env.reward_registry import apply_reward_version, version_of
 from utils.league_manager import LeagueManager
 
 
@@ -112,6 +113,14 @@ class PPOTrainer:
         # Load YAML config
         with open(config_path, "r", encoding="utf-8") as f:
             self.config = yaml.safe_load(f)
+        # A named reward version supplies its frozen rewards / reward_annealing / scenarios sections
+        # (config/reward_versions/<v>.json); live overrides of those are ignored for the whole run.
+        self.config = apply_reward_version(self.config)
+        self.reward_version = version_of(self.config)
+        self.reward_version_pinned = bool(self.config.get("reward_version"))
+        # global_step at which this reward version's run began (set on load; see _start_reward_run)
+        self.reward_run_start_step = 0
+        self._live_frozen_seen: Dict[str, Any] = {}
 
         hp = self.config.get("hyperparameters", {})
         env_cfg = self.config.get("environment", {})
@@ -244,6 +253,7 @@ class PPOTrainer:
             continuous_actions=self.continuous_actions,
             self_play=self.self_play,
             baseline_opponent_ratio=0.0,
+            reward_version=self.reward_version,
         )
         if self.num_env_workers > 1:
             from env.subproc_vec_env import SubprocVectorizedRocketEnv
@@ -593,8 +603,17 @@ class PPOTrainer:
                 if "bc_decay_steps" in live:
                     self.bc_decay_steps = int(live["bc_decay_steps"])
 
-                # Update rewards
-                if "rewards" in live and isinstance(live["rewards"], dict):
+                # Update rewards. Not under a named reward version: its weights and scenario mix are
+                # frozen for the run (docs/reward_v3_spec.md, R1), so live edits are reported and dropped.
+                if self.reward_version_pinned:
+                    ignored = [k for k in ("rewards", "scenarios") if isinstance(live.get(k), dict)
+                               and live[k] != self._live_frozen_seen.get(k)]
+                    for k in ignored:
+                        self._live_frozen_seen[k] = live[k]
+                    if ignored:
+                        print(f"[Live Config] Ignoring live {' and '.join(ignored)}: reward {self.reward_version} "
+                              f"is frozen for this run (config/reward_versions/{self.reward_version}.json)")
+                elif "rewards" in live and isinstance(live["rewards"], dict):
                     # Update the base, not the live value: annealing composes on top of whatever
                     # the config says, so a config edit retargets the schedule rather than
                     # fighting it. _apply_reward_annealing pushes within the same iteration.
@@ -603,7 +622,7 @@ class PPOTrainer:
                     print(f"[Live Config] Reward weights dynamically updated.")
 
                 # Update scenario distributions
-                if "scenarios" in live and isinstance(live["scenarios"], dict):
+                if not self.reward_version_pinned and "scenarios" in live and isinstance(live["scenarios"], dict):
                     self.env.update_scenarios(live["scenarios"])
                     print(f"[Live Config] Scenario distributions dynamically updated.")
 
@@ -783,12 +802,15 @@ class PPOTrainer:
             "rot_anneal_start_ceiling": self._rot_anneal_start_ceiling,
             "return_rms": self.ret_rms.state_dict(),
             "critic_warmup_remaining": self._critic_warmup_remaining,
+            "reward_run_start_step": self.reward_run_start_step,
         }
         # Which reward produced this checkpoint (env/reward_version.py). Never fatal: a checkpoint
         # without the stamp is still a checkpoint, and the eval suite reports it as unknown.
         try:
             from env.reward_version import reward_identity
-            data["reward_identity"] = reward_identity()   # yaml + live overrides as applied now
+            # A named version's settings are frozen in self.config; an unnamed (legacy v2) config is
+            # yaml + live overrides as applied now
+            data["reward_identity"] = reward_identity(self.config if self.reward_version_pinned else None)
         except Exception as e:
             print(f"[PPO Trainer] Could not stamp reward identity: {e}")
         # Atomic save on Windows: write to .tmp file then replace with retry to avoid file lock conflict (Error 1224)
@@ -945,6 +967,7 @@ class PPOTrainer:
             self._load_return_rms(checkpoint)
             self._apply_log_std_floor()
             self.agent.sanitize_log_std()
+            self._check_reward_version(checkpoint)
             print(f"[PPO Trainer] Successfully migrated weights to new dimensions (Obs: {self.obs_dim}, Act: {self.act_dim}) from {path} (Iter: {self.iteration})")
             return
 
@@ -983,7 +1006,36 @@ class PPOTrainer:
             if cleaned_subnormals > 0:
                 print(f"[PPO Trainer] Performance Sanitizer: Flushed {cleaned_subnormals:,} legacy subnormal numbers to true 0.0.")
 
+        self._check_reward_version(checkpoint)
         print(f"[PPO Trainer] Loaded checkpoint from {path} (Iteration: {self.iteration}, Step: {self.global_step})")
+
+    def _check_reward_version(self, checkpoint):
+        """
+        Continue this reward version's run, or start a new one from a checkpoint trained on another.
+
+        The policy carries over; everything fitted to the old reward does not. The critic learned the
+        old version's returns, so the return normaliser is reset and the critic warmed up (policy
+        frozen) before the first policy update. The optimizer's moments describe the old objective,
+        so it starts fresh. The anneal clocks restart, so the new version's schedules run on the
+        new run's own clock. A checkpoint with no reward stamp predates versioning and was v2.
+        """
+        stamp = checkpoint.get("reward_identity") if isinstance(checkpoint, dict) else None
+        ckpt_version = (stamp or {}).get("version", "v2") if isinstance(stamp, dict) else "v2"
+        if ckpt_version == self.reward_version:
+            self.reward_run_start_step = int(checkpoint.get("reward_run_start_step", 0) or 0) \
+                if isinstance(checkpoint, dict) else 0
+            return
+
+        self.reward_run_start_step = int(self.global_step)
+        self.ret_rms = RunningMeanStd()
+        self._needs_value_norm_migration = False
+        self._critic_warmup_remaining = self.critic_warmup_iterations
+        self.optimizer = optim.AdamW(self.agent.parameters(), lr=self.lr, eps=1e-5, weight_decay=0.0)
+        self._reward_anneal_start_steps = {}
+        self._last_pushed_reward_weights = None
+        print(f"[PPO Trainer] Reward version change {ckpt_version} -> {self.reward_version} at step "
+              f"{self.global_step:,}: return normaliser reset, fresh optimizer, anneal clocks restarted, "
+              f"critic warmup for {self.critic_warmup_iterations} iterations before policy updates.")
 
     def train(self, max_iterations: Optional[int] = None):
         """

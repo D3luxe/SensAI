@@ -201,6 +201,7 @@ class SubprocVectorizedRocketEnv:
         baseline_opponent_ratio: float = 0.25,
         baseline_opponent_type: str = "heuristic",
         num_workers: Optional[int] = None,
+        reward_version: Optional[str] = None,
     ):
         self.num_envs = num_envs
         self.game_mode = game_mode
@@ -223,6 +224,7 @@ class SubprocVectorizedRocketEnv:
             reward_weights=reward_weights,
             continuous_actions=continuous_actions,
             self_play=self_play,
+            reward_version=reward_version,
         )
         self.num_players_per_env = probe.num_players
         self.obs_dim = probe.obs_dim
@@ -269,6 +271,7 @@ class SubprocVectorizedRocketEnv:
             self_play=self_play,
             baseline_opponent_ratio=self.baseline_opponent_ratio,
             baseline_opponent_type=baseline_opponent_type,
+            reward_version=reward_version,
         )
 
         # Contiguous, balanced env ranges: worker w owns [starts[w], starts[w+1]).

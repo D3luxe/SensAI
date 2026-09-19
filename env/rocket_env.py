@@ -8,7 +8,7 @@ import numpy as np
 from typing import List, Tuple, Dict, Any, Optional
 
 from env.physics_engine import RocketSimArena, CarState
-from env.rewards import RewardManager
+from env.reward_registry import make_reward_manager
 from env.observations import DefaultObservationBuilder
 from env.actions import ContinuousActionParser, DiscreteActionParser
 from env.baseline_agent import BaselineChaser, BaseOpponent, NectoNextoOpponentBot, CheckpointOpponentBot, create_opponent_bot
@@ -24,6 +24,8 @@ SCENARIO_TIMEOUTS: Dict[str, int] = {
     "dribble_flick": 375,   # 25s  (extended carry & flick)
     "replay":        450,   # 30s  (match state rollout)
     "custom":        300,   # 20s
+    "bounce_drop":    90,   # 6s   (reward v3: meet a falling or bouncing ball)
+    "retreat":       120,   # 8s   (reward v3: get goal-side before the ball arrives)
 }
 
 
@@ -41,7 +43,8 @@ class RocketLeagueEnv:
         continuous_actions: bool = True,
         self_play: bool = True,
         is_baseline_env: bool = False,
-        baseline_opponent_type: str = "heuristic"
+        baseline_opponent_type: str = "heuristic",
+        reward_version: Optional[str] = None
     ):
         self.game_mode = game_mode
         self.num_players = 2 if game_mode == "1v1" else (4 if game_mode == "2v2" else 6)
@@ -55,7 +58,8 @@ class RocketLeagueEnv:
 
         self.arena = RocketSimArena(num_players=self.num_players, game_mode=game_mode)
         self.obs_builder = DefaultObservationBuilder(symmetric=True)
-        self.reward_manager = RewardManager(reward_weights=reward_weights)
+        # None = the version config/default_config.yaml names (env/reward_registry.py)
+        self.reward_manager = make_reward_manager(reward_version, reward_weights)
         self.action_parser = ContinuousActionParser() if continuous_actions else DiscreteActionParser()
 
         self.obs_dim = self.obs_builder.obs_dim
@@ -273,7 +277,8 @@ class VectorizedRocketEnv:
         self_play: bool = True,
         baseline_opponent_ratio: float = 0.25,
         baseline_opponent_type: str = "heuristic",
-        num_workers: Optional[int] = None
+        num_workers: Optional[int] = None,
+        reward_version: Optional[str] = None
     ):
         self.num_envs = num_envs
         self.game_mode = game_mode
@@ -295,7 +300,8 @@ class VectorizedRocketEnv:
                 continuous_actions=continuous_actions,
                 self_play=self_play,
                 is_baseline_env=(i >= num_envs - num_baseline),
-                baseline_opponent_type=baseline_opponent_type
+                baseline_opponent_type=baseline_opponent_type,
+                reward_version=reward_version
             )
             for i in range(num_envs)
         ]

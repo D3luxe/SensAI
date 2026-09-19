@@ -9,6 +9,10 @@ trainer is not doing:
   3. reward_annealing              decays the named reward targets over decay_steps, each on its own
                                    clock (PPOTrainer._reward_anneal_start_steps, saved per checkpoint)
 
+When the yaml names a `reward_version`, the rewards / reward_annealing / scenarios sections come
+from that version's frozen snapshot (config/reward_versions/<v>.json) instead, and live overrides
+of them are ignored -- see env/reward_registry.py.
+
 effective_config() applies 1 and 2 and returns a full nested config in the yaml's shape.
 effective_reward_weights() adds 3 plus the gamma the boost shaping must discount with.
 Code-side defaults for missing keys come from REWARD_DEFAULTS and SCENARIO_DEFAULTS.
@@ -28,6 +32,7 @@ from typing import Any, Dict, Mapping, Optional
 import yaml
 
 from env.rewards import REWARD_DEFAULTS, REWARD_KEYS_NOT_IN_CONFIG
+from env.reward_registry import apply_reward_version, reward_defaults, version_of
 from env.state_setters import SCENARIO_DEFAULTS
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -122,6 +127,10 @@ def effective_config(
     yaml alone.
     """
     cfg = overlay_live(load_yaml(base_path), load_live(live_path) if live_path else {})
+    if cfg.get("reward_version"):
+        # A named reward version supplies its own frozen sections, complete, and live overrides of
+        # them do not apply (env/reward_registry.py)
+        return apply_reward_version(cfg)
     if fill_defaults:
         for key in CONFIG_REWARD_KEYS:
             cfg["rewards"].setdefault(key, REWARD_DEFAULTS[key])
@@ -182,7 +191,7 @@ def effective_reward_weights(
     were all configured from the start. With global_step=None no annealing is applied.
     """
     cfg = effective_config() if cfg is None else cfg
-    base = {**{k: REWARD_DEFAULTS[k] for k in CONFIG_REWARD_KEYS}, **(cfg.get("rewards") or {})}
+    base = {**reward_defaults(version_of(cfg)), **(cfg.get("rewards") or {})}
     base["gamma"] = float((cfg.get("hyperparameters") or {}).get("gamma", REWARD_DEFAULTS["gamma"]))
 
     anneal = cfg.get("reward_annealing") or {}

@@ -38,14 +38,23 @@ def _yaml():
 
 class TestDefaultTables(unittest.TestCase):
     def test_config_reward_keys_match_the_table(self):
-        self.assertEqual(set(_yaml()["rewards"]), set(CONFIG_REWARD_KEYS))
-        with io.open("config/live_config.json", encoding="utf-8") as f:
-            live = json.load(f)
-        self.assertEqual(set(live.get("rewards", {})), set(CONFIG_REWARD_KEYS))
+        # Reward settings live in each version's frozen snapshot (env/reward_registry.py)
+        from env.reward_registry import known_versions, load_snapshot, reward_defaults
+        self.assertEqual(set(load_snapshot("v2")["settings"]["rewards"]), set(CONFIG_REWARD_KEYS))
+        for version in known_versions():
+            self.assertEqual(set(load_snapshot(version)["settings"]["rewards"]), set(reward_defaults(version)), version)
         self.assertTrue(REWARD_KEYS_NOT_IN_CONFIG <= set(REWARD_DEFAULTS))
 
     def test_config_scenario_keys_match_the_table(self):
-        self.assertEqual(set(_yaml()["scenarios"]), set(SCENARIO_DEFAULTS))
+        # v2 predates the v3 starts, whose zero defaults leave its sampling unchanged
+        from env.reward_registry import known_versions, load_snapshot
+        for version in known_versions():
+            self.assertLessEqual(set(load_snapshot(version)["settings"]["scenarios"]), set(SCENARIO_DEFAULTS), version)
+        self.assertEqual(set(load_snapshot("v3")["settings"]["scenarios"]), set(SCENARIO_DEFAULTS))
+        self.assertEqual(set(SCENARIO_DEFAULTS) - set(load_snapshot("v2")["settings"]["scenarios"]),
+                         {"bounce_drop_prob", "retreat_prob"})
+        self.assertEqual(SCENARIO_DEFAULTS["bounce_drop_prob"], 0.0)
+        self.assertEqual(SCENARIO_DEFAULTS["retreat_prob"], 0.0)
 
     def test_combined_reward_is_built_from_the_table(self):
         c = CombinedReward({})
