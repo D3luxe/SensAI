@@ -869,15 +869,18 @@ def build_reward_card_html(metrics: Optional[dict] = None) -> str:
                     f"({frac * 100:.0f}%)</span>")
         return f"{base:g}"
 
-    if version == "v3":
+    if version in ("v3", "v4"):
         g, ab = float(rew["goal_reward"]), float(rew["aggression_bias"])
         terms = [
             ("Goal", f"+{g:g} / −{g * (1 - ab):g}", f"aggression_bias {ab:g}"),
             ("Ball position", weight_cell("ball_position_weight"), "potential"),
             ("Touch", weight_cell("touch_weight"), "× ball Δv / 2300"),
-            ("Closeness to ball", weight_cell("closeness_weight"), "potential"),
+            ("Closeness to ball", weight_cell("closeness_weight"),
+             "potential" if float(rew["closeness_weight"]) or "closeness_weight" in targets else "retired"),
             ("Boost held", weight_cell("boost_weight"), "potential"),
         ]
+        if "race_weight" in rew:
+            terms.append(("Ball race", weight_cell("race_weight"), "potential: nearer the ball than the opponent"))
     else:
         terms = [(k.replace("_weight", "").replace("_", " "), weight_cell(k), "") for k in sorted(rew)]
     rows = "".join(f"<tr><td>{html.escape(n)}</td><td class='rw-w'>{w}</td><td class='rw-dim'>{html.escape(d)}</td></tr>"

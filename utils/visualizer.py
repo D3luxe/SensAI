@@ -215,8 +215,9 @@ REWARD_METADATA: Dict[str, Dict[str, Any]] = {
 
 CORE_REWARD_KEYS = ["goal", "ball_to_goal", "touch", "player_to_ball", "boost"]
 
-# Reward v3's five terms (env/rewards_v3.py, docs/reward_v3_spec.md). A breakdown carrying
-# "ball_position" is a v3 breakdown and is labelled from here.
+# Reward v3's five terms (env/rewards_v3.py, docs/reward_v3_spec.md) and v4's sixth
+# (env/rewards_v4.py). A breakdown carrying "ball_position" is a v3/v4 breakdown and is labelled
+# from here; "race" appears only in v4's.
 REWARD_METADATA_V3: Dict[str, Dict[str, Any]] = {
     "goal": {"label": "Goal (T1)", "category": "Outcome",
              "desc": "+10 for scoring, -7.5 for conceding (aggression_bias 0.25)", "priority": 1},
@@ -225,9 +226,12 @@ REWARD_METADATA_V3: Dict[str, Dict[str, Any]] = {
     "touch": {"label": "Touch (T3)", "category": "Outcome",
               "desc": "0.5 x ball speed change / 2300 on a touch", "priority": 3},
     "closeness": {"label": "Closeness to ball (T4)", "category": "Shaping",
-                  "desc": "Potential: minus car-ball distance, annealed to 0 over 300M steps", "priority": 4},
+                  "desc": "Potential: minus car-ball distance (v3 annealed it to 0 over 300M steps; 0 in v4)",
+                  "priority": 4},
     "boost": {"label": "Boost held (T5)", "category": "Shaping",
               "desc": "Potential: sqrt(boost / 100)", "priority": 5},
+    "race": {"label": "Ball race (T6)", "category": "Shaping",
+             "desc": "Potential: how much nearer the ball than the nearest opponent (v4), weight 1", "priority": 6},
 }
 
 

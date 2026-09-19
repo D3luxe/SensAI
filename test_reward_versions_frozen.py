@@ -7,6 +7,7 @@ one of these fails, the fix is to put the change in the next version, not to upd
 
   v2  env/rewards.py, git tag reward-v2
   v3  env/rewards_v3.py + env/scenarios_v3.py
+  v4  env/rewards_v4.py (+ the v3 files it imports)
 """
 import unittest
 
@@ -43,6 +44,15 @@ class TestRewardVersionsFrozen(unittest.TestCase):
     def test_v2_code_is_what_trained_to_iteration_173600(self):
         self.assertEqual(code_sha(), "7c5d7a2b15e057d7")
         self.assertEqual(load_snapshot("v2")["identity"]["settings_sha"], "20d320a8ec343cca")
+
+    def test_v4_is_v3_plus_the_race_term_with_closeness_retired(self):
+        v3, v4 = load_snapshot("v3")["settings"], load_snapshot("v4")["settings"]
+        self.assertEqual(v4["scenarios"], v3["scenarios"])
+        self.assertEqual(v4["gamma"], v3["gamma"])
+        self.assertFalse(v4["reward_annealing"]["enabled"])
+        expected = {**v3["rewards"], "closeness_weight": 0.0, "race_weight": 1.0}
+        self.assertEqual(v4["rewards"], expected)
+        self.assertEqual(load_snapshot("v4")["start_checkpoint"], "checkpoints/baselines/v3_iter198000.pt")
 
     def test_active_config_resolves_to_its_frozen_settings(self):
         from utils.config import effective_config

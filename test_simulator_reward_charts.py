@@ -98,7 +98,10 @@ class TestSimulatorRewardCharts(unittest.TestCase):
 
         # The breakdown carries the active reward version's terms
         from env.reward_registry import active_version
+        from env.rewards_v4 import TERM_NAMES as V4_TERMS
         from env.rewards_v3 import TERM_NAMES
+        if active_version() == "v4":
+            TERM_NAMES = V4_TERMS
         b_keys = stats["blue_breakdown"].keys()
         for core_k in (CORE_REWARD_KEYS if active_version() == "v2" else TERM_NAMES):
             self.assertIn(core_k, b_keys)

@@ -1,0 +1,42 @@
+{
+  "version": "v4",
+  "spec": "docs/reward_v4_spec.md",
+  "start_checkpoint": "checkpoints/baselines/v3_iter198000.pt",
+  "baseline_eval": "evals/baselines/v3_iter198000.json",
+  "identity": {
+    "version": "v4",
+    "code_sha": "05332866aaf14755",
+    "settings_sha": "354c613fc62e7ee9"
+  },
+  "notes": "v3 plus T6 ball race (env/rewards_v4.py); T4 closeness retired at 0, no anneal. Frozen for the whole run; a change is v5.",
+  "settings": {
+    "rewards": {
+      "aggression_bias": 0.25,
+      "ball_position_weight": 5.0,
+      "boost_weight": 1.0,
+      "closeness_weight": 0.0,
+      "goal_reward": 10.0,
+      "race_weight": 1.0,
+      "touch_weight": 0.5
+    },
+    "reward_annealing": {
+      "decay_steps": 0,
+      "enabled": false,
+      "targets": {}
+    },
+    "scenarios": {
+      "aerial_prob": 0.08,
+      "bounce_drop_prob": 0.04,
+      "custom_prob": 0.0,
+      "dribble_flick_prob": 0.03,
+      "kickoff_prob": 0.15,
+      "replay_prob": 0.45,
+      "retreat_prob": 0.04,
+      "save_prob": 0.06,
+      "turnaround_prob": 0.05,
+      "wall_prob": 0.05,
+      "wall_rebound_prob": 0.05
+    },
+    "gamma": 0.995
+  }
+}

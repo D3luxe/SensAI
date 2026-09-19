@@ -36,6 +36,8 @@ SETTINGS_SECTIONS = ("rewards", "reward_annealing", "scenarios")
 CODE_FILES: Dict[str, Tuple[str, ...]] = {
     "v2": ("env/rewards.py",),
     "v3": ("env/rewards_v3.py", "env/scenarios_v3.py"),
+    # v4 builds on v3's term functions and training starts, so their files are part of its identity
+    "v4": ("env/rewards_v4.py", "env/rewards_v3.py", "env/scenarios_v3.py"),
 }
 
 
@@ -100,6 +102,9 @@ def reward_defaults(version: str) -> Dict[str, float]:
     if version == "v3":
         from env.rewards_v3 import REWARD_V3_DEFAULTS
         return {k: v for k, v in REWARD_V3_DEFAULTS.items() if k != "gamma"}
+    if version == "v4":
+        from env.rewards_v4 import REWARD_V4_DEFAULTS
+        return {k: v for k, v in REWARD_V4_DEFAULTS.items() if k != "gamma"}
     raise ValueError(f"unknown reward_version {version!r}")
 
 
@@ -112,4 +117,7 @@ def make_reward_manager(version: Optional[str] = None, reward_weights: Optional[
     if version == "v3":
         from env.rewards_v3 import RewardManagerV3
         return RewardManagerV3(reward_weights=reward_weights)
+    if version == "v4":
+        from env.rewards_v4 import RewardManagerV4
+        return RewardManagerV4(reward_weights=reward_weights)
     raise ValueError(f"unknown reward_version {version!r}")
