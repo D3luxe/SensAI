@@ -22,9 +22,11 @@ import threading
 from typing import Any, Dict, List, Optional, Tuple
 
 HISTORY_FILE = "logs/history.jsonl"
+# Fields the UI charts. A record keeps only these, so anything the trainer starts logging has to be
+# added here before it can reach a curve.
 KEEP = ("iteration", "global_step", "mean_reward", "policy_loss", "value_loss", "entropy", "sps",
         "ball_touches", "goals", "reward_version", "reward_run_start_step", "critic_warmup", "telemetry",
-        "timestamp")
+        "timestamp", "approx_kl", "clip_fraction", "explained_variance", "learning_rate")
 _CHUNK = 4 * 1024 * 1024
 # Records held per run. Past this the older half is thinned to every other record, so a run of any
 # length costs bounded memory and its curve keeps its shape; the backward scan stops here too.

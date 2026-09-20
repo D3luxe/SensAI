@@ -51,6 +51,14 @@ class TestRunHistory(unittest.TestCase):
         self.assertEqual(run["key"], ("v4", 800))
         self.assertEqual(len(run["records"]), 2)
 
+    def test_charted_fields_survive_compaction(self):
+        rec = _rec(1, "v4", 0)
+        rec.update(approx_kl=0.02, clip_fraction=0.15, explained_variance=0.84, learning_rate=3e-4)
+        self._write([rec])
+        got = run_history.current_run(self.path)["records"][0]
+        for k in ("approx_kl", "clip_fraction", "explained_variance", "learning_rate"):
+            self.assertIn(k, got, f"{k} is charted but dropped by run_history.KEEP")
+
     def test_a_half_written_line_waits(self):
         self._write([_rec(0, "v3", 0)])
         run_history.current_run(self.path)
