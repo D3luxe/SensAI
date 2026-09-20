@@ -166,6 +166,37 @@ def compare_results(a: Dict[str, Any], b: Dict[str, Any]) -> List[Dict[str, Any]
     return rows
 
 
+# A head-to-head run (eval_suite --reference) plays the checkpoint against another checkpoint and
+# reports it under "reference". It is judged on its own sign, not against the baseline eval: above
+# zero means it beats that opponent. Only every seed on one side of zero is a result.
+HEAD_TO_HEAD: List[Tuple[str, str, int]] = [
+    ("goal_diff_per_10min", "Goal difference head to head (per 10 min)", +1),
+    ("goals_for_per_10min", "Goals for (per 10 min)", +1),
+    ("goals_against_per_10min", "Goals against (per 10 min)", -1),
+    ("touches_per_min", "Touches per minute", +1),
+    ("kickoff_first_touch_pct", "Kickoff first touch", +1),
+    ("on_target_per_100_touches", "On target per 100 touches", +1),
+]
+
+
+def head_to_head_rows(b: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """The reference-match cards, verdict taken from the sign of the seed range."""
+    ref = (b.get("results") or {}).get("reference") or {}
+    rows = []
+    for k, label, direction in HEAD_TO_HEAD:
+        s = ref.get(k)
+        if s is None:
+            continue
+        lo, hi = s.get("min"), s.get("max")
+        verdict = "none"
+        if k == "goal_diff_per_10min" and lo is not None and hi is not None:
+            verdict = "better" if lo * direction > 0 else ("worse" if hi * direction < 0 else "noise")
+        rows.append({"group": "reference", "metric": k, "a": None, "b": s["mean"], "delta": None,
+                     "clear": verdict in ("better", "worse"), "verdict": verdict, "label": label,
+                     "b_range": (lo, hi), "seeds": len(s.get("per_seed", []))})
+    return rows
+
+
 def headline_rows(a: Optional[Dict[str, Any]], b: Dict[str, Any]) -> Dict[str, List[Dict[str, Any]]]:
     """HEADLINE metrics of B, compared with A when given."""
     out = {}
@@ -213,6 +244,10 @@ def scorecard_html(result: Dict[str, Any], baseline: Optional[Dict[str, Any]], r
                    baseline_name: Optional[str]) -> str:
     """The spec's judging view: primary metric, guardrails and v2's problem metrics as cards."""
     sections = headline_rows(baseline, result)
+    h2h = head_to_head_rows(result)
+    if h2h:
+        opponent = os.path.basename(str(result.get("reference") or result.get("reference_checkpoint") or "the reference"))
+        sections = {f"Head to head vs {opponent}": h2h, **sections}
     stamp = result.get("reward_identity") if isinstance(result.get("reward_identity"), dict) else {}
     meta = [f"<b>{html.escape(result_name)}</b>",
             f"reward {html.escape(str(stamp.get('version', 'unstamped')))}",
@@ -236,7 +271,8 @@ def scorecard_html(result: Dict[str, Any], baseline: Optional[Dict[str, Any]], r
                       if r.get("seeds", 0) > 1 else "")
             base = (f"<div class='ev-base'>was {_num(r['a'], m)} <span class='ev-d ev-{verdict}'>{_delta(r['delta'], m)} · "
                     f"{VERDICT_TEXT[verdict]}</span></div>" if r["a"] is not None else "")
-            big = " ev-card-primary" if section == "Primary" else ""
+            big = " ev-card-primary" if (section == "Primary" or (m == "goal_diff_per_10min"
+                                                                  and r["group"] == "reference")) else ""
             cards.append(f"<div class='ev-card ev-edge-{verdict}{big}'><div class='ev-label'>{html.escape(r['label'])}</div>"
                          f"<div class='ev-value'>{_num(r['b'], m)}</div>{base}{spread}</div>")
         parts.append(f"<div class='ev-section'><div class='ev-section-title'>{html.escape(section)}</div>"

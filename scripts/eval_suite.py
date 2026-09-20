@@ -491,6 +491,8 @@ def main():
         "reward_run_start_step": ckpt.get("reward_run_start_step"),
         "git_commit": subprocess.run(["git", "rev-parse", "--short", "HEAD"], capture_output=True, text=True).stdout.strip(),
         "quick": bool(args.quick),
+        # the head-to-head opponent, so a result can name who the "reference" group was played against
+        "reference": args.reference,
         "created": time.strftime("%Y-%m-%d %H:%M:%S"),
     }
     del ckpt

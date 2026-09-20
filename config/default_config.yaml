@@ -61,7 +61,7 @@ league:
   training_opponents:
   - checkpoints/necto-model.pt
 logging:
-  archive_stride: 5000
+  archive_stride: 1000
   autosave_interval: 20
   checkpoint_interval: 200
   log_dir: logs

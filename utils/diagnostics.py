@@ -179,7 +179,7 @@ def curve_records(mode: str = "run", history_file: str = run_history.HISTORY_FIL
 def render_training_curves_plot(history_file: str = run_history.HISTORY_FILE, mode: str = "run") -> plt.Figure:
     plt.close("all")
     recs, scope = curve_records(mode, history_file)
-    fig, axes = plt.subplots(2, 2, figsize=(11, 5.6), dpi=100, sharex=True)
+    fig, axes = plt.subplots(2, 3, figsize=(15, 5.6), dpi=100, sharex=True)
     fig.patch.set_facecolor(BG)
     for ax in axes.flat:
         _style(ax)
@@ -206,8 +206,10 @@ def render_training_curves_plot(history_file: str = run_history.HISTORY_FILE, mo
     panels = [
         (axes[0, 0], "mean_reward", "Mean episode reward", "#38bdf8"),
         (axes[0, 1], "value_loss", "Value loss", "#facc15"),
+        (axes[0, 2], "approx_kl", "Approx KL per update", "#fb7185"),
         (axes[1, 0], "entropy", "Policy entropy", "#c084fc"),
         (axes[1, 1], "ball_touches", "Touches per episode", "#4ade80"),
+        (axes[1, 2], "explained_variance", "Critic explained variance", "#2dd4bf"),
     ]
     warm = np.array([bool(r.get("critic_warmup")) for r in recs])
     for ax, key, title, colour in panels:
@@ -217,6 +219,23 @@ def render_training_curves_plot(history_file: str = run_history.HISTORY_FILE, mo
         ax.set_title(title, color=TEXT, fontsize=9.5, loc="left")
         if warm.any():
             ax.axvspan(xs[warm].min(), xs[warm].max(), color="#a78bfa", alpha=0.12, lw=0)
+    # A healthy PPO update sits near 0.01 KL: well above means the step size is too large for the
+    # trust region, far below means the updates are barely moving the policy.
+    if np.isfinite(series("approx_kl")).any() and series("approx_kl").any():
+        axes[0, 2].axhline(0.01, color="#64748b", linewidth=0.9, linestyle="--")
+        axes[0, 2].text(0.99, 0.9, "0.01 target", transform=axes[0, 2].transAxes, ha="right",
+                        color=MUTED, fontsize=7.5)
+        clip = series("clip_fraction")
+        axes[0, 2].text(0.99, 0.04, f"clipped {np.nanmean(clip[-20:]) * 100:.1f}% of samples",
+                        transform=axes[0, 2].transAxes, ha="right", color=MUTED, fontsize=8)
+    else:
+        for ax in (axes[0, 2], axes[1, 2]):
+            ax.text(0.5, 0.5, "No KL / explained variance\nin this part of the run", transform=ax.transAxes,
+                    ha="center", va="center", color=MUTED, fontsize=8.5)
+    lr = series("learning_rate")
+    if np.isfinite(lr).any() and lr.any():
+        axes[1, 2].text(0.99, 0.04, f"lr {lr[-1]:.1e}", transform=axes[1, 2].transAxes, ha="right",
+                        color=MUTED, fontsize=8)
     sps = series("sps")
     axes[1, 1].text(0.99, 0.04, f"{np.nanmean(sps[-20:]):,.0f} steps/s", transform=axes[1, 1].transAxes,
                     ha="right", color=MUTED, fontsize=8)

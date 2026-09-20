@@ -89,6 +89,22 @@ class TestEvalResults(unittest.TestCase):
         self.assertEqual(eval_results.compare_results(a, b)[0]["verdict"], "worse")
         self.assertEqual(eval_results.compare_results(a, c)[0]["verdict"], "noise")
 
+    def test_head_to_head_is_judged_on_the_sign_of_its_seeds(self):
+        beats = _result({"reference": {"goal_diff_per_10min": 5.0}})       # seeds 4, 5, 6
+        loses = _result({"reference": {"goal_diff_per_10min": -5.0}})      # seeds -6, -5, -4
+        level = _result({"reference": {"goal_diff_per_10min": 0.5}})       # seeds -0.5, 0.5, 1.5
+        for res, verdict in ((beats, "better"), (loses, "worse"), (level, "noise")):
+            rows = eval_results.head_to_head_rows(res)
+            self.assertEqual(rows[0]["verdict"], verdict)
+        self.assertEqual(eval_results.head_to_head_rows(_result({"necto": {"goal_diff_per_10min": 5.0}})), [])
+
+    def test_scorecard_leads_with_the_head_to_head_when_there_is_one(self):
+        res = _result({"reference": {"goal_diff_per_10min": 5.0}, "necto": {"goal_diff_per_10min": -30.0}})
+        res["reference"] = "checkpoints/baselines/v3_iter198000.pt"
+        html = eval_results.scorecard_html(res, None, "b", None)
+        self.assertIn("Head to head vs v3_iter198000.pt", html)
+        self.assertLess(html.index("Head to head"), html.index("Primary"))
+
     def test_real_baselines_match_the_cli(self):
         if not all(os.path.exists(p) for p in ("evals/baselines/v2_iter172000.json", "evals/baselines/v2_iter173600.json")):
             self.skipTest("baseline evals not present")

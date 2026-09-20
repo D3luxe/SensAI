@@ -24,6 +24,19 @@ from env.reward_registry import apply_reward_version, version_of
 from utils.league_manager import LeagueManager
 
 
+def _explained_variance(returns: torch.Tensor, values: torch.Tensor) -> float:
+    """
+    1 - Var(returns - values) / Var(returns): the share of the return signal the critic explains.
+    1.0 is a perfect fit, 0.0 is no better than predicting the mean, negative is worse than that.
+    Returns 0.0 for a batch whose returns are constant, where the ratio is undefined.
+    """
+    with torch.no_grad():
+        var_y = returns.var()
+        if not torch.isfinite(var_y) or var_y <= 1e-8:
+            return 0.0
+        return float(1.0 - (returns - values).var() / var_y)
+
+
 def _league_grade_entry(ckpt_path: str, league_cfg: Dict[str, Any], project_root: str):
     """
     Child-process entry point for TrueSkill grading.
@@ -1346,6 +1359,13 @@ class PPOTrainer:
             mean_pg_loss = float(np.mean(pg_losses))
             mean_v_loss = float(np.mean(v_losses))
             mean_entropy = float(np.mean(entropy_losses))
+            # Update size and critic fit. approx_kl is how far the policy moved this iteration
+            # (a healthy PPO update sits near 0.01); clip_fraction is the share of samples the
+            # trust region had to clamp; explained_variance is how much of the return signal the
+            # critic accounts for (1.0 perfect, 0 no better than predicting the mean).
+            mean_kl = float(np.mean(approx_kls)) if approx_kls else 0.0
+            mean_clipfrac = float(np.mean(clipfracs)) if clipfracs else 0.0
+            explained_var = _explained_variance(b_returns, b_values)
             sps = int(self.total_actors * self.num_steps / (time.time() - iter_start_time))
 
             # Fast zero-copy telemetry directly from rollout tensors
@@ -1396,6 +1416,9 @@ class PPOTrainer:
                 "policy_loss": round(mean_pg_loss, 5),
                 "value_loss": round(mean_v_loss, 5),
                 "entropy": round(mean_entropy, 4),
+                "approx_kl": round(mean_kl, 6),
+                "clip_fraction": round(mean_clipfrac, 5),
+                "explained_variance": round(explained_var, 4),
                 "ball_touches": round(mean_touches, 2),
                 "total_touches": rollout_touches_total,
                 "goals": total_goals,
@@ -1425,8 +1448,9 @@ class PPOTrainer:
                 self.writer.add_scalar("losses/policy_loss", mean_pg_loss, self.global_step)
                 self.writer.add_scalar("losses/value_loss", mean_v_loss, self.global_step)
                 self.writer.add_scalar("losses/entropy", mean_entropy, self.global_step)
-                self.writer.add_scalar("losses/approx_kl", float(np.mean(approx_kls)) if approx_kls else 0.0, self.global_step)
-                self.writer.add_scalar("losses/clipfrac", float(np.mean(clipfracs)) if clipfracs else 0.0, self.global_step)
+                self.writer.add_scalar("losses/approx_kl", mean_kl, self.global_step)
+                self.writer.add_scalar("losses/clipfrac", mean_clipfrac, self.global_step)
+                self.writer.add_scalar("losses/explained_variance", explained_var, self.global_step)
                 self.writer.add_scalar("losses/bc_weight", current_bc_weight, self.global_step)
                 if bc_losses:
                     self.writer.add_scalar("losses/bc_loss", float(np.mean(bc_losses)), self.global_step)
@@ -1443,6 +1467,7 @@ class PPOTrainer:
                 f"Policy Loss: {mean_pg_loss:.4f} | "
                 f"Value Loss: {mean_v_loss:.4f} | "
                 f"Entropy: {mean_entropy:.3f} | "
+                f"KL: {mean_kl:.4f} | "
                 f"Touches: {rollout_touches_total} ({mean_touches:.1f}/ep) | "
                 f"Goals: {total_goals} | "
                 f"SPS: {sps}"

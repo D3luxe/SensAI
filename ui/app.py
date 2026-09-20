@@ -2093,6 +2093,15 @@ def _eval_result_choices() -> list:
     return [(eval_results.label_for(e), e["path"]) for e in eval_results.list_results()]
 
 
+def _default_reference_path() -> Optional[str]:
+    """The checkpoint a head-to-head defaults to: the one the active reward version started from."""
+    try:
+        p = load_snapshot(active_version()).get("start_checkpoint")
+    except Exception:
+        p = None
+    return p if p and os.path.exists(p) else None
+
+
 def _default_baseline_path() -> Optional[str]:
     try:
         p = load_snapshot(active_version()).get("baseline_eval")
@@ -2235,6 +2244,12 @@ def create_ui():
                                                    label="Checkpoint")
                         eval_size_radio = gr.Radio([("Full (3 seeds)", "full"), ("Quick smoke test", "quick")],
                                                    value="full", label="Size")
+                        _ref_default = _default_reference_path()
+                        eval_ref_dd = gr.Dropdown(choices=[("(none)", "")] + _eval_choices, value=_ref_default or "",
+                                                  label="Head to head against",
+                                                  info="Also plays the two checkpoints directly. More sensitive than "
+                                                       "each one's score against Necto; defaults to the checkpoint "
+                                                       "this reward version started from.")
                         with gr.Row():
                             eval_workers = gr.Number(value=4, precision=0, label="Worker processes", minimum=1, maximum=16, min_width=100)
                             eval_name = gr.Textbox(label="Name (optional)", placeholder="auto: v3_<M>M", min_width=120)
@@ -2668,15 +2683,30 @@ def create_ui():
         refresh_evals_btn.click(fn=on_refresh_evals, inputs=[eval_result_dd, eval_base_dd],
                                 outputs=[eval_result_dd, eval_base_dd]).then(
             fn=on_show_eval, inputs=eval_view_inputs, outputs=eval_view_outputs)
-        refresh_eval_ckpts_btn.click(fn=lambda: gr.Dropdown(choices=eval_checkpoint_choices()), outputs=[eval_ckpt_dd])
+        def on_rescan_eval_checkpoints(reference):
+            choices = eval_checkpoint_choices()
+            paths = [p for _, p in choices]
+            ref = reference if reference in paths else (_default_reference_path() or "")
+            return gr.Dropdown(choices=choices), gr.Dropdown(choices=[("(none)", "")] + choices, value=ref)
 
-        def on_run_eval(ckpt, size, workers, name):
+        refresh_eval_ckpts_btn.click(fn=on_rescan_eval_checkpoints, inputs=[eval_ref_dd],
+                                     outputs=[eval_ckpt_dd, eval_ref_dd])
+
+        def on_run_eval(ckpt, size, workers, name, reference):
             import subprocess
             if not ckpt or not os.path.exists(ckpt):
                 yield "Pick a checkpoint first.", gr.skip(), gr.skip()
                 return
             cmd = [sys.executable, "-u", "scripts/eval_suite.py", "--checkpoint", ckpt,
                    "--workers", str(max(1, int(workers or 1)))]
+            if reference:
+                if not os.path.exists(reference):
+                    yield f"Head-to-head checkpoint not found: {reference}", gr.skip(), gr.skip()
+                    return
+                if os.path.normpath(reference) == os.path.normpath(ckpt):
+                    yield "A checkpoint played against itself says nothing; pick another or (none).", gr.skip(), gr.skip()
+                    return
+                cmd += ["--reference", reference]
             if size == "quick":
                 cmd.append("--quick")
             if name and str(name).strip():
@@ -2700,7 +2730,7 @@ def create_ui():
                    gr.Dropdown(choices=choices, value=written or (choices[0][1] if choices else None)),
                    gr.Dropdown(choices=[("(none)", "")] + choices))
 
-        run_eval_btn.click(fn=on_run_eval, inputs=[eval_ckpt_dd, eval_size_radio, eval_workers, eval_name],
+        run_eval_btn.click(fn=on_run_eval, inputs=[eval_ckpt_dd, eval_size_radio, eval_workers, eval_name, eval_ref_dd],
                            outputs=[eval_log, eval_result_dd, eval_base_dd]).then(
             fn=on_show_eval, inputs=eval_view_inputs, outputs=eval_view_outputs)
 
