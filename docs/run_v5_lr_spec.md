@@ -150,8 +150,8 @@ The king's Necto figure is −28.0 (seeds −30.0 to −25.5).
   touches per min 5.9 (7.0), shot conversion 21.7% (47.6%), kickoff goals against 9.1 (4.0),
   back-wall climbs 38 per 100 touches (11.8). This is v4's pattern in milder form: clearly better
   than its own ancestor, not better against the one opponent that never trains.
-- **Pinned:** `checkpoints/baselines/lr15_iter210000.pt` (+16.5 over three seeds) and
-  `lr15_iter213000.pt` (+12.75).
+- **Pinned:** `checkpoints/baselines/lr15_iter204000.pt` (+10.0 over six seeds),
+  `lr15_iter210000.pt` (+16.5 over three) and `lr15_iter213000.pt` (+12.75).
 
 On present evidence the 400M bar — every seed above zero **and** the Necto guardrail holding — is
 failed on both counts. If 300M and 350M look like 250M, the run is called at 400M rather than
