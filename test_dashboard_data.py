@@ -97,6 +97,15 @@ class TestEvalResults(unittest.TestCase):
         self.assertEqual(eval_results.compare_results(a, b)[0]["verdict"], "worse")
         self.assertEqual(eval_results.compare_results(a, c)[0]["verdict"], "noise")
 
+    def test_a_repeat_run_is_saved_beside_the_first(self):
+        d = tempfile.mkdtemp()
+        self.assertTrue(eval_results.unique_result_path("v4_199M", d).endswith("v4_199M.json"))
+        open(os.path.join(d, "v4_199M.json"), "w").close()
+        self.assertTrue(eval_results.unique_result_path("v4_199M", d).endswith("v4_199M_2.json"))
+        open(os.path.join(d, "v4_199M_2.json"), "w").close()
+        self.assertTrue(eval_results.unique_result_path("v4_199M", d).endswith("v4_199M_3.json"))
+        self.assertTrue(eval_results.unique_result_path("v4_199M", d, overwrite=True).endswith("v4_199M.json"))
+
     def test_head_to_head_is_judged_on_the_sign_of_its_seeds(self):
         beats = _result({"reference": {"goal_diff_per_10min": 5.0}})       # seeds 4, 5, 6
         loses = _result({"reference": {"goal_diff_per_10min": -5.0}})      # seeds -6, -5, -4

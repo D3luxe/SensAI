@@ -110,6 +110,21 @@ def list_results(eval_dir: str = EVAL_DIR) -> List[Dict[str, Any]]:
     return sorted(out, key=lambda r: r["mtime"], reverse=True)
 
 
+def unique_result_path(name: str, eval_dir: str = EVAL_DIR, overwrite: bool = False) -> str:
+    """
+    evals/<name>.json, or <name>_2, _3 ... when that file exists. A re-run of the same checkpoint is
+    a second sample and the reason to run one at all is to compare it with the first, so a result is
+    never overwritten unless the caller asks.
+    """
+    base = os.path.join(eval_dir, name + ".json")
+    if overwrite or not os.path.exists(base):
+        return base
+    n = 2
+    while os.path.exists(os.path.join(eval_dir, f"{name}_{n}.json")):
+        n += 1
+    return os.path.join(eval_dir, f"{name}_{n}.json")
+
+
 def load(path: str) -> Dict[str, Any]:
     with open(path, encoding="utf-8") as fh:
         return json.load(fh)

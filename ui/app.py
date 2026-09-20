@@ -2252,7 +2252,9 @@ def create_ui():
                                                        "this reward version started from.")
                         with gr.Row():
                             eval_workers = gr.Number(value=4, precision=0, label="Worker processes", minimum=1, maximum=16, min_width=100)
-                            eval_name = gr.Textbox(label="Name (optional)", placeholder="auto: v3_<M>M", min_width=120)
+                            eval_name = gr.Textbox(label="Name (optional)", min_width=120,
+                                                   placeholder="auto-named from steps into the run",
+                                                   info="A repeat of the same name is saved alongside as _2, never over the first.")
                         with gr.Row():
                             run_eval_btn = gr.Button("Run eval", variant="primary")
                             refresh_eval_ckpts_btn = gr.Button("Rescan", size="sm", min_width=80)

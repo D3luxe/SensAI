@@ -475,6 +475,8 @@ def main():
     p.add_argument("--quick", action="store_true", help="one seed, quarter size: a smoke test, not a result")
     p.add_argument("--workers", type=int, default=4)
     p.add_argument("--compare", nargs=2, metavar=("A", "B"))
+    p.add_argument("--overwrite", action="store_true",
+                   help="replace an existing result of the same name instead of saving alongside it as _2, _3 ...")
     args = p.parse_args()
     if args.compare:
         compare(*args.compare)
@@ -518,7 +520,8 @@ def main():
         name = f"iter{meta['iteration']}"
     if args.quick:
         name += "_quick"
-    out = os.path.join("evals", name + ".json")
+    from utils.eval_results import unique_result_path
+    out = unique_result_path(name, overwrite=bool(args.overwrite))
     with open(out, "w", encoding="utf-8") as fh:
         json.dump(summary, fh, indent=1, default=float)
     print_report(summary)

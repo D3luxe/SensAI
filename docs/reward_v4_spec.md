@@ -95,3 +95,45 @@ level within the seed spread and the loose-ball first-touch metrics are better.
 - Checkpoint numbering continues from the start checkpoint, so the v3 run's checkpoints after
   iteration 198000 were moved to `checkpoints/archive/v3_run/` (league state and TrueSkill ratings
   repointed) before the v4 run could overwrite them.
+
+## 6. Outcome (run closed at ~562M steps, 2026-09-20)
+
+**Rejected.** No v4 checkpoint beats the v3 king, and `checkpoints/baselines/v3_iter198000.pt`
+stays the king. v4's own baseline eval is unchanged; v5 is judged against the same one.
+
+- **Primary.** Head to head against the v3 king, pooled over the six evals from 300M on: **+0.7**
+  across 18 seeds (10 positive, range −8.2 to +9.0). Level, which meets the first half of §4's
+  adoption rule.
+- **The second half fails.** Loose-ball first touch, averaged over 300M+ against the king: drop
+  21.5% vs 16.7%, bounce 18.8% vs 20.8%, wall 87.5% vs 83.3%. All inside the noise. The one thing
+  T6 existed to fix did not move in 500M steps.
+- **Costs.** Retreat scenario conceded 42–58% (king 17%); reached goal-side 54–83% (king 88%);
+  back-wall climbs 28–36 per 100 touches (king 12); kickoff goals against vs Necto 15–22 (king 4);
+  kickoff first touch vs Necto 2–4% (king 13%); goal difference vs Necto −32 to −44 (king −28).
+- **Head to head vs Necto is not where v4 lost.** Iteration 210000 scores 5.8–6.8 goals per 10 min
+  against Necto (king 4.2) with 7.1 touches per minute and fewer back-wall climbs. The attacking
+  half of v4 is better than v3's; kickoff defence and retreats are what sink it.
+
+**What the run established, for later versions:**
+
+1. A permanent pull toward the ball buys nothing net and costs defensive positioning. v2's
+   `player_to_ball` and v4's T6 are different formulations of the same idea and both failed, T6
+   despite being relative, zero-sum and potential-based.
+2. Losing the race to a loose ball is not a motivation problem. T6 paid for winning that race for
+   500M steps and the first-touch rates did not move, so the deficit is mechanical — approach angle
+   and timing — and no reward term aimed at wanting the ball will fix it.
+3. **Checkpoint churn dominates single-checkpoint evals.** Neighbouring checkpoints 200–3,200
+   iterations apart differ by up to 25 goals per 10 min head to head, while mean reward, entropy,
+   value loss and explained variance stay flat. Every judgement in this run drawn from one
+   checkpoint ("recovered at 200M", "collapsed at 250M") was overconfident. From now on a decision
+   point is three adjacent checkpoints, pooled.
+4. That churn, with `approx_kl` at 0.023 against a 0.01 target and 15% of samples clipped, makes
+   the learning rate (3e-4 for the whole project, 3.2B steps) the leading suspect for the lack of
+   progress. That is what the next run tests: `docs/run_v5_lr_spec.md`.
+
+**Process failure to not repeat.** Iteration 210200 measured +11.9 over six seeds against the king,
+the best result of the run. It was left in `checkpoints/`, the league pruned it, and its two good
+evals can no longer be reproduced or used, since the weights are gone. Its neighbours (209800,
+210000, 211200) all measure between −3 and 0, so the spike stays unexplained. **A checkpoint that
+evals well is copied into `checkpoints/baselines/` immediately**; nothing else in `checkpoints/` is
+safe from the league's retention.
