@@ -24,6 +24,20 @@ from env.reward_registry import apply_reward_version, version_of
 from utils.league_manager import LeagueManager
 
 
+def apply_learning_rate(optimizer, lr: float) -> float:
+    """
+    Force `lr` on every param group and return the rate that was there before.
+
+    torch's optimizer.load_state_dict restores the learning rate saved inside the checkpoint, so a
+    resume silently keeps training at the old rate and the config's value is a lie. Every path that
+    loads optimizer state calls this afterwards.
+    """
+    previous = float(optimizer.param_groups[0]["lr"]) if optimizer.param_groups else float(lr)
+    for group in optimizer.param_groups:
+        group["lr"] = float(lr)
+    return previous
+
+
 def _explained_variance(returns: torch.Tensor, values: torch.Tensor) -> float:
     """
     1 - Var(returns - values) / Var(returns): the share of the return signal the critic explains.
@@ -990,6 +1004,11 @@ class PPOTrainer:
                 self.optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
             except Exception:
                 pass
+            # The checkpoint carries the learning rate it was saved with; the config decides it
+            previous = apply_learning_rate(self.optimizer, self.lr)
+            if abs(previous - self.lr) > 1e-12:
+                print(f"[PPO Trainer] Learning rate {previous:g} from the checkpoint replaced by "
+                      f"{self.lr:g} from the config")
         self.iteration = checkpoint.get("iteration", 0)
         self.global_step = checkpoint.get("global_step", 0)
         self._load_reward_anneal_clocks(checkpoint)
@@ -1423,7 +1442,8 @@ class PPOTrainer:
                 "total_touches": rollout_touches_total,
                 "goals": total_goals,
                 "sps": sps,
-                "learning_rate": self.lr,
+                # what the optimizer is actually using, not what the config asked for
+                "learning_rate": float(self.optimizer.param_groups[0]["lr"]),
                 "elapsed_time": round(time.time() - start_time, 1),
                 "timestamp": time.time(),
                 "telemetry": telemetry

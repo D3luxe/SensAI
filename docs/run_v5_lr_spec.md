@@ -60,6 +60,20 @@ reward and its scenario mix, the league ratios.
   repointed (as was done for v3's).
 - **Nothing is changed during the run.**
 
+## 3a. False start (2026-09-20)
+
+The first attempt trained ~1,000 iterations (16M steps) at **3e-4**, not 1.5e-4, while every
+history record and the dashboard reported 1.5e-4. `optimizer.load_state_dict` restores the
+learning rate saved inside the checkpoint, overwriting the rate the optimizer was constructed
+with, and the live-config path that would have corrected it only fires when `live_config.json`
+changes *after* startup. The eval at iteration 199000 (head to head −3.75) measures 3e-4 training
+and is void.
+
+Fixed in `agent/ppo.py`: `apply_learning_rate()` re-asserts the configured rate after any optimizer
+state is loaded, the history record now logs the optimizer's actual rate rather than the config's,
+and `test_learning_rate_resume.py` fails if that call is removed. The run restarts from the king,
+and the ~1,000 iterations already trained are discarded rather than resumed, so the run is clean.
+
 ## 4. How it is judged
 
 Baseline: `evals/baselines/v3_iter198000.json`. Results named `lr15_<steps>M` (`--name`), to keep
