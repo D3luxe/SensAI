@@ -1,0 +1,153 @@
+# Reward v5 — v3's terms at a twenty-second horizon
+
+Status: **draft, 2026-09-20** — not started, and not to be started until the learning-rate run
+(`docs/run_v5_lr_spec.md`) is closed. The rules of `docs/reward_v3_spec.md` §2 (R1–R7) apply
+unchanged.
+
+**A note on the name.** `run_v5_lr_spec.md` is a *training run*, not a reward version; it left the
+reward at v3. This is the fifth *reward version*, so it is v5 and its snapshot is
+`config/reward_versions/v5.json`. The two are unrelated despite the shared digit.
+
+## 1. Why this has to be a reward version at all
+
+The only change is the discount factor, γ 0.995 → 0.9977. That looks like a hyperparameter, and in
+most projects it would be one. Here it is not, because every dense term pays
+`w·(γ·Φ(s′) − Φ(s))` (R4), and potential-based shaping is policy-invariant **only** when the
+shaping γ equals the γ PPO optimises. So γ is part of the reward's frozen settings and its
+`settings_sha`. `env/reward_registry.py:92` already refuses the mismatch by name:
+
+> `hyperparameters.gamma 0.9977 differs from reward v3's frozen gamma 0.995: a new gamma is a new reward version`
+
+That guard is correct and stays. The consequence is that this run gets a version bump even though
+no term, weight or scenario changes — v5's terms are **v3's, identical, at a different γ**.
+
+## 2. Why γ, and why now
+
+Our γ has been 0.995 for the whole project — 3.5B steps, three reward versions, two tuned
+hyperparameters — and has never been revisited. Seer (Ma/Neville/Walo, §3.8) parameterises the
+discount by a half-life instead of a bare number:
+
+```
+γ = exp( log(0.5) / (T · A) )      A = actions per second, T = the time after which a reward halves
+```
+
+Seer runs frameskip 8 at 120 ticks — **A = 15 actions/sec, identical to ours** (`tick_skip: 8`).
+That makes the comparison exact:
+
+| | T (half-life) | γ |
+|---|---|---|
+| Seer, initial — *"to facilitate learning an initial strategy"* | 10 s | 0.9954 |
+| Seer, final — *"to ensure Seer performs proper long-term planning"* | 20 s | 0.9977 |
+| **Ours, every run to date** | **9.2 s** | **0.995** |
+
+We have been sitting at Seer's beginner horizon the entire time. A 9-second half-life is enough to
+connect a touch to the goal it causes a second or two later; it is not enough to value a retreat, a
+boost pickup or a positioning move that pays off eight seconds downfield.
+
+**The symptoms match a short horizon, not a bad reward.** From the learning-rate run at 250M
+(`run_v5_lr_spec.md` §4a), against the v3 king: goals-for per 10 min against Necto 1.39 vs 4.25
+while goals-against is flat (35.0 vs 32.2); touches per min 5.9 vs 7.0; back-wall climbs 38 per 100
+touches vs 11.8; shot conversion 21.7% vs 47.6%. The bot is not conceding more — it has stopped
+constructing anything. That is what a myopic critic produces.
+
+Diagnosis order (R7): (a) sim and opponents are unchanged and correct; (b) the scenario mix is v3's,
+which produced the king; (c) the reward's terms have now been probed twice (v4's race term, v2's
+ball pull) with nothing to show. γ is the remaining untouched knob, and unlike the terms it has an
+external reference point telling us our value is the wrong one.
+
+## 3. The change
+
+`hyperparameters.gamma: 0.9977` in `config/default_config.yaml`, mirrored into
+`config/reward_versions/v5.json`'s settings so the identity resolves. Everything else is v3's:
+T1 goal +10/−7.5 at `aggression_bias` 0.25, T2 ball position weight 5, T3 touch 0.5·Δv/2300,
+T4 closeness retired at 0, T5 boost √(boost/100). No race term — v4 is rejected and stays rejected.
+`learning_rate` stays at whatever the learning-rate run concludes with (1.5e-4 unless that run says
+otherwise), because changing two hyperparameters at once is the thing these specs exist to prevent.
+
+**Fixed, not ramped.** Seer increased T continuously from 10 s to 20 s across training. We hold
+0.9977 fixed, because a ramp is two variables — the endpoint and the schedule — and v3's closeness
+anneal already taught us that a moving weight makes the eval unreadable (v4 §1: "the eval could not
+say which one did what"). If the fixed jump proves too aggressive, a ramp is the *next* experiment,
+not a hedge inside this one.
+
+## 4. The run
+
+- **Start:** `checkpoints/baselines/v3_iter198000.pt`, the v3 king — the same start point as v4 and
+  as the learning-rate run, so all three are single-variable branches from one node.
+- **Version change handling.** The start checkpoint is stamped v3 and the config will name v5, so
+  the trainer takes its normal version-change path: return-normaliser reset, fresh optimizer,
+  50 iterations of critic warm-up. **This matters more here than usual.** Raising γ from 0.995 to
+  0.9977 roughly doubles the scale of the discounted return the critic has to predict, so the
+  inherited value head is not merely stale, it is systematically wrong by a large factor. Expect
+  `explained_variance` to collapse from ~0.85 at the switch and to recover over the warm-up and the
+  first few million steps. **If it has not recovered past ~0.6 by 20M steps, stop** — that is the
+  critic failing to refit, and nothing measured after it is meaningful.
+- **Checkpoint numbering** restarts from 198000 and would overwrite the learning-rate run's files,
+  so those move to `checkpoints/archive/v5lr_run/` first, with league state and TrueSkill ratings
+  repointed, as was done for v3's and v4's.
+- **Nothing is changed during the run.** No mid-run γ adjustment, no reward patching.
+
+## 5. How v5 is judged
+
+Baseline: `evals/baselines/v3_iter198000.json`. Results named `v5g_<steps>M`.
+
+**Primary:** head to head against the v3 king, goal difference per 10 min, **pooled over three
+adjacent checkpoints** (nine seeds) at each decision point. Single-checkpoint readings are not
+decisions (v4 §6, finding 3).
+
+**Necto guardrail:** goals scored per 10 min against Necto, not clearly below the king's 4.25, as
+redefined in `run_v5_lr_spec.md` §4 — a nine-seed pooled reading carries about ±0.36, so a
+half-goal difference is real and a two-goal difference is decisive. This is the metric v5 exists to
+move, and it is where both v4 and the learning-rate run failed while winning the head-to-head.
+
+**Where v5 must earn its keep**, all of which a longer horizon should improve if the diagnosis is
+right: goals-for vs Necto, touches per min (5.9 → toward 7.0), back-wall climbs per 100 touches
+(38 → toward 12), retreat scenario conceded (31.9% → toward 16.7%).
+
+**Watch for the opposite failure.** A long horizon can produce its own pathology: excessive
+patience, declining to challenge, farming boost while the opponent sets up. If touches per min
+falls *further* and goals-against climbs, γ is too long and T = 15 s (γ 0.99692) is the retry.
+
+**Decision points:**
+- **~20M steps:** `explained_variance` recovered past ~0.6, or stop (§4).
+- **150M:** pooled head to head at least level with the king, **and** goals-for vs Necto moving
+  toward 4.25 rather than away. The head-to-head alone is not enough — that is the trap the last
+  two runs fell into.
+- **400M:** adopt if the pooled head to head is clearly positive (every seed above zero) **and**
+  goals-for vs Necto is at least level with the king's 4.25.
+
+**Checkpoint hygiene:** any checkpoint that evals well is copied into `checkpoints/baselines/` the
+same day. v4 lost its best checkpoint to the league's retention.
+
+## 6. What this does not address
+
+Seer's §3.6.1 lists 16 reward terms. Reviewed against ours, most are already present (Boost Amount
+is our T5 formula-for-formula, Boost Difference is that same potential's difference, Distance Ball
+Goal is T2, Ball Touch is T3, Goal Scored is T1) and three — Distance Player Ball, Closest to Ball,
+Velocity Player to Ball — are the ball-pull idea that failed as v2's `player_to_ball` and again as
+v4's T6. Those are closed.
+
+One term is genuinely new and genuinely ours to take: **Align Ball Goal** (Seer eq. 3.7),
+
+```
+0.5·cos_sim(ball − car, car − own_net) + 0.5·cos_sim(car − ball, opp_net − car)
+```
+
+a bounded state function that scores the car's *angle* relative to both nets rather than its
+distance to the ball, so it pays for being goal-side when the opponent attacks — the opposite of a
+ball pull, which is why it does not repeat v2's and v4's failure. It maps onto our measured
+back-wall-climb and retreat deficits. It is deliberately **not** in v5: γ and a new term at once is
+two variables, and γ goes first because it is the cheaper test and the one with outside evidence
+against our current value. If v5 works, Align Ball Goal is v6; if v5 fails, it is v6 anyway, as the
+next single change.
+
+Also noted from the paper, and deliberately deferred: Seer makes the whole reward zero-sum by
+subtracting the opponent's reward, which would prevent joint farming of shaped terms in self-play.
+That is a structural change to every term at once, so it cannot be a single-variable run, and it
+would invalidate cross-version comparison against the v3 king.
+
+**A caution about the source.** Seer reached TrueSkill ~40 after 10 billion steps with all 16 terms
+and never learned to aerial or double-jump. Its reward design is not self-evidently better than
+ours, and R5's six-term cap stands. What the paper is being used for here is the one thing it
+measures better than we do: the discount horizon, where it has a principled parameterisation and a
+before/after value, and we have a number nobody ever chose.

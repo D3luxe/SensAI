@@ -88,16 +88,37 @@ churn is the learning rate, the spread shrinks. `approx_kl` should fall toward 0
 `clip_fraction` into the single digits within the first few million steps; if KL does not move,
 the learning rate was not the constraint and the run stops early.
 
-**Necto guardrail (added 2026-09-20, after the 50M evals).** Goal difference per 10 min against
-Necto must not be clearly worse than the king's −28.0, i.e. the seed ranges must overlap. A run is
-not adopted on the head-to-head alone.
+**Necto guardrail (added 2026-09-20 after the 50M evals; changed to goals-for 2026-09-20
+after 250M).** **Goals scored per 10 min against Necto** must not be clearly worse than the king's
+4.25. A run is not adopted on the head-to-head alone.
 
-*Why.* v4 and this run both beat the king head to head while getting worse against Necto: v4 at
-iteration 210000 (+11.9 h2h, −33 vs Necto) and this run at 201000 (+7.5 h2h, −36 to −38 vs Necto).
-Training opponents are self-play plus a league of the king's own descendants, so a run drifts
-toward beating its own lineage, and the head-to-head scores exactly that drift. Necto is the only
-opponent that never changes and never trains, so it is the check on whether the bot is improving
-or merely diverging. Nexto is reported beside it but is noisier (one seed).
+*Why a guardrail at all.* v4 and this run both beat the king head to head while getting worse
+against Necto: v4 at iteration 210000 (+11.9 h2h, −33 vs Necto) and this run at 201000 (+7.5 h2h,
+−36 to −38 vs Necto). Training opponents are self-play plus a league of the king's own descendants,
+so a run drifts toward beating its own lineage, and the head-to-head scores exactly that drift.
+Necto is the only opponent that never changes and never trains, so it is the check on whether the
+bot is improving or merely diverging. Nexto is reported beside it but is noisier (one seed).
+
+*Why goals-for and not goal difference.* Necto is far stronger than anything we have trained. Seer
+(Ma/Neville/Walo, §4.1) puts Necto at TrueSkill 42.5 and its own agent at ~40 after **10 billion**
+steps; we are at 3.5B. Losing heavily to Necto is the expected state, not a symptom, and at 35–1 the
+goal difference is pinned against a floor where it barely responds. Measured over the run, goals-for
+fell 4.25 → 1.39 (−67% of the king's value) while goal difference moved −28.0 → −33.6 (−20%).
+Goals-for is the sensitive half, and it is the half that carries the meaning: conceding is flat
+within noise (32.2 → 35.0), so the entire Necto gap is that the bot stopped scoring.
+
+*The noise, measured.* From five same-run repeat pairs (identical checkpoint, identical seeds), a
+single seed's Necto reading has sd 2.61 on goal difference and 1.07 on goals-for. A three-checkpoint
+pooled reading (nine seeds) therefore carries about ±0.9 and ±0.36 respectively. Individual
+per-seed swings of 10+ goals are Necto variance and must never be read as a checkpoint difference —
+including the king's own −28.0, which is itself a three-seed number with ±1.5 on it.
+
+*Changing the bar mid-run.* This is the second amendment to the judging criteria during a live run,
+which is a hazard: a bar that moves can always be made to pass. Both numbers are therefore reported
+at every decision point from here, the old goal-difference bar stays recorded above, and the change
+is justified on measurement quality (a 3× better signal-to-noise ratio, quantified above) rather
+than on the current run's standing — which it does not rescue. On goals-for the run is failing the
+guardrail clearly: 1.39 against 4.25, about 8 standard errors apart.
 
 **Guardrails:** touches per min, kickoff goals against, retreat scenario conceded, shot conversion.
 
@@ -113,8 +134,9 @@ checkpoint-to-checkpoint spread has to clear.
   smaller than v4's at a comparable point. If both fail, the learning rate is not the answer and
   the run stops.
 - **400M:** adopt if the pooled head to head is clearly positive (every seed above zero) **and**
-  the Necto guardrail holds. The v3 king was crowned on +15 against v2 by this measure, with Necto
-  improving at the same time (−44.5 → −28.0), which is what a genuine gain looks like.
+  the Necto guardrail holds (goals-for per 10 min not clearly below the king's 4.25). The v3 king
+  was crowned on +15 against v2 by this measure, with Necto improving at the same time
+  (−44.5 → −28.0 goal difference), which is what a genuine gain looks like.
 
 **Checkpoint hygiene:** any checkpoint that evals well is copied into `checkpoints/baselines/`
 the same day. The league prunes everything else, and v4 lost its best checkpoint that way.
@@ -144,9 +166,12 @@ The king's Necto figure is −28.0 (seeds −30.0 to −25.5).
   15.6% → 88.9% → 83.3% → 93.1%, and drop first touch 16.7% → 1.0% → 20.8% → 13.9%. The 100M
   readings, which looked like a systematic collapse at the time, were not. Retreat conceded is still
   worse than the king (31.9% vs 16.7%).
-- **The Necto guardrail is the weak point.** It passes only marginally at 250M (range −41.2 to
-  −28.5 against the king's −30.0 to −25.5) and shows no trend toward improving over 250M steps.
-  The attacking metrics behind it are all down on the king: goals for per 10 min 0.8 (king 4.2),
+- **The Necto guardrail fails.** On the old goal-difference bar it passed only marginally at 250M
+  (range −41.2 to −28.5 against the king's −30.0 to −25.5) with no trend toward improving. On the
+  goals-for bar that replaced it (§4) it fails outright: 1.39 pooled over 48 seeds against the
+  king's 4.25, roughly 8 standard errors. Conceding is flat within noise (32.2 → 35.0), so the whole
+  Necto gap is lost scoring. The attacking metrics behind it are all down on the king:
+  goals for per 10 min 0.8 (king 4.2),
   touches per min 5.9 (7.0), shot conversion 21.7% (47.6%), kickoff goals against 9.1 (4.0),
   back-wall climbs 38 per 100 touches (11.8). This is v4's pattern in milder form: clearly better
   than its own ancestor, not better against the one opponent that never trains.
