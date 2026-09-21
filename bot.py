@@ -82,7 +82,18 @@ AGENT_ID = "antigravity/sensai"
 
 def rotation_to_rot_mat(pitch: float, yaw: float, roll: float) -> np.ndarray:
     """
-    Computes exact 3x3 orthonormal basis (Row 0: Forward, Row 1: Right, Row 2: Up).
+    The game's orientation as RocketSim's 3x3 basis: row 0 forward, row 1 right, row 2 up.
+
+    Must equal RocketSim's own Angle.as_rot_mat(), since the policy was trained on RocketSim
+    states. Row 1 used to be forward x up, which is the car's physical LEFT: Rocket League's
+    frame is left-handed, so the right side is up x forward. (A right turn in the game --
+    steer +1 -- curves toward up x forward; checked in RocketSim.) The old row made the matrix
+    a reflection, determinant -1, and disagreed with RocketSim in every orientation.
+
+    Nothing read row 1, so the policy never saw it -- DefaultObservationBuilder and
+    CarState.get_right_vector both rebuild their own vector from rows 0 and 2. That mirrored
+    "right" is part of the trained convention and must NOT be changed to match; only this
+    stored row was wrong, and it is fixed so the next reader of rot_mat[1] gets the truth.
     """
     cy, sy = math.cos(yaw), math.sin(yaw)
     cp, sp = math.cos(pitch), math.sin(pitch)
@@ -90,9 +101,9 @@ def rotation_to_rot_mat(pitch: float, yaw: float, roll: float) -> np.ndarray:
     fwd = np.array([cp * cy, cp * sy, sp], dtype=np.float32)
     up = np.array([-cy * sp * cr - sy * sr, -sy * sp * cr + cy * sr, cp * cr], dtype=np.float32)
     right = np.array([
-        fwd[1] * up[2] - fwd[2] * up[1],
-        fwd[2] * up[0] - fwd[0] * up[2],
-        fwd[0] * up[1] - fwd[1] * up[0]
+        up[1] * fwd[2] - up[2] * fwd[1],
+        up[2] * fwd[0] - up[0] * fwd[2],
+        up[0] * fwd[1] - up[1] * fwd[0]
     ], dtype=np.float32)
     return np.vstack([fwd, right, up]).astype(np.float32)
 
