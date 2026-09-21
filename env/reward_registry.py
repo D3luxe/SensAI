@@ -41,6 +41,8 @@ CODE_FILES: Dict[str, Tuple[str, ...]] = {
     # v5 is v3's terms at a longer horizon: same code, so the same files and the same code_sha.
     # Only gamma differs, and gamma lives in the settings, so settings_sha is what separates them.
     "v5": ("env/rewards_v3.py", "env/scenarios_v3.py"),
+    # v6 is v5 plus T6 align; it imports v3's term functions and trains on v3's starts
+    "v6": ("env/rewards_v6.py", "env/rewards_v3.py", "env/scenarios_v3.py"),
 }
 
 
@@ -111,6 +113,9 @@ def reward_defaults(version: str) -> Dict[str, float]:
     if version == "v5":
         from env.rewards_v3 import REWARD_V3_DEFAULTS
         return {k: v for k, v in REWARD_V3_DEFAULTS.items() if k != "gamma"}
+    if version == "v6":
+        from env.rewards_v6 import REWARD_V6_DEFAULTS
+        return {k: v for k, v in REWARD_V6_DEFAULTS.items() if k != "gamma"}
     raise ValueError(f"unknown reward_version {version!r}")
 
 
@@ -142,4 +147,7 @@ def make_reward_manager(version: Optional[str] = None, reward_weights: Optional[
         # manager reads from its weights. Nothing reads RewardManagerV3.version.
         from env.rewards_v3 import RewardManagerV3
         return RewardManagerV3(reward_weights=reward_weights)
+    if version == "v6":
+        from env.rewards_v6 import RewardManagerV6
+        return RewardManagerV6(reward_weights=reward_weights)
     raise ValueError(f"unknown reward_version {version!r}")

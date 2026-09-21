@@ -513,9 +513,18 @@ class TrueSkillEvaluator:
         norm_key = os.path.normpath(model_spec.strip().strip('"').strip("'")).replace("\\", "/")
         name = get_model_display_name(norm_key)
 
-        # Match by key or by display name
+        # Exact key first. The name and basename fallbacks exist so "x.pt" and "checkpoints/x.pt"
+        # reach one record, but they must not join two different files: checkpoint numbering
+        # restarts from each run's start checkpoint, so a new run's checkpoint_iter_222200.pt
+        # shares its name with the archived one of the run before, and would otherwise inherit
+        # that checkpoint's record and have its own games scored against it.
+        if norm_key in self.ratings:
+            return self.ratings[norm_key]
         for k, r in self.ratings.items():
-            if k == norm_key or r.name == name or os.path.basename(k) == os.path.basename(norm_key):
+            if r.name == name or os.path.basename(k) == os.path.basename(norm_key):
+                if (os.path.exists(k) and os.path.exists(norm_key)
+                        and os.path.abspath(k) != os.path.abspath(norm_key)):
+                    continue
                 return r
 
         # A pinned rating is a reference whoever registers it first.

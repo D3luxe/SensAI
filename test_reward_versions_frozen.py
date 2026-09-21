@@ -8,6 +8,8 @@ one of these fails, the fix is to put the change in the next version, not to upd
   v2  env/rewards.py, git tag reward-v2
   v3  env/rewards_v3.py + env/scenarios_v3.py
   v4  env/rewards_v4.py (+ the v3 files it imports)
+  v5  the v3 files, at gamma 0.9977 (only settings_sha differs from v3)
+  v6  env/rewards_v6.py (+ the v3 files it imports)
 """
 import unittest
 

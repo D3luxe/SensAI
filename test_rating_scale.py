@@ -184,6 +184,22 @@ class TestTheEvaluator(unittest.TestCase):
         again.refit()
         self.assertAlmostEqual(again.ratings[a.path].mu, a.mu, places=3)
 
+    def test_a_new_run_does_not_inherit_an_archived_namesake(self):
+        """Numbering restarts per run, so two different files can share checkpoint_iter_N.pt."""
+        old = os.path.join(self.tmp, "archive", "checkpoint_iter_222200.pt")
+        new = os.path.join(self.tmp, "checkpoint_iter_222200.pt")
+        for p in (old, new):
+            os.makedirs(os.path.dirname(p), exist_ok=True)
+            open(p, "wb").close()
+        a = self.ev.get_or_create_rating(old)
+        b = self.ev.get_or_create_rating(new)
+        self.assertIsNot(a, b)
+        self.assertIs(self.ev.get_or_create_rating(new), b)
+
+    def test_a_path_variant_still_reaches_its_record(self):
+        rec = self.ev.get_or_create_rating("checkpoints/not_on_disk_77.pt")
+        self.assertIs(self.ev.get_or_create_rating("not_on_disk_77.pt"), rec)
+
     def test_nothing_locks_and_an_old_lock_is_lifted(self):
         rec = self.ev.get_or_create_rating("checkpoints/checkpoint_iter_1.pt")
         rec.matches_played, rec.sigma = 500, 0.5

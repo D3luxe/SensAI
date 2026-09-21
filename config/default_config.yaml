@@ -76,4 +76,4 @@ model:
   use_layer_norm: true
 # Reward weights, their anneal schedule and the scenario mix are frozen per reward version in
 # config/reward_versions/<reward_version>.json (env/reward_registry.py); live edits to them are ignored.
-reward_version: v5
+reward_version: v6

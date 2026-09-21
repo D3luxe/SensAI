@@ -1,6 +1,8 @@
 # Reward v6 — v5 plus Align Ball Goal
 
-Status: **draft, 2026-09-21** — not implemented, not started. v5 is adopted
+Status: **agreed and implemented 2026-09-21**; frozen as `config/reward_versions/v6.json` (code
+`8f6de804eeb8e03f`, settings `88f455c4cdf9cae8`). v5's checkpoints are archived in
+`checkpoints/archive/v5_run/` (`scripts/archive_run.py`). v5 is adopted
 (`docs/reward_v5_gamma_spec.md` §7) and its king is `checkpoints/baselines/v5_iter222000.pt`. The
 rules of `docs/reward_v3_spec.md` §2 (R1–R7) apply unchanged.
 
