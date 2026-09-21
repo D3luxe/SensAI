@@ -232,7 +232,8 @@ not for its best single reading. Baseline eval: `evals/baselines/v5_iter222000.j
    decisions vs v3's 15.9%). It is learned; deploy-side smoothing, tested inside the eval first, is
    the next thing to try.
 4. **The league's absolute scale drifted again** (king mu 41 against Necto's anchored 30 while
-   losing to it 35–1). Peer ranking was unaffected; the fix is outside this spec.
+   losing to it 35–1). Peer ranking was unaffected. Fixed after the run by replacing online
+   TrueSkill with a batch fit over every series, pinned on the v3 king (`utils/rating_fit.py`).
 
 **Pinned from this run:** 200200, 201600, 210200, 210400, 213200, 216200, 219200, 219400, 222000,
 222400.

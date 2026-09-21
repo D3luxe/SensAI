@@ -17,7 +17,7 @@ from utils.trueskill_evaluator import (
     TrueSkillEvaluator, ModelRating, get_model_display_name, DEFAULT_LEADERBOARD_PATH,
     DEFAULT_EVAL_MAX_STEPS, DEFAULT_NO_TOUCH_STEPS,
     DEFAULT_SERIES_LENGTH, DEFAULT_SERIES_WINS_NEEDED,
-    simulate_headless_series
+    simulate_headless_series, get_anchor_calibration
 )
 
 # Checkpoint files are named by the iteration that produced them, and that ordering is
@@ -195,7 +195,11 @@ class LeagueManager:
         #
         # It stays a benchmark instead: played, reported, never rated. See
         # benchmark_opponents below.
+        #
+        # 2026-09-21: the v3 king joins, first, as the one pinned rating (see
+        # ANCHOR_CALIBRATION). Necto and the heuristic stay as fitted references.
         default_anchors = [
+            "checkpoints/baselines/v3_iter198000.pt",
             "checkpoints/necto-model.pt",
             "heuristic"
         ]
@@ -274,10 +278,8 @@ class LeagueManager:
         # Budget ceiling, in series. Headroom above target so a slow-converging
         # contender is not evicted un-ranked the moment it reaches the target.
         self.max_contender_matches = int(self.config.get("max_contender_matches", 48))
-        # Series after which a converged rating is frozen. Sits above
-        # max_contender_matches on purpose: the Gauntlet always finishes before the lock
-        # can bite, so a contender is never frozen mid-trial. See
-        # TrueSkillEvaluator.maybe_lock_rating for why the cap exists at all.
+        # Retired with the move to a batch fit (2026-09-21): nothing locks any more. Still
+        # read so an older config loads; see TrueSkillEvaluator.maybe_lock_rating.
         self.rating_lock_matches = int(self.config.get("rating_lock_matches", 64))
         # Kept only for the extended-trial check. Graduation itself is gated on
         # rank-eligibility now: a separate 1.8 threshold sitting next to an
@@ -759,6 +761,7 @@ class LeagueManager:
         if best_rec is None:
             return False
         rec.mu = best_rec.mu
+        rec.prior_mu = best_rec.mu      # the batch fit's prior centre, until data outweigh it
         rec.update_conservative()
         return True
 
@@ -794,13 +797,17 @@ class LeagueManager:
 
     def run_benchmarks(self, subject_path: str, device: str = "cpu") -> Dict[str, Any]:
         """
-        Plays the benchmark references and records the score without rating anything.
+        Plays the benchmark references and reports the score.
 
         This is where a reference goes when it is strong but not on one scale with the
         models under test. Nexto beats Necto every series and loses to every checkpoint
         every series, so it cannot be ranked alongside them, but knowing how the current
-        best does against it is still worth having. Nothing here calls the evaluator, so
-        no rating moves.
+        best does against it is still worth having.
+
+        Since the batch fit (2026-09-21) the series also go into the results log. Nothing
+        they involve is pinned, so they cannot move the scale; they place Necto and Nexto
+        on it, which is what makes the leaderboard's "vs Necto" column mean something. No
+        tally changes, so the promotion gate never sees them.
         """
         results: Dict[str, Any] = {}
         subject = self._normalize_path(subject_path)
@@ -829,6 +836,7 @@ class LeagueManager:
                     goals_for += int(r.get("a_score", 0))
                     goals_against += int(r.get("b_score", 0))
                     episodes += int(r.get("episodes_played", 0))
+                    self.evaluator.record_series(subject, opp, r, kind="benchmark", refit=False)
                 played = max(1, self.benchmark_series)
                 results[get_model_display_name(opp)] = {
                     "series": played,
@@ -853,6 +861,8 @@ class LeagueManager:
         if results:
             self.benchmark_results = results
             self._append_benchmark_history(subject, results)
+            self.evaluator.refit()
+            self.evaluator.save_leaderboard()
         return results
 
     def _append_benchmark_history(self, subject: str, results: Dict[str, Any]):
@@ -893,6 +903,25 @@ class LeagueManager:
         self.benchmark_history.append(entry)
         if len(self.benchmark_history) > self.benchmark_history_cap:
             self.benchmark_history = self.benchmark_history[-self.benchmark_history_cap:]
+
+    def _calibration_anchor(self, rec: Optional[ModelRating], exclude: str = "") -> Optional[str]:
+        """
+        The pinned rating nearest `rec`, which is what a calibration series must be played
+        against: only a pinned opponent ties the fit to a fixed scale. Falls back to the
+        nearest reference of any kind if no pinned one is on disk.
+        """
+        target_mu = rec.mu if rec else 25.0
+        pinned = []
+        for cand in self.active_anchors:
+            norm_c = self._normalize_path(cand)
+            if norm_c == exclude or get_anchor_calibration(norm_c) is None:
+                continue
+            if norm_c != "heuristic" and not os.path.exists(norm_c):
+                continue
+            pinned.append((abs(get_anchor_calibration(norm_c)[0] - target_mu), norm_c))
+        if pinned:
+            return min(pinned)[1]
+        return self._nearest_anchor(rec, exclude=exclude)
 
     def _nearest_anchor(self, rec: Optional[ModelRating], exclude: str = "") -> Optional[str]:
         """
@@ -1102,7 +1131,7 @@ class LeagueManager:
         due = int(self._calibration_debt)
         self._calibration_debt -= due
 
-        anchor = self._nearest_anchor(rec, exclude=contender_path)
+        anchor = self._calibration_anchor(rec, exclude=contender_path)
         if not anchor:
             return 0
         try:

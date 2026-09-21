@@ -204,22 +204,20 @@ class TestLeagueManager(unittest.TestCase):
         norm_key = self.league._normalize_path(self.dummy_ckpt_path)
         self.assertIn(norm_key, self.evaluator.ratings)
 
-    def test_anchors_rank_by_calibrated_mu_not_match_count(self):
-        """A calibrated anchor outranks a weaker checkpoint despite having no record."""
-        strong = os.path.join(self.test_dir, "checkpoint_iter_900.pt")
-        shutil.copyfile(self.dummy_ckpt_path, strong)
-        rec = self.evaluator.get_or_create_rating(self.league._normalize_path(strong))
-        rec.mu, rec.sigma, rec.matches_played = 26.0, 1.0, 60
+    def test_anchors_rank_by_pinned_mu_not_match_count(self):
+        """The pinned anchor outranks a weaker checkpoint despite having no record."""
+        weak = os.path.join(self.test_dir, "checkpoint_iter_900.pt")
+        shutil.copyfile(self.dummy_ckpt_path, weak)
+        rec = self.evaluator.get_or_create_rating(self.league._normalize_path(weak))
+        rec.mu, rec.sigma, rec.matches_played = 24.0, 1.0, 60
         rec.update_conservative()
 
-        necto = self.evaluator.ratings.get("checkpoints/necto-model.pt")
-        if necto is None:
-            self.skipTest("necto anchor not present in this environment")
+        pinned = self.evaluator.get_or_create_rating("checkpoints/baselines/v3_iter198000.pt")
 
-        # Anchors never accumulate a record -- their rating is declared, not earned -- so
-        # gating them on match count would sort them below every ranked checkpoint.
-        self.assertTrue(self.league._is_rank_eligible(necto))
-        self.assertGreater(self.league._ranking_key(necto), self.league._ranking_key(rec))
+        # The pinned rating is declared, not earned, so gating it on match count would sort
+        # it below every ranked checkpoint.
+        self.assertTrue(self.league._is_rank_eligible(pinned))
+        self.assertGreater(self.league._ranking_key(pinned), self.league._ranking_key(rec))
 
     def test_protected_checkpoints(self):
         """Verify protected checkpoints include top-K models and King-of-the-Hill."""
@@ -337,6 +335,10 @@ class TestLeagueManager(unittest.TestCase):
         r_grad.sigma = self.league.eligibility_sigma + 0.3   # still un-converged
         r_grad.update_conservative()
         self.league.max_consecutive_losses = 99   # isolate graduation from match outcomes
+        # The fixture hand-sets sigma to straddle the gate; a refit would replace it with
+        # the posterior from the two series actually played. This tests the gate's logic,
+        # not the fit, so the fit is held still.
+        self.evaluator.refit = lambda: None
         # A production-sized 12-game trial would converge this rating past the gate
         # inside the first step, which is the opposite of what this fixture tests.
         self.league.contender_eval_matches_per_step = 2
@@ -577,20 +579,26 @@ class TestLeagueManager(unittest.TestCase):
             self.assertNotIn("nexto", str(path).lower())
         self.assertTrue(any("nexto" in str(x).lower() for x in self.league.benchmark_opponents))
 
-    def test_benchmarks_do_not_move_any_rating(self):
-        """A benchmark is played and reported; it must never update the leaderboard."""
+    def test_benchmarks_do_not_touch_the_record(self):
+        """
+        A benchmark is played, reported and, since the batch fit, logged as data -- but it
+        is never part of the record the promotion gate reads. Its rating effect is covered
+        in test_rating_scale (an undefeated reference cannot move the scale).
+        """
         self.league.benchmark_opponents = ["heuristic"]
         self.league.benchmark_series = 1
         subject = self.league._normalize_path(self.dummy_ckpt_path)
         rec = self.evaluator.get_or_create_rating(subject)
         rec.mu, rec.sigma, rec.matches_played = 26.0, 1.4, 20
         rec.update_conservative()
-        before = (rec.mu, rec.sigma, rec.matches_played, rec.wins, rec.losses)
+        before = (rec.matches_played, rec.wins, rec.losses, rec.draws, rec.calibration_matches)
 
         results = self.league.run_benchmarks(subject)
 
-        after = (rec.mu, rec.sigma, rec.matches_played, rec.wins, rec.losses)
-        self.assertEqual(before, after, "a benchmark changed a rating")
+        after = (rec.matches_played, rec.wins, rec.losses, rec.draws, rec.calibration_matches)
+        self.assertEqual(before, after, "a benchmark changed the record")
+        if results:
+            self.assertEqual({r["kind"] for r in self.evaluator.results}, {"benchmark"})
         if results:
             for res in results.values():
                 self.assertIn("points_rate", res)
@@ -978,7 +986,7 @@ class TestLeagueManager(unittest.TestCase):
         self.assertIn(str(league.get("series_length", 9)), html)
         self.assertIn(str(league.get("target_eval_matches", 30)), html)
         self.assertIn(str(league.get("eligibility_sigma", 1.5)), html)
-        self.assertIn(str(league.get("rating_lock_matches", 64)), html)
+        self.assertIn(f"{round(100 * league.get('calibration_share', 0.1))}% share", html)
         # The King's share is what the fixed training-opponent list leaves behind, so the
         # copy must not quote the raw king_ratio when that list is populated.
         if league.get("training_opponents"):
@@ -1372,127 +1380,39 @@ class TestCheckpointRetentionTiers(unittest.TestCase):
         self.assertIn(1000, kept)
 
 
-class TestRatingLock(unittest.TestCase):
+class TestRatingLockRetired(unittest.TestCase):
     """
-    Past the series cap a rating stops moving.
-
-    The motivation is not sample size. Against a fixed opponent more series is always
-    better, but an established model faces a stream of fresh challengers, each entering
-    at sigma 8.33. Simulated over that schedule with every player's true skill identical,
-    the established rating random-walks (true spread 0.36 -> 0.70 mu between 30 and 300
-    series) while its reported sigma flatlines near 0.94 and stops reflecting it.
+    The lock froze a converged rating at 64 series so fresh sigma-8 challengers could not
+    random-walk it. Retired 2026-09-21 with the move to a batch fit, which weighs every result
+    once against all the others: there is no walk, and frozen ratings are what let the v5
+    league ratchet from mu 19 to 41. Full coverage is in test_rating_scale.
     """
 
     def setUp(self):
         self.tmp = tempfile.mkdtemp()
-        self.evaluator = TrueSkillEvaluator(
-            leaderboard_path=os.path.join(self.tmp, "lb.json")
-        )
-        self.evaluator.rating_lock_matches = 64
-        self.evaluator.eligibility_sigma = 1.5
+        self.evaluator = TrueSkillEvaluator(leaderboard_path=os.path.join(self.tmp, "lb.json"))
 
     def tearDown(self):
         shutil.rmtree(self.tmp, ignore_errors=True)
 
-    def _rec(self, matches, sigma, mu=30.0):
-        rec = self.evaluator.get_or_create_rating(f"checkpoints/checkpoint_iter_{matches}.pt")
-        rec.matches_played = matches
-        rec.sigma = sigma
-        rec.mu = mu
-        rec.update_conservative()
-        return rec
-
-    def test_converged_rating_locks_at_the_cap(self):
-        rec = self._rec(64, 0.95)
-        self.assertTrue(self.evaluator.maybe_lock_rating(rec))
-        self.assertTrue(rec.rating_locked)
-        self.assertEqual(rec.locked_at_matches, 64)
-        self.assertTrue(self.evaluator.is_rating_frozen(rec))
-
-    def test_below_the_cap_stays_live(self):
-        rec = self._rec(63, 0.95)
-        self.assertFalse(self.evaluator.maybe_lock_rating(rec))
-        self.assertFalse(self.evaluator.is_rating_frozen(rec))
-
-    def test_unconverged_rating_is_never_locked(self):
-        """
-        Reaching the cap without converging means the model was not measured. Freezing it
-        there would make the noise permanent instead of the estimate.
-        """
-        rec = self._rec(200, 2.4)
+    def test_a_converged_rating_past_the_old_cap_stays_live(self):
+        rec = self.evaluator.get_or_create_rating("checkpoints/checkpoint_iter_64.pt")
+        rec.matches_played, rec.sigma = 64, 0.95
         self.assertFalse(self.evaluator.maybe_lock_rating(rec))
         self.assertFalse(rec.rating_locked)
-
-    def test_locking_is_idempotent_and_survives_a_cap_change(self):
-        """
-        The lock is recorded on the rating, not recomputed from config, so raising the
-        cap later cannot silently re-open a model that was already frozen.
-        """
-        rec = self._rec(64, 0.95)
-        self.evaluator.maybe_lock_rating(rec)
-        self.assertFalse(self.evaluator.maybe_lock_rating(rec), "locked twice")
-
-        self.evaluator.rating_lock_matches = 500
-        self.assertTrue(self.evaluator.is_rating_frozen(rec))
-        self.assertEqual(rec.locked_at_matches, 64)
-
-    def test_lock_survives_a_save_and_load_round_trip(self):
-        rec = self._rec(64, 0.95)
-        self.evaluator.maybe_lock_rating(rec)
-        self.evaluator.save_leaderboard()
-
-        reloaded = TrueSkillEvaluator(leaderboard_path=self.evaluator.leaderboard_path)
-        again = reloaded.ratings[rec.path]
-        self.assertTrue(again.rating_locked)
-        self.assertEqual(again.locked_at_matches, 64)
+        self.assertFalse(self.evaluator.is_rating_frozen(rec))
 
     def test_a_leaderboard_written_before_the_lock_existed_still_loads(self):
-        """Old JSON has neither field; ModelRating must fall back rather than raise."""
         path = os.path.join(self.tmp, "legacy.json")
         with open(path, "w", encoding="utf-8") as f:
             json.dump({"ratings": {"checkpoints/old.pt": {
                 "name": "old", "path": "checkpoints/old.pt",
                 "mu": 28.0, "sigma": 1.1, "matches_played": 90,
             }}, "history": []}, f)
-
         loaded = TrueSkillEvaluator(leaderboard_path=path)
         rec = loaded.ratings["checkpoints/old.pt"]
         self.assertFalse(rec.rating_locked)
         self.assertFalse(loaded.is_rating_frozen(rec))
-
-    def test_frozen_side_holds_its_rating_while_the_live_side_moves(self):
-        """
-        The whole point: a locked model keeps playing, and the series still measures the
-        opponent. Only the locked side is exempt from the update.
-        """
-        locked = self._rec(64, 0.95, mu=32.0)
-        self.evaluator.maybe_lock_rating(locked)
-        live = self.evaluator.get_or_create_rating("checkpoints/checkpoint_iter_999.pt")
-        before_locked, before_live = locked.mu, live.mu
-
-        r_locked = locked.to_trueskill_rating()
-        r_live = live.to_trueskill_rating()
-        new_live, new_locked = trueskill.rate_1vs1(r_live, r_locked)
-        if not self.evaluator.is_rating_frozen(locked):
-            locked.from_trueskill_rating(new_locked)
-        if not self.evaluator.is_rating_frozen(live):
-            live.from_trueskill_rating(new_live)
-
-        self.assertEqual(locked.mu, before_locked, "locked rating moved")
-        self.assertGreater(live.mu, before_live, "live rating did not absorb the win")
-
-    def test_the_gauntlet_always_finishes_before_the_lock_can_bite(self):
-        """
-        A contender frozen mid-trial could never graduate. The cap must sit above the
-        Gauntlet's own ceiling for that to be structurally impossible.
-        """
-        cfg = yaml.safe_load(open("config/default_config.yaml", encoding="utf-8"))
-        league = cfg.get("league", {})
-        self.assertGreater(
-            league.get("rating_lock_matches", 64),
-            league.get("max_contender_matches", 48),
-        )
-
 
 if __name__ == "__main__":
     unittest.main()

@@ -1307,7 +1307,6 @@ def build_how_it_works_html(league_state: Optional[Dict[str, Any]] = None) -> st
     gate = league.get("eligibility_sigma", 1.5)
     pool_size = league.get("max_pool_size", 10)
     streak = league.get("max_consecutive_losses", 4)
-    lock_at = league.get("rating_lock_matches", 64)
 
     # The King's share is king_ratio of what the fixed training_opponents list leaves
     # behind, not king_ratio of everything. See opponent_mix_shares.
@@ -1331,10 +1330,11 @@ def build_how_it_works_html(league_state: Optional[Dict[str, Any]] = None) -> st
          f"The Elite Pool is the top {pool_size} by rating μ among trusted models. The "
          f"highest is crowned and becomes {king_pct}% of training opponents. Anchors are "
          "never crowned."),
-        ("6", "Locked",
-         f"At {lock_at} series its rating stops moving for good. It keeps playing as an "
-         "opponent and as a yardstick, but a long reign would otherwise re-score it on "
-         "whoever happened to challenge it next."),
+        ("6", "Scale",
+         "Every rating is re-fitted from every series ever played, so a result counts the "
+         "same whenever it happened. One rating is pinned: the v3 king at μ 25, which a "
+         f"{_pct(100 * league.get('calibration_share', 0.1))} share of series is played against. "
+         "Necto and Nexto are fitted like anyone else."),
     ]
     rows = "".join(
         f'<div class="hiw-step"><span class="hiw-num">{n}</span>'

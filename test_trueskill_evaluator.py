@@ -184,43 +184,41 @@ class TestSeriesSettings(unittest.TestCase):
 
 class TestAnchorCalibration(unittest.TestCase):
     """
-    The anchor ladder is a declaration of the scale every rating is solved against, so
-    its numbers must come from measurement. These pin the two relationships that were
-    previously set from reputation and measured wrong.
+    One rating is pinned, and only one. The old ladder (heuristic 15, BC 14.5, Necto 30, Nexto
+    34.7) pinned four values from a round robin whose field no longer exists; two pins the
+    data disagree with bend every rating between them. See ANCHOR_CALIBRATION.
     """
 
-    @staticmethod
-    def _implied(a: str, b: str) -> float:
-        from math import sqrt, erf
+    def test_the_v3_king_is_the_only_pin(self):
         from utils.trueskill_evaluator import ANCHOR_CALIBRATION
-        beta = 25.0 / 6.0
-        z = (ANCHOR_CALIBRATION[a] - ANCHOR_CALIBRATION[b]) / (sqrt(2) * beta)
-        return 0.5 * (1.0 + erf(z / sqrt(2)))
-
-    def test_ladder_reproduces_measured_head_to_heads(self):
-        # Round robin, 14 games per pair. Nexto beat Necto 78.6%; the heuristic and the
-        # BC baseline were a coin flip at 53.6%.
-        self.assertAlmostEqual(self._implied("nexto", "necto"), 0.786, delta=0.02)
-        self.assertAlmostEqual(self._implied("heuristic", "pretrained_baseline"), 0.536, delta=0.02)
-
-    def test_anchor_sigma_stays_tight(self):
-        """Anchors are known quantities; a wide sigma cripples information transfer."""
-        from utils.trueskill_evaluator import ANCHOR_SIGMA
-        self.assertLessEqual(ANCHOR_SIGMA, 1.0)
+        self.assertEqual(list(ANCHOR_CALIBRATION), ["v3_iter198000"])
 
     def test_calibration_is_applied_on_load(self):
-        """A leaderboard carrying stale anchor values is corrected when it is read."""
+        """A leaderboard carrying a stale value for the pinned rating is corrected on read."""
         import json, os, tempfile
         from utils.trueskill_evaluator import TrueSkillEvaluator, ANCHOR_CALIBRATION
         path = os.path.join(tempfile.mkdtemp(), "lb.json")
+        key = "checkpoints/baselines/v3_iter198000.pt"
         with open(path, "w", encoding="utf-8") as f:
-            json.dump({"ratings": {"checkpoints/nexto-model.pt": {
-                "name": "Nexto (EARL TorchScript)", "path": "checkpoints/nexto-model.pt",
-                "mu": 25.0, "sigma": 8.333, "is_anchor": True}}}, f)
+            json.dump({"ratings": {key: {"name": "v3_iter198000", "path": key,
+                                         "mu": 31.0, "sigma": 8.333}}}, f)
         ev = TrueSkillEvaluator(leaderboard_path=path)
-        rec = ev.ratings["checkpoints/nexto-model.pt"]
-        self.assertAlmostEqual(rec.mu, ANCHOR_CALIBRATION["nexto"], places=3)
+        rec = ev.ratings[key]
+        self.assertAlmostEqual(rec.mu, ANCHOR_CALIBRATION["v3_iter198000"], places=3)
+        self.assertTrue(rec.is_anchor)
 
+    def test_a_former_anchor_loads_as_fitted(self):
+        """Necto keeps whatever the fit last gave it; nothing re-pins it at 30."""
+        import json, os, tempfile
+        from utils.trueskill_evaluator import TrueSkillEvaluator
+        path = os.path.join(tempfile.mkdtemp(), "lb.json")
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump({"ratings": {"checkpoints/necto-model.pt": {
+                "name": "Necto", "path": "checkpoints/necto-model.pt",
+                "mu": 44.0, "sigma": 2.0, "is_anchor": True}}}, f)
+        ev = TrueSkillEvaluator(leaderboard_path=path)
+        self.assertEqual(ev.ratings["checkpoints/necto-model.pt"].mu, 44.0)
+        self.assertFalse(ev.is_rating_frozen(ev.ratings["checkpoints/necto-model.pt"]))
 
 if __name__ == "__main__":
     unittest.main()

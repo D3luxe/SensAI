@@ -101,6 +101,7 @@ except ImportError:
     trueskill = _TrueskillModule()
 
 from env.physics_engine import RocketSimArena
+from utils import rating_fit
 from env.baseline_agent import (
     BaseOpponent, BaselineChaser, CheckpointOpponentBot, NectoNextoOpponentBot, create_opponent_bot
 )
@@ -201,47 +202,34 @@ try:
 except Exception:   # mpmath missing, or the fallback shim is in use
     ts_env = trueskill.TrueSkill(**_TS_KWARGS)
 
-# Calibrated fixed reference ladder.
+# The one pinned rating, which fixes the scale. See utils/rating_fit.py.
 #
-# Anchors never learn, so their mu defines the scale that every checkpoint rating is
-# solved against. Pinning them all at 25.0 asserted that the BC baseline (46W-4536L) and
-# Necto (2865W-611L) are equally strong, which is false by a wide margin and made ratings
-# reached through the two paths mutually inconsistent.
+# Until 2026-09-21 this was a ladder of pinned bots -- heuristic 15, BC baseline 14.5, Necto 30,
+# Nexto 34.7 -- solved against by online TrueSkill. Necto wins every series against this
+# league, so pinning it tied the scale to a reference no result could reach, and the
+# population drifted to mu 41 while losing to it 35-1. The ladder's values also came from a
+# 2026 round robin whose field no longer exists.
 #
-# Anchor sigma is deliberately small. Information transfer in TrueSkill scales with
-# sigma_self^2 / (2*beta^2 + sigma_self^2 + sigma_opp^2); at the old sigma of 8.333 the
-# denominator was dominated by the anchor's own uncertainty, so games against a *fixed,
-# known* reference barely moved the contender's sigma. Dropping it to 0.5 cuts the games a
-# debut needs to reach the sigma<=1.5 eligibility gate from ~73 to ~23, at zero extra
-# compute. That ratio is the difference between a checkpoint that can converge inside its
-# gauntlet trial and one that never can.
-# Values derived from a measured round robin (14 games per pair: heuristic, Necto,
-# Nexto, BC baseline, and two SensAI checkpoints), converting each head-to-head points
-# rate p into a mu gap via the TrueSkill relation gap = sqrt(2) * beta * Phi^-1(p).
+# Now exactly one rating is pinned: the v3 king, which the league plays close enough that every
+# series against it carries information, and which never trains. mu 25 is TrueSkill's default,
+# so the number reads as "relative to the v3 king". Necto, Nexto, the heuristic and the BC
+# baseline are still reference opponents (is_anchor), but they are fitted like anyone else: their
+# results place them on the scale and can no longer move it.
 #
-# Necto stays at 30.0 as the scale reference; only gaps carry meaning, and it is the
-# most-played anchor, so moving it would churn every rating for nothing.
-#
-#   heuristic over BC baseline    p=0.536  ->  gap +0.53   (they are near-parity)
-#   Nexto over Necto              p=0.786  ->  gap +4.67
-#   heuristic -> Necto, two independent chains through the SensAI checkpoints, give
-#   12.58 and 17.30, averaging 14.9 against the existing gap of 15 -- so heuristic 15
-#   and Necto 30 were already right and are left alone.
-#
-# The two that were wrong came from reputation rather than measurement: the BC baseline
-# was placed 3.0 below the heuristic when they are a coin flip, and Nexto was placed 8.0
-# above Necto when the measured gap is 4.7.
+# Pin more than one only with values measured against each other in the same fit. Two pins
+# that disagree with the data bend every rating between them, which is the failure this
+# replaced. (A ladder that pins each new king at its fitted value was simulated too, and
+# inflates: the king is chosen for rating high, so its pinned value is a winner's-curse number.)
 ANCHOR_CALIBRATION: Dict[str, float] = {
-    "pretrained_baseline": 14.5,   # BC init; near-parity with the scripted chaser
-    "heuristic": 15.0,             # scripted ball-chaser
-    "necto": 30.0,                 # scale reference
-    "nexto": 34.7,                 # Necto + measured 4.67
+    "v3_iter198000": 25.0,
 }
+# Display only: a pinned rating is exact in the fit. Kept non-zero because callers divide by
+# and subtract multiples of sigma.
 ANCHOR_SIGMA = 0.5
 
 
 def get_anchor_calibration(model_spec: str) -> Optional[Tuple[float, float]]:
-    """Returns the (mu, sigma) this anchor should be pinned at, or None if not an anchor."""
+    """Returns the (mu, sigma) this rating is pinned at, or None if it is fitted."""
     key = os.path.basename(str(model_spec).strip().strip('"').strip("'")).lower()
     if str(model_spec).strip().lower() in ("heuristic", "baseline", "baselinechaser"):
         key = "heuristic"
@@ -284,6 +272,9 @@ class ModelRating:
     calibration_matches: int = 0
     calibration_wins: int = 0
     calibration_draws: int = 0
+    # Centre of this rating's prior in the batch fit: the predecessor's mu for a seeded
+    # checkpoint, the default otherwise. Only matters until the data outweigh it.
+    prior_mu: float = 25.0
     last_updated: str = ""
 
     def update_conservative(self):
@@ -469,32 +460,23 @@ class TrueSkillEvaluator:
 
     def is_rating_frozen(self, rec: ModelRating) -> bool:
         """
-        Whether this record's rating is a fixed reference rather than a live measurement.
+        Whether this rating is pinned rather than fitted: only the ANCHOR_CALIBRATION entries.
 
-        Two ways to get here. Anchors are declared fixed by ANCHOR_CALIBRATION. Locked
-        checkpoints earned it by converging and then hitting the series cap. Both keep
-        playing -- they are still training opponents and still the yardstick new arrivals
-        are graded against -- but neither absorbs the result.
+        Reference bots (is_anchor) are fitted now, and the lock is retired, so every other
+        rating is re-solved from the whole results log after each pairing.
         """
-        return rec.is_anchor or rec.rating_locked
+        return get_anchor_calibration(rec.path) is not None
 
     def maybe_lock_rating(self, rec: ModelRating) -> bool:
         """
-        Freezes a rating that has hit the cap. Returns True on the transition only.
+        Retired 2026-09-21; never locks. Kept so older callers and saved records still load.
 
-        Requires sigma at or under the eligibility gate as well as the match count. A
-        model that somehow reached the cap without converging has not been measured, and
-        freezing it there would enshrine the noise permanently instead of the estimate.
+        The lock stopped an established rating random-walking under a stream of sigma-8
+        newcomers in the online update. The batch fit weighs every result once against all
+        the others, so there is no walk to stop, and a frozen rating is exactly what let the
+        v5 league ratchet away from its anchor.
         """
-        if rec.is_anchor or rec.rating_locked:
-            return False
-        if rec.matches_played < self.rating_lock_matches:
-            return False
-        if rec.sigma > self.eligibility_sigma:
-            return False
-        rec.rating_locked = True
-        rec.locked_at_matches = rec.matches_played
-        return True
+        return False
 
     def is_rank_eligible(self, rec: ModelRating) -> bool:
         """
@@ -515,10 +497,15 @@ class TrueSkillEvaluator:
             return (1, rec.mu, rec.points_rate)
         return (0, rec.conservative_rating, rec.points_rate)
 
-    def __init__(self, leaderboard_path: str = DEFAULT_LEADERBOARD_PATH):
+    def __init__(self, leaderboard_path: str = DEFAULT_LEADERBOARD_PATH,
+                 results_path: Optional[str] = None):
         self.leaderboard_path = leaderboard_path
+        # The results log is named after its leaderboard, so a test's scratch board gets a
+        # scratch log rather than appending to the live one.
+        self.results_path = results_path or (os.path.splitext(leaderboard_path)[0] + ".results.jsonl")
         self.ratings: Dict[str, ModelRating] = {}
         self.match_history: List[Dict[str, Any]] = []
+        self.results: List[Dict[str, Any]] = rating_fit.load_results(self.results_path)
         self.load_leaderboard()
 
     def get_or_create_rating(self, model_spec: str, is_anchor: bool = False) -> ModelRating:
@@ -531,7 +518,9 @@ class TrueSkillEvaluator:
             if k == norm_key or r.name == name or os.path.basename(k) == os.path.basename(norm_key):
                 return r
 
-        calib = get_anchor_calibration(norm_key) if is_anchor else None
+        # A pinned rating is a reference whoever registers it first.
+        calib = get_anchor_calibration(norm_key)
+        is_anchor = is_anchor or calib is not None
         record = ModelRating(
             name=name,
             path=norm_key,
@@ -555,11 +544,10 @@ class TrueSkillEvaluator:
         """
         changed = 0
         for rec in self.ratings.values():
-            if not rec.is_anchor:
-                continue
             calib = get_anchor_calibration(rec.path) or get_anchor_calibration(rec.name)
             if not calib:
                 continue
+            rec.is_anchor = True
             if abs(rec.mu - calib[0]) > 1e-6 or abs(rec.sigma - calib[1]) > 1e-6:
                 rec.mu, rec.sigma = calib
                 rec.update_conservative()
@@ -577,7 +565,9 @@ class TrueSkillEvaluator:
                 data = json.load(f)
             self.ratings.clear()
             for k, v in data.get("ratings", {}).items():
+                v = {k2: v2 for k2, v2 in v.items() if k2 in ModelRating.__dataclass_fields__}
                 record = ModelRating(**v)
+                record.rating_locked = False      # the lock is retired; see maybe_lock_rating
                 record.update_conservative()
                 self.ratings[k] = record
             self.match_history = data.get("history", [])
@@ -667,13 +657,9 @@ class TrueSkillEvaluator:
             record_b.goals_for += res["b_score"]
             record_b.goals_against += res["a_score"]
 
-            r_a = record_a.to_trueskill_rating()
-            r_b = record_b.to_trueskill_rating()
             drawn = (res["score_diff"] == 0)
 
-            # The win/loss tallies are recorded whatever happens to the rating solve
-            # below: the series was played, and losing its record too would corrupt
-            # points_rate and the goal columns as well as mu.
+            # The win/loss tallies are the raw record; the rating comes from the fit below.
             if drawn:
                 record_a.draws += 1
                 record_b.draws += 1
@@ -684,33 +670,8 @@ class TrueSkillEvaluator:
                 record_b.wins += 1
                 record_a.losses += 1
 
-            # A degenerate solve leaves both ratings where they were rather than raising
-            # through the caller. With the mpmath backend this should not fire; it is here
-            # because the alternative failure mode -- a whole pairing discarded by an
-            # except several frames up -- is exactly how the anchors went silent before.
-            try:
-                if drawn:
-                    new_a, new_b = trueskill.rate_1vs1(r_a, r_b, drawn=True)
-                elif res["score_diff"] > 0:
-                    new_a, new_b = trueskill.rate_1vs1(r_a, r_b)
-                else:
-                    new_b, new_a = trueskill.rate_1vs1(r_b, r_a)
-            except Exception as exc:
-                print(f"[TrueSkill] Rating update skipped for "
-                      f"'{record_a.name}' vs '{record_b.name}' (mu {record_a.mu:.1f} vs "
-                      f"{record_b.mu:.1f}): {type(exc).__name__}: {exc}. "
-                      f"The series result is still recorded.")
-                new_a, new_b = r_a, r_b
-
-            # Calibrated anchors and locked checkpoints are fixed references; their
-            # ratings never move. The series is still played and still counted, because
-            # the point of it is to measure the other side.
-            if not self.is_rating_frozen(record_a):
-                record_a.from_trueskill_rating(new_a)
-            if not self.is_rating_frozen(record_b):
-                record_b.from_trueskill_rating(new_b)
-            # Calibration series still move mu -- that is the entire point of them -- but
-            # they are tallied apart so the promotion gate stays a peer-only judgement.
+            # Calibration series are tallied apart so the promotion gate stays a peer-only
+            # judgement. In the fit they are ordinary results: that is what ties the scale.
             if calibration:
                 for rec in (record_a, record_b):
                     if self.is_rating_frozen(rec):
@@ -721,16 +682,8 @@ class TrueSkillEvaluator:
                     elif (rec is record_a) == (res["score_diff"] > 0):
                         rec.calibration_wins += 1
 
-            record_a.update_conservative()
-            record_b.update_conservative()
-
-            for rec in (record_a, record_b):
-                if self.maybe_lock_rating(rec):
-                    print(
-                        f"[TrueSkill] Rating locked: '{rec.name}' at mu={rec.mu:.2f} "
-                        f"(sigma={rec.sigma:.2f}) after {rec.matches_played} series. "
-                        f"It stays in the pool as a fixed reference."
-                    )
+            self.record_series(record_a.path, record_b.path, res,
+                               kind="calibration" if calibration else "league", refit=False)
 
             res["model_a"] = record_a.name
             res["model_b"] = record_b.name
@@ -743,8 +696,65 @@ class TrueSkillEvaluator:
             results.append(res)
             self.match_history.append(res)
 
+        # One solve per pairing, after its series: every rating on the board can move,
+        # because a result between A and B is also evidence about everyone they have met.
+        self.refit()
+        for res in results:
+            res["a_mu"] = record_a.mu
+            res["b_mu"] = record_b.mu
         self.save_leaderboard()
         return results
+
+    def record_series(self, a_path: str, b_path: str, res: Dict[str, Any],
+                      kind: str = "league", refit: bool = True) -> None:
+        """
+        Adds one played series to the results log, and by default re-solves the ratings.
+
+        Everything that plays a series should come through here, including the benchmark
+        runs against Necto and Nexto, which touch no tallies but are data the fit can use.
+        """
+        a = self._key(a_path)
+        b = self._key(b_path)
+        self.results.append(rating_fit.append_result(
+            self.results_path, a, b, int(res.get("a_score", 0)), int(res.get("b_score", 0)),
+            kind, datetime.datetime.now().isoformat()))
+        if refit:
+            self.refit()
+
+    @staticmethod
+    def _key(model_spec: str) -> str:
+        return os.path.normpath(str(model_spec).strip().strip('"').strip("'")).replace("\\", "/")
+
+    def refit(self) -> None:
+        """
+        Re-solves every rating from the whole results log; see utils/rating_fit.py.
+
+        Pinned ratings are held, everyone else who has played is fitted, and a record that
+        has never played keeps whatever it was created or seeded with.
+        """
+        if not self.results:
+            return
+        by_key = {self._key(k): r for k, r in self.ratings.items()}
+        pinned = {}
+        for k, r in by_key.items():
+            calib = get_anchor_calibration(r.path)
+            if calib:
+                pinned[k] = calib[0]
+        fitted = rating_fit.fit_ratings(
+            self.results, pinned,
+            prior_mu={k: r.prior_mu for k, r in by_key.items()},
+            start={k: r.mu for k, r in by_key.items()},
+        )
+        now = datetime.datetime.now().isoformat()
+        for k, (mu, sd) in fitted.items():
+            r = by_key.get(k)
+            if r is None or k in pinned:
+                continue
+            r.mu = round(mu, 3)
+            r.sigma = round(sd, 3)
+            r.last_updated = now
+        for r in self.ratings.values():
+            r.update_conservative()
 
     def run_tournament(
         self,
