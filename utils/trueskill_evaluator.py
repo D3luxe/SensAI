@@ -179,13 +179,27 @@ DEFAULT_SERIES_WINS_NEEDED = 5
 # pessimistic case and the ones the league actually schedules.
 DEFAULT_DRAW_PROBABILITY = 0.07
 
-ts_env = trueskill.TrueSkill(
+# The mpmath backend, not the default one. TrueSkill's default solver raises
+# FloatingPointError once the two mu are far enough apart -- measured here, anything past
+# a gap of ~229 mu against a sigma-0.5 anchor. That is not hypothetical: the league ran to
+# mu 518-521 against anchors at 30-34.7, a gap of ~485, so every anchor grading raised and
+# was swallowed by the caller's except. The anchor could not correct the drift precisely
+# when the drift was worst, which is what let it keep going.
+#
+# mpmath computes the same update in arbitrary precision (520 vs 34.7 resolves to a 13.6
+# mu correction instead of an exception). It costs 394 us against 65 us per update, which
+# is 0.01% of the ~3 s best-of-9 series that produces the update.
+_TS_KWARGS = dict(
     mu=25.0,
     sigma=25.0 / 3.0,     # ~8.333
     beta=25.0 / 6.0,      # ~4.167
     tau=25.0 / 300.0,     # ~0.0833
-    draw_probability=DEFAULT_DRAW_PROBABILITY
+    draw_probability=DEFAULT_DRAW_PROBABILITY,
 )
+try:
+    ts_env = trueskill.TrueSkill(backend="mpmath", **_TS_KWARGS)
+except Exception:   # mpmath missing, or the fallback shim is in use
+    ts_env = trueskill.TrueSkill(**_TS_KWARGS)
 
 # Calibrated fixed reference ladder.
 #
@@ -260,6 +274,16 @@ class ModelRating:
     # re-open a model that was already frozen, and the leaderboard stays auditable.
     rating_locked: bool = False
     locked_at_matches: int = 0
+    # Calibration series -- those played against a fixed anchor purely to bind the scale.
+    # Counted separately because the anchors are saturated against this population (Necto
+    # takes ~93% of points off any checkpoint we have), so folding them into points_rate
+    # puts the promotion floor out of reach however good a contender is. That is the bug
+    # that got the anchors dropped from grading in the first place, and dropping them is
+    # what let mu drift to 520. Separating the two lets an anchor move mu without touching
+    # the gate. They are still in wins/losses/matches_played, which are the raw record.
+    calibration_matches: int = 0
+    calibration_wins: int = 0
+    calibration_draws: int = 0
     last_updated: str = ""
 
     def update_conservative(self):
@@ -277,7 +301,12 @@ class ModelRating:
         despite never having lost. Points rate is the standard fix and is what promotion,
         demotion and pool tiebreaks should use.
         """
-        return round(((self.wins + 0.5 * self.draws) / max(1, self.matches_played)) * 100.0, 1)
+        played = self.matches_played - self.calibration_matches
+        wins = self.wins - self.calibration_wins
+        draws = self.draws - self.calibration_draws
+        if played <= 0:     # nothing but calibration so far: no peer evidence either way
+            return 0.0
+        return round(((wins + 0.5 * draws) / played) * 100.0, 1)
 
     def to_trueskill_rating(self) -> trueskill.Rating:
         return ts_env.create_rating(mu=self.mu, sigma=self.sigma)
@@ -591,6 +620,7 @@ class TrueSkillEvaluator:
         series_length: int = DEFAULT_SERIES_LENGTH,
         wins_needed: int = DEFAULT_SERIES_WINS_NEEDED,
         device: str = "cpu",
+        calibration: bool = False,
         **legacy
     ) -> List[Dict[str, Any]]:
         """
@@ -641,18 +671,36 @@ class TrueSkillEvaluator:
             r_b = record_b.to_trueskill_rating()
             drawn = (res["score_diff"] == 0)
 
+            # The win/loss tallies are recorded whatever happens to the rating solve
+            # below: the series was played, and losing its record too would corrupt
+            # points_rate and the goal columns as well as mu.
             if drawn:
                 record_a.draws += 1
                 record_b.draws += 1
-                new_a, new_b = trueskill.rate_1vs1(r_a, r_b, drawn=True)
             elif res["score_diff"] > 0:
                 record_a.wins += 1
                 record_b.losses += 1
-                new_a, new_b = trueskill.rate_1vs1(r_a, r_b)
             else:
                 record_b.wins += 1
                 record_a.losses += 1
-                new_b, new_a = trueskill.rate_1vs1(r_b, r_a)
+
+            # A degenerate solve leaves both ratings where they were rather than raising
+            # through the caller. With the mpmath backend this should not fire; it is here
+            # because the alternative failure mode -- a whole pairing discarded by an
+            # except several frames up -- is exactly how the anchors went silent before.
+            try:
+                if drawn:
+                    new_a, new_b = trueskill.rate_1vs1(r_a, r_b, drawn=True)
+                elif res["score_diff"] > 0:
+                    new_a, new_b = trueskill.rate_1vs1(r_a, r_b)
+                else:
+                    new_b, new_a = trueskill.rate_1vs1(r_b, r_a)
+            except Exception as exc:
+                print(f"[TrueSkill] Rating update skipped for "
+                      f"'{record_a.name}' vs '{record_b.name}' (mu {record_a.mu:.1f} vs "
+                      f"{record_b.mu:.1f}): {type(exc).__name__}: {exc}. "
+                      f"The series result is still recorded.")
+                new_a, new_b = r_a, r_b
 
             # Calibrated anchors and locked checkpoints are fixed references; their
             # ratings never move. The series is still played and still counted, because
@@ -661,6 +709,18 @@ class TrueSkillEvaluator:
                 record_a.from_trueskill_rating(new_a)
             if not self.is_rating_frozen(record_b):
                 record_b.from_trueskill_rating(new_b)
+            # Calibration series still move mu -- that is the entire point of them -- but
+            # they are tallied apart so the promotion gate stays a peer-only judgement.
+            if calibration:
+                for rec in (record_a, record_b):
+                    if self.is_rating_frozen(rec):
+                        continue
+                    rec.calibration_matches += 1
+                    if drawn:
+                        rec.calibration_draws += 1
+                    elif (rec is record_a) == (res["score_diff"] > 0):
+                        rec.calibration_wins += 1
+
             record_a.update_conservative()
             record_b.update_conservative()
 
@@ -750,9 +810,11 @@ class TrueSkillEvaluator:
         sigma_col = "Uncertainty (sigma)" if ascii_safe else "Uncertainty (σ)"
         plus_minus = "+/-" if ascii_safe else "±"
 
+        necto_col = "vs Necto"
         cols = [
-            "Rank", "Model", "Confidence", mu_col, sigma_col, "Conservative Score",
-            "Points", "Win Rate", "Record (W-L-D)", "Goal Diff", "Matches"
+            "Rank", "Model", "Confidence", mu_col, necto_col, sigma_col,
+            "Conservative Score", "Points", "Win Rate", "Record (W-L-D)", "Goal Diff",
+            "Matches"
         ]
 
         if not self.ratings:
@@ -777,6 +839,7 @@ class TrueSkillEvaluator:
                 "Model": r.name,
                 "Confidence": "Ranked" if self.is_rank_eligible(r) else "Provisional",
                 mu_col: f"{r.mu:.2f}",
+                necto_col: ("n/a" if self.vs_necto(r) is None else f"{self.vs_necto(r):+.1f}"),
                 sigma_col: f"{plus_minus}{r.sigma:.2f}",
                 "Conservative Score": f"{r.conservative_rating:.2f}",
                 "Points": f"{r.points_rate:.1f}%",
@@ -787,6 +850,28 @@ class TrueSkillEvaluator:
             })
 
         return pd.DataFrame(rows)
+
+    def necto_reference_mu(self) -> Optional[float]:
+        """The Necto anchor's mu, or None if it is not on the board."""
+        for r in self.ratings.values():
+            if r.is_anchor and "necto" in os.path.basename(r.path).lower()                     and "nexto" not in os.path.basename(r.path).lower():
+                return r.mu
+        return None
+
+    def vs_necto(self, rec: ModelRating) -> Optional[float]:
+        """
+        A rating's mu relative to Necto's, which is the only number on this board with a
+        fixed meaning.
+
+        Raw mu is relative to whoever a model actually played, and this league plays
+        mostly itself, so mu drifts with the population and is not comparable across
+        eras. Reporting it alone is how the board came to show checkpoints at mu 518
+        against an anchored Necto at 30 while those same checkpoints lost to Necto 35-1.
+        Anchored to Necto the number stays interpretable: negative means the eval suite
+        should show us losing to it, and it cannot drift without the anchor drifting.
+        """
+        ref = self.necto_reference_mu()
+        return None if ref is None else rec.mu - ref
 
     def get_anchor_ratings(self) -> List[ModelRating]:
         """The calibrated reference ladder, strongest first, for the legend."""

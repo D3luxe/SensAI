@@ -127,6 +127,22 @@ class LeagueManager:
         self.training_opponents: List[str] = [
             self._normalize_path(x) for x in self.config.get("training_opponents", []) if x
         ]
+        # Share of graded series spent against a fixed anchor purely to bind the scale.
+        #
+        # TrueSkill has no absolute scale: mu means "relative to whoever you played". This
+        # league played itself, so mu climbed with every generation that beat its own past
+        # and reached 518-521 while the bot was losing to Necto (anchored at 30) by 35-1.
+        # Simulated over 600 generations with true skill held constant and strictly below
+        # the anchor's, mu is still climbing at an anchor share of 0.06% and of 1%, and is
+        # bounded below the anchor at 5% and above. 5% is the knee, and at ~3 s per series
+        # it is a rounding error against training.
+        #
+        # Calibration series are excluded from points_rate and from the loss streak, so a
+        # saturated anchor can move mu without touching promotion or triggering eviction.
+        self.calibration_share = float(self.config.get("calibration_share", 0.05))
+        self.calibration_share = max(0.0, min(1.0, self.calibration_share))
+        self._calibration_debt = 0.0
+
         self.training_opponent_ratio = float(self.config.get("training_opponent_ratio", 0.0))
         self.training_opponent_ratio = max(0.0, min(1.0, self.training_opponent_ratio))
         self._training_opp_cycle_idx: int = 0
@@ -527,6 +543,7 @@ class LeagueManager:
             "king_of_the_hill": self.king_of_the_hill,
             "elite_pool": self.elite_pool,
             "elite_pool_details": self.get_elite_pool_details(),
+            "calibration_debt": self._calibration_debt,
             "contender_queue": self.contender_queue,
             "contender_consecutive_losses": self.contender_consecutive_losses,
             "event_history": self.event_history[-30:],
@@ -566,6 +583,10 @@ class LeagueManager:
                 if p == "heuristic" or os.path.exists(p)
             ]
             self.contender_consecutive_losses = data.get("contender_consecutive_losses", {})
+            try:
+                self._calibration_debt = float(data.get("calibration_debt", 0.0))
+            except (TypeError, ValueError):
+                self._calibration_debt = 0.0
             self.event_history = data.get("event_history", [])[-30:]
             self.previous_king_of_the_hill = data.get("king_of_the_hill", None)
             try:
@@ -1040,6 +1061,54 @@ class LeagueManager:
             return {"status": "coronation", "new_king": self.king_of_the_hill, "old_king": old_king}
         return {"status": "defended", "king": self.king_of_the_hill, "challenger": norm_challenger}
 
+    def _run_calibration_series(self, contender_path: str, rec: Optional[ModelRating],
+                                series_played: int, device: str = "cpu") -> int:
+        """
+        Spends calibration_share of the graded budget against a fixed anchor, and returns
+        how many series it played.
+
+        Debt-based rather than every-Nth so the realised share matches the configured one
+        regardless of how many series each trial happens to run.
+
+        The anchors are saturated against this population -- measured 2026-09-20, the v3
+        king loses 12 of 12 series to Necto and 12 of 12 to Nexto -- so these series say
+        almost nothing about how two checkpoints compare. That is fine: ranking peers is
+        the peer trial's job. This exists only so the population stays tethered to a
+        reference that never trains, which is the one thing self-play cannot provide.
+        """
+        if self.calibration_share <= 0.0 or series_played <= 0:
+            return 0
+        self._calibration_debt += self.calibration_share * series_played
+        if self._calibration_debt < 1.0:
+            return 0
+        due = int(self._calibration_debt)
+        self._calibration_debt -= due
+
+        anchor = self._nearest_anchor(rec, exclude=contender_path)
+        if not anchor:
+            return 0
+        try:
+            self.evaluator.evaluate_pairing(
+                model_a_path=contender_path,
+                model_b_path=anchor,
+                series_per_pair=due,
+                max_steps=self.eval_max_steps,
+                no_touch_steps=self.eval_no_touch_steps,
+                series_length=self.series_length,
+                wins_needed=self.series_wins_needed,
+                device=device,
+                calibration=True,
+            )
+        except Exception as e:
+            print(f"[League Manager] Warning: calibration {contender_path} vs {anchor}: {e}")
+            return 0
+        after = self.evaluator.ratings.get(contender_path)
+        print(f"[League Manager] [Calibration] '{get_model_display_name(contender_path)}' "
+              f"played {due} series vs {get_model_display_name(anchor)} to hold the scale"
+              + (f" (mu {after.mu:.2f})" if after else "")
+              + ". Not counted toward promotion or the loss streak.")
+        return due
+
     def step_contender_gauntlet(self, device: str = "cpu") -> Optional[Dict[str, Any]]:
         """
         Advances the Gauntlet promotion/demotion trials by running matches for the top active contender.
@@ -1091,6 +1160,15 @@ class LeagueManager:
         # series, Nexto lost every series. None of them distinguishes an early checkpoint
         # from a late one. Peers do, and the same probe found the checkpoint round robin
         # cleanly transitive.
+        #
+        # Re-measured 2026-09-20, after Necto's kickoff was fixed. The "Nexto lost every
+        # series" half of that probe no longer holds and was an artefact of the kickoff
+        # bug, which made the three-way SensAI/Necto/Nexto ordering non-transitive. It is
+        # transitive now: Nexto beats Necto 38-4 over 42 series, and the v3 king loses 12
+        # of 12 to each. So the anchors are ordered correctly and still saturated -- which
+        # is why they stay out of this trial, and why the separate calibration pass in
+        # _run_calibration_series exists instead. Ranking peers and fixing the scale are
+        # different jobs and now use different matches.
         opponents = self.nearest_rated_peers(
             rec, exclude=contender_path, limit=self.gauntlet_opponents
         )
@@ -1145,6 +1223,13 @@ class LeagueManager:
                 print(f"[League Manager] Warning: Gauntlet trial error {contender_path} vs {opp}: {e}")
 
         self.contender_consecutive_losses[contender_path] = streak
+
+        # Scale calibration. After the streak is committed, so a saturated anchor cannot
+        # contribute to an eviction, and after the peer trial, so it never displaces the
+        # matches that actually rank the field.
+        self._run_calibration_series(
+            contender_path, self.evaluator.ratings.get(contender_path, rec),
+            series_played=max(1, self.contender_series_per_step), device=device)
 
         # Refresh rating after matches
         rec = self.evaluator.ratings.get(contender_path, rec)
