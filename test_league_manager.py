@@ -995,79 +995,35 @@ class TestLeagueManager(unittest.TestCase):
         self.assertIn('tabindex="0"', html)
         self.assertIn('role="tooltip"', html)
 
-    def test_ui_league_wire_and_queue_rendering(self):
-        """The league board renders in both the empty and the populated state."""
+    def test_ui_league_board_rendering(self):
+        """
+        The league board renders in both the empty and the populated state. Its panels are
+        covered in detail by test_league_board; this checks the wiring the app uses.
+        """
         from ui.app import build_league_wire_and_queue_html
 
         empty_html = build_league_wire_and_queue_html(self.evaluator, league_state={})
-        self.assertIn("league-board", empty_html)
-        self.assertIn("Gauntlet Wire", empty_html)
-        self.assertIn("Gauntlet Trials", empty_html)
-        self.assertIn("Elite Pool", empty_html)
+        for panel in ("league-board", "Rating ladder", "Elite pool", "Pipeline", "Benchmarks"):
+            self.assertIn(panel, empty_html)
+        # The scrolling ticker was retired: a marquee is the wrong shape for a feed.
+        self.assertNotIn("lb-ticker", empty_html)
 
         mock_state = {
-            "king_of_the_hill": "checkpoints/checkpoint_iter_101940.pt",
             "event_history": [
-                {
-                    "timestamp": "2026-09-07T22:30:00",
-                    "type": "promotion",
-                    "model": "Iteration 100020",
-                    "detail": "Graduated Gauntlet to Elite Pool"
-                },
-                {
-                    "timestamp": "2026-09-07T22:35:00",
-                    "type": "demotion",
-                    "model": "Iteration 98200",
-                    "detail": "Loss streak knockout"
-                }
+                {"timestamp": "2026-09-07T22:30:00", "type": "promotion", "model": "checkpoint_iter_100020",
+                 "detail": "Graduated Gauntlet to Elite Pool", "matches": 30, "points_rate": 62.5},
+                {"timestamp": "2026-09-07T22:35:00", "type": "demotion", "model": "checkpoint_iter_98200",
+                 "detail": "Loss streak knockout"},
             ],
             "contenders": [
-                {
-                    "name": "Iteration 101940",
-                    "path": "checkpoints/checkpoint_iter_101940.pt",
-                    "mu": 31.94,
-                    "sigma": 2.29,
-                    "conservative_score": 25.06,
-                    "matches_played": 8,
-                    "target_matches": 16,
-                    "progress_pct": 50.0,
-                    "win_rate": 37.5,
-                    "points_rate": 62.5,
-                    "record": "3W-3L-2D",
-                    "consecutive_losses": 0,
-                    "max_consecutive_losses": 4,
-                    "status": "In Trial"
-                }
-            ],
-            "elite_pool_details": [
-                {
-                    "rank": 1, "name": "Iteration 101940",
-                    "path": "checkpoints/checkpoint_iter_101940.pt",
-                    "mu": 30.10, "sigma": 0.92, "conservative_score": 27.34,
-                    "win_rate": 41.0, "points_rate": 55.0, "record": "41W-30L-29D",
-                    "matches_played": 100, "is_anchor": False, "is_king": True
-                },
-                {
-                    "rank": 2, "name": "Necto (EARL TorchScript)",
-                    "path": "checkpoints/necto-model.pt",
-                    "mu": 30.00, "sigma": 0.50, "conservative_score": 28.50,
-                    "win_rate": 0.0, "points_rate": 0.0, "record": "0W-0L-0D",
-                    "matches_played": 0, "is_anchor": True, "is_king": False
-                },
+                {"name": "Iteration 101940", "matches_played": 8, "target_matches": 30, "sigma": 2.29},
             ],
         }
         populated = build_league_wire_and_queue_html(self.evaluator, league_state=mock_state)
-        self.assertIn("Promoted", populated)
-        self.assertIn("Demoted", populated)
+        self.assertIn("graduated to the elite pool", populated)
+        self.assertIn("dropped out", populated)
         self.assertIn("Iteration 101940", populated)
-        # Points rate, not raw win rate, is what the trial card reports.
-        self.assertIn("62.5%", populated)
-        self.assertNotIn("37.5%", populated)
-        # A demotion animates downward, a promotion upward.
-        self.assertIn("lb-tick-down", populated)
-        self.assertIn("lb-tick-up", populated)
-        # An anchor shows no fabricated points figure.
-        self.assertIn("reference", populated)
+        self.assertIn("8/30 series", populated)
 
     def test_title_bout_extended_trial(self):
         """Verify high-mu contenders are granted extended trial up to max_contender_matches."""
@@ -1575,8 +1531,8 @@ class TestBenchmarkChartRendering(unittest.TestCase):
     def setUpClass(cls):
         # Imported here rather than at module scope, matching the other UI-touching tests
         # in this file: ui.app pulls in Gradio, which is slow and not needed by the rest.
-        global _build_benchmark_chart, _build_pool_panel
-        from ui.app import _build_benchmark_chart, _build_pool_panel
+        global _build_benchmark_chart
+        from ui.app import _build_benchmark_chart
 
     @staticmethod
     def _entry(iteration, gf, ga, eps=50, name="Necto"):
@@ -1591,10 +1547,10 @@ class TestBenchmarkChartRendering(unittest.TestCase):
         self.assertIn("a curve needs two", html)
         self.assertNotIn("<svg", html)
 
-    def test_no_readings_explains_why_the_ladder_cannot_answer_this(self):
+    def test_no_readings_says_so(self):
         html = _build_benchmark_chart({})
         self.assertIn("No benchmark has run yet", html)
-        self.assertIn("pool-relative", html)
+        self.assertIn("benchmark_interval", html)
 
     def test_two_readings_plot_a_point_each_and_a_fitted_trend(self):
         state = {"benchmark_history": [self._entry(1000, 5, 20), self._entry(2000, 15, 20)]}
@@ -1642,11 +1598,13 @@ class TestBenchmarkChartRendering(unittest.TestCase):
         self.assertIn("<svg", html)
         self.assertIn("+1.00", html)
 
-    def test_the_panel_offers_both_faces_with_the_roster_showing_first(self):
-        evaluator = TrueSkillEvaluator(leaderboard_path=os.path.join(tempfile.mkdtemp(), "lb.json"))
-        html = _build_pool_panel({"benchmark_history": []}, evaluator)
-        self.assertIn('id="lbface-pool" checked', html)
-        self.assertIn('id="lbface-chart"', html)
-        self.assertNotIn('id="lbface-chart" checked', html)
-        self.assertIn("lb-face-pool", html)
-        self.assertIn("lb-face-chart", html)
+    def test_readings_plot_in_the_order_played_not_by_iteration(self):
+        """Iteration numbers restart each run, so two runs' readings would stack on one x."""
+        late_run = self._entry(199000, 15, 20)
+        late_run["at"] = "2026-09-12T20:00:00"
+        early_run = self._entry(210000, 5, 20)
+        early_run["at"] = "2026-09-11T20:00:00"
+        html = _build_benchmark_chart({"benchmark_history": [late_run, early_run]})
+        self.assertIn("Sep 11", html)
+        self.assertIn("Sep 12", html)
+        self.assertLess(html.index("Sep 11"), html.index("Sep 12"))

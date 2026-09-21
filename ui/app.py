@@ -51,6 +51,8 @@ from utils.scenario_manager import (
     simulate_custom_scenario,
     DEFAULT_CUSTOM_SCENARIOS
 )
+from ui import league_board
+from ui.league_board import LEAGUE_CSS
 from utils.trueskill_evaluator import TrueSkillEvaluator, get_model_display_name
 from utils.league_manager import snap_tiers_to_worker_slices
 from utils.config import effective_config
@@ -232,7 +234,7 @@ button.primary-btn {
 }
 
 /* ============================================================================
-   LEAGUE BOARD  --  King banner, Elite standings, Gauntlet ticker.
+   LEAGUE BOARD  --  shared pieces. The board itself is ui/league_board.py (LEAGUE_CSS).
    Animations are transform/opacity only (compositor-driven, no layout or paint
    per frame) and every one of them is disabled under prefers-reduced-motion.
    ========================================================================= */
@@ -472,32 +474,7 @@ button.primary-btn {
     filter: none; opacity: 0.55; animation: none;
 }
 
-/* ---- Elite standings table ------------------------------------------ */
-
-.lb-standings { padding: 4px 8px 10px; }
-
-.lb-row {
-    display: grid;
-    grid-template-columns: 38px minmax(140px, 2fr) 92px 1.3fr 56px 54px 58px 116px 48px;
-    align-items: center; gap: 9px;
-    padding: 7px 10px; border-radius: 7px;
-    font-size: 0.86em; color: #cbd5e1;
-    border: 1px solid transparent;
-    transition: background-color 0.16s ease, border-color 0.16s ease;
-}
-
-.lb-row + .lb-row { margin-top: 2px; }
-.lb-row:not(.lb-row-head):hover { background: rgba(56, 189, 248, 0.06); border-color: rgba(56, 189, 248, 0.22); }
-
-.lb-row-head {
-    font-size: 0.68em; font-weight: 800; letter-spacing: 1px;
-    text-transform: uppercase; color: #64748b;
-    border-bottom: 1px solid rgba(51, 65, 85, 0.5); border-radius: 0;
-    padding-bottom: 6px; margin-bottom: 3px;
-}
-
-.lb-row-king { background: rgba(234, 179, 8, 0.07); border-color: rgba(234, 179, 8, 0.32); }
-.lb-row-king:hover { background: rgba(234, 179, 8, 0.11); border-color: rgba(234, 179, 8, 0.45); }
+/* ---- Standings shared pieces (rows are .lg-row, ui/league_board.py) --- */
 
 .lb-rank {
     font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
@@ -510,111 +487,9 @@ button.primary-btn {
 .lb-muted { color: #7c8ba1; font-variant-numeric: tabular-nums; }
 .lb-record { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 0.92em; color: #94a3b8; }
 
-/* Rating bar: width is set inline once per render, then never animated. */
-.lb-bar-track {
-    position: relative; height: 6px; border-radius: 3px;
-    background: rgba(51, 65, 85, 0.55); overflow: hidden;
-}
-.lb-bar-fill {
-    position: absolute; inset: 0 auto 0 0; border-radius: 3px;
-    background: linear-gradient(90deg, #0ea5e9 0%, #38bdf8 100%);
-    transform-origin: left center;
-    animation: lb-bar-grow 0.5s cubic-bezier(0.22, 1, 0.36, 1) both;
-}
-.lb-bar-fill.is-king { background: linear-gradient(90deg, #ca8a04 0%, #facc15 100%); }
-.lb-bar-fill.is-provisional { background: linear-gradient(90deg, #475569 0%, #94a3b8 100%); }
-
 @keyframes lb-bar-grow { from { transform: scaleX(0); } to { transform: scaleX(1); } }
 
-/* ---- Gauntlet ticker ------------------------------------------------ */
-
-.lb-ticker { position: relative; overflow: hidden; padding: 0; }
-
-.lb-ticker-head {
-    display: flex; align-items: center; justify-content: space-between;
-    gap: 10px; flex-wrap: wrap; padding: 8px 16px;
-    border-bottom: 1px solid rgba(51, 65, 85, 0.55);
-}
-
-.lb-live {
-    display: inline-flex; align-items: center; gap: 7px;
-    font-size: 0.72em; font-weight: 800; letter-spacing: 1.2px; text-transform: uppercase;
-    color: #fb7185; background: rgba(244, 63, 94, 0.1);
-    border: 1px solid rgba(244, 63, 94, 0.35); border-radius: 9999px; padding: 3px 10px;
-}
-
-.lb-live-dot {
-    width: 7px; height: 7px; border-radius: 50%; background: #fb7185;
-    animation: lb-pulse 1.9s ease-in-out infinite;
-}
-
-@keyframes lb-pulse {
-    0%, 100% { opacity: 1; transform: scale(1); }
-    50%      { opacity: 0.35; transform: scale(0.78); }
-}
-
-.lb-ticker-viewport {
-    position: relative; overflow: hidden; padding: 9px 0;
-    -webkit-mask-image: linear-gradient(90deg, transparent 0, #000 44px, #000 calc(100% - 44px), transparent 100%);
-            mask-image: linear-gradient(90deg, transparent 0, #000 44px, #000 calc(100% - 44px), transparent 100%);
-}
-
-/* Two identical halves scrolled by one transform gives a seamless loop with a
-   single animated element. Duration is set inline from the item count so the
-   speed stays constant regardless of how much is on the wire. */
-.lb-ticker-track {
-    display: flex; align-items: center; gap: 10px; width: max-content;
-    animation: lb-marquee linear infinite;
-    will-change: transform;
-}
-.lb-ticker-viewport:hover .lb-ticker-track { animation-play-state: paused; }
-
-@keyframes lb-marquee { from { transform: translateX(0); } to { transform: translateX(-50%); } }
-
-.lb-tick {
-    display: inline-flex; align-items: center; gap: 8px; flex-shrink: 0;
-    background: rgba(15, 23, 42, 0.85); border: 1px solid #24324a;
-    border-radius: 8px; padding: 5px 12px; font-size: 0.83em; color: #94a3b8;
-}
-.lb-tick b { color: #f1f5f9; font-weight: 700; }
-.lb-tick-time { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 0.88em; color: #52627a; }
-
-.lb-tick-badge {
-    font-size: 0.76em; font-weight: 800; letter-spacing: 0.6px; text-transform: uppercase;
-    padding: 2px 7px; border-radius: 4px; white-space: nowrap;
-}
-.lb-badge-promotion  { background: rgba(34, 197, 94, 0.16);  color: #4ade80; border: 1px solid rgba(34, 197, 94, 0.45); }
-.lb-badge-demotion   { background: rgba(244, 63, 94, 0.16);  color: #fb7185; border: 1px solid rgba(244, 63, 94, 0.45); }
-.lb-badge-coronation { background: rgba(234, 179, 8, 0.16);  color: #facc15; border: 1px solid rgba(234, 179, 8, 0.45); }
-.lb-badge-admission  { background: rgba(56, 189, 248, 0.16); color: #7dd3fc; border: 1px solid rgba(56, 189, 248, 0.45); }
-.lb-badge-preemption { background: rgba(168, 85, 247, 0.16); color: #c4b5fd; border: 1px solid rgba(168, 85, 247, 0.45); }
-
-/* A demotion drops in and settles; a promotion or coronation lifts. Both run
-   once, on the newest few items only, so a refresh does not re-animate the
-   whole wire. */
-.lb-tick-fresh.lb-tick-down { animation: lb-drop 0.55s cubic-bezier(0.34, 1.56, 0.64, 1) both; }
-.lb-tick-fresh.lb-tick-up   { animation: lb-rise 0.55s cubic-bezier(0.34, 1.56, 0.64, 1) both; }
-.lb-tick-fresh.lb-tick-flat { animation: lb-fade 0.45s ease-out both; }
-
-@keyframes lb-drop { from { transform: translateY(-9px); opacity: 0; } to { transform: none; opacity: 1; } }
-@keyframes lb-rise { from { transform: translateY(9px);  opacity: 0; } to { transform: none; opacity: 1; } }
-@keyframes lb-fade { from { opacity: 0; } to { opacity: 1; } }
-
-/* ---- Gauntlet trial cards ------------------------------------------- */
-
-.lb-trials { display: grid; grid-template-columns: repeat(auto-fit, minmax(290px, 1fr)); gap: 10px; padding: 12px 16px; }
-
-.lb-trial {
-    background: rgba(10, 15, 30, 0.7); border: 1px solid #24324a;
-    border-radius: 9px; padding: 11px 14px;
-    display: flex; flex-direction: column; gap: 8px;
-    transition: border-color 0.18s ease, transform 0.18s ease;
-}
-.lb-trial:hover { transform: translateY(-2px); border-color: rgba(56, 189, 248, 0.45); }
-.lb-trial-danger { border-color: rgba(244, 63, 94, 0.45); }
-
-.lb-trial-top { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
-.lb-trial-name { font-weight: 800; color: #f1f5f9; font-size: 0.93em; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* ---- Progress bar (pipeline trials) ---------------------------------- */
 
 .lb-prog-track { height: 7px; border-radius: 4px; background: rgba(51, 65, 85, 0.6); overflow: hidden; }
 .lb-prog-fill {
@@ -624,46 +499,9 @@ button.primary-btn {
     animation: lb-bar-grow 0.55s cubic-bezier(0.22, 1, 0.36, 1) both;
 }
 
-.lb-trial-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 3px 12px; font-size: 0.81em; color: #8fa0b6; }
-.lb-trial-grid b { color: #e2e8f0; font-variant-numeric: tabular-nums; }
-.lb-trial-foot {
-    display: flex; align-items: center; justify-content: space-between;
-    font-size: 0.79em; color: #7c8ba1;
-    border-top: 1px solid rgba(51, 65, 85, 0.45); padding-top: 6px;
-}
-
 .lb-empty {
     padding: 16px 20px; text-align: center; color: #7c8ba1; font-size: 0.87em;
     border: 1px dashed #2b3a52; border-radius: 8px; margin: 12px 16px;
-}
-
-/* ---- Elite Pool / Benchmark flip ------------------------------------
-   Two faces of one panel. Two radios rather than one checkbox, so clicking the
-   tab you are already on is a no-op instead of flipping away. Sibling selectors
-   rather than :has() so this holds on the older webviews Gradio embeds. The flip
-   is pure CSS, so it costs no server round trip; a re-render returns the card to
-   the roster face, which happens only when the leaderboard or league state
-   changes on disk. */
-
-.lb-flip-input { position: absolute; opacity: 0; pointer-events: none; width: 0; height: 0; }
-
-.lb-flip-tabs { display: inline-flex; gap: 2px; padding: 2px; border-radius: 7px;
-    background: rgba(15, 23, 42, 0.75); border: 1px solid #22304a; }
-
-.lb-flip-tab {
-    cursor: pointer; user-select: none;
-    font-size: 0.72em; font-weight: 700; letter-spacing: 0.6px; text-transform: uppercase;
-    padding: 4px 10px; border-radius: 5px; color: #7c8ba1;
-    transition: background 0.18s ease, color 0.18s ease;
-}
-.lb-flip-tab:hover { color: #cbd5e1; }
-
-.lb-flip-face { display: none; }
-#lbface-pool:checked  ~ .lb-face-pool  { display: block; }
-#lbface-chart:checked ~ .lb-face-chart { display: block; }
-#lbface-pool:checked  ~ .lb-panel-head .lb-flip-tab-pool,
-#lbface-chart:checked ~ .lb-panel-head .lb-flip-tab-chart {
-    background: rgba(56, 189, 248, 0.16); color: #7dd3fc;
 }
 
 .lb-face-note { padding: 8px 16px 0; font-size: 0.78em; color: #7c8ba1; letter-spacing: 0.3px; }
@@ -686,18 +524,9 @@ button.primary-btn {
 .bm-note { padding: 0 16px 14px; font-size: 0.76em; color: #64748b; line-height: 1.5; }
 .bm-note b { color: #94a3b8; font-weight: 600; }
 
-@media (max-width: 900px) {
-    /* Drops the sigma, record and games columns; the remaining six keep their order,
-       so the header and the body rows stay aligned at every width. */
-    .lb-row { grid-template-columns: 34px minmax(110px, 2fr) 88px 1.1fr 54px 56px; }
-    .lb-row > .lb-hide-sm { display: none; }
-}
-
 @media (prefers-reduced-motion: reduce) {
-    .lb-king::after, .lb-crown, .lb-live-dot, .lb-ticker-track,
-    .lb-bar-fill, .lb-prog-fill, .lb-tick-fresh { animation: none !important; }
-    .lb-bar-fill, .lb-prog-fill { transform: none !important; }
-    .lb-trial:hover { transform: none; }
+    .lb-king::after, .lb-crown, .lb-prog-fill { animation: none !important; }
+    .lb-prog-fill { transform: none !important; }
 }
 
 /* ---------------------------------------------------------------------------------------------
@@ -800,6 +629,8 @@ button.primary-btn {
 @media (max-width: 700px) { .ev-card-primary { grid-column: span 1; } .ev-tables { grid-template-columns: 1fr; } }
 """
 
+
+CUSTOM_CSS += LEAGUE_CSS
 
 def format_elapsed_time(seconds: Union[int, float]) -> str:
     sec = int(seconds or 0)
@@ -1359,326 +1190,23 @@ def build_how_it_works_html(league_state: Optional[Dict[str, Any]] = None) -> st
 
 
 def build_anchor_legend_html(evaluator: TrueSkillEvaluator) -> str:
-    """
-    A compact legend for the calibrated reference ladder.
+    """The scale strip above the board: the one pinned rating and the fitted references."""
+    return league_board.scale_legend_html(evaluator, build_how_it_works_html())
 
-    These sit outside the standings because their mu is a declaration, not a result:
-    they never move, they cannot be dethroned, and listing them among the checkpoints
-    makes a fixed yardstick look like a competitor.
-    """
-    anchors = evaluator.get_anchor_ratings() if hasattr(evaluator, "get_anchor_ratings") else []
-    if not anchors:
-        # No ladder to show yet, but the explainer is still worth having.
-        return f'<div class="lb-anchor-legend">{build_how_it_works_html()}</div>'
 
-    chips = []
-    for rec in anchors:
-        chips.append(
-            f'<span class="lb-anchor-chip">'
-            f'<b>{rec.name}</b>'
-            f'<span class="lb-anchor-mu">&mu; {rec.mu:.1f}</span>'
-            f'</span>'
-        )
-    return f"""
-    <div class="lb-anchor-legend">
-        {build_how_it_works_html()}
-        <span class="lb-anchor-legend-label">&#9875; Reference ladder</span>
-        {''.join(chips)}
-        <span class="lb-anchor-note">fixed calibration &middot; excluded from standings</span>
-    </div>
-    """
+def _board_version() -> str:
+    try:
+        return active_version()
+    except Exception:
+        return ""
 
 
 def build_cockpit_leaderboard_summary_html(evaluator: TrueSkillEvaluator, league_state: Optional[Dict[str, Any]] = None) -> str:
-    """
-    King banner plus season totals: the headline slab of the league board.
-
-    Leads with mu and sigma rather than the conservative score, because ranking is now
-    gated on sigma and ordered by mu; showing mu - 3*sigma as the headline number would
-    describe a ranking the league no longer uses.
-    """
+    """King banner and the season strip; see ui/league_board.py."""
     global _LB_EVALUATOR_GATE
     _LB_EVALUATOR_GATE = evaluator.is_rank_eligible
-
-    ratings = [
-        r for r in evaluator.ratings.values()
-        if "latest_model" not in r.path.lower() and "latest_model" not in r.name.lower()
-    ]
-    if not ratings:
-        return """
-        <div class="lb-panel" style="padding: 14px 20px; color: #7c8ba1; font-size: 0.88em; margin-bottom: 10px;">
-            &#8505;&#65039; <b>League standby.</b> No checkpoints graded yet. Each numbered checkpoint is
-            graded automatically on save (see League Checkpoint Interval).
-        </div>
-        """
-
     state = league_state if league_state is not None else load_league_state_safely()
-    active_king_path = state.get("king_of_the_hill")
-
-    sorted_ratings = sorted(ratings, key=lambda r: (evaluator.ranking_key(r), r.matches_played), reverse=True)
-
-    king = None
-    if active_king_path:
-        norm_target = str(active_king_path).replace("\\", "/").lower()
-        for r in ratings:
-            if r.path.replace("\\", "/").lower() == norm_target or r.name.lower() in norm_target:
-                king = r
-                break
-    # An anchor is never King. The league bars it, and the banner must agree: falling
-    # back to "the best rated thing" here crowned Nexto on its declared mu and made a
-    # fixed yardstick look like the reigning champion.
-    if king is not None and king.is_anchor:
-        king = None
-
-    ckpts = [r for r in sorted_ratings if not r.is_anchor and _lb_iteration(r) >= 0]
-    latest_iter = max((_lb_iteration(r) for r in ckpts), default=-1)
-    ranked_count = sum(1 for r in ratings if evaluator.is_rank_eligible(r))
-    total_matches = sum(r.matches_played for r in ratings) // 2
-
-    if king is None:
-        # Cold start: no rated checkpoint, so the King and pool tiers fall back to pure
-        # self-play. Say that plainly rather than showing an empty crown.
-        return f"""
-    <div class="lb-king lb-king-empty">
-        <div class="lb-king-id">
-            <span class="lb-crown lb-crown-dim">&#9876;&#65039;</span>
-            <div style="min-width: 0;">
-                <div class="lb-king-label">Throne Vacant</div>
-                <div class="lb-king-name">Awaiting a rated checkpoint</div>
-                <div class="lb-king-sub">
-                    Anchors cannot hold the crown &middot; King and pool tiers are running
-                    as self-play until the first checkpoints are graded
-                </div>
-            </div>
-        </div>
-        <div class="lb-king-stats">
-            <div class="lb-stat">
-                <span class="lb-stat-label">Latest Ckpt</span>
-                <span class="lb-stat-value accent">{latest_iter if latest_iter >= 0 else '&mdash;'}</span>
-            </div>
-            <div class="lb-stat">
-                <span class="lb-stat-label">Roster</span>
-                <span class="lb-stat-value">{ranked_count}<span style="color:#64748b; font-size:0.7em; font-weight:600;"> ranked / {len(ratings)}</span></span>
-            </div>
-            <div class="lb-stat">
-                <span class="lb-stat-label">Matches</span>
-                <span class="lb-stat-value">{total_matches:,}</span>
-            </div>
-        </div>
-    </div>
-    """
-
-    king_chip, _ = _lb_confidence(king)
-    king_iter = _lb_iteration(king)
-    king_sub = f"checkpoint_iter_{king_iter}" if king_iter >= 0 else king.path
-
-    return f"""
-    <div class="lb-king">
-        <div class="lb-king-id">
-            <span class="lb-crown">&#128081;</span>
-            <div style="min-width: 0;">
-                <div class="lb-king-label">King of the Hill</div>
-                <div class="lb-king-name">{_lb_short_name(king)} {king_chip}</div>
-                <div class="lb-king-sub">{king_sub} &middot; {king.wins}W-{king.losses}L-{king.draws}D over {king.matches_played} matches</div>
-            </div>
-        </div>
-        <div class="lb-king-stats">
-            <div class="lb-stat">
-                <span class="lb-stat-label">Rating</span>
-                <span class="lb-stat-value warn">{king.mu:.2f}</span>
-            </div>
-            <div class="lb-stat">
-                <span class="lb-stat-label">Uncertainty</span>
-                <span class="lb-stat-value">&plusmn;{king.sigma:.2f}</span>
-            </div>
-            <div class="lb-stat">
-                <span class="lb-stat-label">Points</span>
-                <span class="lb-stat-value good">{king.points_rate:.1f}%</span>
-            </div>
-            <div class="lb-stat">
-                <span class="lb-stat-label">Latest Ckpt</span>
-                <span class="lb-stat-value accent">{latest_iter if latest_iter >= 0 else '&mdash;'}</span>
-            </div>
-            <div class="lb-stat">
-                <span class="lb-stat-label">Roster</span>
-                <span class="lb-stat-value">{ranked_count}<span style="color:#64748b; font-size:0.7em; font-weight:600;"> ranked / {len(ratings)}</span></span>
-            </div>
-            <div class="lb-stat">
-                <span class="lb-stat-label">Matches</span>
-                <span class="lb-stat-value">{total_matches:,}</span>
-            </div>
-        </div>
-    </div>
-    """
-
-
-def _build_gauntlet_ticker(state: Dict[str, Any]) -> str:
-    """
-    The Gauntlet wire: a seamless CSS marquee of promotions, demotions, coronations,
-    admissions and preemptions.
-
-    The track holds the item list twice and is translated by exactly -50%, so the loop
-    is seamless with a single animated element and no JavaScript. Duration scales with
-    item count to hold a constant scroll speed, and the newest three events get a
-    one-shot entrance keyed to their direction: demotions drop, promotions rise.
-    """
-    events = state.get("event_history", [])
-    recent = list(reversed(events[-14:]))
-
-    if not recent:
-        body = """
-        <div class="lb-ticker-viewport">
-            <div style="padding: 2px 16px; color: #7c8ba1; font-size: 0.85em;">
-                Wire is quiet. Promotions, demotions and coronations broadcast here as trials resolve.
-            </div>
-        </div>
-        """
-        return f"""
-        <div class="lb-panel lb-ticker">
-            <div class="lb-ticker-head">
-                <span class="lb-live"><span class="lb-live-dot"></span>Gauntlet Wire</span>
-                <span class="lb-panel-meta">Promotion &amp; demotion feed</span>
-            </div>
-            {body}
-        </div>
-        """
-
-    badges = {
-        "promotion":  ('<span class="lb-tick-badge lb-badge-promotion">&#127942; Promoted</span>', "lb-tick-up"),
-        "demotion":   ('<span class="lb-tick-badge lb-badge-demotion">&#128317; Demoted</span>', "lb-tick-down"),
-        "coronation": ('<span class="lb-tick-badge lb-badge-coronation">&#128081; New King</span>', "lb-tick-up"),
-        "admission":  ('<span class="lb-tick-badge lb-badge-admission">&#9876;&#65039; In Queue</span>', "lb-tick-flat"),
-        "preemption": ('<span class="lb-tick-badge lb-badge-preemption">&#128260; Preempt</span>', "lb-tick-flat"),
-    }
-
-    ticks = []
-    for idx, ev in enumerate(recent):
-        badge, direction = badges.get(
-            str(ev.get("type", "")).lower(),
-            ('<span class="lb-tick-badge lb-badge-admission">&#9889; Update</span>', "lb-tick-flat")
-        )
-        time_str = ""
-        raw_ts = ev.get("timestamp", "")
-        if raw_ts:
-            try:
-                time_str = datetime.datetime.fromisoformat(raw_ts).strftime("%H:%M:%S")
-            except Exception:
-                time_str = ""
-        # Only the newest few animate in; re-animating the whole wire on every poll
-        # would be noise, and would restart mid-scroll.
-        fresh = " lb-tick-fresh" if idx < 3 else ""
-        stamp = f'<span class="lb-tick-time">{time_str}</span>' if time_str else ""
-        ticks.append(
-            f'<div class="lb-tick{fresh} {direction}">{badge}<b>{ev.get("model", "Model")}</b>'
-            f'<span>{ev.get("detail", "")}</span>{stamp}</div>'
-        )
-
-    # ~9s of travel per item keeps the pace readable whether the wire holds 3 or 14.
-    duration = max(24, len(ticks) * 9)
-    lane = "".join(ticks)
-
-    return f"""
-    <div class="lb-panel lb-ticker">
-        <div class="lb-ticker-head">
-            <span class="lb-live"><span class="lb-live-dot"></span>Gauntlet Wire</span>
-            <span class="lb-panel-meta">Hover to pause &middot; {len(ticks)} recent events</span>
-        </div>
-        <div class="lb-ticker-viewport">
-            <div class="lb-ticker-track" style="animation-duration: {duration}s;">
-                {lane}{lane}
-            </div>
-        </div>
-    </div>
-    """
-
-
-def _build_gauntlet_trials(state: Dict[str, Any], evaluator: TrueSkillEvaluator) -> str:
-    """Active contender trial cards, keyed on convergence rather than raw win rate."""
-    contenders = state.get("contenders", [])
-
-    if not contenders and evaluator and hasattr(evaluator, "ratings"):
-        inferred = []
-        for path, rec in evaluator.ratings.items():
-            if (
-                not rec.is_anchor
-                and path != "heuristic"
-                and "latest_model" not in path.lower()
-                and not evaluator.is_rank_eligible(rec)
-                and rec.mu >= 26.0
-                and rec.points_rate >= 50.0
-            ):
-                inferred.append({
-                    "name": rec.name, "path": path,
-                    "mu": round(rec.mu, 2), "sigma": round(rec.sigma, 2),
-                    "conservative_score": round(rec.conservative_rating, 2),
-                    "matches_played": rec.matches_played,
-                    "target_matches": evaluator.min_ranked_matches,
-                    "progress_pct": min(100.0, round((rec.matches_played / max(1, evaluator.min_ranked_matches)) * 100.0, 1)),
-                    "win_rate": round(rec.win_rate, 1), "points_rate": rec.points_rate,
-                    "record": f"{rec.wins}W-{rec.losses}L-{rec.draws}D",
-                    "consecutive_losses": 0, "max_consecutive_losses": 4,
-                    "status": "In Trial",
-                })
-        contenders = inferred[:3]
-
-    gate = getattr(evaluator, "eligibility_sigma", 1.5)
-
-    if not contenders:
-        inner = (
-            '<div class="lb-empty">&#128564; <b>No active trials.</b> '
-            'A new checkpoint entering at &mu; &ge; 26.0 with Points &ge; 50% is admitted automatically.</div>'
-        )
-        count_str = '<span class="lb-panel-meta">Queue idle</span>'
-    else:
-        cards = []
-        for c in contenders:
-            consec = c.get("consecutive_losses", 0)
-            max_consec = c.get("max_consecutive_losses", 4)
-            danger = " lb-trial-danger" if consec >= max(1, max_consec - 1) else ""
-            streak_color = "#4ade80" if consec == 0 else ("#facc15" if consec < max_consec - 1 else "#fb7185")
-            sigma = c.get("sigma", 8.33)
-            pts = c.get("points_rate", c.get("win_rate", 0.0))
-            # Distance to the eligibility gate is the thing that actually decides whether
-            # this contender can ever be ranked, so it is the headline on the card.
-            sigma_color = "#4ade80" if sigma <= gate else ("#facc15" if sigma <= gate * 1.6 else "#fb7185")
-            pct = c.get("progress_pct", 0.0)
-            cards.append(f"""
-            <div class="lb-trial{danger}">
-                <div class="lb-trial-top">
-                    <span class="lb-trial-name">&#9889; {c.get('name', 'Contender')}</span>
-                    <span class="lb-chip lb-chip-provisional">{c.get('status', 'In Trial')}</span>
-                </div>
-                <div>
-                    <div style="display:flex; justify-content:space-between; font-size:0.79em; color:#7c8ba1; margin-bottom:4px;">
-                        <span>Trial progress</span>
-                        <b style="color:#38bdf8;">{c.get('matches_played', 0)} / {c.get('target_matches', 24)} games</b>
-                    </div>
-                    <div class="lb-prog-track"><div class="lb-prog-fill" style="width: {pct}%;"></div></div>
-                </div>
-                <div class="lb-trial-grid">
-                    <div>Rating <b>&mu;={c.get('mu', 25.0):.2f}</b></div>
-                    <div>Uncertainty <b style="color:{sigma_color};">&sigma;=&plusmn;{sigma:.2f}</b></div>
-                    <div>Points <b style="color:#4ade80;">{pts:.1f}%</b></div>
-                    <div>Gate <b class="lb-muted">&sigma; &le; {gate:.1f}</b></div>
-                </div>
-                <div class="lb-trial-foot">
-                    <span>Record <b style="color:#cbd5e1;">{c.get('record', '0W-0L-0D')}</b></span>
-                    <span>Loss streak <b style="color:{streak_color};">{consec} / {max_consec}</b></span>
-                </div>
-            </div>
-            """)
-        inner = f'<div class="lb-trials">{"".join(cards)}</div>'
-        count_str = f'<span class="lb-panel-meta"><b>{len(contenders)}</b> in trial</span>'
-
-    return f"""
-    <div class="lb-panel">
-        <div class="lb-panel-head">
-            <span class="lb-panel-title">&#9876;&#65039; Gauntlet Trials</span>
-            {count_str}
-        </div>
-        {inner}
-    </div>
-    """
+    return league_board.king_banner_html(evaluator, state, _board_version())
 
 
 # Marker shape and colour per reference. Shape carries the distinction as well as
@@ -1710,7 +1238,7 @@ def _bm_marker(shape: str, x: float, y: float, color: str, tip: str) -> str:
 
 def _build_benchmark_chart(state: Dict[str, Any]) -> str:
     """
-    Goal margin per episode against each fixed reference, over training iteration.
+    Goal margin per episode against each fixed reference, in the order the readings were played.
 
     Why margin rather than series wins: series win rate against these references is
     pinned at the rails and has no gradient left. Checkpoints take 100% of series off
@@ -1718,11 +1246,11 @@ def _build_benchmark_chart(state: Dict[str, Any]) -> str:
     160000-190200 both before and after a real improvement. The margin over that same
     span moved -0.64 to -0.25, a 4.7 sigma change the series record shows as flat.
 
-    Why one line per reference and never a combined score: the reference set holds a
-    closed cycle. Nexto beats Necto every series, loses to every checkpoint measured,
-    and Necto beats those same checkpoints. No scalar spans that, so averaging the
-    columns would invent a transitivity that does not exist. The chart plots each
-    reference on its own and says so underneath.
+    Why one line per reference and never a combined score: the two measure different
+    things -- Necto and Nexto punish different mistakes -- so a divergence between the
+    lines is a style shift, which an average would hide. (The closed cycle that first
+    motivated this, Nexto over Necto over the bot over Nexto, was an artefact of Necto's
+    broken kickoff and is gone: Nexto now beats Necto 38-4.)
     """
     history = [
         e for e in (state.get("benchmark_history") or [])
@@ -1735,13 +1263,17 @@ def _build_benchmark_chart(state: Dict[str, Any]) -> str:
         return f"""
         <div class="lb-empty">
             &#128202; <b>{waiting}</b><br>
-            Fixed references play on the <code>benchmark_interval</code> schedule and change no
-            rating. They are the only measure that compares across checkpoints, because the
-            ladder is pool-relative and cannot see a gain the whole field shares.
+            Necto and Nexto play the King on the <code>benchmark_interval</code> schedule. Goal
+            margin keeps a gradient where series results against them are pinned at zero wins.
         </div>
         """
 
-    history.sort(key=lambda e: e["iteration"])
+    # Plotted in the order the readings were played, not by iteration: checkpoint numbering
+    # restarts from each run's start checkpoint, so five runs' readings share one iteration
+    # range and an iteration axis stacks them on top of each other. Evenly spaced by reading
+    # rather than by wall time, so a night of idle does not open a gap in the middle.
+    history.sort(key=lambda e: (str(e.get("at", "")), e["iteration"]))
+    order = {id(e): i for i, e in enumerate(history)}
 
     # Series order is fixed by first appearance, so a colour never migrates between
     # references as readings accumulate.
@@ -1752,14 +1284,16 @@ def _build_benchmark_chart(state: Dict[str, Any]) -> str:
                 names.append(name)
 
     points: Dict[str, List[Tuple[int, float, Dict[str, Any]]]] = {n: [] for n in names}
+    when: Dict[int, Tuple[str, int]] = {}
     for e in history:
+        when[order[id(e)]] = (str(e.get("at", "")), int(e["iteration"]))
         for name, res in e["results"].items():
             eps = int(res.get("episodes", 0) or 0)
             if eps <= 0:
                 continue  # written before the episode count was recorded
             gf = int(res.get("goals_for", 0) or 0)
             ga = int(res.get("goals_against", 0) or 0)
-            points[name].append((int(e["iteration"]), (gf - ga) / eps, res))
+            points[name].append((order[id(e)], (gf - ga) / eps, res))
     points = {n: p for n, p in points.items() if p}
 
     if not points:
@@ -1793,14 +1327,20 @@ def _build_benchmark_chart(state: Dict[str, Any]) -> str:
         parts.append(f'<line x1="{PAD_L:.0f}" y1="{y:.1f}" x2="{W - PAD_R:.0f}" y2="{y:.1f}" class="{cls}" />')
         parts.append(f'<text x="{PAD_L - 6:.0f}" y="{y + 3:.1f}" text-anchor="end" class="bm-axis-label">{label}</text>')
 
+    def _day(i: int) -> str:
+        try:
+            return datetime.datetime.fromisoformat(when[i][0]).strftime("%b %d")
+        except (KeyError, ValueError):
+            return f"#{i + 1}"
+
     tick_iters = (x_lo, (x_lo + x_hi) // 2, x_hi) if x_hi > x_lo else (x_lo,)
     for it in tick_iters:
         parts.append(f'<text x="{sx(it):.1f}" y="{H - PAD_B + 14:.0f}" text-anchor="middle" '
-                     f'class="bm-axis-label">{it:,}</text>')
+                     f'class="bm-axis-label">{_day(it)}</text>')
     mid_x = (PAD_L + W - PAD_R) / 2.0
     mid_y = (PAD_T + H - PAD_B) / 2.0
     parts.append(f'<text x="{mid_x:.0f}" y="{H - 2:.0f}" text-anchor="middle" '
-                 f'class="bm-axis-title">TRAINING ITERATION</text>')
+                 f'class="bm-axis-title">READINGS, OLDEST TO NEWEST</text>')
     parts.append(f'<text x="11" y="{mid_y:.0f}" class="bm-axis-title" text-anchor="middle" '
                  f'transform="rotate(-90 11 {mid_y:.0f})">GOAL MARGIN / EPISODE</text>')
 
@@ -1827,7 +1367,7 @@ def _build_benchmark_chart(state: Dict[str, Any]) -> str:
                     f'class="bm-trend" stroke="{color}" />'
                 )
         for it, m, res in series:
-            tip = (f"{name} &#183; iter {it:,} &#183; margin {m:+.2f}/ep &#183; goals "
+            tip = (f"{name} &#183; iter {when.get(it, ('', 0))[1]:,} &#183; {when.get(it, ('', 0))[0][:16].replace('T', ' ')} &#183; margin {m:+.2f}/ep &#183; goals "
                    f"{res.get('goals_for', 0)}-{res.get('goals_against', 0)} over "
                    f"{res.get('episodes', 0)} episodes &#183; "
                    f"{res.get('series_won', 0)}/{res.get('series', 0)} series")
@@ -1839,206 +1379,29 @@ def _build_benchmark_chart(state: Dict[str, Any]) -> str:
     return f"""
     <div class="bm-chart">
         <svg class="bm-svg" viewBox="0 0 {W:.0f} {H:.0f}" role="img"
-             aria-label="Goal margin per episode against each fixed reference, by training iteration">
+             aria-label="Goal margin per episode against each fixed reference, oldest reading to newest">
             {''.join(parts)}
         </svg>
     </div>
-    <div class="bm-legend"><span class="lb-muted">Latest</span>{''.join(legend)}</div>
+    <div class="bm-legend"><span class="lb-muted">Latest</span>{''.join(legend)}
+        <span class="lb-muted">last {len(history)} readings, across runs</span></div>
     <div class="bm-note">
         Above the zero line the checkpoint outscores the reference. Each reference is its own
-        scale and they are <b>never combined</b>: Nexto beats Necto every series, loses to every
-        checkpoint, and Necto beats those same checkpoints, so no single ordering holds. Read one
-        line for progress and a <b>divergence between them as a style shift</b>. Nothing here
-        moves a rating.
-    </div>
-    """
-
-
-def _build_elite_standings(state: Dict[str, Any], evaluator: TrueSkillEvaluator) -> str:
-    """
-    The Elite Pool as a standings table rather than a card grid.
-
-    Rows are dense and aligned so ratings can be compared down a column, which is the
-    point of a standings board. The bar is scaled across the visible mu spread so small
-    real differences stay visible instead of collapsing against a 0-50 axis.
-    """
-    items = state.get("elite_pool_details", [])
-    king_path = str(state.get("king_of_the_hill", "")).replace("\\", "/").lower()
-
-    if not items:
-        paths = state.get("elite_pool", [])
-        if not paths and evaluator and hasattr(evaluator, "ratings"):
-            valid = []
-            for key, rec in evaluator.ratings.items():
-                if "latest_model" in key.lower():
-                    continue
-                if rec.is_anchor or key == "heuristic" or os.path.exists(rec.path):
-                    valid.append((key, rec))
-            valid.sort(key=lambda x: (evaluator.ranking_key(x[1]), x[1].matches_played), reverse=True)
-            paths = [x[0] for x in valid[:10]]
-        for rank, path in enumerate(paths, start=1):
-            rec = evaluator.ratings.get(path) if evaluator and hasattr(evaluator, "ratings") else None
-            if not rec:
-                continue
-            items.append({
-                "rank": rank, "name": get_model_display_name(path), "path": path,
-                "mu": round(rec.mu, 2), "sigma": round(rec.sigma, 2),
-                "conservative_score": round(rec.conservative_rating, 2),
-                "win_rate": round(rec.win_rate, 1), "points_rate": rec.points_rate,
-                "record": f"{rec.wins}W-{rec.losses}L-{rec.draws}D",
-                "matches_played": rec.matches_played,
-                "is_anchor": rec.is_anchor,
-                "is_king": str(path).replace("\\", "/").lower() == king_path,
-            })
-
-    if not items:
-        return """
-        <div class="lb-empty">&#128737;&#65039; <b>Pool initialising.</b> Models appear here as checkpoints are graded.</div>
-        """
-
-    # At cold start the pool holds nothing but anchors and the league is running pure
-    # self-play, so calling it an active sparring roster would be wrong.
-    anchors_only = all(m.get("is_anchor") for m in items)
-    if anchors_only and not king_path:
-        roster_note = (
-            "<b>Standby</b> &middot; anchors only, not in rotation &middot; "
-            "King and pool tiers are running as self-play until a checkpoint is rated"
-        )
-    else:
-        gate = getattr(evaluator, "eligibility_sigma", 1.5)
-        roster_note = (
-            f"<b>{len(items)}</b> active &middot; ranked by &mu; behind a &sigma; &le; {gate:.1f} gate "
-            "&middot; 50% self-play / 25% king / 25% pool"
-        )
-
-    mus = [float(m.get("mu", 25.0)) for m in items]
-    lo, hi = min(mus), max(mus)
-    span = max(hi - lo, 1.0)  # never divide by zero when the pool has converged tightly
-
-    head = (
-        '<div class="lb-row lb-row-head">'
-        '<span>#</span><span>Model</span><span>Confidence</span><span>Rating</span>'
-        '<span>&mu;</span><span class="lb-hide-sm">&sigma;</span><span>Pts</span>'
-        '<span class="lb-hide-sm">Record</span><span class="lb-hide-sm">GP</span></div>'
-    )
-
-    rows = []
-    for m in items:
-        rec = evaluator.ratings.get(m.get("path", "")) if evaluator else None
-        is_king = bool(m.get("is_king"))
-        is_anchor = bool(m.get("is_anchor"))
-        mu = float(m.get("mu", 25.0))
-        sigma = float(m.get("sigma", 8.33))
-
-        if is_anchor:
-            chip = '<span class="lb-chip lb-chip-anchor">Anchor</span>'
-            ranked = True
-        elif getattr(rec, "rating_locked", False):
-            chip = '<span class="lb-chip lb-chip-locked">&#128274; Locked</span>'
-            ranked = True
-        elif rec is not None and evaluator.is_rank_eligible(rec):
-            chip = '<span class="lb-chip lb-chip-ranked">Ranked</span>'
-            ranked = True
-        elif rec is None and sigma <= getattr(evaluator, "eligibility_sigma", 1.5):
-            chip = '<span class="lb-chip lb-chip-ranked">Ranked</span>'
-            ranked = True
-        else:
-            chip = '<span class="lb-chip lb-chip-provisional">Provisional</span>'
-            ranked = False
-
-        if is_king:
-            chip = '<span class="lb-chip lb-chip-king">&#128081; King</span>'
-
-        pct = 8.0 + 92.0 * ((mu - lo) / span)
-        bar_class = "is-king" if is_king else ("" if ranked else "is-provisional")
-        rank_class = " lb-rank-top" if m.get("rank", 99) <= 3 else ""
-        row_class = " lb-row-king" if is_king else ""
-        pts = float(m.get("points_rate", m.get("win_rate", 0.0)))
-        gp = int(m.get("matches_played", 0) or 0)
-        # An anchor's mu is a declaration, not something it earned on the field, and a
-        # reference with no games would otherwise read as a bright red 0.0%.
-        if is_anchor or gp == 0:
-            pts_cell = '<span class="lb-muted">&mdash;</span>'
-            record_cell = '<span class="lb-muted">reference</span>' if is_anchor else '<span class="lb-muted">&mdash;</span>'
-        else:
-            pts_color = "#4ade80" if pts >= 50 else ("#facc15" if pts >= 40 else "#fb7185")
-            pts_cell = f'<span class="lb-num" style="color: {pts_color};">{pts:.1f}%</span>'
-            record_cell = f'<span class="lb-record">{m.get("record", "0W-0L-0D")}</span>'
-
-        rows.append(f"""
-        <div class="lb-row{row_class}">
-            <span class="lb-rank{rank_class}">{m.get('rank', '-')}</span>
-            <span class="lb-name">{m.get('name', 'Model')}</span>
-            <span>{chip}</span>
-            <span class="lb-bar-track" title="&mu;={mu:.2f} &plusmn;{sigma:.2f}">
-                <span class="lb-bar-fill {bar_class}" style="width: {pct:.1f}%;"></span>
-            </span>
-            <span class="lb-num">{mu:.2f}</span>
-            <span class="lb-muted lb-hide-sm">&plusmn;{sigma:.2f}</span>
-            {pts_cell}
-            <span class="lb-hide-sm">{record_cell}</span>
-            <span class="lb-muted lb-hide-sm">{gp if gp else '&mdash;'}</span>
-        </div>
-        """)
-
-    return f"""
-    <div class="lb-face-note">{roster_note}</div>
-    <div class="lb-standings">{head}{"".join(rows)}</div>
-    """
-
-
-def _build_pool_panel(state: Dict[str, Any], evaluator: TrueSkillEvaluator) -> str:
-    """
-    One panel, two faces: the sparring roster and the benchmark curve.
-
-    They share a card because they answer the same question from the two directions the
-    league has available, and showing both at once would double the height of the board
-    for a reader who only ever wants one of them. The roster is where each model sits
-    relative to the others. The curve is where the field sits against a fixed opponent,
-    which is the only thing that can see a gain the whole pool shares -- pool-relative
-    ratings cannot, and the reward scale moves whenever the reward function is edited.
-
-    The toggle is a pair of radio inputs driving sibling CSS selectors, so switching
-    faces is instant and costs no server round trip. A re-render returns the card to the
-    roster face, which happens only when the leaderboard or league state file changes.
-    """
-    roster = _build_elite_standings(state, evaluator)
-    chart = _build_benchmark_chart(state)
-    readings = len([
-        e for e in (state.get("benchmark_history") or [])
-        if isinstance(e, dict) and e.get("iteration") is not None
-    ])
-    count_chip = f' <span class="lb-muted">{readings}</span>' if readings else ""
-
-    return f"""
-    <div class="lb-panel">
-        <input class="lb-flip-input" type="radio" name="lbface" id="lbface-pool" checked>
-        <input class="lb-flip-input" type="radio" name="lbface" id="lbface-chart">
-        <div class="lb-panel-head">
-            <span class="lb-panel-title">&#128737;&#65039; Elite Pool</span>
-            <span class="lb-flip-tabs">
-                <label for="lbface-pool" class="lb-flip-tab lb-flip-tab-pool"
-                       title="Ratings relative to the rest of the pool">Roster</label>
-                <label for="lbface-chart" class="lb-flip-tab lb-flip-tab-chart"
-                       title="Goal margin against the fixed references, which no rating uses">Benchmarks{count_chip}</label>
-            </span>
-        </div>
-        <div class="lb-flip-face lb-face-pool">{roster}</div>
-        <div class="lb-flip-face lb-face-chart">{chart}</div>
+        line and they are <b>never combined</b>: read one for progress and a <b>divergence between
+        them as a style shift</b>. These series also feed the rating fit, where they place Necto
+        and Nexto on the scale; neither is pinned, so they cannot move it.
     </div>
     """
 
 
 def build_league_wire_and_queue_html(evaluator: TrueSkillEvaluator, league_state: Optional[Dict[str, Any]] = None) -> str:
-    """Renders the full league board: Gauntlet wire, active trials, Elite Pool roster and benchmarks."""
+    """
+    The league board below the King banner: rating ladder, elite pool, pipeline, head to head,
+    recent series and benchmarks. The name is kept from the ticker era because the timer and the
+    refresh button are wired to it.
+    """
     state = league_state if league_state is not None else load_league_state_safely()
-    return (
-        '<div class="league-board">'
-        + _build_gauntlet_ticker(state)
-        + _build_gauntlet_trials(state, evaluator)
-        + _build_pool_panel(state, evaluator)
-        + '</div>'
-    )
+    return league_board.board_html(evaluator, state, _board_version(), _build_benchmark_chart(state))
 
 
 _CKPT_STAMP_CACHE: Dict[str, tuple] = {}
