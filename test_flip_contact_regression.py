@@ -302,6 +302,20 @@ class TestFlipContactRegression(unittest.TestCase):
             car.on_ground = on_ground
             car.boost = 10.0
             arena.ball.pos = np.array([0.0, 3000.0, 93.0], dtype=np.float32)
+            # The transit potential reads the whole arena, not just this car: it calls
+            # compute_opponent_threats and compute_car_arrival_time, which use the
+            # opponent's state and the ball's velocity. reset() randomises both, so
+            # leaving them alone made this test fail about one run in four -- the round
+            # trip is exact, but only once every input to the potential is held fixed.
+            # The potential itself is a pure function of arena state; it was the fixture
+            # that was under-specified.
+            arena.ball.vel = np.zeros(3, dtype=np.float32)
+            opp = arena.cars[1]
+            opp.rot_mat = np.array([[1, 0, 0], [0, 1, 0], [0, 0, 1]], dtype=np.float32)
+            opp.pos = np.array([0.0, -2000.0, 17.0], dtype=np.float32)
+            opp.vel = np.zeros(3, dtype=np.float32)
+            opp.on_ground = True
+            opp.boost = 34.0
             br = BoostReward(gain_weight=1.4, lose_weight=0.6)
             br.reset(arena)
             return br, arena, car

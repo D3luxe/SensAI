@@ -133,13 +133,22 @@ class LeagueManager:
         # league played itself, so mu climbed with every generation that beat its own past
         # and reached 518-521 while the bot was losing to Necto (anchored at 30) by 35-1.
         # Simulated over 600 generations with true skill held constant and strictly below
-        # the anchor's, mu is still climbing at an anchor share of 0.06% and of 1%, and is
-        # bounded below the anchor at 5% and above. 5% is the knee, and at ~3 s per series
-        # it is a rounding error against training.
+        # the anchor's, and reading mu at generation 599:
+        #
+        #     0.06% (what we ran)   26.5 and still climbing
+        #     1%                    24.4 and still climbing
+        #     5%                    20.9   bounded
+        #     10%                   ~19    bounded, with margin
+        #     15%                   17.3   bounded
+        #     30%                   15.7   bounded
+        #
+        # 5% is the knee, so it is the floor rather than a safe setting; 10% buys margin
+        # on a simulation whose exact knee is not worth trusting to one significant
+        # figure. At ~3 s per series it is a rounding error against training either way.
         #
         # Calibration series are excluded from points_rate and from the loss streak, so a
         # saturated anchor can move mu without touching promotion or triggering eviction.
-        self.calibration_share = float(self.config.get("calibration_share", 0.05))
+        self.calibration_share = float(self.config.get("calibration_share", 0.10))
         self.calibration_share = max(0.0, min(1.0, self.calibration_share))
         self._calibration_debt = 0.0
 
@@ -1078,7 +1087,16 @@ class LeagueManager:
         """
         if self.calibration_share <= 0.0 or series_played <= 0:
             return 0
-        self._calibration_debt += self.calibration_share * series_played
+        # share is the fraction of ALL graded series, matching the simulation it was
+        # chosen from, so the rate applied to peer series has to gross up for the
+        # calibration series themselves: c / (c + p) = share  =>  c = p * share/(1-share).
+        # Applying share directly to p realises share/(1+share) instead -- 9.1% for a
+        # configured 10%, which is the sort of quiet shortfall that makes a measured
+        # threshold meaningless.
+        if self.calibration_share >= 1.0:
+            return 0
+        rate = self.calibration_share / (1.0 - self.calibration_share)
+        self._calibration_debt += rate * series_played
         if self._calibration_debt < 1.0:
             return 0
         due = int(self._calibration_debt)

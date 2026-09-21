@@ -106,23 +106,33 @@ class TestCalibrationIsSeparateFromPromotion(unittest.TestCase):
 
 
 class TestCalibrationShare(unittest.TestCase):
-    """5% is the knee: simulated over 600 generations, 0.06% and 1% still drift, 5% binds."""
+    """Simulated over 600 generations: 0.06% and 1% still drift, 5% binds, 10% has margin."""
 
     def _manager(self, share):
         from utils.league_manager import LeagueManager
         return LeagueManager(config={"calibration_share": share, "enabled": False})
 
-    def test_the_realised_share_matches_the_configured_one(self):
-        lm = self._manager(0.05)
+    def _realised(self, share, trials=400, per_trial=24):
+        """Drive the real debt schedule and return the fraction of graded series calibrated."""
+        lm = self._manager(share)
         played = calibrated = 0
-        for _ in range(200):
-            lm._calibration_debt += lm.calibration_share * 24
+        for _ in range(trials):
+            rate = lm.calibration_share / (1.0 - lm.calibration_share)
+            lm._calibration_debt += rate * per_trial
             due = int(lm._calibration_debt)
             lm._calibration_debt -= due
-            played += 24
+            played += per_trial
             calibrated += due
-        realised = calibrated / (played + calibrated)
-        self.assertAlmostEqual(realised, 0.05, delta=0.005)
+        return calibrated / (played + calibrated)
+
+    def test_the_realised_share_is_the_configured_share(self):
+        """
+        The knob is a fraction of all graded series, which is how the simulation that
+        picked 5%/10% defined it. Applying it to peer series alone silently realises
+        share/(1+share) -- 9.1% for a configured 10%.
+        """
+        for share in (0.05, 0.10, 0.15, 0.30):
+            self.assertAlmostEqual(self._realised(share), share, delta=0.005, msg=f"{share=}")
 
     def test_zero_share_never_calibrates(self):
         lm = self._manager(0.0)
@@ -136,6 +146,7 @@ class TestCalibrationShare(unittest.TestCase):
         from utils.config import effective_config
         share = float(effective_config().get("league", {}).get("calibration_share", 0.0))
         self.assertGreaterEqual(share, 0.05, "below 5% the scale drifts without bound")
+        self.assertGreaterEqual(share, 0.10, "5% is the measured knee, not a margin")
 
 
 class TestTheBoardReportsAgainstNecto(unittest.TestCase):

@@ -50,7 +50,7 @@ league:
   min_contender_points_rate: 40.0
   min_matches_for_points_floor: 12
   pool_group_size: 8
-  calibration_share: 0.05
+  calibration_share: 0.1
   pool_ratio: 0.25
   protect_top_k: 20
   rating_lock_matches: 64
