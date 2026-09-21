@@ -18,16 +18,22 @@ from env.physics_engine import ARENA_EXTENT_X, ARENA_EXTENT_Y, ARENA_HEIGHT_Z, G
 
 
 def rotation_to_rot_mat(pitch: float, yaw: float, roll: float) -> np.ndarray:
-    """Computes exact 3x3 orthonormal basis (Forward, Right, Up)."""
+    """
+    Exact 3x3 basis (forward, right, up) in RocketSim's rot_mat convention.
+
+    The frame is left-handed, so row 1 -- the car's physical right -- is up x forward, as in
+    RocketSim.Angle.as_rot_mat() and bot.py. This copy had forward x up until 2026-09-21. Nothing
+    reads it; see test_ingame_rotation.py for why the policy's own mirrored "right" stays as it is.
+    """
     cy, sy = math.cos(yaw), math.sin(yaw)
     cp, sp = math.cos(pitch), math.sin(pitch)
     cr, sr = math.cos(roll), math.sin(roll)
     fwd = np.array([cp * cy, cp * sy, sp], dtype=np.float32)
     up = np.array([-cy * sp * cr - sy * sr, -sy * sp * cr + cy * sr, cp * cr], dtype=np.float32)
     right = np.array([
-        fwd[1] * up[2] - fwd[2] * up[1],
-        fwd[2] * up[0] - fwd[0] * up[2],
-        fwd[0] * up[1] - fwd[1] * up[0]
+        up[1] * fwd[2] - up[2] * fwd[1],
+        up[2] * fwd[0] - up[0] * fwd[2],
+        up[0] * fwd[1] - up[1] * fwd[0]
     ], dtype=np.float32)
     return np.vstack([fwd, right, up]).astype(np.float32)
 

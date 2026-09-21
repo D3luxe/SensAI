@@ -458,8 +458,10 @@ class TestPhysicsAndControls(unittest.TestCase):
 
     def test_rot_mat_basis_parity(self):
         """
-        Guarantees that bot.py rotation_to_rot_mat matches true orthonormal basis
-        (Row 0: Forward, Row 1: Right = fwd x up, Row 2: Up).
+        Guarantees that bot.py rotation_to_rot_mat is an orthonormal basis in RocketSim's
+        convention (Row 0: Forward, Row 1: Right = up x fwd, Row 2: Up). The frame is
+        left-handed, so the physical right is up x fwd; fwd x up is the policy's own mirrored
+        "right" (CarState.get_right_vector), not this row. See test_ingame_rotation.py.
         """
         from bot import rotation_to_rot_mat
         for p in [-1.2, -0.5, 0.0, 0.5, 1.2]:
@@ -476,8 +478,8 @@ class TestPhysicsAndControls(unittest.TestCase):
                     self.assertLess(abs(float(np.dot(fwd, right))), 1e-5)
                     self.assertLess(abs(float(np.dot(fwd, up))), 1e-5)
                     self.assertLess(abs(float(np.dot(right, up))), 1e-5)
-                    # Right must equal fwd x up
-                    expected_right = np.cross(fwd, up)
+                    # Right must equal up x fwd (left-handed frame, as RocketSim)
+                    expected_right = np.cross(up, fwd)
                     self.assertLess(float(np.max(np.abs(right - expected_right))), 1e-5)
 
     def test_observation_lateral_ball_offsets(self):

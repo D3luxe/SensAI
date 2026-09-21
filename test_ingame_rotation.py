@@ -102,12 +102,11 @@ class TestTheMirroredRightStaysAsTrained(unittest.TestCase):
 @unittest.skipIf(rs is None, "RocketSim is not installed")
 class TestStateSetterBasis(unittest.TestCase):
     """
-    env/state_setters.py carries its own copy of the conversion with the same reversed row.
-    Also unread, and left alone because it is training code and a run is live. Marked as a
-    known failure so it reports an unexpected success the day it is fixed.
+    env/state_setters.py carries its own copy of the conversion. It had the same reversed row,
+    left alone while v5 trained and fixed once the run stopped (2026-09-21). Nothing reads it,
+    so the fix is for the next reader, and this keeps the two copies from drifting apart.
     """
 
-    @unittest.expectedFailure
     def test_state_setter_right_row_matches_rocketsim(self):
         from env.state_setters import rotation_to_rot_mat
         for p, y, r in random_angles(50, seed=2):
