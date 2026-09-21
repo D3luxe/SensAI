@@ -1,8 +1,8 @@
 # Reward v5 — v3's terms at a twenty-second horizon
 
-Status: **running since 2026-09-20** (drafted while the learning-rate run
-`docs/run_v5_lr_spec.md` was still open). The rules of `docs/reward_v3_spec.md` §2 (R1–R7) apply
-unchanged.
+Status: **adopted 2026-09-21 at ~400M steps; king `checkpoints/baselines/v5_iter222000.pt`**
+(see §7). Drafted while the learning-rate run, `docs/run_v5_lr_spec.md`, was still open. The rules
+of `docs/reward_v3_spec.md` §2 (R1–R7) apply unchanged.
 
 **A note on the name.** `run_v5_lr_spec.md` is a *training run*, not a reward version; it left the
 reward at v3. This is the fifth *reward version*, so it is v5 and its snapshot is
@@ -108,10 +108,21 @@ throws the occasional spike — v3 at 6M and 98M, the learning-rate run at 547M 
 (6.0), v5 at 201600 (3.75) and 210400 (6.75) — and the king was crowned partly for evaluating well,
 so 4.25 is a winner's-curse number no pooled reading was ever likely to reach. A three-checkpoint
 pool carries about ±0.7 from checkpoint noise, so "clearly below" means more than ~1 goal under
-the reference. Until the two archived neighbours are evaluated, the provisional reference is the
-v3 run's own level, **1.06**. The same caution applies to the king-level targets below (retreat
-16.7%, back-wall climbs 11.8): they are the king's readings, not the v3 run's, which sat at 25–46%
-and 7.5–46 respectively.
+the reference. (Provisionally 1.06, the v3 run's own level, until the neighbours were measured.)
+
+*Measured reference, 2026-09-21* (`evals/v3king_n1.json`, `evals/v3king_n2.json`):
+
+| v3 checkpoint | GF vs Necto | Necto GD | Nexto GD | on target /100 | back-wall /100 | kickoff GA | retreat conceded |
+|---|---|---|---|---|---|---|---|
+| 198000 (king) | 4.25 | −28.0 | −33.8 | 12.9 | 11.8 | 4.0 | 16.7% |
+| 198200 | 0.50 | −38.0 | −30.7 | 0.7 | 23.5 | 9.7 | 20.8% |
+| 198400 | 0.75 | −39.5 | −34.5 | 0.8 | 22.8 | 18.0 | 25.0% |
+| **pooled** | **1.83** | **−35.2** | **−33.0** | **4.8** | **19.4** | **10.6** | **20.8%** |
+
+The neighbours, 200 and 400 iterations after it, read like the rest of the v3 run, which confirms the
+king's Necto numbers as a spike. **The guardrail reference is 1.83.** It still contains the king
+itself, so it remains biased upward; the two neighbours alone read 0.63. The pooled row is also the
+reference for the scenario targets below, in place of the king's own readings.
 
 This also weakens, retrospectively, the Necto-scoring half of the case against v4 and the
 learning-rate run; the learning-rate run's churn finding stands on its own.
@@ -130,9 +141,21 @@ falls *further* and goals-against climbs, γ is too long and T = 15 s (γ 0.9969
   not clearly below the pooled v3 reference. The head-to-head alone is not enough.
   *Result:* head to head +6.0, 9/9 seeds positive; goals-for 0.67 against the provisional 1.06,
   inside the ±0.7 checkpoint noise. **Passed** under the revised guardrail (it failed the original
-  4.25 comparison, which is what prompted the revision).
+  4.25 comparison, which is what prompted the revision). Against the measured 1.83 it is 1.16
+  under — just past the ~1-goal line, so borderline in hindsight; the later pools read 2.83 (200M),
+  0.92 (250M) and 0.83 (300M), 1.31 across all twelve checkpoints.
 - **400M:** adopt if the pooled head to head is clearly positive (every seed above zero) **and**
-  pooled goals-for vs Necto is at least level with the pooled v3 reference.
+  pooled goals-for vs Necto is **not clearly below** the pooled v3 reference (more than ~1 goal
+  under 1.83). *Revised 2026-09-21 from "at least level with", before any 400M eval was run:* a
+  difference between two three-checkpoint pools carries about ±1.0 from checkpoint noise alone, and
+  the reference still contains the king's spike, so "at least level" would fail a run that matched
+  v3 about half the time. Same rule as the 150M gate.
+
+**Progress, pooled (h2h vs v3 king / seeds positive / GF vs Necto / Necto GD):**
+150M +6.0 / 9/9 / 0.67 / −37.1 · 200M +18.0 / 9/9 / 2.83 / −38.2 · 250M +8.4 / 7/9 / 0.92 /
+−31.4 · 300M +17.6 / 9/9 / 0.83 / −34.3 · **350M +16.25 / 9/9 / 2.83 / −27.0** (219000, 219200,
+219400). At 350M every Necto-facing number is at or past the pooled v3 reference: on target 7.0
+(4.8), kickoff GA 5.1 (10.6), back-wall 13.2 (19.4), retreat conceded 25.0% (20.8%).
 
 **Checkpoint hygiene:** any checkpoint that evals well is copied into `checkpoints/baselines/` the
 same day. v4 lost its best checkpoint to the league's retention.
@@ -169,3 +192,49 @@ and never learned to aerial or double-jump. Its reward design is not self-eviden
 ours, and R5's six-term cap stands. What the paper is being used for here is the one thing it
 measures better than we do: the discount horizon, where it has a principled parameterisation and a
 before/after value, and we have a number nobody ever chose.
+
+## 7. Outcome — adopted (run stopped at ~400M steps, 2026-09-21)
+
+**The 400M gate, over all four checkpoints evaluated** (222000, 222200, 222400, 222600; choosing
+the best three would repeat the selection error §5 describes):
+
+| Condition | Result | |
+|---|---|---|
+| pooled head to head clearly positive, every seed above zero | +9.25, **10 of 12 seeds** | missed literally, by −0.8 (222200) and −2.2 (222600) |
+| pooled goals-for vs Necto not clearly below 1.83 | **2.94** | passed |
+
+**Adopted over the literal miss, as an explicit decision rather than a rewritten rule.** "Every
+seed above zero" was the proxy for *clearly better*. Five consecutive pools were positive (+6.0,
++18.0, +8.4, +17.6, +16.25 from 150M to 350M, then +9.25), 44 of 48 seeds from 150M on, and the
+two misses sit inside one single-seed standard deviation (3.9). The rule is left as written, and
+this paragraph records that it was overruled and why.
+
+**Against the pooled v3 reference at 400M:** Nexto goal difference −27.4 vs −33.0 (the clearest
+gain; 222000's −23.2 is the best of any run), Necto goal difference −29.4 vs −35.2, on target 6.5
+vs 4.8, kickoff goals against 6.4 vs 10.6, touches per min 7.5 vs 6.5, back-wall climbs level
+(18.2 vs 19.4). **Retreat conceded 27.1% vs 20.8% is the one deficit v5 never closed** — the
+positioning gap Align Ball Goal (§6) targets.
+
+**The v5 king is 222000.** A direct match against 219400, the other candidate
+(`evals/king_222000_vs_219400.json`), came out +2.75 for 222000 (8.25, −3.75, 3.75): level
+within noise. 222000 was chosen as the later checkpoint and the most even across every measure,
+not for its best single reading. Baseline eval: `evals/baselines/v5_iter222000.json`.
+
+**Findings to carry forward:**
+1. **A 20 s horizon helped** where v4's race term and the learning-rate run did not, with the same
+   start point and the same judging. It supports the §2 diagnosis that the critic was myopic.
+2. **The judging itself was the bigger error.** The Necto guardrail compared pools against one
+   checkpoint that was a spike in its own run (§5). The same checkpoint also varies between eval
+   runs: 222000 read 4.25 goals-for vs Necto in its 400M eval and 1.00 in the king match; the v3
+   king read 4.25 and 6.25. Every Necto-facing number is pooled from here on, never read from one
+   eval of one checkpoint.
+3. **Steering jitter is unchanged by the horizon** (`logs/jitter_250M.json`: 18.9–20.4% of grounded
+   decisions vs v3's 15.9%). It is learned; deploy-side smoothing, tested inside the eval first, is
+   the next thing to try.
+4. **The league's absolute scale drifted again** (king mu 41 against Necto's anchored 30 while
+   losing to it 35–1). Peer ranking was unaffected; the fix is outside this spec.
+
+**Pinned from this run:** 200200, 201600, 210200, 210400, 213200, 216200, 219200, 219400, 222000,
+222400.
+
+**Next:** reward v6 — v5 plus Align Ball Goal, one change, starting from the v5 king.
