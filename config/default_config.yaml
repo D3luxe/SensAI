@@ -12,7 +12,7 @@ hyperparameters:
   critic_warmup_iterations: 50
   ent_coef: 0.008
   gae_lambda: 0.98
-  gamma: 0.995
+  gamma: 0.9977
   learning_rate: 0.00015
   log_std_floor:
   - -2.5
@@ -76,4 +76,4 @@ model:
   use_layer_norm: true
 # Reward weights, their anneal schedule and the scenario mix are frozen per reward version in
 # config/reward_versions/<reward_version>.json (env/reward_registry.py); live edits to them are ignored.
-reward_version: v3
+reward_version: v5

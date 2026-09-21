@@ -1,0 +1,41 @@
+{
+  "version": "v5",
+  "spec": "docs/reward_v5_gamma_spec.md",
+  "start_checkpoint": "checkpoints/baselines/v3_iter198000.pt",
+  "baseline_eval": "evals/baselines/v3_iter198000.json",
+  "identity": {
+    "version": "v5",
+    "code_sha": "9243332689bd95fa",
+    "settings_sha": "d911cde2868fbdda"
+  },
+  "notes": "v3's five terms at gamma 0.9977 (a 20 s half-life at 15 actions/sec) instead of 0.995 (9.2 s). No code of its own: the terms are v3's, so code_sha equals v3's and only settings_sha differs. Closeness stays retired at 0 with annealing off, as v4 did, because the v3 king trained with it at 0 for its last 100M steps.",
+  "settings": {
+    "rewards": {
+      "aggression_bias": 0.25,
+      "ball_position_weight": 5.0,
+      "boost_weight": 1.0,
+      "closeness_weight": 0.0,
+      "goal_reward": 10.0,
+      "touch_weight": 0.5
+    },
+    "reward_annealing": {
+      "decay_steps": 300000000,
+      "enabled": false,
+      "targets": {}
+    },
+    "scenarios": {
+      "aerial_prob": 0.08,
+      "bounce_drop_prob": 0.04,
+      "custom_prob": 0.0,
+      "dribble_flick_prob": 0.03,
+      "kickoff_prob": 0.15,
+      "replay_prob": 0.45,
+      "retreat_prob": 0.04,
+      "save_prob": 0.06,
+      "turnaround_prob": 0.05,
+      "wall_prob": 0.05,
+      "wall_rebound_prob": 0.05
+    },
+    "gamma": 0.9977
+  }
+}

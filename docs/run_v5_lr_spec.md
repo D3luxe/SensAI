@@ -1,6 +1,6 @@
 # Run v5 — v3's reward at a lower learning rate
 
-Status: **running, 2026-09-20** — 250M steps in, progress in §4a. This is a **training run, not a reward version**.
+Status: **closed, rejected, 2026-09-20** — stopped at ~310M steps. Outcome in §6. This is a **training run, not a reward version**.
 The reward is v3's, unchanged and still frozen (`config/reward_versions/v3.json`, code
 `9243332689bd95fa`, settings `646c9927726c7f82`); `config/default_config.yaml` goes back to
 `reward_version: v3`. The one change is `learning_rate: 3e-4 → 1.5e-4`.
@@ -182,9 +182,76 @@ On present evidence the 400M bar — every seed above zero **and** the Necto gua
 failed on both counts. If 300M and 350M look like 250M, the run is called at 400M rather than
 extended, and the next lever is 0.8e-4 or the mechanical approach-quality problem from v4 §6.
 
-## 5. If this works
+## 6. Outcome (run stopped at ~310M steps, 2026-09-20)
 
-A lower learning rate applies to every later run, and the reward question from v4 stays open:
-loose-ball first touch is a mechanical deficit, so the next reward version (a real v5) should aim
-at approach quality — arriving with speed retained and under control — or at nothing at all, if
-v3's reward at a stable learning rate is already improving.
+**Rejected, and the hypothesis is falsified.** `checkpoints/baselines/v3_iter198000.pt` stays the
+king. The run was stopped 90M steps short of its 400M decision point because its stated test had
+already returned an answer.
+
+**The secondary test — the direct test of the hypothesis — failed.**
+
+| Point | Pooled h2h | Seeds positive | Checkpoint means | Spread |
+|---|---|---|---|---|
+| ~50M | +7.50 | 6/6 | 7.5 | — |
+| ~100M | +10.62 | 11/12 | 10.0, 4.2, 18.2 | 14.0 |
+| ~150M | +8.17 | 8/9 | 8.5, 3.8, 12.2 | 8.5 |
+| ~200M | +11.00 | 9/9 | 16.5, 5.5, 11.0 | 11.0 |
+| ~250M | +6.08 | 7/9 | 12.8, 5.0, 0.5 | 12.2 |
+| **~300M** | **+7.44** | 9/12 | 18.0, −5.8, 9.2, 8.2 | **23.8** |
+
+v4's spread at 3e-4 was 25.2. At 300M this run matches it, over four consecutive checkpoints
+spanning only 10M steps, one of which (216400) is negative on every seed. **And the optimizer was
+behaving correctly the whole time:** `approx_kl` 0.0113, `clip_fraction` 9.5%,
+`explained_variance` 0.853, entropy and mean reward flat, over the final 55M steps. Halving the
+learning rate did exactly what it was supposed to do to the trust region and did not reduce
+checkpoint churn.
+
+Nor were the middle readings ever good evidence. Head-to-head carries a single-seed sd of 3.90, so
+three checkpoint means scatter by ~3.8 on noise alone; 8.5 to 12.2 was never clearly below 25.2.
+The apparent mid-run improvement was probably never real.
+
+**The guardrail failed outright**, and got worse as the run went on. Pooled over the four
+checkpoints at 300M, goals scored per 10 min against Necto was **0.69 against the king's 4.25** —
+about 11 standard errors. Seven of the twelve matches ended with zero goals scored (11 goals for,
+568 against). It is not finishing variance: on-target shots per 100 touches 4.6 (king 12.9) and
+shot conversion 13.0% (king 47.6%), so both halves of scoring degraded. Goals conceded stayed flat
+throughout (33.3 vs 32.2).
+
+**The primary stayed positive the whole way** — +6 to +11 pooled at every point, and the run's best
+checkpoints beat the king by +12 to +18. That is real, and it is also exactly the lineage drift the
+Necto guardrail was added to catch: the run got better at beating its own ancestor while getting
+worse at the game. Even 216200, the +18.0 checkpoint, scored 1.75 per 10 min against Necto.
+
+**What the run established, for later versions:**
+
+1. **`approx_kl` at 0.023 was not the cause of checkpoint churn.** Churn survives a correctly-sized
+   trust region at full strength. v4 §6 finding 4 is withdrawn: the learning rate was a real
+   anomaly but not the explanation, and no future run should spend 300M steps on it again.
+2. **A lower learning rate is not worthless — it is just not a fix.** 1.5e-4 produced a consistent
+   head-to-head gain over the king and cost nothing measurable. Later runs keep it; it stays at
+   1.5e-4 for the gamma run so that run changes one thing.
+3. **The head-to-head alone cannot adopt a run.** Two consecutive runs (v4, this one) beat the king
+   head to head while getting worse against Necto. The guardrail is now the deciding criterion, and
+   it is goals-for (§4), where the signal actually lives.
+4. **The scoring collapse is the thing to explain.** Conceding is flat across v4 and this run;
+   goals-for fell to a third of the king's and shots on target to a third. Whatever is wrong is on
+   the attacking side and is not motivational (v4 established that) and not PPO stability (this run
+   establishes that). The remaining untested structural knob is the discount horizon, which has
+   never been changed in 3.5B steps: `docs/reward_v5_gamma_spec.md`.
+
+**League note.** For this entire run the league's King and its whole Elite Pool were v4 checkpoints,
+and no checkpoint past iteration 198000 was ever rated — 6 rated entries out of 71 saved, all at or
+below the starting checkpoint. The contender skill floor is `King.mu − 4`, and v4's kings sat at
+mu 518–521 on a self-play-inflated scale while this run's checkpoints entered around 436, so every
+newcomer was admitted and immediately evicted for breaching the floor. The run therefore trained
+against a frozen set of v4 descendants plus Necto, not against its own lineage as intended. This
+does not change the conclusions above — the guardrail is measured against Necto, which never
+changes — but it does mean the head-to-head gain was measured against a lineage the run never
+actually trained against. The league was rebuilt before the gamma run.
+
+## 7. What followed
+
+Written before the run as "if this works". It did not, so what carries forward is narrower: the
+learning rate stays at 1.5e-4 for later runs as a free improvement, and the reward question from v4
+stays open. The next experiment is the discount horizon, `docs/reward_v5_gamma_spec.md`, which is a
+reward version rather than a bare training run because gamma is part of the frozen reward identity.

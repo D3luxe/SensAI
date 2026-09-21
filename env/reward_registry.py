@@ -38,6 +38,9 @@ CODE_FILES: Dict[str, Tuple[str, ...]] = {
     "v3": ("env/rewards_v3.py", "env/scenarios_v3.py"),
     # v4 builds on v3's term functions and training starts, so their files are part of its identity
     "v4": ("env/rewards_v4.py", "env/rewards_v3.py", "env/scenarios_v3.py"),
+    # v5 is v3's terms at a longer horizon: same code, so the same files and the same code_sha.
+    # Only gamma differs, and gamma lives in the settings, so settings_sha is what separates them.
+    "v5": ("env/rewards_v3.py", "env/scenarios_v3.py"),
 }
 
 
@@ -105,12 +108,26 @@ def reward_defaults(version: str) -> Dict[str, float]:
     if version == "v4":
         from env.rewards_v4 import REWARD_V4_DEFAULTS
         return {k: v for k, v in REWARD_V4_DEFAULTS.items() if k != "gamma"}
+    if version == "v5":
+        from env.rewards_v3 import REWARD_V3_DEFAULTS
+        return {k: v for k, v in REWARD_V3_DEFAULTS.items() if k != "gamma"}
     raise ValueError(f"unknown reward_version {version!r}")
 
 
 def make_reward_manager(version: Optional[str] = None, reward_weights: Optional[Dict[str, float]] = None):
-    """The reward manager for `version` (None: the version the default config names)."""
+    """
+    The reward manager for `version` (None: the version the default config names).
+
+    Weights that do not carry a gamma get the version's frozen one. Without this a caller that
+    builds an env without weights silently gets the reward module's code default, which is v3's
+    0.995 for both v3 and v5 -- and v5 exists precisely because its gamma is 0.9977. Potentials
+    telescope only under the gamma the policy is optimised with, so a mismatch here is the exact
+    failure apply_reward_version refuses to let a config express.
+    """
     version = version or active_version()
+    weights = dict(reward_weights or {})
+    weights.setdefault("gamma", float(load_snapshot(version)["settings"]["gamma"]))
+    reward_weights = weights
     if version == "v2":
         from env.rewards import RewardManager
         return RewardManager(reward_weights=reward_weights)
@@ -120,4 +137,9 @@ def make_reward_manager(version: Optional[str] = None, reward_weights: Optional[
     if version == "v4":
         from env.rewards_v4 import RewardManagerV4
         return RewardManagerV4(reward_weights=reward_weights)
+    if version == "v5":
+        # v5's terms are v3's, unchanged; the version differs only in gamma, which the
+        # manager reads from its weights. Nothing reads RewardManagerV3.version.
+        from env.rewards_v3 import RewardManagerV3
+        return RewardManagerV3(reward_weights=reward_weights)
     raise ValueError(f"unknown reward_version {version!r}")
