@@ -52,6 +52,8 @@ from utils.scenario_manager import (
     DEFAULT_CUSTOM_SCENARIOS
 )
 from ui import league_board
+from ui.auto_eval_panel import AUTO_EVAL_CSS, AutoEvalRunner, panel_html
+from ui.eval_pooling import POOL_CSS, pick_results, table_html
 from ui.league_board import LEAGUE_CSS
 from utils.trueskill_evaluator import TrueSkillEvaluator, get_model_display_name
 from utils.league_manager import snap_tiers_to_worker_slices
@@ -630,7 +632,7 @@ button.primary-btn {
 """
 
 
-CUSTOM_CSS += LEAGUE_CSS
+CUSTOM_CSS += LEAGUE_CSS + AUTO_EVAL_CSS + POOL_CSS
 
 def format_elapsed_time(seconds: Union[int, float]) -> str:
     sec = int(seconds or 0)
@@ -1624,6 +1626,25 @@ def create_ui():
                         eval_log = gr.Textbox(show_label=False, lines=9, max_lines=9, interactive=False,
                                               placeholder="Progress appears here. Running beside training slows both.")
 
+                        gr.Markdown("### Follow the run")
+                        gr.Markdown(
+                            "Evaluates every new checkpoint as training writes it (~45 s each, one checkpoint "
+                            "every ~7 min), so a decision point pools a series instead of three checkpoints "
+                            "picked by hand. Runs below the trainer's priority.", elem_classes=["hint"])
+                        with gr.Row():
+                            follow_every = gr.Number(value=1, precision=0, minimum=1, maximum=20, min_width=90,
+                                                     label="Every Nth", info="1 = every checkpoint")
+                            follow_workers = gr.Number(value=4, precision=0, minimum=1, maximum=12, min_width=90,
+                                                       label="Workers")
+                            follow_backfill = gr.Checkbox(value=False, label="Also evaluate saved checkpoints",
+                                                          info="Catches up on what is already on disk first.")
+                        with gr.Row():
+                            follow_start_btn = gr.Button("Start following", variant="secondary")
+                            follow_stop_btn = gr.Button("Stop", size="sm", min_width=80)
+                        follow_status = gr.HTML()
+                        follow_log = gr.Textbox(show_label=False, lines=6, max_lines=6, interactive=False,
+                                                placeholder="Each checkpoint's result and head to head appears here.")
+
                     with gr.Column(scale=9, min_width=640):
                         _results = _eval_result_choices()
                         _baseline = _default_baseline_path()
@@ -1641,6 +1662,17 @@ def create_ui():
                             with gr.Tab("Every metric"):
                                 eval_only_diff = gr.Checkbox(value=False, label="Only differences beyond the noise")
                                 eval_table = gr.HTML()
+                            with gr.Tab("Decision point"):
+                                with gr.Row(elem_classes=["toolbar"]):
+                                    pool_mode = gr.Radio([("Last N results", "last"), ("Around a step count", "around")],
+                                                         value="last", label="Window", scale=3)
+                                    pool_n = gr.Number(value=5, precision=0, minimum=1, min_width=120, scale=1,
+                                                       label="N results / M steps")
+                                    pool_window = gr.Number(value=10, precision=0, minimum=1, min_width=110, scale=1,
+                                                            label="± M steps", info="Only when around a step count.")
+                                    pool_boost = gr.Checkbox(value=False, label="Boost economy", scale=1)
+                                    pool_refresh_btn = gr.Button("Refresh", size="sm", scale=1, min_width=80)
+                                pool_table = gr.HTML()
 
             # =====================================================================================
             # LEAGUE
@@ -2099,6 +2131,52 @@ def create_ui():
                            outputs=[eval_log, eval_result_dd, eval_base_dd]).then(
             fn=on_show_eval, inputs=eval_view_inputs, outputs=eval_view_outputs)
 
+        # ---- Follow the run, and the pooled decision point ------------------------------------
+        auto_eval = AutoEvalRunner.get_instance()
+
+        def _follow_view():
+            version = active_version()
+            try:
+                reference = load_snapshot(version).get("start_checkpoint") or ""
+            except Exception:
+                reference = ""
+            return panel_html(auto_eval.status(), version, reference), auto_eval.log_text()
+
+        def on_follow_start(every, workers, backfill):
+            auto_eval.start(int(every or 1), int(workers or 4), bool(backfill))
+            return _follow_view()
+
+        def on_follow_stop():
+            auto_eval.stop()
+            return _follow_view()
+
+        follow_start_btn.click(fn=on_follow_start, inputs=[follow_every, follow_workers, follow_backfill],
+                               outputs=[follow_status, follow_log])
+        follow_stop_btn.click(fn=on_follow_stop, outputs=[follow_status, follow_log])
+        follow_timer = gr.Timer(5.0, active=True)
+        follow_timer.tick(fn=_follow_view, outputs=[follow_status, follow_log], show_progress="hidden")
+
+        def on_pool(mode, n, window, boost):
+            version = active_version()
+            try:
+                n = float(n or 0)
+            except (TypeError, ValueError):
+                n = 5.0
+            if mode == "around":
+                w = float(window or 10)
+                chosen = pick_results(version=version, around=n, window=w)
+                title = f"Reward {version}, within ±{w:g}M of {n:g}M steps"
+            else:
+                chosen = pick_results(version=version, last=max(1, int(n)))
+                title = f"Reward {version}, last {max(1, int(n))} results"
+            note = f"{len(chosen)} checkpoint{'s' if len(chosen) != 1 else ''} pooled"
+            return table_html(title, chosen, bool(boost), note=note)
+
+        pool_inputs = [pool_mode, pool_n, pool_window, pool_boost]
+        pool_refresh_btn.click(fn=on_pool, inputs=pool_inputs, outputs=pool_table)
+        for comp in (pool_mode, pool_n, pool_window, pool_boost):
+            comp.change(fn=on_pool, inputs=pool_inputs, outputs=pool_table)
+
         # ---- League tab ----------------------------------------------------------------------
         def on_refresh_cockpit_leaderboard():
             ts_evaluator.load_leaderboard()
@@ -2454,6 +2532,8 @@ def create_ui():
         status_timer.tick(fn=on_timer_tick, inputs=[metrics_window_radio], outputs=timer_outputs, show_progress="hidden")
         demo.load(fn=on_timer_tick, inputs=[metrics_window_radio], outputs=timer_outputs)
         demo.load(fn=on_show_eval, inputs=eval_view_inputs, outputs=eval_view_outputs)
+        demo.load(fn=on_pool, inputs=pool_inputs, outputs=pool_table)
+        demo.load(fn=_follow_view, outputs=[follow_status, follow_log])
         demo.load(fn=on_refresh_behaviour, inputs=[diag_window], outputs=[diag_flags, diag_behaviour_plot])
 
     return demo

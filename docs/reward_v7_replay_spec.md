@@ -228,12 +228,41 @@ difference, caught-upfield goals against.
   or a guardrail is clearly broken. Passivity is judged against **v5 at the same step count**, not
   its 400M numbers: v5 at 150M read 5.5 touches/min and 0.7 goals for, and went on to be adopted (the
   v6 run showed the 400M comparison stops a healthy run early).
-- **400M:** adopt if the pooled head to head is positive by more than two standard errors, the
-  guardrails hold, **and** goals conceded while goal-side or Necto goals for is better than the
-  reference's range.
+- **400M:** adopt on the criterion below.
 
 The head to head alone cannot adopt (v4, the learning-rate run and v6's last 100M all beat their
 ancestor while getting no better against Necto). These gates are written before the run.
+
+### The 400M criterion (changed 2026-09-22 at ~273M steps, before any eval past that point)
+
+*What changed and why.* The gate as first written required the head to head to be **positive** by
+more than two standard errors. Two things since say that is the wrong test. First, every eval of
+this run is now automated (`scripts/auto_eval.py`), so a decision point pools ~20 adjacent
+checkpoints and ~60 seeds instead of three checkpoints and nine: the head-to-head readings that
+drove the 150M (+7.17) and 200M (−8.92) reviews were the extremes of that sampling, and the pooled
+series shows head to head flat near zero from 50M on. Second, the head to head measures how well a
+checkpoint beats **its own ancestor**, and v4, the learning-rate run and v6's last 100M each did
+that while getting worse at the game. Necto and Nexto never change and never train, so they are the
+only measure of the game itself (`docs/run_v5_lr_spec.md` §4).
+
+So a run may be adopted while level with its ancestor, provided it is **better against the fixed
+opponents**. All three conditions must hold, pooled over every checkpoint within ±25M of 400M:
+
+1. **Not clearly worse than its ancestor.** Pooled head to head at or above −2 standard errors of
+   its own seeds.
+2. **Clearly better against a fixed opponent.** Necto **or** Nexto goal difference better than the
+   v5 400M reference by more than twice the combined standard error. With the reference's 12 seeds
+   and ~60 of v7's, that is **Necto better than −26.2** or **Nexto better than −23.0** (reference:
+   −29.4 and −27.4).
+3. **No guardrail clearly worse** by the same test: Necto goals for (2.94), touches per min (7.49),
+   kickoff goals against (6.42), retreat scenario conceded (27.1%).
+
+*Where the run stood when this was written,* pooled over the 7 checkpoints from 248M to 272M, in
+combined standard errors against the reference: Necto goal difference −33.4 (**−2.3**), Nexto −32.4
+(**−2.1**), Necto goals for 1.39 (−2.8), touches 6.55 (−3.7), kickoff goals against 12.4 (**+3.9
+worse**), retreat conceded 42.9% (+2.6 worse). On that window v7 fails conditions 2 and 3, and the
+criterion is recorded here **before** the evals that will decide it, exactly so that it cannot be
+fitted to them afterwards.
 
 ## 7. Implementation
 
