@@ -57,5 +57,17 @@
       }
     }
   },
-  "replay_pool": null
+  "replay_pool": {
+    "frames": 2000000,
+    "kept_frames": 1402903,
+    "tag_counts": {
+      "carry_contested": 7046,
+      "carry": 30071,
+      "aerial": 321244,
+      "challenge": 274404,
+      "goal_threat": 185806,
+      "open_play": 584332
+    },
+    "sha": "8fb61d856a48bc4c"
+  }
 }
