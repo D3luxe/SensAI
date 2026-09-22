@@ -21,7 +21,7 @@ import json
 import os
 from typing import Any, Dict, Mapping, Optional
 
-from env.reward_registry import CODE_FILES, SETTINGS_SECTIONS, version_of
+from env.reward_registry import CODE_FILES, OPTIONAL_SETTINGS_SECTIONS, SETTINGS_SECTIONS, version_of
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 REWARD_CODE_FILES = CODE_FILES["v2"]
@@ -46,6 +46,9 @@ def reward_settings(cfg: Optional[Mapping[str, Any]] = None) -> Dict[str, Any]:
         if isinstance(val, Mapping):
             val = {k: v for k, v in val.items() if k != "updated_at"}
         out[section] = val
+    for section in OPTIONAL_SETTINGS_SECTIONS:
+        if cfg.get(section):
+            out[section] = cfg[section]
     out["gamma"] = float((cfg.get("hyperparameters") or {}).get("gamma", 0.995))
     return out
 

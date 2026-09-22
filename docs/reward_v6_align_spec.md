@@ -1,6 +1,7 @@
 # Reward v6 — v5 plus Align Ball Goal
 
-Status: **agreed and implemented 2026-09-21**; frozen as `config/reward_versions/v6.json` (code
+Status: **closed, not adopted, 2026-09-22** — ran to ~507M steps; outcome in §6. Was agreed and
+implemented 2026-09-21; frozen as `config/reward_versions/v6.json` (code
 `8f6de804eeb8e03f`, settings `88f455c4cdf9cae8`). v5's checkpoints are archived in
 `checkpoints/archive/v5_run/` (`scripts/archive_run.py`). v5 is adopted
 (`docs/reward_v5_gamma_spec.md` §7) and its king is `checkpoints/baselines/v5_iter222000.pt`. The
@@ -192,6 +193,58 @@ same day.
   - v5 → v6 version change; v6 frozen once started.
 - Six terms counting the retired T4, which is R5's limit. v7 cannot add a term without removing one.
 
-## 6. Outcome
+## 6. Outcome (run stopped at ~507M steps, 2026-09-22)
 
-*(to be written when the run closes)*
+**Not adopted.** `checkpoints/baselines/v5_iter222000.pt` stays the king, and v7 is built on v5's
+reward, not v6's (`docs/reward_v7_replay_spec.md`).
+
+**The 400M gate.** Pooled over 246200, 246400 and 246600 against the v5 400M reference:
+
+| | v6 400M | v5 reference | gate |
+|---|---|---|---|
+| head to head vs v5 king | +2.50 ± 1.29 (7/9 seeds) | — | needs > 2 SE: **1.94, missed** |
+| Necto goals for | 4.9 | 2.9 | guardrail holds |
+| touches /min | 7.2 | 7.5 | holds |
+| kickoff goals against | 7.8 | 6.4 | holds (range 2.7–11.3) |
+| Nexto goal difference | −29.0 | −27.4 | holds (range −33.0 to −23.2) |
+| retreat conceded | 27.8% | 27.1% | not better |
+| caught-upfield goals /10 min | 13.0 | 14.4 | not better (range 8.7–18.4) |
+| back-wall climbs /100 touches | 16.5 | 18.1 | not better (range 10.9–25.4) |
+
+Positioning improved on none of the three, where two were required.
+
+**The run, pooled at each decision point:**
+
+| | h2h vs v5 king | Necto GF | Necto GD | touches | kickoff GA | retreat conceded |
+|---|---|---|---|---|---|---|
+| 100M | +7.25 | 1.6 | −30.3 | 5.3 | 9.2 | 33.3% |
+| 150M | +3.50 | 1.4 | −31.0 | 5.9 | 2.7 | 27.8% |
+| 200M | −2.58 | 2.8 | −29.3 | 7.5 | 13.4 | 26.4% |
+| 250M | +1.75 | 2.0 | −26.8 | 6.3 | 2.9 | 34.7% |
+| 300M | +2.75 | 1.7 | −33.3 | 6.8 | 11.4 | 36.1% |
+| 350M | +4.67 | **3.8** | **−23.9** | **7.8** | 6.4 | 30.6% |
+| 400M | +2.50 | **4.9** | **−25.2** | 7.2 | 7.8 | 27.8% |
+| 450M | +1.58 | 1.6 | −27.2 | 6.4 | 4.0 | 26.4% |
+| 500M | +5.69 | 2.2 | −29.8 | 6.8 | 13.5 | 44.8% |
+
+**Findings, for later versions:**
+
+1. **T6 moved the failure around rather than removing it.** At 100M goals conceded while goal-side
+   doubled (3.6 → 7.5 per 10 min) as the bot got into position and lost the duel from there; by
+   150M caught-upfield goals had jumped to 20 per 10 min instead; by 400M both were back at v5's
+   level. Positioning is not a credit-assignment problem a potential can fix at this horizon, which
+   is the conclusion §2 said this outcome would mean. The next change is a scenario (R7 b): v7.
+2. **350–400M was the best stretch against Necto of any run** (goal difference −23.9 and −25.2
+   pooled; single checkpoints 243600 at −17.8 and 246600 at −21.2, both pinned with 243400). It did
+   not hold: by 450–500M the Necto numbers were back at v5's. Those checkpoints are not v7's start,
+   because they were chosen for evaluating well.
+3. **The last 100M were lineage drift again.** Head to head peaked at 500M (+5.69, 10/12 seeds) while
+   kickoff goals against doubled and the retreat scenario went from 27.8% to 44.8% conceded. The
+   league crowned 253000 (+5.75 head to head, 0.5 Necto goals for, 58.3% retreat conceded). Third
+   run in a row where head to head alone would have adopted the wrong checkpoint.
+4. **Boost is a collection problem.** From 193M the eval reports boost economy: ~1 big pad a
+   minute, 1–4% of boost spent while already supersonic, 54–79% of retreats begun with under 12
+   boost, and time on empty rising to 50% by 500M. The bot does not waste boost; it does not collect
+   it. That is the target for a later version's boost change, not spending.
+5. **The 150M passivity gate compared against v5's 400M numbers,** which v5 itself would have
+   failed at 150M. v7's gate compares against v5 at the same step count.

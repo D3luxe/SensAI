@@ -63,6 +63,11 @@ FLIGHT_MIN_STEPS = 5                     # airborne >= 0.33 s counts as a flight
 WHEELS_DOWN_UP_Z = 0.7                   # up-vector z at touchdown; below this: door or roof
 SETTLE_STEPS = 5                         # speed retained is read 0.33 s after touchdown
 SUPERSONIC = 2200.0
+# Boost economy. A small pad gives 12 and a big one fills to 100; one step (8 ticks) of boosting
+# burns ~2.2, so a gain above SMALL_PAD_MAX is a big pad even if the car was boosting as it collected.
+PICKUP_MIN = 0.5
+SMALL_PAD_MAX = 13.0
+LOW_BOOST = 12.0                         # the retreat threshold: less than this is not worth a burn
 
 
 # ---------------------------------------------------------------------------------------------
@@ -73,7 +78,12 @@ class MotionStats:
     Tracks blue each step:
       boost       mean held, share of steps empty, spent per minute, share of steps supersonic
       retreat     steps upfield of a ball that is in our half or heading for it; of those with
-                  boost to spend (>= 12), the share on which boost was actually burnt
+                  boost to spend (>= 12), the share on which boost was actually burnt; and of the
+                  retreats begun, the share begun with less than that
+      economy     boost collected per minute, small and big pads per minute (a gain of more than
+                  SMALL_PAD_MAX is a big pad), and the share of boost spent while already supersonic
+                  or while airborne. A respawn after a demolition refills to 33 and counts as a pickup;
+                  goals end the episode (episode_end) so kickoff refills do not.
       landings    every flight of >= FLIGHT_MIN_STEPS: wheels-down at touchdown, and horizontal
                   speed SETTLE_STEPS after touchdown relative to speed at takeoff
     """
@@ -88,14 +98,25 @@ class MotionStats:
         self.retreat_steps = 0
         self.retreat_can_boost = 0
         self.retreat_boosting = 0
+        self.retreat_starts = 0
+        self.retreat_starts_low = 0
+        self.collected = 0.0
+        self.small_pads = 0
+        self.big_pads = 0
+        self.spent_supersonic = 0.0
+        self.spent_air = 0.0
         self.flights = []                # (wheels_down, speed_kept)
         self._prev_boost = None
+        self._prev_supersonic = False
+        self._prev_retreat = False
         self._flight = None
         self._settling = []
         self._last_ground_speed = None
 
     def episode_end(self):
         self._prev_boost = None
+        self._prev_supersonic = False
+        self._prev_retreat = False
         self._flight = None
         self._settling = []
         self._last_ground_speed = None
@@ -107,14 +128,32 @@ class MotionStats:
         boost = float(car.boost)
         self.boost_sum += boost
         self.empty += boost < 1.0
-        self.supersonic += float(np.linalg.norm(car.vel)) >= SUPERSONIC
+        supersonic = float(np.linalg.norm(car.vel)) >= SUPERSONIC
+        self.supersonic += supersonic
         burnt = self._prev_boost is not None and boost < self._prev_boost - 0.05
         if burnt:
             self.spent += self._prev_boost - boost
+            if self._prev_supersonic:
+                self.spent_supersonic += self._prev_boost - boost
+            if not car.on_ground:
+                self.spent_air += self._prev_boost - boost
+        elif self._prev_boost is not None and boost > self._prev_boost + PICKUP_MIN:
+            gain = boost - self._prev_boost
+            self.collected += gain
+            if gain > SMALL_PAD_MAX:
+                self.big_pads += 1
+            else:
+                self.small_pads += 1
+        self._prev_supersonic = supersonic
 
         ball_y, ball_vy = float(ball.pos[1]), float(ball.vel[1])
         threatened = ball_y < 0.0 or ball_vy < -300.0
-        if threatened and float(car.pos[1]) > ball_y + 300.0:
+        retreating = threatened and float(car.pos[1]) > ball_y + 300.0
+        if retreating and not self._prev_retreat:
+            self.retreat_starts += 1
+            self.retreat_starts_low += boost < LOW_BOOST
+        self._prev_retreat = retreating
+        if retreating:
             self.retreat_steps += 1
             if self._prev_boost is not None and self._prev_boost >= 12.0:
                 self.retreat_can_boost += 1
@@ -155,6 +194,12 @@ class MotionStats:
             "supersonic_pct": 100.0 * self.supersonic / n,
             "retreat_time_pct": 100.0 * self.retreat_steps / n,
             "retreat_boosting_pct": 100.0 * self.retreat_boosting / max(1, self.retreat_can_boost),
+            "retreat_starts_low_boost_pct": 100.0 * self.retreat_starts_low / max(1, self.retreat_starts),
+            "boost_collected_per_min": self.collected / max(1e-6, minutes),
+            "small_pads_per_min": self.small_pads / max(1e-6, minutes),
+            "big_pads_per_min": self.big_pads / max(1e-6, minutes),
+            "boost_spent_supersonic_pct": 100.0 * self.spent_supersonic / max(1e-6, self.spent),
+            "boost_spent_air_pct": 100.0 * self.spent_air / max(1e-6, self.spent),
             "flights_per_min": len(self.flights) / max(1e-6, minutes),
             "landing_not_wheels_down_pct": 100.0 * (1.0 - float(np.mean(wd))) if wd else float("nan"),
             "landing_speed_kept_median": float(np.median(kept)) if kept else float("nan"),

@@ -20,7 +20,8 @@ from env.observations import OBS_MIRROR_MASK_NP, ACT_MIRROR_MASK_NP
 from agent.models import ActorCritic, LOG_STD_FLOOR_DEFAULT
 from agent.checkpoint import migrate_state_dict
 from utils.config import anneal_progress, annealed_weights
-from env.reward_registry import apply_reward_version, version_of
+from env import replay_sampling_v7
+from env.reward_registry import apply_reward_version, load_snapshot, scenario_payload, version_of
 from utils.league_manager import LeagueManager
 
 
@@ -145,6 +146,14 @@ class PPOTrainer:
         self.config = apply_reward_version(self.config)
         self.reward_version = version_of(self.config)
         self.reward_version_pinned = bool(self.config.get("reward_version"))
+        # A version that samples a frozen replay pool (v7) trains on that pool or not at all. Checked
+        # here, in the parent, before any worker starts: it also builds the pool's shared store and
+        # index once, so the workers find them instead of racing to build them.
+        if self.reward_version_pinned:
+            checked = replay_sampling_v7.check_replay_pool(load_snapshot(self.reward_version))
+            if checked:
+                print(f"[PPO Trainer] Replay pool matches reward {self.reward_version}'s frozen pool: "
+                      f"{checked['kept_frames']:,} kept frames, sha {checked['sha']}")
         # global_step at which this reward version's run began (set on load; see _start_reward_run)
         self.reward_run_start_step = 0
         self._live_frozen_seen: Dict[str, Any] = {}
@@ -296,7 +305,7 @@ class PPOTrainer:
         if self.league_manager.enabled:
             print(f"[PPO Trainer] Stratified League Self-Play active across {self.num_envs} envs (King: {self.league_manager.king_of_the_hill})")
 
-        sc_cfg = self.config.get("scenarios", {})
+        sc_cfg = scenario_payload(self.config)
         if sc_cfg:
             self.env.update_scenarios(sc_cfg)
 

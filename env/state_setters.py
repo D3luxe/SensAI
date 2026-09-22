@@ -331,12 +331,31 @@ class GoalieSaveSetter(BaseStateSetter):
 class ReplayStateSetter(BaseStateSetter):
     """
     Samples authentic match states from the ingested replay pool.
+
+    Uniformly over every frame (reward v2-v6), or, once configure() is given a version's
+    `replay_sampling` settings, through reward v7's pruned, tagged and mirrored sampler
+    (env/replay_sampling_v7.py).
     """
     def __init__(self, parser: Optional[ReplayParser] = None):
         self.parser = parser or ReplayParser()
+        self.sampler = None
+        self._sampling_settings: Optional[Dict[str, Any]] = None
+
+    def configure(self, settings: Optional[Dict[str, Any]]):
+        """Switches to v7's sampler for these settings, or back to uniform sampling for None."""
+        if settings == self._sampling_settings:
+            return
+        self._sampling_settings = settings
+        self.sampler = None
+        if settings:
+            from env.replay_sampling_v7 import ReplaySampler
+            self.sampler = ReplaySampler.from_parser(self.parser, settings)
 
     def reset(self, rsim_arena: Any, num_players: int) -> bool:
-        sample = self.parser.sample_state(num_cars=num_players)
+        if self._sampling_settings:
+            sample = self.sampler.sample(num_cars=num_players) if self.sampler is not None else None
+        else:
+            sample = self.parser.sample_state(num_cars=num_players)
         if sample is None:
             return False
 
@@ -1013,6 +1032,9 @@ class WeightedScenarioSetter:
         for key in SCENARIO_DEFAULTS:
             if key in sc:
                 setattr(self, key, float(sc[key]))
+        # Reward v7 carries its replay sampling beside the mix (env/reward_registry.scenario_payload)
+        if "replay_sampling" in sc:
+            self.replay_setter.configure(sc["replay_sampling"])
 
     def reset(self, rsim_arena: Any, num_players: int) -> str:
         """

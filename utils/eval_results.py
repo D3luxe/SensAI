@@ -40,6 +40,16 @@ HEADLINE: Dict[str, List[Tuple[str, str, str, int]]] = {
         ("necto", "ga_cause_back_wall_climb_pct", "Goals against: back-wall climb", -1),
         ("necto", "ga_cause_caught_upfield_pct", "Goals against: caught upfield", -1),
     ],
+    # Added with reward v7 as a side metric (docs/reward_v7_replay_spec.md §6): is running dry a
+    # collection problem or a spending one. Earlier results do not carry these and show without them.
+    "Boost economy": [
+        ("necto", "boost_empty_pct", "Time on empty boost", -1),
+        ("necto", "boost_collected_per_min", "Boost collected per minute", +1),
+        ("necto", "small_pads_per_min", "Small pads per minute", +1),
+        ("necto", "big_pads_per_min", "Big pads per minute", +1),
+        ("necto", "boost_spent_supersonic_pct", "Boost spent while already supersonic", -1),
+        ("necto", "retreat_starts_low_boost_pct", "Retreats begun with under 12 boost", -1),
+    ],
 }
 
 GROUP_LABELS = {
@@ -56,7 +66,9 @@ _BETTER = {
     "overshoots_aimed_per_100_touches": -1, "kickoff_first_touch_pct": +1, "kickoff_goals_for": +1,
     "kickoff_goals_against": -1, "retreat_dodges_per_100_touches": -1,
     "retreat_dodge_not_wheels_down_pct": -1, "backwall_climbs_per_100_touches": -1,
-    "boost_empty_pct": -1, "retreat_boosting_pct": +1, "landing_not_wheels_down_pct": -1,
+    "boost_empty_pct": -1, "retreat_boosting_pct": +1, "boost_collected_per_min": +1,
+    "small_pads_per_min": +1, "big_pads_per_min": +1, "boost_spent_supersonic_pct": -1,
+    "retreat_starts_low_boost_pct": -1, "landing_not_wheels_down_pct": -1,
     "landing_speed_kept_median": +1, "sensai_first_touch_pct": +1, "opp_first_touch_pct": -1,
     "time_to_first_touch_s": -1, "ran_under_ball_pct": -1, "touch_goalward_pct": +1,
     "opp_next_touch_pct": -1, "conceded_pct": -1, "scored_pct": +1, "bad_landing_pct": -1,
@@ -368,8 +380,10 @@ def trend_figure(version: str, baseline: Optional[Dict[str, Any]], eval_dir: str
         ys = [p[1]["results"][g][k] for p in pts if p[1].get("results", {}).get(g, {}).get(k)]
         if xs:
             means = [y["mean"] for y in ys]
-            lo = [y["mean"] - y["min"] if y.get("min") is not None else 0 for y in ys]
-            hi = [y["max"] - y["mean"] if y.get("max") is not None else 0 for y in ys]
+            # Clamped: when every seed reads the same value, the float mean can land a hair outside
+            # [min, max] (5.85 x 3 averages to 5.849999999999999) and matplotlib rejects a negative bar
+            lo = [max(0.0, y["mean"] - y["min"]) if y.get("min") is not None else 0 for y in ys]
+            hi = [max(0.0, y["max"] - y["mean"]) if y.get("max") is not None else 0 for y in ys]
             ax.errorbar(xs, means, yerr=[lo, hi], color="#38bdf8", ecolor="#38bdf8", elinewidth=1, capsize=2,
                         marker="o", markersize=4, linewidth=1.6)
         ax.set_xlim(0, xmax)

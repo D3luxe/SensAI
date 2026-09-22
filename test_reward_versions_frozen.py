@@ -10,6 +10,7 @@ one of these fails, the fix is to put the change in the next version, not to upd
   v4  env/rewards_v4.py (+ the v3 files it imports)
   v5  the v3 files, at gamma 0.9977 (only settings_sha differs from v3)
   v6  env/rewards_v6.py (+ the v3 files it imports)
+  v7  v6's files + env/replay_sampling_v7.py; its replay pool is frozen separately (replay_pool)
 """
 import unittest
 

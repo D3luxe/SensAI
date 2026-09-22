@@ -214,7 +214,11 @@ class TestRocketLeagueEnvironment(unittest.TestCase):
             cfg_path = os.path.join(tmpdir, "test_config.yaml")
             with open(cfg_path, "w") as f:
                 yaml.dump(cfg, f)
-            trainer = PPOTrainer(config_path=cfg_path)
+            # A version with a frozen replay pool refuses to train on any other; this test is about
+            # the training loop, and runs wherever there is no frozen pool on disk
+            from unittest import mock
+            with mock.patch("env.replay_sampling_v7.check_replay_pool", return_value=None):
+                trainer = PPOTrainer(config_path=cfg_path)
             # Run 2 training iterations
             trainer.train(max_iterations=2)
 

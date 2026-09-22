@@ -95,7 +95,8 @@ def run(agent, rw, n_envs, n_steps):
     from env.rocket_env import RocketLeagueEnv
 
     from utils.config import effective_config
-    scenarios = effective_config()["scenarios"]
+    from env.reward_registry import scenario_payload
+    scenarios = scenario_payload(effective_config())
     envs = [RocketLeagueEnv(game_mode="1v1", max_episode_steps=600, reward_weights=rw)
             for _ in range(n_envs)]
     for e in envs:

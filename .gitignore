@@ -19,6 +19,8 @@ checkpoints/latest_model_before_alignment_*.pt
 .system_generated/
 runs/
 *.npz
+# The replay pool's memory-mapped store and v7's index, rebuilt from the .npz (utils/replay_parser.py)
+*.store/
 archive/
 checkpoints/manual_saves/
 checkpoints/hall_of_fame/

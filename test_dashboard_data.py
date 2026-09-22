@@ -122,6 +122,19 @@ class TestEvalResults(unittest.TestCase):
         self.assertIn("Head to head vs v3_iter198000.pt", html)
         self.assertLess(html.index("Head to head"), html.index("Primary"))
 
+    def test_trend_draws_a_metric_whose_seeds_all_agree(self):
+        # 5.85 x 3 averages to 5.849999999999999, a hair below the seed minimum; the error bar must
+        # clamp to zero rather than go negative (matplotlib refuses, and the Evaluation tab crashed)
+        d = tempfile.mkdtemp()
+        seeds = [5.85, 5.85, 5.85]
+        stat = {"mean": sum(seeds) / 3, "min": 5.85, "max": 5.85, "per_seed": seeds}
+        self.assertLess(stat["mean"], stat["min"])
+        with open(os.path.join(d, "v9_249M.json"), "w", encoding="utf-8") as f:
+            json.dump({"reward_identity": {"version": "v9"}, "global_step": 249_000_000, "reward_run_start_step": 0,
+                       "results": {"necto": {"touches_per_min": stat}}}, f)
+        fig = eval_results.trend_figure("v9", None, eval_dir=d)
+        self.assertIsNotNone(fig)
+
     def test_real_baselines_match_the_cli(self):
         if not all(os.path.exists(p) for p in ("evals/baselines/v2_iter172000.json", "evals/baselines/v2_iter173600.json")):
             self.skipTest("baseline evals not present")

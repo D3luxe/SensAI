@@ -100,8 +100,10 @@ DEFAULT_DEMO_DIR = get_default_demo_dir()
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 DEFAULT_POOL_PATH = os.path.join(REPO_ROOT, "data", "replays", "replays_pool.npz")
 
-# Keep the most recent frames only. At 30 Hz one 1v1 replay is ~5-7k frames.
-MAX_POOL_FRAMES = 2_000_000
+# Keep the most recent frames only. At 30 Hz one 1v1 replay is ~11k frames, ~70% of them live play
+# (reward v7 prunes the rest when it samples). 14M frames is ~2.2 GB uncompressed, held once per
+# machine: the pool is memory-mapped from its .npy store and shared by every process (see load_pool).
+MAX_POOL_FRAMES = 14_000_000
 
 REQUIRED_POOL_KEYS = ("ball_pos", "ball_vel", "car_pos", "car_vel", "car_rot", "car_boost")
 # Written by full-rate parsing; absent from legacy pools.
@@ -162,6 +164,72 @@ def find_car_transition(data: Dict[str, np.ndarray], idx: int, car_idx: int) -> 
     return None
 
 
+def fit_car_count(state: Dict[str, np.ndarray], num_cars: int) -> Dict[str, np.ndarray]:
+    """A sampled state with its car arrays padded (mirrored copies) or cut to num_cars."""
+    c_pos, c_vel, c_rot, c_bst = state["car_pos"], state["car_vel"], state["car_rot"], state["car_boost"]
+    if len(c_pos) < num_cars:
+        pad_count = num_cars - len(c_pos)
+        c_pos = np.vstack([c_pos, -c_pos[:pad_count]])
+        c_vel = np.vstack([c_vel, -c_vel[:pad_count]])
+        c_rot = np.vstack([c_rot, c_rot[:pad_count]])
+        c_bst = np.concatenate([c_bst, c_bst[:pad_count]])
+    elif len(c_pos) > num_cars:
+        c_pos, c_vel, c_rot, c_bst = c_pos[:num_cars], c_vel[:num_cars], c_rot[:num_cars], c_bst[:num_cars]
+    return dict(state, car_pos=c_pos, car_vel=c_vel, car_rot=c_rot, car_boost=c_bst)
+
+
+# One pool per process, keyed by (path, mtime, size): every arena in a worker shares it. Before this,
+# each of training's 128 arenas decompressed its own ~300 MB copy. Only pools at least this large (the
+# .npz on disk) are memory-mapped; a small one is cheaper to read than to write a store for, and a
+# mapped file cannot be deleted on Windows until every reference to it is gone.
+MMAP_MIN_BYTES = 32 * 1024 * 1024
+_SHARED_POOLS: Dict[Tuple[str, int, int], Tuple[Dict[str, np.ndarray], Optional[str]]] = {}
+
+
+def release_shared_pools() -> None:
+    """Forgets every shared pool, so its mapped files close once no parser still holds its arrays."""
+    _SHARED_POOLS.clear()
+
+
+def _store_base(pool_path: str) -> str:
+    return os.path.splitext(pool_path)[0] + ".store"
+
+
+def _ensure_store(pool_path: str, st: os.stat_result) -> str:
+    """
+    The pool as one uncompressed .npy per array, for np.load(mmap_mode="r"): the operating system
+    keeps a single copy in its page cache for every process that maps it. Named after the .npz's size
+    and mtime, so an ingest writes a new store rather than replacing one a running trainer has mapped
+    (Windows refuses that). Built into a temporary directory and renamed; a concurrent builder that
+    loses the rename discards its copy. Older stores are removed when nothing holds them.
+    """
+    base = _store_base(pool_path)
+    name = f"{st.st_size}_{st.st_mtime_ns}"
+    final = os.path.join(base, name)
+    if os.path.exists(os.path.join(final, "complete")):
+        return final
+    os.makedirs(base, exist_ok=True)
+    tmp = os.path.join(base, f"{name}.tmp{os.getpid()}_{random.getrandbits(32):08x}")
+    os.makedirs(tmp)
+    try:
+        with np.load(pool_path) as data:
+            for k in data.files:
+                np.save(os.path.join(tmp, f"{k}.npy"), data[k])
+        with open(os.path.join(tmp, "complete"), "w", encoding="utf-8") as f:
+            f.write(json.dumps({"source": os.path.basename(pool_path), "size": st.st_size}))
+        try:
+            os.rename(tmp, final)
+        except OSError:
+            if not os.path.exists(os.path.join(final, "complete")):
+                raise
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+    for other in os.listdir(base):
+        if other != name:
+            shutil.rmtree(os.path.join(base, other), ignore_errors=True)
+    return final
+
+
 def _merge_pool(buffer: Optional[Dict[str, np.ndarray]], chunks: List[Dict[str, np.ndarray]]) -> Dict[str, np.ndarray]:
     """Concatenates parsed chunks onto the pool, offsetting segment ids and enforcing MAX_POOL_FRAMES."""
     keys = list(REQUIRED_POOL_KEYS)
@@ -203,6 +271,8 @@ class ReplayParser:
         self.demo_dir = demo_dir or DEFAULT_DEMO_DIR
         os.makedirs(os.path.dirname(self.pool_path), exist_ok=True)
         self.states_buffer: Optional[Dict[str, np.ndarray]] = None
+        # Directory of the memory-mapped store the buffer was read from (None if read into memory)
+        self.store_dir: Optional[str] = None
         self.last_ingest_report: Dict[str, Any] = {
             "total_files": 0,
             "parsed_files": 0,
@@ -212,7 +282,34 @@ class ReplayParser:
         self.load_pool()
 
     def load_pool(self) -> bool:
-        """Loads cached replay frame states from disk if present."""
+        """
+        Loads the pool, memory-mapped from its .npy store and shared by every parser in the process.
+        The arrays are read-only; ingesting builds new ones. Falls back to reading the .npz into
+        memory if the store cannot be written.
+        """
+        if not os.path.exists(self.pool_path):
+            return False
+        st = os.stat(self.pool_path)
+        if st.st_size < MMAP_MIN_BYTES:
+            return self._load_pool_in_memory()
+        key = (os.path.abspath(self.pool_path), st.st_mtime_ns, st.st_size)
+        if key not in _SHARED_POOLS:
+            try:
+                store = _ensure_store(self.pool_path, st)
+                keys = list(REQUIRED_POOL_KEYS)
+                if all(os.path.exists(os.path.join(store, f"{k}.npy")) for k in TIMED_POOL_KEYS):
+                    keys += list(TIMED_POOL_KEYS)
+                buf = {k: np.load(os.path.join(store, f"{k}.npy"), mmap_mode="r") for k in keys}
+                _SHARED_POOLS[key] = (buf, store)
+            except Exception as e:
+                print(f"[ReplayParser] Warning: could not memory-map {self.pool_path} ({e}); reading it into memory")
+                return self._load_pool_in_memory()
+        buf, store = _SHARED_POOLS[key]
+        self.states_buffer, self.store_dir = dict(buf), store
+        return True
+
+    def _load_pool_in_memory(self) -> bool:
+        """The pre-v7 load: the whole .npz decompressed into this parser's own arrays."""
         if os.path.exists(self.pool_path):
             try:
                 data = np.load(self.pool_path)
@@ -226,6 +323,7 @@ class ReplayParser:
                 }
                 if all(k in data.files for k in TIMED_POOL_KEYS):
                     self.states_buffer.update({k: data[k] for k in TIMED_POOL_KEYS})
+                self.store_dir = None
                 return True
             except Exception as e:
                 print(f"[ReplayParser] Warning: Could not load {self.pool_path}: {e}")
@@ -259,6 +357,12 @@ class ReplayParser:
     def clear_pool(self) -> bool:
         """Clears active memory buffer and removes saved pool from disk."""
         self.states_buffer = None
+        self.store_dir = None
+        path = os.path.abspath(self.pool_path)
+        for key in [k for k in _SHARED_POOLS if k[0] == path]:
+            del _SHARED_POOLS[key]
+        # Removed where nothing has it mapped; a running trainer keeps its copy until it restarts
+        shutil.rmtree(_store_base(self.pool_path), ignore_errors=True)
         if os.path.exists(self.pool_path):
             try:
                 os.remove(self.pool_path)
@@ -391,28 +495,14 @@ class ReplayParser:
         c_rot = self.states_buffer["car_rot"][idx].copy()
         c_bst = self.states_buffer["car_boost"][idx].copy()
 
-        # Handle car count dimension adaptation
-        if len(c_pos) < num_cars:
-            # Duplicate / mirror if needed
-            pad_count = num_cars - len(c_pos)
-            c_pos = np.vstack([c_pos, -c_pos[:pad_count]])
-            c_vel = np.vstack([c_vel, -c_vel[:pad_count]])
-            c_rot = np.vstack([c_rot, c_rot[:pad_count]])
-            c_bst = np.concatenate([c_bst, c_bst[:pad_count]])
-        elif len(c_pos) > num_cars:
-            c_pos = c_pos[:num_cars]
-            c_vel = c_vel[:num_cars]
-            c_rot = c_rot[:num_cars]
-            c_bst = c_bst[:num_cars]
-
-        return {
+        return fit_car_count({
             "ball_pos": b_pos,
             "ball_vel": b_vel,
             "car_pos": c_pos,
             "car_vel": c_vel,
             "car_rot": c_rot,
             "car_boost": c_bst
-        }
+        }, num_cars)
 
     def ingest_directory(
         self,
@@ -542,6 +632,13 @@ class ReplayParser:
             data = json.loads(proc.stdout)
         except Exception as e:
             print(f"[ReplayParser] Error parsing '{os.path.basename(file_path)}' with rrrocket: {e}")
+            return None
+
+        # The pool holds 1v1 frames: two cars, one per team. From a team replay the frame loop below
+        # would keep the first car of each team and pair them as if they were the only two players.
+        team_size = (data.get("properties") or {}).get("TeamSize")
+        if team_size is not None and int(team_size) > 1:
+            print(f"[ReplayParser] Skipping '{os.path.basename(file_path)}': {team_size}v{team_size}, the pool is 1v1 only.")
             return None
 
         objects = data.get("objects", [])

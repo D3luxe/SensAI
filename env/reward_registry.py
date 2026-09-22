@@ -15,6 +15,7 @@ A config that names no version is a pre-versioning config: it ran v2 with its ow
   load_snapshot(v)        config/reward_versions/<v>.json
   apply_reward_version    a config with the version's frozen sections in place
   make_reward_manager     the reward manager for a version
+  scenario_payload        what the environments are sent: the scenario mix, and v7's replay sampling
 """
 from __future__ import annotations
 
@@ -32,6 +33,9 @@ DEFAULT_CONFIG_PATH = "config/default_config.yaml"
 SNAPSHOT_DIR = "config/reward_versions"
 LEGACY_VERSION = "v2"
 SETTINGS_SECTIONS = ("rewards", "reward_annealing", "scenarios")
+# Sections only some versions carry. Hashed into settings_sha only when present, so adding one leaves
+# every earlier version's identity untouched.
+OPTIONAL_SETTINGS_SECTIONS = ("replay_sampling",)
 
 CODE_FILES: Dict[str, Tuple[str, ...]] = {
     "v2": ("env/rewards.py",),
@@ -43,6 +47,8 @@ CODE_FILES: Dict[str, Tuple[str, ...]] = {
     "v5": ("env/rewards_v3.py", "env/scenarios_v3.py"),
     # v6 is v5 plus T6 align; it imports v3's term functions and trains on v3's starts
     "v6": ("env/rewards_v6.py", "env/rewards_v3.py", "env/scenarios_v3.py"),
+    # v7 is v5's reward (v6 was not adopted) with its replay starts pruned, tagged and mirrored
+    "v7": ("env/rewards_v3.py", "env/scenarios_v3.py", "env/replay_sampling_v7.py"),
 }
 
 
@@ -92,6 +98,11 @@ def apply_reward_version(cfg: Mapping[str, Any]) -> Dict[str, Any]:
     settings = load_snapshot(version)["settings"]
     for section in SETTINGS_SECTIONS:
         out[section] = copy.deepcopy(settings[section])
+    for section in OPTIONAL_SETTINGS_SECTIONS:
+        if section in settings:
+            out[section] = copy.deepcopy(settings[section])
+        else:
+            out.pop(section, None)
     gamma = float((out.get("hyperparameters") or {}).get("gamma", settings["gamma"]))
     if abs(gamma - float(settings["gamma"])) > 1e-12:
         raise ValueError(f"hyperparameters.gamma {gamma} differs from reward {version}'s frozen gamma "
@@ -110,7 +121,7 @@ def reward_defaults(version: str) -> Dict[str, float]:
     if version == "v4":
         from env.rewards_v4 import REWARD_V4_DEFAULTS
         return {k: v for k, v in REWARD_V4_DEFAULTS.items() if k != "gamma"}
-    if version == "v5":
+    if version in ("v5", "v7"):
         from env.rewards_v3 import REWARD_V3_DEFAULTS
         return {k: v for k, v in REWARD_V3_DEFAULTS.items() if k != "gamma"}
     if version == "v6":
@@ -142,12 +153,25 @@ def make_reward_manager(version: Optional[str] = None, reward_weights: Optional[
     if version == "v4":
         from env.rewards_v4 import RewardManagerV4
         return RewardManagerV4(reward_weights=reward_weights)
-    if version == "v5":
+    if version in ("v5", "v7"):
         # v5's terms are v3's, unchanged; the version differs only in gamma, which the
-        # manager reads from its weights. Nothing reads RewardManagerV3.version.
+        # manager reads from its weights. Nothing reads RewardManagerV3.version. v7's reward is
+        # v5's, unchanged; v7 differs in where episodes start.
         from env.rewards_v3 import RewardManagerV3
         return RewardManagerV3(reward_weights=reward_weights)
     if version == "v6":
         from env.rewards_v6 import RewardManagerV6
         return RewardManagerV6(reward_weights=reward_weights)
     raise ValueError(f"unknown reward_version {version!r}")
+
+
+def scenario_payload(cfg: Mapping[str, Any]) -> Dict[str, Any]:
+    """
+    The scenario settings the environments are sent (WeightedScenarioSetter.update_weights): the
+    mix, plus the version's replay sampling when it has one. None of v2-v6 has one, so theirs is
+    the mix alone, exactly as before.
+    """
+    payload = dict(cfg.get("scenarios") or {})
+    if cfg.get("replay_sampling"):
+        payload["replay_sampling"] = copy.deepcopy(cfg["replay_sampling"])
+    return payload
