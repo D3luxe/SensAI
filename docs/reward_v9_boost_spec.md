@@ -1,7 +1,7 @@
 # Reward v9: boost as a state, not a transaction
 
-Status: **running since 2026-09-23.** §2–§4 amended at ~20M steps, before any decision point; see
-§4, "Amendments".
+Status: **closed at ~156M, not adopted, 2026-09-23** — outcome in §6. §2–§4 were amended at ~20M
+steps, before any decision point; see §4, "Amendments".
 Identity: code `2005bf0f49098e34`, settings `e4d83141033d39de` (`config/reward_versions/v9.json`).
 Start checkpoint: `checkpoints/baselines/v5_iter222000.pt` — lineage stays at v5, since none of v6,
 v7 or v8 was adopted.
@@ -231,4 +231,91 @@ function of the state, so there is nothing in it to gate.
 
 ## 6. Outcome
 
-*Filled in when the run closes.*
+**Stopped at ~156M (iteration 231523; last checkpoint 231400), not adopted, 2026-09-23.** v5
+remains the lineage baseline. The 47 checkpoints are archived in `checkpoints/archive/v9_run/`.
+
+**The term did what it was written to do, and the bot stopped using boost where boost matters.**
+Play in game was visibly passive by ~140M.
+
+### The 150M check
+
+Pooled ±25M (9 results, 27 head-to-head seeds). Per the §3 amendment, guardrails are read against
+v7 at the same step count.
+
+| | v9 | v7 | v8 | read |
+|---|---|---|---|---|
+| head to head vs v5 reference | −0.22 ± 1.28 (15/27) | +2.79 ± 1.01 | −4.53 ± 1.03 | not clearly negative |
+| retreat conceded % | **43.1 ± 1.8** | 36.9 ± 1.7 | 44.7 ± 1.8 | **clearly worse** than v7 (2.4σ); v5 reference 27.1 |
+| touches / min | **6.43 ± 0.16** | 6.91 ± 0.15 | 5.97 ± 0.14 | **clearly worse** than v7 (2.2σ); v5 reference 7.49 |
+| Necto goals for / 10 min | 3.22 ± 0.72 | 2.34 ± 0.51 | 2.28 ± 0.56 | holds |
+| Necto goal difference | −27.7 ± 2.1 | −29.2 ± 1.3 | −31.0 ± 1.3 | level |
+| Nexto goal difference | −33.8 ± 1.4 | −31.3 ± 1.0 | −34.7 ± 0.8 | worse than v7 |
+| mean tank (eval, Necto) | **16.3 ± 1.1** | 14.8 ± 0.9 | 9.0 ± 0.5 | the priced state, up |
+| empty % | **26.4 ± 2.7** | 39.2 ± 1.3 | 60.9 ± 1.6 | the priced state, up |
+| boost spent / min | 228 ± 4 | 243 ± 4 | 291 ± 8 | |
+
+**The run was stopped on the guardrails.** Two were clearly broken by the §3 test, and the in-game
+passivity matched them. The head to head did not trip at the formal window: it read −3.6 ± 1.2 at
+75–100M and −3.2 ± 1.1 at 115–142M, then recovered to −0.2 when the window moved to 125–156M. That is
+the same window sensitivity v7 §8 "Judging" describes.
+
+### Where it went wrong: retreats
+
+The retreat scenario, pooled in 25M windows:
+
+| | 0–25M | 25–50M | 50–75M | 75–100M | 100–125M | 125–150M | v7 @128M | v5 ref |
+|---|---|---|---|---|---|---|---|---|
+| boost used | 22.7 | 23.2 | 15.7 | **8.3** | **5.8** | 11.2 | 21.5 | 23.1 |
+| retreats spent boosting % | 65.8 | 62.7 | 47.6 | **13.9** | **14.5** | 31.0 | 60.5 | 69.2 |
+| time to goal-side (s) | 3.6 | 3.7 | 3.9 | 4.6 | 4.5 | 4.2 | 3.7 | 3.5 |
+| reached goal-side % | 97.5 | 97.9 | 95.8 | 79.2 | 73.4 | 85.0 | 90.1 | 96.5 |
+| conceded % | 24.2 | 12.5 | 23.8 | 41.1 | 47.4 | 42.5 | 29.7 | 25.0 |
+
+### Findings
+
+1. **The state moved, and the bot learned to withhold the resource.** By 75–100M the tank and empty
+   % had already passed condition 4's 400M bar, and `retreat_starts_low_boost_pct` fell from 64%
+   to 45%. Retreats now began with boost, and it was not used: boost spent on a retreat fell by
+   two-thirds, the bot got home a second slower, and retreat conceded went from 12.5% to 41–47%.
+   First touches fell elsewhere too (wall balls 93% → 77%, dropped balls 23% → 13%). In real games
+   against Necto, the share of retreats spent boosting fell from 14% to 5%. **This is v8's lesson
+   3 for the second run running:** the paid-for metric passed while the game got worse.
+2. **Why: the cost is immediate and certain, the benefit delayed and uncertain.** Spending boost
+   on a retreat costs T8 on every step until the tank refills. The goal it saves arrives seconds
+   later, through the sparse goal term. PPO learns the dense, immediate signal first, so a term
+   sized an order below the goal reward still decided the trade. Size is a statement about the
+   optimum, not about what the learner finds first.
+3. **The hoarding canary in §3 would not have fired.** Per-minute spend against Necto ended at 228
+   against v7's 243, not clearly lower. The bot kept spending where it cost nothing and stopped in
+   contested moments. **A canary for a resource term has to measure the resource in the moments
+   that matter** (`scenario_retreat.boost_used`, `retreat_boosting_pct`), not the per-minute
+   total. The retreat metrics showed the turn at 75–100M, and a 100M check on them would have
+   stopped the run 50M sooner.
+4. **The stall argument held.** Total goals stayed at 34–36 per 10 min, above v8. The size
+   argument in §2 was right about stalling; finding 2 is the failure it did not cover.
+5. **Three boost terms, three failures, one pattern.** A potential (v5–v7) could not move the
+   policy. A ratchet on the change (v8) was cycled. A level (v9) was hoarded. Boost is worth
+   something only when it is spent, and only the goal reward sees that. **Stop pricing boost.**
+   The replay study's boost result (AUC 0.618) describes good play, and none of the three
+   rewards turned it into good play.
+6. **Comparisons against v7 are confounded by the start mix.** v7 forced 67.5% of replay starts
+   into contested situations; v8 and v9 use the pool's natural frequencies. At 50M this made v9's
+   spend and touches look low against v7 when they matched v8's. No run has trained v5's reward
+   on the natural mix, so there is no clean same-step reference for v8 or v9.
+7. **The league carried v8 into v9.** Archived checkpoints stay in the league:
+   `LeagueManager.refresh_pool` keeps any rated path that still exists, and `archive_run.py`
+   moves files rather than retiring them. At v9's start the King was v8's 235600 and the elite
+   pool was v8's checkpoints. The King (25% of environments) and the pool (25%) are half of
+   training, so v9's early training played v8's collect-and-dump bot. At v9's close the King is
+   229000 and the pool is all v9, so a v10 started now would begin against v9's hoarders. Only the
+   v8 → v9 transition has been checked, but nothing in the code makes it specific to that one. It is not separable from T8's effect here,
+   but it contaminates every cross-run comparison.
+8. **Necto is a training opponent.** `training_opponents` has been Necto at 18.75% of environments
+   since 2026-09-09, so Necto goal difference partly measures a trained-against opponent. Nexto is
+   the only held-out one. v9's split (Necto −27.7, Nexto −33.8) is worth reading with that in mind.
+   It applies equally to every run since v3, so comparisons are fair, but a condition-2 pass on
+   Necto alone is weaker evidence than one on Nexto.
+9. **No training pathology.** Entropy −0.367 → −0.360 (rising slightly), explained variance
+   0.82–0.84, mean reward flat. As with v7, the policy optimised the reward successfully and
+   arrived somewhere worse at football.
+
