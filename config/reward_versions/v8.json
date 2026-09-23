@@ -1,0 +1,74 @@
+{
+  "version": "v8",
+  "spec": "docs/reward_v8_boost_spec.md",
+  "start_checkpoint": "checkpoints/baselines/v5_iter222000.pt",
+  "baseline_eval": "evals/baselines/v5_iter222000.json",
+  "identity": {
+    "version": "v8",
+    "code_sha": "d21ef08af7da3f38",
+    "settings_sha": "3ea7be8882fbd05c"
+  },
+  "notes": "v5's reward with T5 boost replaced by T7 boost_gain, the same sqrt(boost/100) quantity paid on the rise and not charged on the fall. T5 is a potential, so it could never create an incentive to collect boost; big pads sat at ~0.5/min across v5, v6 and v7 while humans in the pool take 4.1/min. Replay starts keep v7's pruning and mirroring but drop its tag weighting: tag_weights are the frozen pool's own frequencies, so replay starts are drawn uniformly from kept frames. Lineage start is v5, since neither v6 nor v7 was adopted. replay_pool is filled in when the pool is frozen (scripts/freeze_replay_pool.py).",
+  "settings": {
+    "rewards": {
+      "aggression_bias": 0.25,
+      "ball_position_weight": 5.0,
+      "boost_gain_weight": 2.0,
+      "boost_weight": 0.0,
+      "closeness_weight": 0.0,
+      "goal_reward": 10.0,
+      "touch_weight": 0.5
+    },
+    "reward_annealing": {
+      "decay_steps": 300000000,
+      "enabled": false,
+      "targets": {}
+    },
+    "scenarios": {
+      "aerial_prob": 0.08,
+      "bounce_drop_prob": 0.04,
+      "custom_prob": 0.0,
+      "dribble_flick_prob": 0.03,
+      "kickoff_prob": 0.24,
+      "replay_prob": 0.36,
+      "retreat_prob": 0.04,
+      "save_prob": 0.06,
+      "turnaround_prob": 0.05,
+      "wall_prob": 0.05,
+      "wall_rebound_prob": 0.05
+    },
+    "gamma": 0.9977,
+    "replay_sampling": {
+      "tag_weights": {
+        "carry_contested": 0.005022,
+        "carry": 0.021435,
+        "aerial": 0.228985,
+        "challenge": 0.195597,
+        "goal_threat": 0.132444,
+        "open_play": 0.416517
+      },
+      "flip_x_prob": 0.5,
+      "team_swap_prob": 0.5,
+      "prune": {
+        "countdown_radius": 5.0,
+        "countdown_speed": 1.0,
+        "goal_line_y": 5120.0,
+        "stale_car_update_s": 0.5,
+        "spawn_radius": 1.0
+      }
+    }
+  },
+  "replay_pool": {
+    "frames": 2000000,
+    "kept_frames": 1402903,
+    "tag_counts": {
+      "carry_contested": 7046,
+      "carry": 30071,
+      "aerial": 321244,
+      "challenge": 274404,
+      "goal_threat": 185806,
+      "open_play": 584332
+    },
+    "sha": "8fb61d856a48bc4c"
+  }
+}

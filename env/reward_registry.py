@@ -49,6 +49,12 @@ CODE_FILES: Dict[str, Tuple[str, ...]] = {
     "v6": ("env/rewards_v6.py", "env/rewards_v3.py", "env/scenarios_v3.py"),
     # v7 is v5's reward (v6 was not adopted) with its replay starts pruned, tagged and mirrored
     "v7": ("env/rewards_v3.py", "env/scenarios_v3.py", "env/replay_sampling_v7.py"),
+    # v8 is v5's reward with T5 boost turned into the T7 ratchet, on v7's replay machinery at the
+    # pool's own tag frequencies; it imports v3's term functions
+    "v8": ("env/rewards_v8.py", "env/rewards_v3.py", "env/scenarios_v3.py", "env/replay_sampling_v7.py"),
+    # v9 is v8 with the T7 ratchet retired for the T8 boost-edge state bonus; everything else --
+    # terms, gamma, scenarios, replay machinery and tag frequencies -- is v8's, unchanged
+    "v9": ("env/rewards_v9.py", "env/rewards_v3.py", "env/scenarios_v3.py", "env/replay_sampling_v7.py"),
 }
 
 
@@ -127,6 +133,12 @@ def reward_defaults(version: str) -> Dict[str, float]:
     if version == "v6":
         from env.rewards_v6 import REWARD_V6_DEFAULTS
         return {k: v for k, v in REWARD_V6_DEFAULTS.items() if k != "gamma"}
+    if version == "v8":
+        from env.rewards_v8 import REWARD_V8_DEFAULTS
+        return {k: v for k, v in REWARD_V8_DEFAULTS.items() if k != "gamma"}
+    if version == "v9":
+        from env.rewards_v9 import REWARD_V9_DEFAULTS
+        return {k: v for k, v in REWARD_V9_DEFAULTS.items() if k != "gamma"}
     raise ValueError(f"unknown reward_version {version!r}")
 
 
@@ -162,6 +174,12 @@ def make_reward_manager(version: Optional[str] = None, reward_weights: Optional[
     if version == "v6":
         from env.rewards_v6 import RewardManagerV6
         return RewardManagerV6(reward_weights=reward_weights)
+    if version == "v8":
+        from env.rewards_v8 import RewardManagerV8
+        return RewardManagerV8(reward_weights=reward_weights)
+    if version == "v9":
+        from env.rewards_v9 import RewardManagerV9
+        return RewardManagerV9(reward_weights=reward_weights)
     raise ValueError(f"unknown reward_version {version!r}")
 
 

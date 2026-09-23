@@ -1,6 +1,6 @@
 # Reward v7 — v5 with a cleaned, situation-weighted replay pool
 
-Status: **agreed and implemented 2026-09-21; rebased on v5 2026-09-22** when v6 closed without being
+Status: **closed, not adopted, 2026-09-23** (§8). Agreed and implemented 2026-09-21; rebased on v5 2026-09-22 when v6 closed without being
 adopted (`docs/reward_v6_align_spec.md` §6). Frozen as `config/reward_versions/v7.json` (code
 `6f7bbc1ec86ffaae`, settings `e9d24c1d25cf5da0`); the replay pool is frozen into it before the run
 starts (§4). Drafted at v6 ≈100M steps, so §1 describes v6 as it stood then. **v7's reward is v5's,
@@ -297,4 +297,84 @@ and merged when v6 stopped.
 
 ## 8. Outcome
 
-*(to be written when the run closes)*
+**Closed at ~413M steps, not adopted, 2026-09-23.** v5 remains the lineage baseline.
+
+### The 400M gate
+
+Pooled over the 9 checkpoints within ±25M of 400M (27 head-to-head seeds), against the v5 400M
+reference. One of three conditions passed.
+
+| condition | result | |
+|---|---|---|
+| 1. Not clearly worse than its ancestor | head to head **−0.36 ± 0.89**, threshold −1.79 | **PASS** |
+| 2. Clearly better vs a fixed opponent | Necto **−31.9** (−1.2σ), Nexto **−32.0** (−1.7σ); needed better than −26.2 / −23.0 | **FAIL** |
+| 3. No guardrail clearly worse | touches **6.34** vs 7.49 (**−4.3σ**), kickoff GA **10.6** vs 6.42 (**+2.04σ**) | **FAIL** |
+
+Condition 2 was never close at any point in the run. Scanning every 50M window across all 413M, the
+best v7 ever managed was **+0.84σ** against Necto at ~210M — under half the bar, at its single most
+favourable moment.
+
+### v7 is the only run in the lineage that got worse in its second half
+
+| | 75–175M | 175–275M | 275–375M | 375M+ |
+|---|---|---|---|---|
+| **v5** Necto GD / touches / reached goal-side % | −37.8 / 4.9 / 86.7 | −34.8 / 6.5 / 93.8 | −30.6 / 6.6 / 95.1 | **−28.0 / 7.4 / 96.5** |
+| **v6** | −30.7 / 5.6 / 97.9 | −28.0 / 6.9 / 99.3 | −28.6 / 7.3 / 93.8 | **−27.7 / 6.8 / 97.5** |
+| **v7** | −29.1 / 6.7 / 91.8 | −29.4 / 6.7 / 95.0 | −33.8 / 6.4 / 86.6 | **−31.9 / 6.3 / 83.3** |
+
+v5 and v6 improved monotonically; v7 peaked near 250M and declined. **Reaching goal-side on retreats
+fell from 95% to 83.3%** (−4.3σ vs the reference). That metric is not on the guardrail list, so it
+did not formally fail the gate, but it is the largest regression in the run and it is a skill v5 had
+effectively perfected.
+
+### Findings
+
+1. **The regression is behavioural, not a training pathology.** Explained variance (0.817–0.831) and
+   value loss (0.070–0.081) are indistinguishable from v5's and v6's across the whole run. v7
+   optimised v5's reward successfully and arrived somewhere worse at football.
+
+2. **Which means v5's reward under-specifies the game, and the start distribution had been supplying
+   the rest.** With `closeness_weight` at 0.0 since v4, the live reward is four terms, and T2 and T5
+   are potentials whose total episode contribution telescopes to a start-state constant — so they
+   cannot change the optimal policy. The entire behavioural specification is *score goals, and hit
+   the ball hard*. That is thin enough for the start distribution to do most of the work of defining
+   the task, which is why changing it moved behaviour this much. This is the finding that produced
+   v8 (`docs/reward_v8_boost_spec.md` §1).
+
+3. **The kickoff regression is unexplained.** Kickoff goals against went 6.42 → 10.6 while
+   `kickoff_prob` was *raised* 0.15 → 0.24 to hold exposure constant after the countdown frames were
+   pruned out of the replay share. More reps on the thing that got worse. Left open.
+
+4. **The tag weighting is the prime suspect, not the pruning.** Pruning removed 29.9% dead frames and
+   the memory work was sound; the pool is reused unchanged in v8. But the tag weights concentrated
+   67.5% of replay starts into challenge/goal_threat/aerial duels, against natural pool frequencies
+   of 19.6% / 13.2% / 22.9% — and `open_play`, at 41.7% of the pool, was forced down to 20%.
+   Declining touches, declining goal-side recovery and worsening kickoffs are all consistent with a
+   policy that got better at contesting and worse at positioning. v8 reverts the weighting to the
+   pool's own frequencies and keeps everything else about the pool.
+
+5. **A territorial reward was designed, tested against the replay data, and rejected before it cost a
+   run.** The proposal was a zero-sum possession-weighted ball-progress term. Scored on 781 minutes
+   of human 1v1 play with a gap between measurement and prediction so no feature could see the shot,
+   territorial progress came out at **AUC 0.480** — chance — and contributed −0.003 per standard
+   deviation in a joint fit. Possession share was no better (0.461). Ball position **inverts**
+   (0.386): having the ball advanced predicts *conceding* 4–12 seconds later, so the term would have
+   paid for exactly the overcommitment v7 was already drifting into. Goal-side differential also
+   scored at chance (0.517), which retroactively explains v6's T6 buying nothing.
+
+6. **Boost is the lead, and it had never actually been rewarded.** Boost differential is the
+   strongest predictor of who scores next in human play (AUC 0.618, surviving controls at +0.212 per
+   sd; bottom quintile scores next 32.4% of the time, top quintile 70.2%), and the bot takes big pads
+   at 0.5/min against humans' 4.1/min. T5 boost is a potential, so it was mathematically incapable of
+   creating a collection incentive — which is why big pads never moved across v5, v6 or v7 regardless
+   of anything else. This is v8.
+
+### Judging
+
+This run replaced hand-picked 3-checkpoint decision points with automated per-checkpoint evaluation
+(107 results, 13M–413M) and ±25M pooling. That change paid for itself immediately: the head-to-head
+swings that drove the 150M (+7.17) and 200M (−8.92) reviews were sampling extremes, and the pooled
+series was flat near zero from 50M on. The variance decomposition behind it — seed noise sd 4.34
+against real checkpoint-to-checkpoint sd 5.82, F = 6.40 — is in the session notes; adjacent
+checkpoints are genuinely different policies, ~2.5 nats of summed KL apart, so pooling rather than a
+shorter checkpoint interval is the remedy.
