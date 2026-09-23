@@ -71,8 +71,9 @@ Read in order:
   4–12 seconds later. The counter-attack is the dominant dynamic in 1v1, and it is why a
   territorial reward was considered and rejected: it would have paid for entering the state that
   precedes conceding, which is the direction v7 was already drifting.
-- **Goal-side differential is at chance** (0.517). That is v6's T6, and it retroactively explains
-  why adding it bought nothing.
+- **Goal-side differential is at chance** (0.517). That is what v6's T6 targeted. *(Corrected
+  2026-09-23: this was read as explaining why T6 bought nothing, but T6 is a potential and could
+  not change the policy whatever the data said; `reward_v6_align_spec.md` §6, correction.)*
 
 And the bot is worse at the winning feature than at anything else it is measured on:
 

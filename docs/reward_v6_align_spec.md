@@ -1,6 +1,7 @@
 # Reward v6 — v5 plus Align Ball Goal
 
-Status: **closed, not adopted, 2026-09-22** — ran to ~507M steps; outcome in §6. Was agreed and
+Status: **closed, not adopted, 2026-09-22** — ran to ~507M steps; outcome in §6, which carries a
+correction (2026-09-23): T6 is a potential and could not change the optimal policy. Was agreed and
 implemented 2026-09-21; frozen as `config/reward_versions/v6.json` (code
 `8f6de804eeb8e03f`, settings `88f455c4cdf9cae8`). v5's checkpoints are archived in
 `checkpoints/archive/v5_run/` (`scripts/archive_run.py`). v5 is adopted
@@ -248,3 +249,40 @@ Positioning improved on none of the three, where two were required.
    it. That is the target for a later version's boost change, not spending.
 5. **The 150M passivity gate compared against v5's 400M numbers,** which v5 itself would have
    failed at 150M. v7's gate compares against v5 at the same step count.
+
+### Correction (2026-09-23): T6 could not have changed the policy
+
+Found while reviewing v9. **T6 is a potential** (§2; `env/rewards_v6.py` pays it as
+`w·(γ·φ(s′) − φ(s))` with φ(s′) = 0 on a goal step, like T2 and T5). The telescoping argument of
+`docs/reward_v7_replay_spec.md` §8 finding 2 therefore applies to it too: over an episode its
+discounted total is `−w·φ(s₀)`, a constant fixed by the start state. **v6's reward has exactly v5's
+optimal policy.** v6 was not a test of whether goal-side alignment helps; no setting of
+`align_weight` could have made it one. This corrects the readings above and elsewhere:
+
+- **Finding 1** says positioning is not something a potential can fix "at this horizon". It is
+  not something a potential can fix at any horizon. What v6 did show — beaten-while-goal-side
+  doubling at 100M, caught-upfield goals jumping at 150M, both back at v5's level by 400M — is what
+  a potential *can* do: change the path learning takes while leaving the destination where it was.
+- **The replay study did not explain v6.** `reward_v7_replay_spec.md` §8 finding 5 and
+  `reward_v8_boost_spec.md` §2 said goal-side differential scoring at chance (AUC 0.517)
+  "retroactively explains" why T6 bought nothing. The result is consistent with that, but it is
+  moot: T6 could not buy anything whatever the data said.
+- **The same holds for v4.** v4's T6 (ball race) was also a potential (`reward_v4_spec.md` §2, and
+  its tests check the telescoping), so v4's reward had v3's optimal policy. v4 finding 2's
+  conclusion — losing the loose-ball race is not a motivation problem — may be true, but v4 never
+  tested it.
+
+**What v6 is useful for: a continuation control.** v6 started from v5's final checkpoint and
+optimised a reward with v5's optimum for ~507M steps, so it is the lineage's closest thing to
+"train v5 for longer". It is not exact, because shaping changes the learning dynamics even though
+it cannot change the optimum. In 100M windows against Necto (`reward_v7_replay_spec.md` §8) it ran
+−30.7, −28.0, −28.6 and −27.7: level with where it started. The −23.9 and −25.2 at 350–400M
+(finding 2) were three-checkpoint pools, and wider windows put the same stretch at −28.6 and
+−27.7, so they were sampling extremes, like the head-to-head swings v7 §8 "Judging" describes.
+**Training v5's reward for longer does not reach the −26.2 Necto bar** that v7–v9 must clear, so a
+run that does clear it has shown something its reward did.
+
+**Finding 5 needs the same correction.** v7's gate compared against v5 at the same step count, but
+v5's run started from an earlier checkpoint. Every run since v6 starts from v5's *final* checkpoint,
+so v5 at 150M is a weaker policy than any of them was at step 0. The fair same-step comparison is a
+run with the same starting checkpoint: this one, v7, or v8.

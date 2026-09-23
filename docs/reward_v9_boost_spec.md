@@ -1,6 +1,7 @@
 # Reward v9: boost as a state, not a transaction
 
-Status: **written 2026-09-23, not yet started.**
+Status: **running since 2026-09-23.** §2–§4 amended at ~20M steps, before any decision point; see
+§4, "Amendments".
 Identity: code `2005bf0f49098e34`, settings `e4d83141033d39de` (`config/reward_versions/v9.json`).
 Start checkpoint: `checkpoints/baselines/v5_iter222000.pt` — lineage stays at v5, since none of v6,
 v7 or v8 was adopted.
@@ -85,9 +86,19 @@ and this bot's episodes end on goals, so it would pay for not scoring and not co
 the single most dangerous failure mode available to a per-step term, and it is exactly the kind of
 thing that would show up 200M steps late as "passivity" with no obvious cause.
 
-Differencing against the opponent removes it structurally. The two cars' contributions sum to
-**exactly zero on every step**, so stalling gains the pair nothing; whatever one banks, the other
-pays. It also happens to be the quantity the replay study actually measured, and it prices boost
+Differencing against the opponent removes that at the level of the pair: the two cars'
+contributions sum to **exactly zero on every step**, so stalling gains the pair nothing; whatever
+one banks, the other pays.
+
+*(Amended at ~20M.)* That does not remove the incentive for either car, which is what PPO
+optimises. Each car maximises its own return, and the car ahead on boost is still paid for every
+step the episode runs; the other car losing the same amount does not change that. And with
+`self_play_ratio` at 0.5, half of training is against an opponent that is not learning, so there is
+no second learner to cancel against. **What actually rules stalling out is size**: a realistic edge
+pays ~0.002 a step, so delaying a goal by a full second is worth ~0.03 against 10 for scoring it.
+The stall canary in §3 stays, because size is still an argument, not a measurement.
+
+The differential also happens to be the quantity the replay study actually measured, and it prices boost
 starving — denying the opponent a pad is worth as much as taking one — which is a real 1v1 skill
 that none of v2–v8 has ever been paid for.
 
@@ -121,17 +132,30 @@ seeds), per `ui/eval_pooling.py`.
 
 **Decision points:**
 
-- **100M — the stall check.** This is the risk that replaces farming. The term is zero-sum so it
-  *cannot* pay for a longer episode, but that is an argument, not a measurement. The canary is
+- **100M — the stall check.** This is the risk that replaces farming. The term is too small per
+  step to pay for a longer episode (§2), but that is an argument, not a measurement. The canary is
   **total goals per 10 minutes, both teams** (`goals_for_per_10min + goals_against_per_10min`,
   ~34.4 in v7 and v8). If it falls clearly below 30 while the boost metrics improve, episodes are
   being extended and the argument is wrong somewhere — stop the run.
-- **100M — the mechanism check, early.** `mean_boost_tank` should already be moving toward v7's
-  16.3 and `zero_boost_pct` away from v8's 63%. v8's boost damage was visible by 150M and never
-  reversed; there is no reason to spend 300M steps finding out.
+- **100M — the mechanism check, early.** The eval's `boost_mean` against Necto should be clearly
+  above v7's and v8's at the same step count (12.0 and 11.8), and `boost_empty_pct` clearly below
+  (43.3% and 46.8%). v8's boost damage was visible by 150M and never reversed; there is no reason
+  to spend 300M steps finding out. These are eval fields, not the trainer's
+  `mean_boost_tank` / `zero_boost_pct` telemetry (see condition 4).
+- **100M and 150M — the hoarding check.** This is the canary pointed at what T8 prices. T8 pays
+  for the *level*, so the way to abuse it is to hold boost and not use it: the tank rises and
+  spending falls. Watch `boost_spent_per_min` against Necto next to `boost_mean`. If the tank is up
+  while spending is clearly below v7's at the same step count (258.6 at 100M, 243.2 at 150M, by
+  more than twice the combined standard error), and touches or Necto goals for are also down, the
+  term is paying for boost the bot does not use: stop and review. Report
+  `retreat_starts_low_boost_pct` beside it (v7: 75.6, 52.0, 46.9 at 100, 150, 200M) as the check
+  that the boost is where it is needed.
 - **150M — the passivity check**, as in v7 and v8: stop and review if the pooled head to head is
-  clearly negative (below −2 standard errors) or a guardrail is clearly broken. Judged against
-  **v5 at the same step count**, not its 400M numbers.
+  clearly negative (below −2 standard errors) or a guardrail is clearly broken. Head to head is
+  against the v5 reference checkpoint as before. **Guardrails are judged against v7 at 150M**, the
+  same starting checkpoint pooled at the same density (14 results), with v6 at 150M as a second
+  reading (only 3 results). Not against v5 at 150M: v5's run began from an earlier checkpoint, so
+  v5 at 150M (Necto −34.8) is weaker than v9 was at step 0.
 - **400M — adoption**, on the criterion below.
 
 `touches_per_min` is retained as a general guardrail (condition 3), but it is no longer the
@@ -153,14 +177,40 @@ All four conditions must hold:
    game itself.
 3. **No guardrail clearly worse** by the same test: Necto goals for, touches per min, kickoff goals
    against, retreat conceded.
-4. **The mechanism actually fired, in the state and not the transaction.** `mean_boost_tank`
-   clearly above **v7's 16.3** and `zero_boost_pct` clearly below **v7's 33.4%**. Note what this
+4. **The mechanism actually fired, in the state and not the transaction.** The eval's
+   `boost_mean` against Necto clearly above **16.3** and `boost_empty_pct` clearly below
+   **33.4%**. Those are v7's values pooled at 200M, its best stretch for boost; v7 at 400M was
+   14.4 and 36.5%, so this bar is deliberately a little stricter than same-step. Note what this
    deliberately does *not* ask for: big-pad rate. v8 raised big pads by 50% and still halved the
    tank, so collection rate is no longer accepted as evidence that the term worked.
 
 Condition 4 is inherited from v8 and re-pointed. v8's version of it passed — big pads did rise —
 while the run was failing, because it measured the thing the reward paid for instead of the thing
 the reward was for.
+
+**Condition 4 is necessary, not sufficient.** It is still the quantity T8 pays for, so a bot that
+hoards boost passes it (§3, the hoarding check). It establishes that the term moved the state it
+targets; condition 2 decides whether that was worth anything. If condition 4 passes and
+`boost_spent_per_min` is clearly below v7's, a pass on condition 2 is still valid but the write-up
+must not attribute it to better boost use.
+
+### Amendments (2026-09-23, ~20M steps, before any decision point)
+
+No threshold was set or changed from v9's data. The changes:
+
+- **Condition 4's fields.** It named `mean_boost_tank` and `zero_boost_pct`, which exist only in
+  the trainer's telemetry (`agent/ppo.py`), while its thresholds are eval numbers (v7 against
+  Necto, pooled at 200M). The two measure different games: at ~20M the telemetry read tank 30.9 and
+  empty 25.9%, which would have passed condition 4 on day one, while the eval read 14.7 and 44.4%.
+  It now names the eval fields.
+- **The hoarding check** (§3), which applies v8's lesson 2 (point the canary at the quantity the
+  term prices) to v9, and the paragraph above, which applies lesson 3 (do not accept the paid-for
+  metric as evidence) to condition 4.
+- **The stall argument** (§2): the protection is the term's size, not its zero sum.
+- **The 150M guardrail comparison** moves from v5 at 150M to v7 at 150M (§3), since v9 starts from
+  v5's final checkpoint. `reward_v6_align_spec.md` §6 (correction) also shows v6 is effectively
+  v5's reward trained for longer, and it did not reach condition 2's −26.2 against Necto, so a
+  condition-2 pass here cannot be put down to extra training alone.
 
 ## 5. Implementation
 

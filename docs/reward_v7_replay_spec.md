@@ -360,7 +360,9 @@ effectively perfected.
    deviation in a joint fit. Possession share was no better (0.461). Ball position **inverts**
    (0.386): having the ball advanced predicts *conceding* 4–12 seconds later, so the term would have
    paid for exactly the overcommitment v7 was already drifting into. Goal-side differential also
-   scored at chance (0.517), which retroactively explains v6's T6 buying nothing.
+   scored at chance (0.517). *(Corrected 2026-09-23: this was read as explaining v6's T6 buying
+   nothing, but T6 is a potential and could not change the policy whatever the data said;
+   `reward_v6_align_spec.md` §6, correction.)*
 
 6. **Boost is the lead, and it had never actually been rewarded.** Boost differential is the
    strongest predictor of who scores next in human play (AUC 0.618, surviving controls at +0.212 per
