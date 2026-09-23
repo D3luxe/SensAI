@@ -16,6 +16,7 @@ A config that names no version is a pre-versioning config: it ran v2 with its ow
   apply_reward_version    a config with the version's frozen sections in place
   make_reward_manager     the reward manager for a version
   scenario_payload        what the environments are sent: the scenario mix, and v7's replay sampling
+                          (v8-v10 reuse it)
 """
 from __future__ import annotations
 
@@ -55,6 +56,9 @@ CODE_FILES: Dict[str, Tuple[str, ...]] = {
     # v9 is v8 with the T7 ratchet retired for the T8 boost-edge state bonus; everything else --
     # terms, gamma, scenarios, replay machinery and tag frequencies -- is v8's, unchanged
     "v9": ("env/rewards_v9.py", "env/rewards_v3.py", "env/scenarios_v3.py", "env/replay_sampling_v7.py"),
+    # v10 is v7 at the pool's natural tag frequencies: v5's reward and v7's code, byte for byte, so
+    # v7's files and code_sha. Only the replay tag weights differ, and they live in the settings
+    "v10": ("env/rewards_v3.py", "env/scenarios_v3.py", "env/replay_sampling_v7.py"),
 }
 
 
@@ -127,7 +131,7 @@ def reward_defaults(version: str) -> Dict[str, float]:
     if version == "v4":
         from env.rewards_v4 import REWARD_V4_DEFAULTS
         return {k: v for k, v in REWARD_V4_DEFAULTS.items() if k != "gamma"}
-    if version in ("v5", "v7"):
+    if version in ("v5", "v7", "v10"):
         from env.rewards_v3 import REWARD_V3_DEFAULTS
         return {k: v for k, v in REWARD_V3_DEFAULTS.items() if k != "gamma"}
     if version == "v6":
@@ -165,10 +169,10 @@ def make_reward_manager(version: Optional[str] = None, reward_weights: Optional[
     if version == "v4":
         from env.rewards_v4 import RewardManagerV4
         return RewardManagerV4(reward_weights=reward_weights)
-    if version in ("v5", "v7"):
+    if version in ("v5", "v7", "v10"):
         # v5's terms are v3's, unchanged; the version differs only in gamma, which the
         # manager reads from its weights. Nothing reads RewardManagerV3.version. v7's reward is
-        # v5's, unchanged; v7 differs in where episodes start.
+        # v5's, unchanged; v7 differs in where episodes start, and v10 in how v7's starts are weighted.
         from env.rewards_v3 import RewardManagerV3
         return RewardManagerV3(reward_weights=reward_weights)
     if version == "v6":

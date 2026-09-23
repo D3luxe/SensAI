@@ -1,0 +1,73 @@
+{
+  "version": "v10",
+  "spec": "docs/reward_v10_control_spec.md",
+  "start_checkpoint": "checkpoints/baselines/v5_iter222000.pt",
+  "baseline_eval": "evals/baselines/v5_iter222000.json",
+  "identity": {
+    "version": "v10",
+    "code_sha": "6f7bbc1ec86ffaae",
+    "settings_sha": "c51290dcd68a4a89"
+  },
+  "notes": "v7 at the replay pool's natural tag frequencies: v5's reward (T1 goal, T2 ball_position, T3 touch, T5 boost, gamma 0.9977), v7's scenario mix, pruning, mirroring and frozen pool, with only replay_sampling.tag_weights changed from v7's forced mix (67.5% contested) to the pool's own frequencies (v8's and v9's). A control run: no run has trained v5's reward on the natural mix, so v8's and v9's comparisons against v7 were confounded by the start mix, and v7 section 8 finding 4 names the tag weighting as the prime suspect for its second-half regression. Starts from the v5 king with the league restored to where v5 ended (scripts/restore_league.py). Lineage start is v5, since v6-v9 were not adopted.",
+  "settings": {
+    "rewards": {
+      "aggression_bias": 0.25,
+      "ball_position_weight": 5.0,
+      "boost_weight": 1.0,
+      "closeness_weight": 0.0,
+      "goal_reward": 10.0,
+      "touch_weight": 0.5
+    },
+    "reward_annealing": {
+      "decay_steps": 300000000,
+      "enabled": false,
+      "targets": {}
+    },
+    "scenarios": {
+      "aerial_prob": 0.08,
+      "bounce_drop_prob": 0.04,
+      "custom_prob": 0.0,
+      "dribble_flick_prob": 0.03,
+      "kickoff_prob": 0.24,
+      "replay_prob": 0.36,
+      "retreat_prob": 0.04,
+      "save_prob": 0.06,
+      "turnaround_prob": 0.05,
+      "wall_prob": 0.05,
+      "wall_rebound_prob": 0.05
+    },
+    "gamma": 0.9977,
+    "replay_sampling": {
+      "tag_weights": {
+        "carry_contested": 0.005022,
+        "carry": 0.021435,
+        "aerial": 0.228985,
+        "challenge": 0.195597,
+        "goal_threat": 0.132444,
+        "open_play": 0.416517
+      },
+      "flip_x_prob": 0.5,
+      "team_swap_prob": 0.5,
+      "prune": {
+        "countdown_radius": 5.0,
+        "countdown_speed": 1.0,
+        "goal_line_y": 5120.0,
+        "stale_car_update_s": 0.5,
+        "spawn_radius": 1.0
+      }
+    }
+  },
+  "replay_pool": {
+    "frames": 2000000,
+    "kept_frames": 1402903,
+    "tag_counts": {
+      "carry_contested": 7046,
+      "carry": 30071,
+      "aerial": 321244,
+      "challenge": 274404,
+      "goal_threat": 185806,
+      "open_play": 584332
+    },
+    "sha": "8fb61d856a48bc4c"
+  }
+}
