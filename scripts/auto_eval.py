@@ -23,6 +23,7 @@ import re
 import subprocess
 import sys
 import time
+from typing import Dict, Optional, Tuple
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ROOT)
@@ -33,13 +34,59 @@ from utils.eval_results import list_results, load  # noqa: E402
 # Windows: keep the eval below the trainer in the scheduler, so following the run costs it nothing
 BELOW_NORMAL = 0x00004000 if os.name == "nt" else 0
 
+# path -> (mtime, version), so each checkpoint is opened for its stamp once per write
+_VERSION_CACHE: Dict[str, Tuple[float, Optional[str]]] = {}
+
 
 def iteration_of(path: str) -> int:
     return int(re.search(r"(\d+)\.pt$", path).group(1))
 
 
-def evaluated_iterations(eval_dir: str) -> set:
-    return {e["iteration"] for e in list_results(eval_dir) if e["iteration"] is not None and not e["quick"]}
+def checkpoint_version(path: str) -> Optional[str]:
+    """
+    The reward version a checkpoint was TRAINED under, read from its own stamp.
+
+    This has to come from the file rather than from the active config, because checkpoints/ can
+    hold more than one run: numbering restarts from the start checkpoint, so until a finished run
+    is archived (scripts/archive_run.py) its files sit alongside the new run's. eval_suite.py names
+    each result from this same stamp, so the watcher has to dedup against it or it re-evaluates the
+    previous run's leftovers under their own version's name -- which is what happened when v9
+    started on top of v8's 65 unarchived checkpoints.
+
+    None when the file cannot be read or carries no stamp; the caller then treats it as pending,
+    which is the safe direction.
+    """
+    cached = _VERSION_CACHE.get(path)
+    key = os.path.getmtime(path)
+    if cached is not None and cached[0] == key:
+        return cached[1]
+    import torch
+    try:
+        ckpt = torch.load(path, map_location="meta", weights_only=False, mmap=True)
+    except Exception:
+        try:
+            ckpt = torch.load(path, map_location="cpu", weights_only=False)
+        except Exception:
+            return None
+    stamp = ckpt.get("reward_identity")
+    del ckpt
+    version = stamp.get("version") if isinstance(stamp, dict) else None
+    _VERSION_CACHE[path] = (key, version)
+    return version
+
+
+def evaluated_pairs(eval_dir: str) -> set:
+    """
+    (version, iteration) pairs already evaluated.
+
+    Both halves of the key are needed. Without the version a fresh run's checkpoints look
+    already-evaluated because an ANCESTOR evaluated that iteration number -- v7, v8 and v9 all
+    start at iteration 222000, where v5's run ended, which is why v7's first eval landed at 13M
+    steps rather than 3M. Without the iteration nothing is deduped at all. The results themselves
+    never collided; they are named <version>_<M>M.
+    """
+    return {(e["version"], e["iteration"]) for e in list_results(eval_dir)
+            if e["iteration"] is not None and not e["quick"]}
 
 
 def head_to_head(path: str):
@@ -98,9 +145,18 @@ def main() -> int:
         print(f"following from iteration {seen_floor} (pass --backfill to evaluate what is already saved)")
 
     while True:
-        done = evaluated_iterations(args.eval_dir)
-        pending = sorted(p for p in glob.glob(os.path.join(ROOT, "checkpoints", "checkpoint_iter_*.pt"))
-                         if iteration_of(p) > seen_floor and iteration_of(p) not in done)
+        done = evaluated_pairs(args.eval_dir)
+        pending = []
+        for path in glob.glob(os.path.join(ROOT, "checkpoints", "checkpoint_iter_*.pt")):
+            if iteration_of(path) <= seen_floor:
+                continue
+            trained_under = checkpoint_version(path)
+            if trained_under is not None and trained_under != version:
+                continue   # a previous run's leftover: archive it, do not re-evaluate it
+            if (trained_under or version, iteration_of(path)) in done:
+                continue
+            pending.append(path)
+        pending.sort(key=iteration_of)
         if args.every > 1:
             pending = [p for p in pending if (iteration_of(p) // 200) % args.every == 0]
         for path in sorted(pending, key=iteration_of):

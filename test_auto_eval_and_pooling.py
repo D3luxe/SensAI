@@ -31,9 +31,9 @@ def _load_script(name):
 auto_eval = _load_script("auto_eval")
 
 
-def result(iteration, steps_m, h2h_seeds, ga=30.0, upfield_pct=40.0):
+def result(iteration, steps_m, h2h_seeds, ga=30.0, upfield_pct=40.0, version="v9"):
     return {
-        "reward_identity": {"version": "v9"}, "iteration": iteration, "quick": False,
+        "reward_identity": {"version": version}, "iteration": iteration, "quick": False,
         "global_step": int(steps_m * 1e6), "reward_run_start_step": 0,
         "results": {
             "necto": {"goals_against_per_10min": {"mean": ga, "per_seed": [ga]},
@@ -52,15 +52,55 @@ class TestAutoEvalWatcher(unittest.TestCase):
             with open(os.path.join(self.dir, f"v9_{steps}M.json"), "w", encoding="utf-8") as f:
                 json.dump(result(it, steps, [1.0]), f)
 
-    def test_evaluated_iterations_come_from_the_results(self):
-        self.assertEqual(auto_eval.evaluated_iterations(self.dir), {1000, 1200})
+    def test_evaluated_pairs_come_from_the_results(self):
+        self.assertEqual(auto_eval.evaluated_pairs(self.dir), {("v9", 1000), ("v9", 1200)})
+
+    def test_an_ancestors_iterations_do_not_count_as_this_versions(self):
+        """
+        A version starts from an earlier one's checkpoint and keeps counting from its iteration
+        number, so the same number belongs to two different policies. Keyed on the number alone a
+        fresh run looks already-evaluated and the watcher silently skips it: that is what stalled
+        v8 at iteration 222200, where v5's run had ended.
+        """
+        with open(os.path.join(self.dir, "v8_1M.json"), "w", encoding="utf-8") as f:
+            json.dump(result(1000, 1, [0.5], version="v8"), f)
+        done = auto_eval.evaluated_pairs(self.dir)
+        self.assertIn(("v8", 1000), done)
+        self.assertIn(("v9", 1000), done)
+        # iteration 1200 is v9's alone, so a v8 checkpoint at 1200 must still be offered
+        self.assertNotIn(("v8", 1200), done)
+
+    def test_an_unevaluated_version_matches_nothing(self):
+        self.assertFalse(any(v == "v99" for v, _ in auto_eval.evaluated_pairs(self.dir)))
 
     def test_a_quick_result_does_not_count_as_evaluated(self):
         r = result(1400, 16, [1.0])
         r["quick"] = True
         with open(os.path.join(self.dir, "v9_16M_quick.json"), "w", encoding="utf-8") as f:
             json.dump(r, f)
-        self.assertNotIn(1400, auto_eval.evaluated_iterations(self.dir))
+        self.assertNotIn(("v9", 1400), auto_eval.evaluated_pairs(self.dir))
+
+    def test_a_leftover_checkpoint_from_an_earlier_run_is_not_this_runs(self):
+        """
+        checkpoints/ holds more than one run until the finished one is archived, and numbering
+        restarts, so the file at a given iteration may belong to either. eval_suite names each
+        result from the checkpoint's own stamp, so the watcher must read the same stamp: keying off
+        the active config instead made a v9 watcher re-evaluate v8's 65 unarchived checkpoints and
+        write duplicate v8 results.
+        """
+        import torch
+        for name, version in (("checkpoint_iter_1600.pt", "v8"), ("checkpoint_iter_1800.pt", "v9")):
+            torch.save({"iteration": int(name.split("_")[-1][:-3]), "global_step": 1,
+                        "reward_identity": {"version": version}}, os.path.join(self.dir, name))
+        self.assertEqual(auto_eval.checkpoint_version(os.path.join(self.dir, "checkpoint_iter_1600.pt")), "v8")
+        self.assertEqual(auto_eval.checkpoint_version(os.path.join(self.dir, "checkpoint_iter_1800.pt")), "v9")
+
+    def test_an_unstamped_checkpoint_has_no_version(self):
+        """None means 'treat as pending', which is the safe direction for an unreadable stamp."""
+        import torch
+        path = os.path.join(self.dir, "checkpoint_iter_2000.pt")
+        torch.save({"iteration": 2000, "global_step": 1}, path)
+        self.assertIsNone(auto_eval.checkpoint_version(path))
 
     def test_iteration_is_read_from_the_checkpoint_name(self):
         self.assertEqual(auto_eval.iteration_of("checkpoints/checkpoint_iter_231400.pt"), 231400)
