@@ -17,6 +17,8 @@ This plays deterministic matches against Necto through the eval suite's own matc
   |pre| med   median pre-activation magnitude (tanh 0.95 is at 1.83)
   branch%     share of (state, pass) pairs where the raw or mirrored pass alone is past --sat; the
               mean averages the two, so opposed saturated passes read as an unsaturated mean
+  opposed%    share of grounded states where both passes are past --sat in opposite directions,
+              so the mean reads ~0 with no gradient (steer's cancellation)
   brake%      share of grounded states with a throttle mean below -0.1
 
 Measured 2026-09-23 in a separate session: steer 76-85% and throttle 54-69% saturated for every
@@ -95,12 +97,16 @@ def head_readings(model, obs: np.ndarray) -> Dict[str, np.ndarray]:
             grad = 0.5 * (1 - torch.tanh(pre) ** 2) + 0.5 * (1 - torch.tanh(pre_m) ** 2)
             mag = 0.5 * (pre.abs() + pre_m.abs())
             branch = torch.stack([torch.tanh(pre).abs(), torch.tanh(pre_m).abs()], dim=0)
+            # Each pass in the raw pass's frame, so opposite signs mean the two passes disagree
+            signed = torch.stack([torch.tanh(pre), torch.tanh(pre_m) * sign], dim=0)
         else:
             mean = torch.tanh(pre)
             grad = 1 - mean ** 2
             mag = pre.abs()
             branch = mean.abs().unsqueeze(0)
-    return {"mean": mean.numpy(), "grad": grad.numpy(), "pre": mag.numpy(), "branch": branch.numpy()}
+            signed = mean.unsqueeze(0)
+    return {"mean": mean.numpy(), "grad": grad.numpy(), "pre": mag.numpy(), "branch": branch.numpy(),
+            "signed": signed.numpy()}
 
 
 def measure(checkpoint: str, steps: int, seeds: List[int], sat: float) -> Dict[str, object]:
@@ -122,6 +128,9 @@ def measure(checkpoint: str, steps: int, seeds: List[int], sat: float) -> Dict[s
             # Each of the raw and mirrored passes on its own. The mean averages them, so two
             # saturated passes pointing opposite ways give an unsaturated mean with no gradient.
             "branch_sat_pct": float(100.0 * np.mean(r["branch"][:, :, i] > sat)),
+            # Both passes past --sat in opposite directions: the mean reads ~0 with no gradient
+            "opposed_pct": float(100.0 * np.mean((r["branch"][:, :, i] > sat).all(axis=0)
+                                                 & (np.sign(r["signed"][0, :, i]) != np.sign(r["signed"][-1, :, i])))),
             "grad_median": float(np.median(r["grad"][:, i])),
             "pre_abs_median": float(np.median(r["pre"][:, i])),
             "sigma": float(sigma[i]),
@@ -145,7 +154,7 @@ def main() -> int:
         rows.append(row)
         t, s = row["throttle"], row["steer"]
         print(f"{os.path.basename(c):32} n={row['grounded_states']:5}  "
-              f"steer sat {s['sat_pct']:5.1f}% branch {s['branch_sat_pct']:5.1f}% grad {s['grad_median']:.3f} |pre| {s['pre_abs_median']:5.2f} sd {s['sigma']:.3f}   "
+              f"steer sat {s['sat_pct']:5.1f}% branch {s['branch_sat_pct']:5.1f}% opposed {s['opposed_pct']:4.1f}% grad {s['grad_median']:.3f} |pre| {s['pre_abs_median']:5.2f} sd {s['sigma']:.3f}   "
               f"throttle sat {t['sat_pct']:5.1f}% (+{t['sat_pos_pct']:.1f}/-{t['sat_neg_pct']:.1f}) branch {t['branch_sat_pct']:5.1f}% grad {t['grad_median']:.3f} "
               f"|pre| {t['pre_abs_median']:5.2f} sd {t['sigma']:.3f} brake {t['brake_pct']:4.1f}%", flush=True)
     if args.json:

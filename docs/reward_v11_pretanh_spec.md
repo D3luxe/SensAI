@@ -1,6 +1,6 @@
 # v11: v10 plus a pre-tanh magnitude penalty on throttle and steer
 
-Status: **written 2026-09-24, not yet started.**
+Status: **running since 2026-09-24.**
 Identity: code `017162ed5368186c`, settings `a73964846d2f2ae6` (`config/reward_versions/v11.json`).
 Start checkpoint: `checkpoints/baselines/v5_iter222000.pt`, with the league restored to where v5
 ended. Lineage stays at v5, since none of v6–v10 was adopted.
@@ -112,7 +112,11 @@ built on:
   the deterministic mean at about 0.96, so the price, if any, is speed to the ball. Watch time to
   first touch on bounces, kickoff first touch and Necto goals for against v10 at the same step. If
   they are clearly worse while the saturation readings improve, the cap is costing more than the
-  gradient buys: stop and review.
+  gradient buys: stop and review. *(Noted at start, 2026-09-24:)* kickoff first touch is a weak
+  canary. v10 sits at 1–9% against Necto (v5 king 18.9%), so it has little room to get clearly
+  worse. The cause is known from play: SensAI drives and boosts on the kickoff but does not flip,
+  so it arrives late. A flip is the jump button plus airborne pitch, neither of which this penalty
+  touches, so v11 is not expected to change it. Read time to first touch and Necto goals for first.
 - **100M: is the gradient being used?** Re-run the probe and read what the penalty does **not**
   pay for: braking share (v10 229000 at ~115M: 2.0%; pretrained 29.5%), steer opposed-cancellation
   share (v10: 24–28%), and `scripts/steering_jitter_probe.py`, alongside touches, whiffs and first
@@ -156,6 +160,67 @@ That result is worth as much as an adoption.
   inside the threshold; the squared excess; both passes counted; only the actor moves; the hook is
   released; a two-iteration trainer run with warmup off applies the penalty and logs its telemetry.
 
-## 7. Outcome
+## 7. Checks during the run
+
+### ~50M (2026-09-24, iteration 225000)
+
+**Training.** No startup transient: approx_kl 0.010–0.012 and clip_fraction ~0.10, level with v10
+from the first 5M; entropy and explained variance level too. In training minibatches the share
+of throttle/steer pre-activations over 2.0 fell from 68% to 43%, and the medians from 2.84 / 4.16
+(throttle / steer) to 1.75 / 1.62. The penalty fell from 0.013 to 0.0017.
+
+**The cost canary fired.** Evals pooled 2–50M against v10 over the same window (14 and 15 results):
+
+| | v11 | v10 | z |
+|---|---|---|---|
+| time to first touch, bounce | 1.47 s | 1.37 s | +3.0 |
+| time to first touch, drop | 1.88 s | 1.34 s | +3.0 |
+| retreat time to goal-side | 3.88 s | 3.45 s | +6.2 |
+| first touch on drops | 14.3% | 21.9% | −3.1 |
+| first touch on wall balls | **93.5%** | 65.8% | **+8.1** |
+| Necto GD | −31.7 | −27.8 | −2.7 |
+| Necto goals for | 1.6 | 2.8 | −1.7 |
+| touches / min | 6.12 | 6.84 | −2.4 |
+| h2h vs v5 | −3.75 ± 1.06 | −0.52 ± 0.77 | −2.5 |
+
+Per checkpoint, the times grew as the pre-activations shrank (retreat 3.5 → 4.3 s, drop 1.2–1.8 →
+2.1–3.3 s), while the head to head recovered from −8 to −13 (9–26M) to −3 to +4 (29–45M) and
+touches recovered from 4.5 to 6.7.
+
+**The review: the non-priced mechanism checks.** `scripts/action_saturation.py` (now reporting the
+opposed share) and `scripts/steering_jitter_probe.py` on v5 222000, v10 225000 and v11 225000, all
+at the same seeds. Raw results: `logs/saturation_v11_50M.json`, `logs/jitter_v11_50M.json`.
+
+| | v5 king | v10 @ 50M | v11 @ 50M |
+|---|---|---|---|
+| median gradient, steer / throttle | 0.034 / 0.014 | 0.048 / 0.016 | **0.324 / 0.218** |
+| median \|pre\|, steer / throttle | 4.37 / 3.86 | 4.08 / 4.06 | **1.59 / 1.89** |
+| steer opposed (passes at opposite rails) | 27.4% | 18.8% | **6.2%** |
+| steer at full lock | 28.6% | 35.1% | 14.2% |
+| throttle at full forward | 65.9% | 63.5% | **27.3%** |
+| braking | 1.2% | 1.6% | 2.8% |
+
+| steer reversals (>0.3 swing), by distance to ball | v5 king | v10 @ 50M | v11 @ 50M |
+|---|---|---|---|
+| 0–400 uu | 14.7 ± 2.1% | 16.8 ± 2.5% | **9.0 ± 2.1%** |
+| 400–800 | 14.1 ± 1.3% | 18.4 ± 1.9% | **9.7 ± 1.1%** |
+| 800–1500 | 16.2 ± 1.8% | 18.8 ± 1.9% | **12.4 ± 1.0%** |
+| 1500–3000 | 17.1 ± 1.5% | 17.7 ± 1.7% | **7.8 ± 1.2%** |
+| 3000+ | 10.9 ± 2.1% | 21.1 ± 2.7% | **8.9 ± 1.6%** |
+
+**Reading.** Steer is fixed as intended: 7–10× the gradient, cancellation down to a third, and
+jitter roughly halved against v10 at every distance (−2.4σ to −4.7σ), below even the v5 king. That
+fits the wall-ball first touches. Throttle has left the rail, but into part throttle, not braking:
+full-forward share fell from 64% to 27%, braking rose only from 1.6% to 2.8% (pretrained 29.5%). The
+throttle median (1.89) is below the threshold, so the penalty is not holding it there. Off the rail,
+a small shortfall from full throttle barely changes the clipped sampled action, so the policy
+gradient pushes it back weakly. The slower times fit this.
+
+**Decision: continue to 100M** (the user's call). Throttle was as much of a pain point as steer in
+play, so the run gets the chance to pick its speed back up with the gradient now available. At
+100M: if time to the ball and Necto GD are still clearly worse than v10 at the same step, stop. The
+fallback is a v12 with the same penalty on steer only.
+
+## 8. Outcome
 
 *Filled in when the run closes.*
