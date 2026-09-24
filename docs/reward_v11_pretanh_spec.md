@@ -1,6 +1,7 @@
 # v11: v10 plus a pre-tanh magnitude penalty on throttle and steer
 
-Status: **running since 2026-09-24.**
+Status: **closed at ~162M, not adopted, 2026-09-24** — outcome in §8. The last version trained with
+this suite: training moves to a rebuild on Prometheus (`docs/rebuild_plan.md`).
 Identity: code `017162ed5368186c`, settings `a73964846d2f2ae6` (`config/reward_versions/v11.json`).
 Start checkpoint: `checkpoints/baselines/v5_iter222000.pt`, with the league restored to where v5
 ended. Lineage stays at v5, since none of v6–v10 was adopted.
@@ -221,6 +222,113 @@ play, so the run gets the chance to pick its speed back up with the gradient now
 100M: if time to the ball and Necto GD are still clearly worse than v10 at the same step, stop. The
 fallback is a v12 with the same penalty on steer only.
 
+### ~100M (2026-09-24)
+
+**In game (user):** SensAI looked passive. With the ball on the opponent's goal line, it sat on its
+own backboard and dropped into its net as the counter started.
+
+**Evals, 72–100M (v11 7 results, v10 9):** time to first touch recovered (bounce 1.44 vs 1.41 s, drop
+2.31 vs 2.01 s), Necto GD level (−29.0 vs −29.3), so the 100M stop rule did not fire. Retreats were
+clearly worse: time to goal-side 4.78 vs 3.40 s (z +11.8), retreat conceded 39.9% vs 28.2% (z +4.5),
+dodges on retreats 8.5 vs 32.9 per 100 touches (z −5.0), wall time 16.1% vs 12.6%. At 87–102M
+(5 results each) retreats had partly recovered (dodges 15.9, wall time 12.1%) and Necto GD read
+−25.2 vs v10's −33.4.
+
+**Defence probe, 3 seeds per checkpoint:** at 95M v11 entered its own net 23.3 times per 10 min
+against v10's 5.7, and at 101M 24.0 against 11.0, almost all unforced. At 101M lost challenges
+became goals within 5 s 73% of the time against 37%. On these readings a stop was recommended.
+
+### ~105M (2026-09-24, iteration 228400): the 3-seed readings did not reproduce
+
+Every probe on v10 and v11 at 228400, the defence probe at 6 seeds (`logs/*_v11_105M.json`):
+
+| | v10 | v11 |
+|---|---|---|
+| own-net entries / 10 min | 14.2 ± 4.6 | 15.3 ± 2.6 |
+| time in net / turned over inside | 1.81 s / 51% | 2.62 s / 70% |
+| SensAI touches first (decided challenges) | 16% | 23% |
+| lost although ahead 1 s out | 48% | 31% |
+| lost → goal against within 5 s | 41% | 39% |
+| steer gradient / steer opposed | 0.030 / 24.2% | 0.408 / 3.4% |
+| throttle full forward / braking | 51% / 1.7% | 35% / 1.4% |
+| steer reversals, 1500–3000 / 3000+ uu | 14.4% / 18.3% | 6.3% / 3.2% |
+
+v10's own net-entry count moved from 5.7 to 14.2 over three neighbouring checkpoints: checkpoint-to-
+checkpoint variation swamps three seeds. **The 4× net-entry gap and the 73% figure were noise.** v10
+parks in its own net about as often; it is a lineage habit, not a v11 one. The stop recommendation
+was withdrawn and the run continued to 150M. Exploration spread (sigma 0.082 throttle floor, jump
+p = 0.059), the midfield retreat comparison and rollout health were level between the two.
+
+**Method lesson:** a probe reading drives a decision only when pooled over several checkpoints and
+at least six seeds, never from one checkpoint.
+
+### ~150M (2026-09-24): the stop rule fires
+
+**Evals, pooled 125–155M (v11 9 results, v10 15) against v10 at the same step:**
+
+| | v11 | v10 | z |
+|---|---|---|---|
+| h2h vs v5 | −0.94 ± 1.09 (−0.87 SE) | −0.45 ± 1.24 | −0.3 |
+| **Necto GD** | **−23.7 ± 2.4** | −29.9 ± 1.5 | +2.2 |
+| Necto goals for / 10 min | 5.5 | 1.5 | +2.6 |
+| Nexto GD | −35.8 ± 3.4 | −34.3 ± 1.0 | −0.4 |
+| whiffs / 100 touches | **34.8** | 56.5 | −4.5 |
+| on target / 100 touches | **9.8** | 4.1 | +2.8 |
+| time to first touch, drop | **1.30 s** | 2.79 s | −8.4 |
+| first touch drop / wall | 24.5% / 82% | 13.9% / 72% | +2.9 / +2.3 |
+| touches / min | 6.47 | 6.08 | +1.4 |
+| kickoff goals against | 4.9 | 6.2 | −0.9 |
+| **retreat reached goal-side** | **53.7%** | 94.7% | **−10.3** |
+| **retreat conceded** (guardrail) | **57.9%** | 39.2% | **+5.4** |
+| retreat time to goal-side | 4.72 s | 3.45 s | +22 |
+| dodges on retreats / 100 touches | 11.2 | 34.7 | −5.5 |
+
+Retreat conceded by v11 25M window: 26, 13, 35, 38, 41, 62%. Time to goal-side rose steadily 3.7 →
+4.7 s.
+
+**Probes pooled over three checkpoints per run** (230800, 231000, 231200; defence probe 6 seeds each,
+n = 18 per run; `logs/*_v11_150M.json`):
+
+| | v10 | v11 | z |
+|---|---|---|---|
+| own-net entries / 10 min | 12.8 ± 1.0 | **5.6 ± 0.7** | −6.1 |
+| time in net with the ball in our corner | 5.9% | 2.1% | −4.4 |
+| challenges / 10 min | 19.6 | 26.3 | +3.0 |
+| challenges won | 12.4% | 16.8% | +1.4 |
+| lost and chipped | 54.6% | 41.5% | −2.9 |
+| steer gradient / steer opposed | 0.017–0.023 / 28.5–32.5% | 0.32–0.39 / 4.6–5.5% | |
+| throttle full forward / braking | 51–56% / 2.3–3.7% | 30–35% / 1.6–4.1% | |
+| steer reversals, mean of three, 800–1500 uu | 17.6% | 8.3% | lower in every band |
+
 ## 8. Outcome
 
-*Filled in when the run closes.*
+**Stopped at ~162M (iteration 231860; last checkpoint 231800), not adopted, 2026-09-24.** The 150M
+passivity check fired on retreat conceded (z +5.4 against v10). The 49 checkpoints are in
+`checkpoints/archive/v11_run/`, all evaluated; the league is restored to v5's end
+(`*.before_restore_202609241702` keeps the league v11 left). Pinned:
+`checkpoints/baselines/v11_iter230400.pt` (`v11_137M`: Necto −18.2, **Nexto −10.5**, the best Nexto
+single reading in the lineage, 3 seeds) and `v11_iter228000.pt` (`v11_98M`: Necto −16.0, h2h +10.8).
+
+### Findings
+
+1. **The steer fix worked and turned into ball play.** Gradient 10–20× v10's, opposed cancellation
+   from ~30% to ~5%, jitter lower at every distance. By 150M: whiffs 35 vs 57 per 100 touches, on
+   target 9.8 vs 4.1, dropped balls reached in half the time, own-net entries halved, more challenges
+   won, and the best pooled Necto GD since v5 (−23.7). **The first change since v5 that moved the
+   plateau was structural, not a reward.**
+2. **Throttle left the rail into part throttle, not braking.** Full-forward share fell from ~64% to
+   30–35%; braking stayed at 1.4–4.1% throughout (pretrained 29.5%). The penalty keeps the gradient
+   alive, but in this head every policy gradient still passes through tanh's slope, and exploration is
+   a global sigma floored at 0.082. A **tanh-squashed Gaussian** (sample before the tanh, state-
+   dependent spread, squash-corrected entropy, as in Prometheus's `PPOLearner.cpp`) removes the dead
+   gradient structurally instead of treating it with a penalty.
+3. **Retreats regressed steadily and the cause is unexplained.** Reached goal-side 95% → 54%,
+   conceded 39% → 58%, dodges on retreats a third of v10's, while full-match goals against were no
+   worse than v10's. The penalty does not touch jump or pitch, and v11 carried more boost than v10.
+4. **Nexto did not improve.** −35.8 against −34.3. Necto is 18.75% of training, so part of the Necto
+   gain may be opponent-specific; the one Nexto −10.5 reading is a single 3-seed checkpoint.
+5. **Single-checkpoint probe readings mislead.** The 95–101M defence-probe gap reversed at 6 seeds and
+   inverted when pooled over three checkpoints (§7). Pool before deciding.
+6. **The lineage closes here.** v5–v11 spent ~2B steps on reward, start-mix and action-head variables
+   with v5's architecture and trainer. With Seer's thesis, GigaLearn and Prometheus in hand, the next
+   step is a rebuild rather than v12: `docs/rebuild_plan.md`.
