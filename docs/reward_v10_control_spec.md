@@ -1,6 +1,6 @@
 # Reward v10: v7 at the pool's natural tag frequencies (a control)
 
-Status: **written 2026-09-23, not yet started.**
+Status: **closed at ~523M, not adopted, 2026-09-24** — outcome in §7.
 Identity: code `6f7bbc1ec86ffaae` (v7's, unchanged), settings `c51290dcd68a4a89`
 (`config/reward_versions/v10.json`).
 Start checkpoint: `checkpoints/baselines/v5_iter222000.pt`. The league is restored to where v5 ended
@@ -138,4 +138,72 @@ v10 can still be adopted, on v9's criterion without the mechanism condition. Poo
 
 ## 7. Outcome
 
-*Filled in when the run closes.*
+**Stopped at ~523M (iteration 253947; last checkpoint 253800), not adopted, 2026-09-24.** v5 remains
+the lineage baseline. The 159 checkpoints are in `checkpoints/archive/v10_run/`, every one
+evaluated. The league has been restored to v5's end again (§3), and the league v10 left is kept
+as `*.before_restore_202609240948`.
+
+### The 400M criterion
+
+Pooled 375–425M (15 results) against the v5 400M reference:
+
+| condition | v10 | needed | |
+|---|---|---|---|
+| 1. head to head vs v5 | −1.68 ± 0.86 (−1.95 SE) | at or above −2 SE | pass, barely |
+| 2. Necto / Nexto goal difference | −29.0 ± 1.3 / **−33.6 ± 0.5** | better than −26.2 or −23.0 | **FAIL** |
+| 3. touches / min | **5.93 ± 0.19** vs 7.39 | not clearly worse | **FAIL** (z −6.3) |
+| 3. retreat conceded | **39.2% ± 2.2** vs 25.0% | not clearly worse | **FAIL** (z +3.5) |
+| 3. kickoff goals against / Necto goals for | 8.9 / 3.6 vs 6.5 / 2.8 | not clearly worse | hold |
+
+### The run against v7, 50M windows
+
+| | Necto GD v10 / v7 | Nexto GD v10 / v7 | retreat goal-side v10 / v7 | kickoff GA v10 / v7 | touches v10 / v7 | h2h v10 / v7 |
+|---|---|---|---|---|---|---|
+| 0–50M | −27.8 / −29.9 | −31.2 / −28.6 | 100.0 / 97.3 | 7.5 / 9.0 | 6.8 / 7.2 | −0.5 / −5.9 |
+| 100–150M | −29.2 / −29.7 | −31.8 / −31.2 | 92.5 / 91.7 | 7.9 / 7.6 | 6.5 / 6.4 | +1.9 / +3.0 |
+| 200–250M | −27.7 / −27.7 | −35.3 / −32.9 | 99.2 / 94.2 | 6.6 / 10.2 | 5.9 / 6.7 | −1.5 / −0.5 |
+| 250–300M | −30.1 / **−33.3** | −33.0 / −32.4 | 97.2 / 93.8 | 11.3 / 11.3 | 6.9 / 6.6 | −1.2 / −0.3 |
+| 300–350M | −29.5 / **−32.2** | −33.5 / −33.5 | 97.5 / **85.4** | 10.6 / **11.4** | 6.5 / 6.5 | −3.9 / +0.4 |
+| 350–400M | −27.0 / **−35.3** | −32.7 / −35.6 | 90.4 / **83.3** | 8.8 / **13.9** | 6.1 / 6.2 | −1.6 / +1.5 |
+| 400–450M | −27.8 / — | −33.1 / — | 94.4 / — | 8.9 / — | 5.9 / — | −3.1 / — |
+| 450–500M | −27.3 / — | −33.5 / — | 96.1 / — | 7.3 / — | 6.2 / — | −5.1 / — |
+
+Training was healthy throughout: entropy −0.364 to −0.372, explained variance 0.81–0.82, value
+loss 0.070–0.084. Mean training reward slid from 0.71 (150–200M) to 0.63–0.65 (400–550M).
+
+### Findings
+
+1. **The tag mix caused v7's regression, the part that was v7's alone.** Over 250–400M, v7 slid
+   to −32 to −35 against Necto, 83–85% retreat goal-side and 11–14 kickoff goals against. v10 held
+   −27 to −30, 90–97% and 7–11 over the same steps. §4's first outcome held: the natural mix is the
+   lineage default, and v7's forced weighting is retired.
+2. **v10 did not improve either.** Nexto, the held-out opponent, stayed at −31 to −35 for all
+   523M, against the reference's −27. Touches fell from 6.8 to about 6.0 (reference 7.4). First
+   touch fell on bounces (33% → 21–28%) and, after 400M, on dropped balls (17–24% → 7.5–10%). The
+   head to head against v5 went steadily negative: −3.9, −1.6, −3.1 and −5.1 over 300–500M. After
+   500M steps v10 loses to the checkpoint it started from.
+3. **Three continuations of v5's reward, one plateau.** v6 (T6 inert, so v5's optimum), v7
+   (forced starts) and v10 (natural starts) have trained v5's reward for ~1.4B steps past v5's
+   end. None beat v5 against a fixed opponent, and v7 and v10 both lost touches and shot quality.
+   With v8's and v9's reward terms, nothing tried since v5 has moved the plateau. The start mix
+   explains why v7 got *worse* than the others, not why none got *better*.
+4. **A structural cause has since been measured: the steer and throttle means are saturated**
+   (project memory `tanh-mean-saturation`, measured 2026-09-23 in a separate session on ~3.2k
+   grounded states against Necto). |mean| > 0.95 in 76–85% of states for steer and 54–69% for
+   throttle, for every checkpoint from v3 198k through v10 229k, with median tanh gradient ~0.
+   `pretrained_baseline` was unsaturated (11% / 4%). The action mean is `tanh(linear)` with a Normal
+   around it (`agent/models.py:377`), and throttle's log_std floor is −2.5, sigma 0.082
+   (`agent/models.py:58`). Once a pre-activation passes full lock, `(1 − tanh²)` removes the
+   gradient in that state and exploration around it is too narrow to find braking. That is a
+   direct mechanism for findings 2 and 3: further training cannot change ground control in most
+   ground states, and the regressing metrics (touches, whiffs, first touch on drops) are ground
+   control. It predates every version in this lineage, which is why no reward or start change
+   moved it.
+5. **The next version should target the action head, not the reward or the starts.** Reward
+   and starts stay at v10's, which is now the natural-mix reference. Candidates from the
+   saturation finding: a penalty on pre-tanh magnitude, a clip-aware log-probability, or
+   tanh-squashed sampling. The first of these leaves the parameterisation alone and is the smallest
+   single variable. Re-measure saturation before claiming any fix. The metric has to be the
+   saturation itself, plus touches and first touch; per v8's lesson 3, not a quantity the change
+   pays for.
+
