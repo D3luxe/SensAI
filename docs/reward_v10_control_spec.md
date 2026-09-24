@@ -187,23 +187,38 @@ loss 0.070–0.084. Mean training reward slid from 0.71 (150–200M) to 0.63–0
    end. None beat v5 against a fixed opponent, and v7 and v10 both lost touches and shot quality.
    With v8's and v9's reward terms, nothing tried since v5 has moved the plateau. The start mix
    explains why v7 got *worse* than the others, not why none got *better*.
-4. **A structural cause has since been measured: the steer and throttle means are saturated**
-   (project memory `tanh-mean-saturation`, measured 2026-09-23 in a separate session on ~3.2k
-   grounded states against Necto). |mean| > 0.95 in 76–85% of states for steer and 54–69% for
-   throttle, for every checkpoint from v3 198k through v10 229k, with median tanh gradient ~0.
-   `pretrained_baseline` was unsaturated (11% / 4%). The action mean is `tanh(linear)` with a Normal
-   around it (`agent/models.py:377`), and throttle's log_std floor is −2.5, sigma 0.082
-   (`agent/models.py:58`). Once a pre-activation passes full lock, `(1 − tanh²)` removes the
-   gradient in that state and exploration around it is too narrow to find braking. That is a
-   direct mechanism for findings 2 and 3: further training cannot change ground control in most
-   ground states, and the regressing metrics (touches, whiffs, first touch on drops) are ground
-   control. It predates every version in this lineage, which is why no reward or start change
-   moved it.
+4. **A structural cause has since been measured: the steer and throttle pre-activations sit far
+   past full lock.** First measured 2026-09-23 in a separate session (project memory
+   `tanh-mean-saturation`). Reproduced 2026-09-24 with `scripts/action_saturation.py` (~4–6k
+   grounded states per checkpoint from two 3000-step matches against Necto; results in
+   `logs/saturation_baseline_20260924.json`):
+
+   | | pretrained | v3 198k | v5 222000 | v10 229000 | v10 253800 |
+   |---|---|---|---|---|---|
+   | median d(mean)/d(pre), steer / throttle | 0.96 / 0.89 | 0.057 / 0.043 | 0.031 / 0.019 | 0.038 / 0.051 | 0.024 / 0.083 |
+   | median \|pre\|, steer / throttle | 0.18 / 0.33 | 4.3 / 3.6 | 4.3 / 4.0 | 4.6 / 3.5 | 4.7 / 2.9 |
+   | each pass past 0.95, steer / throttle | 1% / 19% | 70% / 72% | 75% / 77% | 72% / 71% | 72% / 65% |
+   | averaged mean past 0.95, steer / throttle | 0.5% / 19% | 20% / 54% | 32% / 63% | 28% / 55% | 35% / 46% |
+   | braking (throttle mean < −0.1) | 29.5% | 0.8% | 1.3% | 2.0% | 5.0% |
+
+   The action mean is `0.5 · (tanh(raw pass) + tanh(mirrored pass) · sign)` (`agent/models.py:525`),
+   and full lock (0.95) starts at a pre-activation of 1.83. The first session's "76–85%" was the
+   per-pass figure. The averaged mean reads lower because of **steer cancellation**: in 24–28% of
+   grounded states both passes sit at full lock in *opposite* directions, so steer reads ~0 (median
+   0.002) as +1 and −1 cancelling, with no gradient. A small observation change that pulls either
+   pass off its rail swings steer by up to 0.5, which is a direct mechanism for the steer dither.
+   Throttle's log_std floor is −2.5, sigma 0.082 (`agent/models.py:58`), too narrow to explore
+   braking. That is a direct mechanism for findings 2 and 3: further training cannot change ground
+   control in most ground states, and the regressing metrics (touches, whiffs, first touch on drops)
+   are ground control. It predates every version in this lineage, which is why no reward or start
+   change moved it; 500M steps of v10 moved throttle a little (63% → 46%, braking 1.3% → 5%) and
+   steer not at all.
 5. **The next version should target the action head, not the reward or the starts.** Reward
    and starts stay at v10's, which is now the natural-mix reference. Candidates from the
    saturation finding: a penalty on pre-tanh magnitude, a clip-aware log-probability, or
    tanh-squashed sampling. The first of these leaves the parameterisation alone and is the smallest
-   single variable. Re-measure saturation before claiming any fix. The metric has to be the
+   single variable, and it has to act on each pass: a clip-aware log-probability would not undo
+   opposed cancellation, where the averaged mean is already at 0. Re-measure saturation before claiming any fix. The metric has to be the
    saturation itself, plus touches and first touch; per v8's lesson 3, not a quantity the change
    pays for.
 
