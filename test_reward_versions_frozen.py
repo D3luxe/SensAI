@@ -14,6 +14,7 @@ one of these fails, the fix is to put the change in the next version, not to upd
   v8  env/rewards_v8.py (+ the v3 files it imports) + env/replay_sampling_v7.py
   v9  env/rewards_v9.py (+ the v3 files it imports) + env/replay_sampling_v7.py
   v10 v7's files, unchanged (same code_sha as v7); only the replay tag weights differ
+  v11 v10's files + agent/pre_tanh_penalty.py; v10's settings + action_regularization
 """
 import unittest
 

@@ -36,7 +36,9 @@ LEGACY_VERSION = "v2"
 SETTINGS_SECTIONS = ("rewards", "reward_annealing", "scenarios")
 # Sections only some versions carry. Hashed into settings_sha only when present, so adding one leaves
 # every earlier version's identity untouched.
-OPTIONAL_SETTINGS_SECTIONS = ("replay_sampling",)
+# action_regularization (v11) is a loss on the policy's output, not a reward, but it defines the run
+# the same way, so it is frozen and hashed with the rest.
+OPTIONAL_SETTINGS_SECTIONS = ("replay_sampling", "action_regularization")
 
 CODE_FILES: Dict[str, Tuple[str, ...]] = {
     "v2": ("env/rewards.py",),
@@ -59,6 +61,9 @@ CODE_FILES: Dict[str, Tuple[str, ...]] = {
     # v10 is v7 at the pool's natural tag frequencies: v5's reward and v7's code, byte for byte, so
     # v7's files and code_sha. Only the replay tag weights differ, and they live in the settings
     "v10": ("env/rewards_v3.py", "env/scenarios_v3.py", "env/replay_sampling_v7.py"),
+    # v11 is v10 plus a penalty on the throttle/steer pre-tanh magnitude in PPO's loss; the reward
+    # and starts are v10's, and the penalty's code joins the identity
+    "v11": ("env/rewards_v3.py", "env/scenarios_v3.py", "env/replay_sampling_v7.py", "agent/pre_tanh_penalty.py"),
 }
 
 
@@ -131,7 +136,7 @@ def reward_defaults(version: str) -> Dict[str, float]:
     if version == "v4":
         from env.rewards_v4 import REWARD_V4_DEFAULTS
         return {k: v for k, v in REWARD_V4_DEFAULTS.items() if k != "gamma"}
-    if version in ("v5", "v7", "v10"):
+    if version in ("v5", "v7", "v10", "v11"):
         from env.rewards_v3 import REWARD_V3_DEFAULTS
         return {k: v for k, v in REWARD_V3_DEFAULTS.items() if k != "gamma"}
     if version == "v6":
@@ -169,10 +174,11 @@ def make_reward_manager(version: Optional[str] = None, reward_weights: Optional[
     if version == "v4":
         from env.rewards_v4 import RewardManagerV4
         return RewardManagerV4(reward_weights=reward_weights)
-    if version in ("v5", "v7", "v10"):
+    if version in ("v5", "v7", "v10", "v11"):
         # v5's terms are v3's, unchanged; the version differs only in gamma, which the
         # manager reads from its weights. Nothing reads RewardManagerV3.version. v7's reward is
         # v5's, unchanged; v7 differs in where episodes start, and v10 in how v7's starts are weighted.
+        # v11's reward is v10's; it differs in PPO's loss (action_regularization).
         from env.rewards_v3 import RewardManagerV3
         return RewardManagerV3(reward_weights=reward_weights)
     if version == "v6":

@@ -21,6 +21,7 @@ from agent.models import ActorCritic, LOG_STD_FLOOR_DEFAULT
 from agent.checkpoint import migrate_state_dict
 from utils.config import anneal_progress, annealed_weights
 from env import replay_sampling_v7
+from agent.pre_tanh_penalty import PreTanhPenalty
 from env.reward_registry import apply_reward_version, load_snapshot, scenario_payload, version_of
 from utils.league_manager import LeagueManager
 
@@ -174,6 +175,9 @@ class PPOTrainer:
         self.gae_lambda = float(hp.get("gae_lambda", 0.95))
         self.clip_range = float(hp.get("clip_range", 0.2))
         self.ent_coef = float(hp.get("ent_coef", 0.01))
+        # v11: penalty on the throttle/steer pre-tanh magnitude (agent/pre_tanh_penalty.py). Frozen
+        # with the version's settings (action_regularization); absent for every earlier version.
+        self.pre_tanh_penalty = PreTanhPenalty.from_config(self.config.get("action_regularization"))
         self.vf_coef = float(hp.get("vf_coef", 0.5))
         # Value-function clipping is OFF by default and no longer shares the policy's
         # clip_range. Reusing clip_range meant the critic could move its prediction by at
@@ -1254,6 +1258,8 @@ class PPOTrainer:
             entropy_losses = []
             bc_losses = []
             approx_kls = []
+            pre_tanh_losses = []
+            pre_tanh_stats = []
             critic_warmup = self._critic_warmup_remaining > 0
             decay_factor = max(0.0, 1.0 - (self.global_step / max(1, self.bc_decay_steps)))
             current_bc_weight = 0.0 if critic_warmup else float(self.bc_regularization_weight * decay_factor)
@@ -1287,9 +1293,16 @@ class PPOTrainer:
                     aug_ret = mb_ret
                     aug_val = mb_val
 
-                    _, newlogprob, entropy, newvalue = self.agent.get_action_and_value(
-                        aug_o, aug_a
-                    )
+                    if self.pre_tanh_penalty is not None:
+                        with self.pre_tanh_penalty.capture(self.agent.actor_mean) as pre_outs:
+                            _, newlogprob, entropy, newvalue = self.agent.get_action_and_value(
+                                aug_o, aug_a
+                            )
+                    else:
+                        pre_outs = None
+                        _, newlogprob, entropy, newvalue = self.agent.get_action_and_value(
+                            aug_o, aug_a
+                        )
                     logratio = newlogprob - aug_lp
                     ratio = logratio.exp()
 
@@ -1332,6 +1345,14 @@ class PPOTrainer:
                         loss = v_loss * self.vf_coef
                     else:
                         loss = pg_loss - self.ent_coef * entropy_loss + v_loss * self.vf_coef
+                        # Not during critic warmup: the actor must stay untouched there.
+                        if pre_outs is not None:
+                            pre_tanh_loss = self.pre_tanh_penalty.loss(pre_outs)
+                            if pre_tanh_loss is not None:
+                                loss = loss + pre_tanh_loss
+                                pre_tanh_losses.append(pre_tanh_loss.item())
+                    if pre_outs is not None and start == 0:
+                        pre_tanh_stats.append(self.pre_tanh_penalty.stats(pre_outs))
 
                     # Behavioral Cloning (BC) Regularization (decays cleanly to 0.0)
                     if current_bc_weight > 1e-4:
@@ -1430,6 +1451,10 @@ class PPOTrainer:
                 "mean_boost_tank": round(float(np.mean(boost_amt)), 1),
                 "zero_boost_pct": round(float(np.mean(boost_amt < 1.0) * 100.0), 1),
             }
+            if pre_tanh_stats:
+                telemetry["pre_tanh_penalty"] = round(float(np.mean(pre_tanh_losses)), 6) if pre_tanh_losses else 0.0
+                for key in pre_tanh_stats[0]:
+                    telemetry[f"pre_tanh_{key}"] = round(float(np.mean([st_[key] for st_ in pre_tanh_stats])), 3)
 
             # Stream metrics to JSON for Gradio UI to consume
             metrics_payload = {
