@@ -1,6 +1,6 @@
 # Rebuild plan: SensAI on Prometheus
 
-Status: **agreed 2026-09-24; Phases 0, 1 and 2's gate passed 2026-09-24; Phase 2 complete; Phase 3's run 1 ended 2026-09-25 without adoption (a fresh policy jumps half the time, so ground controls never trained); `headcheck2_1v1` is next.** SenseiBot's trainer is retired after v11
+Status: **agreed 2026-09-24; Phases 0, 1 and 2's gate passed 2026-09-24; Phase 2 complete; Phase 3's run 1 ended 2026-09-25 without adoption (a fresh policy jumps half the time, so ground controls never trained); a grounded start fixed that in `headcheck2_1v1`, and `headcheck3_1v1` (entropy scale 0.01) is next.** SenseiBot's trainer is retired after v11
 (`docs/reward_v11_pretanh_spec.md` §8). Training moves to a new workspace, **`C:\Users\coryf\antigravity\SensAI`**,
 built from Prometheus (https://github.com/mitige/prometheus, reviewed at commit `e4d097d`; upstream HEAD
 re-checked 2026-09-24 and unchanged). SensAI Studio (`ui/`), the evaluation suite and the probes move to
@@ -456,9 +456,17 @@ The ladder, probes and auto-eval followed; Phase 2 is complete.
   0.44 at 200M (0.3 at 4B). Throttle and steer do nothing in the air, so they got almost no signal
   while the entropy bonus pushed their spread to the ceiling, where `tanh` leaves it almost no
   gradient.
-- **Next:** `headcheck2_1v1` adds `actions.init_button_bias: [-3, 0, -3]` and
-  `actions.init_spread: 0.3` (fresh weights only), judged at ~50–100M on ground time, jump p, the
-  throttle and steer spread, and touches (SensAI `docs/run1_spec.md` §8).
+- **`headcheck2_1v1`** (`actions.init_button_bias: [-3, 0, -3]`, `init_spread: 0.3`, stopped at
+  ~158M): the car trained ~40% on the ground. Steer and pitch learned, and touches per player-minute
+  reached 1.84 at 150M, against ~0.8 for run 1 at 130M.
+- **What it left:** with weak signal, handbrake and boost drifted toward p 0.5, yaw and roll sat at the
+  spread ceiling, and the throttle spread rose again after 100M. The entropy scale (0.025) outweighs
+  the policy gradient on those channels.
+- **Next:** `headcheck3_1v1` is `headcheck2_1v1` with entropy scale 0.01 (SensAI `docs/run1_spec.md`
+  §8).
+- **Found on the way:** Studio's writes to `live_config.json` replayed SenseiBot's stale ent 0.008 /
+  LR 1.5e-4 onto one iteration per run (too little to matter). Fixed in the trainer and in Studio's
+  Start.
 - **Run 1b** (horizon ramp from run 1) is dropped.
 - **Process miss:** the 50M saturation check in the spec was never run. It would have caught this in
   minutes. The watcher should run the probe itself.
@@ -567,3 +575,6 @@ The ladder, probes and auto-eval followed; Phase 2 is complete.
   unstick throttle and steer. The revised cause is the fresh policy's 50% jump and handbrake, which
   keeps the car airborne from the start. Next is `headcheck2_1v1` (grounded start: button logit
   biases and a low starting spread).
+- 2026-09-25: `headcheck2_1v1` stopped at ~158M: the grounded start unlocked throttle and steer, but
+  entropy scale 0.025 pulls every weak-signal channel back to maximum entropy. `headcheck3_1v1`
+  (scale 0.01, nothing else changed) is next. The live-config replay bug is fixed.
