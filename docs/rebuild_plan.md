@@ -1,6 +1,6 @@
 # Rebuild plan: SensAI on Prometheus
 
-Status: **agreed 2026-09-24; Phases 0, 1 and 2's gate passed 2026-09-24; Phase 2's ladder, probes and auto-eval next.** SenseiBot's trainer is retired after v11
+Status: **agreed 2026-09-24; Phases 0, 1 and 2's gate passed 2026-09-24; reference ladder done; Phase 2's probes and auto-eval next.** SenseiBot's trainer is retired after v11
 (`docs/reward_v11_pretanh_spec.md` §8). Training moves to a new workspace, **`C:\Users\coryf\antigravity\SensAI`**,
 built from Prometheus (https://github.com/mitige/prometheus, reviewed at commit `e4d097d`; upstream HEAD
 re-checked 2026-09-24 and unchanged). SensAI Studio (`ui/`), the evaluation suite and the probes move to
@@ -363,6 +363,33 @@ frozen as `studio/config/profiles/run1_1v1.json`, and run 1's spec is `docs/run1
 - **Reference ladder.** Heuristic chaser, v3 198000, v5 222000, v11 228000 and 230400, Necto, Nexto.
   SenseiBot sits near the floor against Necto (−29 goals per 10 min), where real differences look like
   noise. A ladder spanning weaker opponents gives resolution from the first checkpoint.
+  - *Done 2026-09-24* (SensAI `4c25eea`, readings `b153a30`). Every suite run now also plays the heuristic,
+    v3 198000, v5 222000, v11 228000 and v11 230400 on the three match seeds (groups `ladder_<rung>`); Necto
+    and Nexto stay the top rungs. Each reference was run through the suite as the evaluated side (the
+    heuristic, Necto and Nexto can now play blue) into `studio/evals/baselines/`, and
+    `eval_suite.py --ladder-table <result>` prints a result beside them. Goal difference per 10 min:
+
+    | evaluated \ vs | heur | v3 | v5 | v11 228k | v11 230k | Necto | Nexto |
+    |---|---|---|---|---|---|---|---|
+    | heuristic | 1.0 | −7.2 | −16.0 | −15.8 | −26.8 | −38.8 | −39.8 |
+    | v3 198000 | 14.8 | −2.8 | −8.2 | −7.0 | −19.5 | −23.0 | −39.0 |
+    | v5 222000 | 15.0 | 12.0 | −2.5 | −3.8 | 2.0 | −26.2 | −27.8 |
+    | v11 228000 | 15.2 | 12.0 | 10.0 | −3.8 | 2.2 | −18.2 | −30.0 |
+    | v11 230400 | 26.0 | 29.5 | −2.0 | 3.0 | 2.0 | −16.2 | −31.5 |
+    | Necto | 39.5 | 26.2 | 29.5 | 27.5 | 24.8 | 9.2 | −8.2 |
+    | Nexto | 42.8 | 34.2 | 26.2 | 28.0 | 35.8 | 10.8 | 3.8 |
+
+    The heuristic rung is where an early checkpoint gets resolution; the SenseiBot rungs sit within
+    about ±10 of one another, so they resolve the middle only coarsely.
+  - Found on the way: **a seed does not fix the game.** The same seed replays differently from run to
+    run (v5 vs Necto, seed 11, three runs: 0–13, 2–7, 0–10), so seeds are independent samples. With 3
+    seeds, "every seed on one side of zero" happens 25% of the time by chance. The source of the
+    nondeterminism is not yet found (np and torch are seeded).
+  - Found on the way: **the blue seat is not neutral.** The evaluated checkpoint always plays blue.
+    Necto beats itself from blue 163–96 over 9 seeds (8 of 9 won); Nexto's mirror is even (91–93 over
+    7); SenseiBot's mirrors run about −3. So compare checkpoints with each other and with the
+    references' readings, not with zero. The Necto asymmetry is in Necto's path, not physics (Nexto
+    shares the physics and is even); not yet traced.
 - **Probe updates.** `action_saturation.py` must read the new head: pre-tanh means against the ±4
   clamp and the state-dependent spread. Braking share and steer reversals stay as-is.
 - **Auto-eval.** Point the watcher at SensAI's checkpoint folder and Prometheus's checkpoint layout
@@ -374,7 +401,7 @@ frozen as `studio/config/profiles/run1_1v1.json`, and run 1's spec is `docs/run1
 scenarios of 24 trials) ran end to end on the smoke run's 6062848 save in 0.8 min on 8 workers, and
 its result lists in Studio as `smoke_1v1 +6M`. The smoke model barely plays (no touches against Necto;
 its training log shows 0.3-0.5 touches per player-minute), so this proves the plumbing, not a baseline.
-The reference ladder, the probe updates and auto-eval remain before run 1 is judged.
+The probe updates and auto-eval remain before run 1 is judged.
 
 ### Phase 3: first run
 
