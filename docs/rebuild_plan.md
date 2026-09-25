@@ -1,6 +1,6 @@
 # Rebuild plan: SensAI on Prometheus
 
-Status: **agreed 2026-09-24; Phases 0, 1 and 2's gate passed 2026-09-24; Phase 2 complete; Phase 3's run 1 ended 2026-09-25 without adoption (a fresh policy jumps half the time, so ground controls never trained); a grounded start fixed that in `headcheck2_1v1`, but no SensAI checkpoint yet steers toward the ball; `headcheck4_1v1` (policy warmup) is next.** SenseiBot's trainer is retired after v11
+Status: **agreed 2026-09-24; Phases 0, 1 and 2's gate passed 2026-09-24; Phase 2 complete; Phase 3's run 1 ended 2026-09-25 without adoption (a fresh policy jumps half the time, so ground controls never trained); a grounded start fixed that in `headcheck2_1v1`, but no continuous run (run 1, head checks 1–4) learned to steer toward the ball; next is `discrete_1v1`, a discrete teacher for the continuous head (user's call 2026-09-25).** SenseiBot's trainer is retired after v11
 (`docs/reward_v11_pretanh_spec.md` §8). Training moves to a new workspace, **`C:\Users\coryf\antigravity\SensAI`**,
 built from Prometheus (https://github.com/mitige/prometheus, reviewed at commit `e4d097d`; upstream HEAD
 re-checked 2026-09-24 and unchanged). SensAI Studio (`ui/`), the evaluation suite and the probes move to
@@ -234,7 +234,7 @@ stays as the benchmark tool, with the Phase 0 flags (`cpu`, `cpu-obs`, `unpadded
      go with the old league.
    - Custom scenarios wait for a C++ state setter that reads the scenario JSON (not needed for run 1).
    - Replays & pretraining is removed, since behavioural cloning is retired; transfer learning is the
-     replacement if a teacher is ever used.
+     replacement if a teacher is ever used. (2026-09-25: it will be; the teacher is `discrete_1v1`.)
    - Tabs that load checkpoints (Evaluation, Behaviour, Watch a match, Health) wait for Phase 2's bridge.
    - *Done 2026-09-24* as SensAI `02fcb35`, `99bc9e3`, `5366a4a`:
      - Start runs `SensAITrainer` on a profile picked in the header.
@@ -476,6 +476,18 @@ The ladder, probes and auto-eval followed; Phase 2 is complete.
   10M). The hard pass is steer following the ball's side both ways by 50–100M
   (`action_saturation.py` now prints it). If it fails, the fallback is discrete actions with
   continuous control distilled later (user's call).
+- **`headcheck4_1v1`** (policy warmup, stopped at ~115M) failed. The warmup fixed the first updates
+  (KL 0.005–0.015). But the one-way steer (−0.5 in every state) was already there at 5.3M, before the
+  policy had learned anything: it comes from the fresh output layer, and PPO never learned away from
+  it. Touches trailed `headcheck2` at every step (0.74 against 1.29 per player-minute at 100M), and so
+  did evals (Necto −128 to −136 against −68 to −88).
+- **Discrete next (user's call, 2026-09-25).** Behavioural cloning would help here: a cloned start
+  already steers to the ball. It takes the form of GigaLearn's transfer learning, not SenseiBot's
+  replay cloning, which had imputed actions and the old observation. Transfer learning needs a teacher
+  in GigaLearn's format, so `discrete_1v1` makes one: `headcheck2`'s setup with GigaLearn's 90-action
+  table, to be cloned into the continuous head later. Pass: steer follows the ball by 50–100M, and
+  touches above `headcheck2`'s. If discrete fails too, the rewards and starts are next, not the head.
+  SensAI `docs/run1_spec.md` §8.
 - **Found on the way:** Studio's writes to `live_config.json` replayed SenseiBot's stale ent 0.008 /
   LR 1.5e-4 onto one iteration per run (too little to matter). Fixed in the trainer and in Studio's
   Start.
@@ -501,7 +513,8 @@ The ladder, probes and auto-eval followed; Phase 2 is complete.
 | retreat regression (v11, cause unknown) | retreat scenario in the suite | keep the retreat metrics as a guardrail |
 | kickoff: SenseiBot never flipped | kickoff first touch, a kickoff dodge metric | state-based kickoff reward in run 1; add a kickoff-dodge count to the suite |
 | upstream action-head defaults untested for 1v1 continuous control | spread pinned at `var_max`, means stuck at 0 (run 1) | **found in run 1:** a fresh policy's buttons are pressed half the time, so the car is airborne from the start and ground controls never train; `actions.init_button_bias` / `init_spread` (checked by `headcheck2_1v1`). The entropy's tanh term, which pulls the means to 0, is switched off too (`entropy_squash_correction`) but was not the cause. Run the saturation probe at 50M on every run |
-| no critic warmup in GigaLearn | the first iterations update the policy on a critic that explains nothing: from scratch (KL 0.5–4 in run 1 and the head checks, which locked `headcheck3`'s steer), and in a `start_from` run whose critic fits old returns | **drafted:** `ppo.policy_warmup` (policy LR 0 for N steps, then a ramp; the shared head trains with the critic meanwhile), counted from the run's start so it covers continuation runs too. First tried in `headcheck4_1v1` |
+| no critic warmup in GigaLearn | the first iterations update the policy on a critic that explains nothing: from scratch (KL 0.5–4 in run 1 and the head checks), and in a `start_from` run whose critic fits old returns | **available:** `ppo.policy_warmup` (policy LR 0 for N steps, then a ramp; the shared head trains with the critic meanwhile), counted from the run's start. `headcheck4_1v1` showed that it works (first KL 0.005–0.015), but it was not what blocked steering. Use it for the transfer and continuation runs |
+| the continuous head does not learn from scratch | steer ignores the ball's side (run 1, head checks 1–4) | **open:** train a discrete teacher (`discrete_1v1`), then clone it into the continuous head with GigaLearn's transfer learning. A fresh discrete policy puts ~45% of its grounded probability on jumps, so check ground time from iteration 1 |
 | moving to 2v2 later | a 2v2 run from a 1v1 checkpoint | same network and observation carry over; the eval suite and probes are 1v1-only and need 2v2 versions (Necto and Nexto both play team modes) before a 2v2 run is judged |
 
 ## 6. Decisions log
@@ -594,3 +607,8 @@ The ladder, probes and auto-eval followed; Phase 2 is complete.
   that no SensAI checkpoint steers toward the ball. `headcheck4_1v1` adds a policy warmup (also the
   critic warmup for continuation runs raised on 2026-09-24). If steering still fails, decide between
   continuous and discrete actions.
+- 2026-09-25: `headcheck4_1v1` stopped at ~115M. The warmup fixed the first updates, not the steering;
+  the one-way steer is the fresh output layer's and was never learned away. **Discrete actions next
+  (user's call)**, as the teacher for the continuous head through GigaLearn's transfer learning, the
+  form of the behavioural cloning cut in the rebuild. This amends the 2026-09-24 "keep continuous"
+  decision: continuous stays the end goal, but not as the from-scratch learner.
