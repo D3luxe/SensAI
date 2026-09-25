@@ -1,6 +1,6 @@
 # Rebuild plan: SensAI on Prometheus
 
-Status: **agreed 2026-09-24; Phases 0 and 1 passed 2026-09-24, Phase 2 next.** SenseiBot's trainer is retired after v11
+Status: **agreed 2026-09-24; Phases 0, 1 and 2's gate passed 2026-09-24; Phase 2's ladder, probes and auto-eval next.** SenseiBot's trainer is retired after v11
 (`docs/reward_v11_pretanh_spec.md` §8). Training moves to a new workspace, **`C:\Users\coryf\antigravity\SensAI`**,
 built from Prometheus (https://github.com/mitige/prometheus, reviewed at commit `e4d097d`; upstream HEAD
 re-checked 2026-09-24 and unchanged). SensAI Studio (`ui/`), the evaluation suite and the probes move to
@@ -354,6 +354,12 @@ frozen as `studio/config/profiles/run1_1v1.json`, and run 1's spec is `docs/run1
     that take raw RocketSim controls are now picked by `wants_raw_controls()` (Necto, Nexto, SensAI),
     not by class. On the same 600 dumped states the pip binding's `has_flip_or_jump()` agrees with
     C++ on every player, and observations through the adapter match C++ within 2.4e-7.
+- **Eval suite on SensAI checkpoints.** *Done 2026-09-24* (SensAI `e5648b5`). The checkpoint being
+  evaluated can be a SensAI save folder (`<run>/<step>` or `<run>/archive/<step>`):
+  `scripts/eval_policy.py` plays it as blue through `SensAIBot`, and `RocketLeagueEnv.step(agent_ticks=...)`
+  runs its per-tick block without the jump sequencer. Results are stamped with the profile as the
+  version and named `<profile>_<M>M`. `shot_quality.py` and `drop_ball_scenario.py`, which the suite
+  imports, came across from SenseiBot. SenseiBot `.pt` files still evaluate as before.
 - **Reference ladder.** Heuristic chaser, v3 198000, v5 222000, v11 228000 and 230400, Necto, Nexto.
   SenseiBot sits near the floor against Necto (−29 goals per 10 min), where real differences look like
   noise. A ladder spanning weaker opponents gives resolution from the first checkpoint.
@@ -363,6 +369,12 @@ frozen as `studio/config/profiles/run1_1v1.json`, and run 1's spec is `docs/run1
   (one folder per timestep count, plus `RUNNING_STATS.json`).
 
 **Gate:** parity passes, and one checkpoint runs through the full suite end to end.
+
+*Gate passed 2026-09-24.* Parity as above; the full suite (3 Necto seeds of 12000 steps, Nexto, 4
+scenarios of 24 trials) ran end to end on the smoke run's 6062848 save in 0.8 min on 8 workers, and
+its result lists in Studio as `smoke_1v1 +6M`. The smoke model barely plays (no touches against Necto;
+its training log shows 0.3-0.5 touches per player-minute), so this proves the plumbing, not a baseline.
+The reference ladder, the probe updates and auto-eval remain before run 1 is judged.
 
 ### Phase 3: first run
 
