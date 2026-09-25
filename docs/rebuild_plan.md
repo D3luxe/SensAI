@@ -347,9 +347,13 @@ frozen as `studio/config/profiles/run1_1v1.json`, and run 1's spec is `docs/run1
     an empty pad whose mirror is available reads as available. The bridge keeps it (the model trained
     on it); 214 of 600 observations would differ without it. Recorded in run 1's spec as a candidate
     fix for a later run.
-  - Still to do for evaluation: an adapter from the eval suite's Python arena (SenseiBot's
-    `RocketSimArena`, a different RocketSim binding) to the bridge's raw state, checked against C++ the
-    same way, and the action delay (`action_delay` 7) the trainer uses.
+  - *Arena adapter passed 2026-09-24* (SensAI `27e8f65`). `sensai_bridge/arena.py` reads the eval
+    suite's pip RocketSim 2.2.1 arena (RocketSim's own car state; pads matched by position), and
+    `sensai_bridge/bot.py` (`SensAIBot`) plays with the trainer's timing: 7 ticks of the previous action,
+    then the new one, as an 8-tick block, with the previous action reset at each episode start. Bots
+    that take raw RocketSim controls are now picked by `wants_raw_controls()` (Necto, Nexto, SensAI),
+    not by class. On the same 600 dumped states the pip binding's `has_flip_or_jump()` agrees with
+    C++ on every player, and observations through the adapter match C++ within 2.4e-7.
 - **Reference ladder.** Heuristic chaser, v3 198000, v5 222000, v11 228000 and 230400, Necto, Nexto.
   SenseiBot sits near the floor against Necto (−29 goals per 10 min), where real differences look like
   noise. A ladder spanning weaker opponents gives resolution from the first checkpoint.
