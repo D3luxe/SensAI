@@ -1,6 +1,6 @@
 # Rebuild plan: SensAI on Prometheus
 
-Status: **agreed 2026-09-24; Phases 0, 1 and 2's gate passed 2026-09-24; reference ladder and probes done; Phase 2's auto-eval next.** SenseiBot's trainer is retired after v11
+Status: **agreed 2026-09-24; Phases 0, 1 and 2's gate passed 2026-09-24; Phase 2 complete; Phase 3 (run 1) next.** SenseiBot's trainer is retired after v11
 (`docs/reward_v11_pretanh_spec.md` §8). Training moves to a new workspace, **`C:\Users\coryf\antigravity\SensAI`**,
 built from Prometheus (https://github.com/mitige/prometheus, reviewed at commit `e4d097d`; upstream HEAD
 re-checked 2026-09-24 and unchanged). SensAI Studio (`ui/`), the evaluation suite and the probes move to
@@ -167,7 +167,7 @@ Each phase ends at a gate. Nothing moves on until the gate passes.
 **Gate:** every parity test passes, and CUDA throughput is measured. The throughput number sets the
 budget for Phase 3 (at SenseiBot's ~8k steps/s, 5B steps took ~7 days).
 
-**Gate passed 2026-09-24.** Parity passes with three documented exceptions, and throughput is
+**Phase 2 complete 2026-09-24* (all items above). *Gate passed 2026-09-24.** Parity passes with three documented exceptions, and throughput is
 measured (§6). Result: **train on CPU physics**, ~123k steps/s in 1v1 at 2048 games (~150k in 2v2),
 which puts 5B steps at ~10–12 h.
 
@@ -410,6 +410,17 @@ frozen as `studio/config/profiles/run1_1v1.json`, and run 1's spec is `docs/run1
     `policy_health.py` still load SenseiBot `.pt` files only. Port one when a run needs it.
 - **Auto-eval.** Point the watcher at SensAI's checkpoint folder and Prometheus's checkpoint layout
   (one folder per timestep count, plus `RUNNING_STATS.json`).
+  - *Done 2026-09-24* (SensAI `35fc3df`). `scripts/auto_eval.py` follows `checkpoints/<run>/archive/`
+    and evaluates the first complete archive at or past each 25M steps from the run's own start,
+    oldest first, reporting a backlog when it falls behind. Studio's "Follow the run" takes the
+    interval in millions of steps and a ladder switch; the Evaluation tab lists SensAI saves and
+    archives, pools by run and compares with v5 222000's reading by default. Checked end to end on
+    the smoke run at a 2M interval.
+  - **Cost, open for run 1:** a full suite with the ladder is ~12 CPU-minutes (2.9 min on 4 idle
+    workers). Run 1's spec assumed ~46 s, which was the pre-ladder suite's wall time on 4 workers. At
+    ~123k steps/s, 25M steps is ~3.4 min, so the watcher barely keeps pace on an idle machine and
+    falls behind beside the trainer, which also loses the cores it takes. Options: a longer
+    interval, `--no-ladder` on most evals, or accept the lag and let pooling catch up after.
 
 **Gate:** parity passes, and one checkpoint runs through the full suite end to end.
 
@@ -417,7 +428,7 @@ frozen as `studio/config/profiles/run1_1v1.json`, and run 1's spec is `docs/run1
 scenarios of 24 trials) ran end to end on the smoke run's 6062848 save in 0.8 min on 8 workers, and
 its result lists in Studio as `smoke_1v1 +6M`. The smoke model barely plays (no touches against Necto;
 its training log shows 0.3-0.5 touches per player-minute), so this proves the plumbing, not a baseline.
-Auto-eval remains before run 1 is judged.
+The ladder, probes and auto-eval followed; Phase 2 is complete.
 
 ### Phase 3: first run
 
