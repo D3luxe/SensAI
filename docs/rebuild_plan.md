@@ -236,8 +236,25 @@ stays as the benchmark tool, with the Phase 0 flags (`cpu`, `cpu-obs`, `unpadded
    - Replays & pretraining is removed, since behavioural cloning is retired; transfer learning is the
      replacement if a teacher is ever used.
    - Tabs that load checkpoints (Evaluation, Behaviour, Watch a match, Health) wait for Phase 2's bridge.
+   - *Done 2026-09-24* as SensAI `02fcb35`, `99bc9e3`, `5366a4a`:
+     - Start runs `SensAITrainer` on a profile picked in the header.
+     - Stop requests a clean stop, and kills only after a 60 s timeout.
+     - "Running" means the pid file's process is a live `SensAITrainer.exe`. The old test needed fresh
+       metrics, so it showed a trainer paused for more than 25 s as stopped.
+     - A profile card replaces the reward card, and the plot titles follow the records.
+     - The Training config tab is a profile editor: a profile is read-only once its run has saves, and
+       *Save as new profile* can set `start_from` to the source run's latest save.
+     - The League tab, league manager, behavioural-cloning pretrainer and SenseiBot's PPO trainer are
+       removed (user's call). `agent/__init__.py` no longer imports the old trainer.
+     - Kept: the replay pool, parser and tools (the "Replays" tab), as the source for replay start
+       states or pretraining in a later run, and `bot.py` to play SenseiBot's reference models in RLBot.
+     - Custom scenarios stays hidden until a C++ state setter reads its scenarios.
+     - 66 test modules, 721 tests pass, apart from the two tests in `test_reward_audit_fixes` that fail
+       at random in SenseiBot too.
 4. **Smoke test:** Start, Pause, Save, change LR, and Stop from Studio against a short 1v1 run. Check
    that the plots update, the checkpoint lands, and the process exits cleanly.
+   - *Done 2026-09-24* on `smoke_1v1.json` (user). Phase 1's gate now needs only the frozen run-1
+     profile (`run1_1v1.draft.json` has no open decisions left) and run 1's written spec.
 
 **Configuration for run 1:**
 
