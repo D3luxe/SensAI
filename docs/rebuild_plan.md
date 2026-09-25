@@ -338,6 +338,18 @@ frozen as `studio/config/profiles/run1_1v1.json`, and run 1's spec is `docs/run1
   Studio's Evaluation, Behaviour, Watch a match and Health tabs.
 - **Parity test.** For the same game states, the C++ and Python observations must match to float
   tolerance, and the deterministic actions must match. No eval number is trusted until this passes.
+  - *Passed 2026-09-24* (SensAI `af5fc1a`: `studio/sensai_bridge`, `src/SensAIParityDump.cpp`,
+    `studio/scripts/sensai_parity.py`, `parity_sensai.bat`). On 200 states (100 1v1, 100 2v2; 600
+    player observations, half orange, 84% airborne, pads on cooldown in 64 states): observations
+    bit-identical to C++, deterministic actions within 7.8e-7, no button disagreements. Not covered: a
+    demolished car (`is_demoed` was never set).
+  - Found on the way: upstream's `GetBoostPadTimers(inverted)` returns the other side's timers, so
+    an empty pad whose mirror is available reads as available. The bridge keeps it (the model trained
+    on it); 214 of 600 observations would differ without it. Recorded in run 1's spec as a candidate
+    fix for a later run.
+  - Still to do for evaluation: an adapter from the eval suite's Python arena (SenseiBot's
+    `RocketSimArena`, a different RocketSim binding) to the bridge's raw state, checked against C++ the
+    same way, and the action delay (`action_delay` 7) the trainer uses.
 - **Reference ladder.** Heuristic chaser, v3 198000, v5 222000, v11 228000 and 230400, Necto, Nexto.
   SenseiBot sits near the floor against Necto (−29 goals per 10 min), where real differences look like
   noise. A ladder spanning weaker opponents gives resolution from the first checkpoint.
