@@ -135,7 +135,7 @@ Each phase ends at a gate. Nothing moves on until the gate passes.
    | CUDA Toolkit ≥ 12.8 | ✅ 12.8 (V12.8.61), `CUDA_PATH` set |
    | VS 2022 C++ build tools, CMake ≥ 3.18 | ✅ Build Tools 17.14, MSVC 14.44, bundled CMake 3.31 |
    | **CUDA's Visual Studio integration** | ❌ `CUDA 12.8.props/.targets` are in neither VS 2022 nor VS 2026. Re-run the CUDA installer with *Visual Studio Integration*, or copy `CUDA\v12.8\extras\visual_studio_integration\MSBuildExtensions\*` into `…\2022\BuildTools\MSBuild\Microsoft\VC\v170\BuildCustomizations`. Without it CMake stops with "No CUDA toolset found". |
-   | **Python 3.11 x64** | ❌ only 3.14 is installed. The bundled pybind11 is 2.12, which predates 3.13/3.14 support, so 3.14 cannot be used. Install 3.11 alongside 3.14 and set `PROMETHEUS_PYTHON_HOME` to it; otherwise `tools/prometheus_env.bat` silently picks whatever `python` is on PATH. Studio and the eval suite keep running on 3.14. |
+   | **Python 3.11 x64** | ❌ only 3.14 is installed. The bundled pybind11 is 2.12, which predates 3.13/3.14 support, so 3.14 cannot be used. Install 3.11 alongside 3.14 and set `PROMETHEUS_PYTHON_HOME` to it; otherwise `tools/prometheus_env.bat` silently picks whatever `python` is on PATH. Studio and the eval suite keep running on RLBotGUIX's own Python 3.11 (see Phase 1 step 1). |
    | **LibTorch, CUDA 12.8 build (2.7 or later), Release** | ❌ not installed. Extract to a short path such as `C:\tools\libtorch` and set `LIBTORCH_DIR`. The installed PyTorch 2.10 is CPU-only and does not count. |
    | Shell | CMake is not on PATH, and VS 2026 Build Tools is also installed. Build from **Developer PowerShell for VS 2022** so its CMake and toolset are used. |
    | Long paths | Windows `LongPathsEnabled` is 0. The longest repo path under `SensAI\` is 161 characters, which fits, but clone with `-c core.longpaths=true` and consider enabling long paths (a system setting, done by the user). |
@@ -180,7 +180,17 @@ stays as the benchmark tool, with the Phase 0 flags (`cpu`, `cpu-obs`, `unpadded
 
 1. **Move Studio and the evaluation into SensAI.** Copy the assets listed in §2 into a Python folder in
    SensAI (e.g. `studio/`, beside the C++ tree), with their history noted in the commit message, and
-   commit before changing anything. Studio and the eval suite keep running on Python 3.14.
+   commit before changing anything. Studio and the eval suite keep running on RLBotGUIX's Python 3.11
+   (`%LOCALAPPDATA%\RLBotGUIX\Python311`, torch 2.0.1 CPU, gradio 6.25), which `start.bat` uses.
+   - *Done 2026-09-24* as SensAI `studio/`, copied from SenseiBot `06973cc` with `git archive`
+     (committed contents, not working-tree run state). The import closure is larger than §2's list:
+     `env/rocket_env.py` imports the reward modules, `utils/league_manager.py` and the BC pretrainer,
+     and `agent/__init__.py` imports `agent/ppo.py`, so the retired trainer comes along as a
+     dependency (60 modules). Also copied: 73 tests whose imports stay inside that set, `config/`,
+     `data/`, `evals/baselines/`, `checkpoints/baselines/` plus the Necto/Nexto/pretrained models,
+     `bin/rrrocket.exe`, `collision_meshes/`, `requirements.txt`, `start.bat`. `studio/` is the
+     working directory for Studio and, later, for `SensAITrainer`. Pruning the retired modules is step
+     3's job, once nothing imports them.
 2. **Write the headless trainer**, `src/SensAIMain.cpp` → `SensAITrainer.exe`, a new CMake target
    beside `GigaLearnBot`. It:
    - reads one **profile JSON** (`--config <path>`): mode and `playersPerTeam`, reward list and weights
@@ -288,7 +298,8 @@ for run 1.
 
 - **Python inference bridge.** Port `AdvancedObsPadded`, the attention model and the squashed head to
   Python/PyTorch so SensAI checkpoints load into the eval suite and every probe (now in SensAI), running
-  in RocketSim from Python. CPU PyTorch on 3.14 is enough for matches and probes. This also unlocks
+  in RocketSim from Python. Studio's CPU PyTorch (2.0.1, RLBotGUIX Python 3.11) is enough for matches
+  and probes; the parity test must hold across it and the trainer's LibTorch 2.10. This also unlocks
   Studio's Evaluation, Behaviour, Watch a match and Health tabs.
 - **Parity test.** For the same game states, the C++ and Python observations must match to float
   tolerance, and the deterministic actions must match. No eval number is trusted until this passes.
