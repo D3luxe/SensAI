@@ -1,6 +1,6 @@
 # Rebuild plan: SensAI on Prometheus
 
-Status: **agreed 2026-09-24, not started.** SenseiBot's trainer is retired after v11
+Status: **agreed 2026-09-24; Phase 0 passed 2026-09-24, Phase 1 next.** SenseiBot's trainer is retired after v11
 (`docs/reward_v11_pretanh_spec.md` §8). Training moves to a new workspace, **`C:\Users\coryf\antigravity\SensAI`**,
 built from Prometheus (https://github.com/mitige/prometheus, reviewed at commit `e4d097d`; upstream HEAD
 re-checked 2026-09-24 and unchanged). SensAI Studio (`ui/`), the evaluation suite and the probes move to
@@ -34,8 +34,9 @@ Meanwhile three outside references point at structure and scale, not reward deta
 
 Prometheus is the closest match to what SensAI wants: continuous actions without the saturation
 failure, attention, previous action in the observation, large batches, GPU physics, and a built-in
-teacher→student transfer path. On an RTX 5090 the GPU physics is the potential step change in
-throughput.
+teacher→student transfer path. Its GPU physics looked like the step change in throughput on an RTX
+5090. Phase 0 measured otherwise: C++ RocketSim on the CPU (24 cores) is as fast or faster for our
+setup, so SensAI trains on CPU physics and uses the 5090 for the network (§6, 2026-09-24).
 
 ## 2. What carries over
 
@@ -166,10 +167,16 @@ Each phase ends at a gate. Nothing moves on until the gate passes.
 **Gate:** every parity test passes, and CUDA throughput is measured. The throughput number sets the
 budget for Phase 3 (at SenseiBot's ~8k steps/s, 5B steps took ~7 days).
 
+**Gate passed 2026-09-24.** Parity passes with three documented exceptions, and throughput is
+measured (§6). Result: **train on CPU physics**, ~123k steps/s in 1v1 at 2048 games (~150k in 2v2),
+which puts 5B steps at ~10–12 h.
+
 ### Phase 1: headless trainer, Studio, and the 1v1 config
 
 SensAI Studio stays the front end. Prometheus's ImGui GUI is not built (`-DPROMETHEUS_BUILD_GUI=OFF`);
-the upstream GUI and `ExampleMain.cpp` stay in the tree, unmodified, as reference.
+the upstream GUI stays in the tree, unmodified, as reference. `ExampleMain.cpp` (`GigaLearnBot.exe`)
+stays as the benchmark tool, with the Phase 0 flags (`cpu`, `cpu-obs`, `unpadded`, `gpu-rewards`,
+`players=`, `games=`); runs go through `SensAITrainer`.
 
 1. **Move Studio and the evaluation into SensAI.** Copy the assets listed in §2 into a Python folder in
    SensAI (e.g. `studio/`, beside the C++ tree), with their history noted in the commit message, and
@@ -179,6 +186,11 @@ the upstream GUI and `ExampleMain.cpp` stay in the tree, unmodified, as referenc
    - reads one **profile JSON** (`--config <path>`): mode and `playersPerTeam`, reward list and weights
      (by name, through a small reward factory), state-setter mix, network and PPO settings, and the
      horizon schedule. This is the config-profile gating described below;
+   - trains on **CPU physics** (`EnvPhysicsBackend::ROCKETSIM_CPU`, `cudaNoCpuWorldState` off) with the
+     learner on the GPU (`LearnerDeviceType::GPU_CUDA`). Start at 2048 games in 1v1, which keeps a
+     ~49-step segment per player at 200k steps per iteration; games and steps per iteration are
+     explicit, frozen run-1 settings, since together they set the segment length GAE sees. The backend
+     stays a profile field so GPU physics can be revisited, but it is not an option for run 1;
    - writes `logs/train.pid` at start and removes it on exit;
    - in `iterationCallback`, appends one line to `logs/history.jsonl` and rewrites `logs/metrics.json`
      in the shapes Studio reads today (`utils/run_history.py`, `utils/process_manager.py`), mapping
@@ -253,7 +265,8 @@ the upstream GUI and `ExampleMain.cpp` stay in the tree, unmodified, as referenc
   SenseiBot's adopted v5 gamma (0.9977). Prometheus's default 0.993 is a 6.6 s half-life, shorter than
   both.
   - **Schedule:** hold at 10 s until the run's early mechanism check has passed, then move T (not gamma)
-    linearly to 20 s. Choose the length of the ramp from Phase 0's throughput, and freeze start, end,
+    linearly to 20 s. Choose the length of the ramp from Phase 0's throughput (~123k steps/s in 1v1, so
+    ~440M steps per hour), and freeze start, end,
     hold and ramp in run 1's spec. The schedule is part of the run's identity, so changing it means a
     new run.
   - **Implementation:** GigaLearn reads `config.ppo.gaeGamma` fresh on every iteration
@@ -293,7 +306,8 @@ for run 1.
 
 - **From scratch.** Prometheus's 28B-step teacher is not public. Using v5 as a teacher would mean
   porting SenseiBot's 108-dim observation and model into C++. Do that only if Phase 0's throughput is
-  too low to train from scratch in reasonable time.
+  too low to train from scratch in reasonable time. It is not: at ~123k steps/s, v5's ~3.6B steps take
+  ~8 h, so run 1 starts from scratch.
 - **Milestones written before the run**: an early mechanism check (saturation, spread, braking), a
   passivity check (head to head and guardrails), and an adoption criterion (clearly better than v5 on
   the ladder and on Nexto).
@@ -303,8 +317,10 @@ for run 1.
 
 | risk | what would show it | response |
 |---|---|---|
-| GPU physics differs from CPU on Blackwell | Phase 0 parity tests | stop; report upstream or fall back to CPU mode |
-| throughput gain smaller than hoped | Phase 0 benchmarks | consider v5 as a teacher (port its obs/model), or accept longer runs |
+| GPU physics differs from CPU on Blackwell | Phase 0 parity tests | **resolved:** parity passes with three documented exceptions, and runs use CPU physics |
+| throughput gain smaller than hoped | Phase 0 benchmarks | **resolved:** CPU physics ~123k steps/s in 1v1, ~15× SenseiBot; no teacher needed |
+| CPU-bound collection | Studio, or anything else heavy, running on the same 24 cores during a run | keep the machine quiet during runs; collection, not learning, is the limit |
+| games and steps per iteration set the segment length | too many games per iteration leaves short segments and a critic-heavy GAE | freeze both in each run's spec; revisit GPU physics only together with larger iterations |
 | eval bridge mismatch | Phase 2 parity test | fix before trusting any number |
 | Studio misreads the trainer | plots or cards blank or wrong after the key mapping | Phase 1 smoke test; the trainer writes the raw report too, so a mapping bug never loses data |
 | hard stop loses progress | Studio kills the process tree | graceful `stop_requested` first; kill only as a fallback |
@@ -320,7 +336,7 @@ for run 1.
 
 - 2026-09-24: retire SenseiBot's trainer after v11; rebuild on Prometheus in `SensAI`.
 - 2026-09-24: keep continuous actions (user's call); the squashed-Gaussian head replaces SenseiBot's.
-- 2026-09-24: use GPU physics on the RTX 5090.
+- 2026-09-24: use GPU physics on the RTX 5090. *Reversed later the same day, see below.*
 - 2026-09-24: horizon follows Seer: half-life 10 s annealed to 20 s (gamma 0.99539 → 0.99769), with the
   schedule frozen per run (user's call).
 - 2026-09-24: SensAI's goal includes 2v2. Start in 1v1; keep all 2v2 code, gated by config profile
@@ -332,3 +348,52 @@ for run 1.
 - 2026-09-24: Phase 0 checked on this machine: GPU, CUDA 12.8 and VS 2022 ready; Python 3.11, LibTorch
   cu128 and CUDA's Visual Studio integration still to install. Phase 0's test list corrected for the
   standalone `RocketSimCuda` build.
+- 2026-09-24: SensAI forked (`e4d097d` + sm_120 flags `77ec197` + `build_rscuda.bat` and
+  `tools/phase0_checks.ps1` `b30d879`); both builds succeed with LibTorch 2.10.0+cu128 and Python 3.11.
+- 2026-09-24: **Phase 0 physics parity passes on the 5090**, with three documented exceptions
+  (logs in SensAI `run_logs/phase0/`). GAE parity passes; CPU↔GPU comparison passes every scenario but
+  one.
+  1. `RocketSimCudaTest` ball drop (5 checks): the test is wrong, not the physics. It sets the ball
+     with exactly zero velocity, which the physics treats as asleep, copying RocketSim
+     (`Collision.cuh:1439`). The comparison's ball drops match CPU at 1, 120 and 1,440 ticks.
+  2. Game-state bridge, ball position after a goal (1 of 79 checks): the goal-interior geometry gap
+     upstream already documents. The goal event and ball velocity match, and the episode has ended by
+     then.
+  3. `front_flip_60`, heading 13.6° off (3° allowed): `RocketSimCudaTraceDivergence` shows CPU and GPU
+     identical through the jump, the flip and the flight (ticks 0–28, within 0.002 UU). They split at
+     the first ground contact (tick 29), where the car lands nose-down on the exact kickoff diagonal and
+     the two simulations break the symmetry in opposite directions. This is the exact tie upstream
+     documents (`compare_cpu_cuda.cpp:491`), not a flip-physics difference.
+- 2026-09-24: **Phase 0 throughput measured** (SensAI `tools/phase0_throughput.ps1`: fresh weights
+  per setup, no old-version games, 4 min each, median after 3 warm-up iterations; 200k steps per
+  iteration; Core Ultra 9 285K, 24 cores). Upstream's command-line `train` mode could not start with
+  its own padded observation; SensAI `76307d1`/`a88ff53`/`78376c6` add `cpu-obs`, `unpadded`,
+  `gpu-rewards` and `players=`.
+
+  | setup | overall steps/s | collection | segment per iteration |
+  |---|---|---|---|
+  | round 1, 2v2, upstream rewards, CPU physics, 1024 games | **150,671** | 253,131 | ~49 steps |
+  | round 1, 2v2, GPU physics (any obs), 2048–4096 games | 89–100k | 116–126k | |
+  | round 2, 1v1, GPU-supported rewards, CPU physics, 1024 games | 110,085 | 180,829 | ~98 steps |
+  | round 2, 1v1, CPU physics, 2048 games | **122,953** | 207,570 | ~49 steps |
+  | round 2, 1v1, GPU physics, padded obs built on CPU, 4096 games | 82,901 | 114,290 | ~24 steps |
+  | round 2, 1v1, fully on GPU (unpadded obs, GPU rewards), 4096 games | 93,035 | 160,436 | ~24 steps |
+  | round 2, 1v1, fully on GPU, 8192 games | 127,841 | 187,963 | ~12 steps |
+  | round 2, 1v1, fully on GPU, 16384 games | fails: 32,768 truncation points > 20,000-step minibatch | | ~6 steps |
+
+  Findings:
+  1. Learning (PPO) runs at 280–650k steps/s; collection is the limit everywhere.
+  2. **CPU physics is the fastest usable setup.** The GPU only catches up (128k vs 123k) when
+     *everything* is on the GPU, which needs the unpadded observation and GPU-supported rewards, and
+     8,192 games. At a fixed 200k steps per iteration, 16,384 players leave each player a ~12-step
+     segment per iteration, so most of GAE's horizon (λ 0.975 ≈ 40 steps; a 10 s half-life ≈ 150
+     steps) is bootstrapped from the critic. Matching CPU's segment length would mean ~4× larger
+     iterations, a learning-setup change rather than a free speed-up.
+  3. Keeping the state copy (padded observation, or any reward without a GPU version) makes GPU
+     physics slower than CPU physics.
+  4. ~120–150k steps/s is ~15–19× SenseiBot's ~8k: 1B steps ≈ 2–2.5 h, 5B ≈ 10–12 h.
+- 2026-09-24: **train on CPU physics; the 5090 runs the network** (user's call, reversing the GPU
+  physics decision above). This keeps `AdvancedObsPadded`, so one network carries from 1v1 to 2v2, and
+  lets rewards be any C++ term, not only those with a RocketSimCuda version. Extending the GPU observation
+  code to build the padded layout is no longer needed. GPU physics stays built and parity-tested, available if a later run raises steps
+  per iteration enough to keep segments long at 8k+ games. Phase 0's gate is passed.
