@@ -241,13 +241,20 @@ stays as the benchmark tool, with the Phase 0 flags (`cpu`, `cpu-obs`, `unpadded
 - **One network for both modes.** `AdvancedObsPadded` pads the observation to 2 teammates and 3
   opponents with zeros (`MAX_TEAMMATES = 2`, `MAX_OPPONENTS = 3`, 29 features per player) and includes
   the previous action. A 1v1 policy therefore sees the same input layout as a 2v2 or 3v3 one, and can be
-  trained on into 2v2 without changing its inputs. Attention over players is what makes that transfer
-  natural, which is one more reason to keep the attention head.
-  - **Check in Phase 1:** whether the empty player slots are masked out of the attention (the model
-    accepts a padding mask) or only zero-filled. A zero-filled slot reads as a car sitting at the
-    origin; masking, or a presence flag per slot, is cleaner. Decide before run 1, because changing it
-    later changes the observation.
-- Keep: continuous head with `varMin`/`varMax`, attention head, `AdvancedObsPadded`,
+  trained on into 2v2 without changing its inputs.
+  - **Checked in Phase 1 (2026-09-24): there is no attention over players.** `AttentionModel::Forward`
+    feeds the whole flat observation as one token, as both query and key (`AttentionModel.cpp:94–99`).
+    Attention over a single token has nothing to weigh, so the "attention head" works as a residual
+    MLP of ~7M parameters, and its padding-mask argument is never used. The padded layout still keeps
+    the input size fixed across modes, but the network sees fixed slots, like an MLP. §1's table is
+    right about the configuration and wrong to imply attention over players.
+  - Empty slots are zero-filled. That is unambiguous (a real car's forward and up vectors are unit
+    length, a zero slot's are zero), but in 1v1 the empty-slot inputs are always zero, so their
+    first-layer weights never receive a gradient and stay at their random initial values until 2v2.
+    **Decided: zero-fill for run 1** (user's call, 2026-09-24). At the move to 2v2, zero the
+    empty-slot first-layer weights so new cars start with no effect. Real attention over players
+    (per-player tokens with a mask) is a later architecture run, compared against run 1.
+- Keep: continuous head with `varMin`/`varMax`, the attention-head network (a residual MLP in practice), `AdvancedObsPadded`,
   `trainAgainstOldVersions` at 20%.
 - **Reward set, judged against §2's lessons.** Prometheus's defaults include terms our own runs showed
   fail:
@@ -408,3 +415,7 @@ for run 1.
   lets rewards be any C++ term, not only those with a RocketSimCuda version. Extending the GPU observation
   code to build the padded layout is no longer needed. GPU physics stays built and parity-tested, available if a later run raises steps
   per iteration enough to keep segments long at 8k+ games. Phase 0's gate is passed.
+- 2026-09-24: run 1 profile choices (user's calls): horizon held at T = 10 s until improvement
+  plateaus, then reassessed as a continuation run; `GoalReward` concede scale stays −0.8; empty player
+  slots zero-filled. Kickoff: `KickoffProximityReward` (state-based, zero-sum in 1v1, not
+  potential-based) at a proposed 0.1. Layout in SensAI `docs/profile.md`.
