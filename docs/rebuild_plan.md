@@ -1,6 +1,6 @@
 # Rebuild plan: SensAI on Prometheus
 
-Status: **agreed 2026-09-24; Phases 0, 1 and 2's gate passed 2026-09-24; Phase 2 complete; Phase 3's run 1 ended 2026-09-25 without adoption (a fresh policy jumps half the time, so ground controls never trained); a grounded start fixed that in `headcheck2_1v1`, and `headcheck3_1v1` (entropy scale 0.01) is next.** SenseiBot's trainer is retired after v11
+Status: **agreed 2026-09-24; Phases 0, 1 and 2's gate passed 2026-09-24; Phase 2 complete; Phase 3's run 1 ended 2026-09-25 without adoption (a fresh policy jumps half the time, so ground controls never trained); a grounded start fixed that in `headcheck2_1v1`, but no SensAI checkpoint yet steers toward the ball; `headcheck4_1v1` (policy warmup) is next.** SenseiBot's trainer is retired after v11
 (`docs/reward_v11_pretanh_spec.md` §8). Training moves to a new workspace, **`C:\Users\coryf\antigravity\SensAI`**,
 built from Prometheus (https://github.com/mitige/prometheus, reviewed at commit `e4d097d`; upstream HEAD
 re-checked 2026-09-24 and unchanged). SensAI Studio (`ui/`), the evaluation suite and the probes move to
@@ -464,6 +464,18 @@ The ladder, probes and auto-eval followed; Phase 2 is complete.
   the policy gradient on those channels.
 - **Next:** `headcheck3_1v1` is `headcheck2_1v1` with entropy scale 0.01 (SensAI `docs/run1_spec.md`
   §8).
+- **`headcheck3_1v1`** (entropy 0.01, stopped at ~222M) was worse on every outcome: 0 touches
+  against Necto, and 70–84% airborne.
+- **The finding behind it:** no SensAI checkpoint steers toward the ball.
+  - `headcheck3` turns hard one way in every state.
+  - `headcheck2` turns one way until the ball is ahead.
+  - Run 1 never steered.
+- **Likely source:** every run's first iterations take huge updates on an untrained critic (KL
+  0.5–4, clip 0.3–0.8). `headcheck3`'s steer locked in its first 3 iterations.
+- **Next:** `headcheck4_1v1` is `headcheck2` plus `ppo.policy_warmup` (policy frozen 5M, ramped over
+  10M). The hard pass is steer following the ball's side both ways by 50–100M
+  (`action_saturation.py` now prints it). If it fails, the fallback is discrete actions with
+  continuous control distilled later (user's call).
 - **Found on the way:** Studio's writes to `live_config.json` replayed SenseiBot's stale ent 0.008 /
   LR 1.5e-4 onto one iteration per run (too little to matter). Fixed in the trainer and in Studio's
   Start.
@@ -489,7 +501,7 @@ The ladder, probes and auto-eval followed; Phase 2 is complete.
 | retreat regression (v11, cause unknown) | retreat scenario in the suite | keep the retreat metrics as a guardrail |
 | kickoff: SenseiBot never flipped | kickoff first touch, a kickoff dodge metric | state-based kickoff reward in run 1; add a kickoff-dodge count to the suite |
 | upstream action-head defaults untested for 1v1 continuous control | spread pinned at `var_max`, means stuck at 0 (run 1) | **found in run 1:** a fresh policy's buttons are pressed half the time, so the car is airborne from the start and ground controls never train; `actions.init_button_bias` / `init_spread` (checked by `headcheck2_1v1`). The entropy's tanh term, which pulls the means to 0, is switched off too (`entropy_squash_correction`) but was not the cause. Run the saturation probe at 50M on every run |
-| no critic warmup in GigaLearn | a continuation run (new reward or horizon from an old checkpoint) whose first iterations update the policy on a critic fit to the old returns | **open:** SenseiBot warmed the critic before continuation runs; GigaLearn has no equivalent, and metrics.json records `critic_warmup: false`. From-scratch runs do not need it. Before the first `start_from` run, decide whether to add a `critic_warmup_iterations` option (policy LR 0 for N iterations; `SetLearningRates` then also freezes the shared head, so it trains the critic only) |
+| no critic warmup in GigaLearn | the first iterations update the policy on a critic that explains nothing: from scratch (KL 0.5–4 in run 1 and the head checks, which locked `headcheck3`'s steer), and in a `start_from` run whose critic fits old returns | **drafted:** `ppo.policy_warmup` (policy LR 0 for N steps, then a ramp; the shared head trains with the critic meanwhile), counted from the run's start so it covers continuation runs too. First tried in `headcheck4_1v1` |
 | moving to 2v2 later | a 2v2 run from a 1v1 checkpoint | same network and observation carry over; the eval suite and probes are 1v1-only and need 2v2 versions (Necto and Nexto both play team modes) before a 2v2 run is judged |
 
 ## 6. Decisions log
@@ -578,3 +590,7 @@ The ladder, probes and auto-eval followed; Phase 2 is complete.
 - 2026-09-25: `headcheck2_1v1` stopped at ~158M: the grounded start unlocked throttle and steer, but
   entropy scale 0.025 pulls every weak-signal channel back to maximum entropy. `headcheck3_1v1`
   (scale 0.01, nothing else changed) is next. The live-config replay bug is fixed.
+- 2026-09-25: `headcheck3_1v1` stopped at ~222M: a lower entropy scale did not help, and it exposed
+  that no SensAI checkpoint steers toward the ball. `headcheck4_1v1` adds a policy warmup (also the
+  critic warmup for continuation runs raised on 2026-09-24). If steering still fails, decide between
+  continuous and discrete actions.
