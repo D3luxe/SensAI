@@ -1,6 +1,6 @@
 # Rebuild plan: SensAI on Prometheus
 
-Status: **agreed 2026-09-24; Phase 0 passed 2026-09-24, Phase 1 next.** SenseiBot's trainer is retired after v11
+Status: **agreed 2026-09-24; Phases 0 and 1 passed 2026-09-24, Phase 2 next.** SenseiBot's trainer is retired after v11
 (`docs/reward_v11_pretanh_spec.md` §8). Training moves to a new workspace, **`C:\Users\coryf\antigravity\SensAI`**,
 built from Prometheus (https://github.com/mitige/prometheus, reviewed at commit `e4d097d`; upstream HEAD
 re-checked 2026-09-24 and unchanged). SensAI Studio (`ui/`), the evaluation suite and the probes move to
@@ -326,6 +326,9 @@ stays as the benchmark tool, with the Phase 0 flags (`cpu`, `cpu-obs`, `unpadded
 **Gate:** Studio drives `SensAITrainer` end to end (step 4), a frozen 1v1 profile, and a written spec
 for run 1.
 
+**Gate passed 2026-09-24** (SensAI `be4e6fa`): Studio drives the trainer (step 4), the profile is
+frozen as `studio/config/profiles/run1_1v1.json`, and run 1's spec is `docs/run1_spec.md`.
+
 ### Phase 2: bring the evaluation across
 
 - **Python inference bridge.** Port `AdvancedObsPadded`, the attention model and the squashed head to
@@ -444,3 +447,8 @@ for run 1.
   plateaus, then reassessed as a continuation run; `GoalReward` concede scale stays −0.8; empty player
   slots zero-filled. Kickoff: `KickoffProximityReward` (state-based, zero-sum in 1v1, not
   potential-based) at a proposed 0.1. Layout in SensAI `docs/profile.md`.
+- 2026-09-24: **Phase 1 passed.** Run 1's spec (SensAI `docs/run1_spec.md`) sets evaluation every 25M
+  steps pooled over ±50M, milestones at 50M, 250M and 1B, a plateau check every 500M (the latest window
+  not clearly better than the window 1B earlier on head to head vs v5, Nexto GD or Necto GD), adoption
+  checks from 2B and a 5B cap (user's calls). Whether adoption must also match v11 is deferred until
+  run 1 has started.
