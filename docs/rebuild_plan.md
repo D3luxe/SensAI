@@ -211,6 +211,14 @@ stays as the benchmark tool, with the Phase 0 flags (`cpu`, `cpu-obs`, `unpadded
      `stopRequested` then a final `Save()`, `learning_rate` → `ppo->SetLearningRates()`, `ent_coef` →
      `ppo->config.entropyScale`. Rewards and the start mix are frozen for the run (R1) and not live;
    - sets `config.ppo.gaeGamma` from the horizon schedule each iteration and logs T and gamma.
+   - *Done 2026-09-24* as SensAI `7a38e2e` (`src/SensAIMain.cpp`, profile layout in `docs/profile.md`).
+     Smoke-tested with `smoke_1v1.json` (256 games, 8.2M steps over two sessions): profile checks,
+     saves kept and stamped, weights-only archive every 500k, resume under the same profile, pause,
+     manual save while paused, live learning rate and entropy, and a clean `stop_requested` stop with a
+     final save all work. Explained variance was added to the Learner's report, and
+     `SetLearningRates`/`SetEntropyScale` exported, since `PPOLearner` is not exported from the DLL.
+     Studio's live keys stay as they are (`learning_rate` sets both learning rates, `ent_coef` sets the
+     entropy scale); `stop_requested` is new.
 3. **Wire Studio to it.**
    - `process_manager.start_training` launches `build\Release\SensAITrainer.exe --config <profile>`
      with `tools/prometheus_env.bat`'s PATH (for the LibTorch and Python DLLs), instead of
