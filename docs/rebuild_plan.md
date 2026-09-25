@@ -1,6 +1,6 @@
 # Rebuild plan: SensAI on Prometheus
 
-Status: **agreed 2026-09-24; Phases 0, 1 and 2's gate passed 2026-09-24; Phase 2 complete; Phase 3 (run 1) next.** SenseiBot's trainer is retired after v11
+Status: **agreed 2026-09-24; Phases 0, 1 and 2's gate passed 2026-09-24; Phase 2 complete; Phase 3's run 1 ended 2026-09-25 without adoption (an action-head entropy term; a head check is next).** SenseiBot's trainer is retired after v11
 (`docs/reward_v11_pretanh_spec.md` §8). Training moves to a new workspace, **`C:\Users\coryf\antigravity\SensAI`**,
 built from Prometheus (https://github.com/mitige/prometheus, reviewed at commit `e4d097d`; upstream HEAD
 re-checked 2026-09-24 and unchanged). SensAI Studio (`ui/`), the evaluation suite and the probes move to
@@ -441,6 +441,22 @@ The ladder, probes and auto-eval followed; Phase 2 is complete.
   the ladder and on Nexto).
 - **First comparison target:** v5 222000, then v11 230400.
 
+*Run 1 ran 2026-09-24 23:20 to 2026-09-25, stopped at ~4.16B steps (SensAI `docs/run1_spec.md` §7–8).*
+- **Not adopted.** In the final window it was −39.3 against v5 head to head, −40.8 against Necto and
+  −44.8 against Nexto. It was level with the heuristic chaser from ~1.5B on, and the plateau check
+  fired at 3.5B. The one learned behaviour is kickoff flipping (0% → ~90% dodges).
+- **Why:** throttle, steer, pitch and roll never learned. Their means stayed at ~0 with the spread
+  pinned at 1.0 through 4B steps; only yaw learned. So the policy moved by boosting and steered by
+  jumping and yawing (81–88% airborne).
+- **The likely cause is upstream GigaLearn:** `ComputeContinuousEntropy` adds `log(1 − tanh²(mean))`
+  per analog dimension, so the entropy bonus pulls every mean to 0.
+- **Fix drafted:** profile field `actions.entropy_squash_correction` (false = Gaussian-only entropy).
+  The confirmation is `headcheck_1v1.json`: run 1 with only that change, for ~100M steps, judged on
+  `action_saturation.py`.
+- **Run 1b** (horizon ramp from run 1) is dropped.
+- **Process miss:** the 50M saturation check in the spec was never run. It would have caught this in
+  minutes. The watcher should run the probe itself.
+
 ## 5. Risks and open questions
 
 | risk | what would show it | response |
@@ -458,6 +474,8 @@ The ladder, probes and auto-eval followed; Phase 2 is complete.
 | licence | publishing or tournament entry | ask mitige before either |
 | retreat regression (v11, cause unknown) | retreat scenario in the suite | keep the retreat metrics as a guardrail |
 | kickoff: SenseiBot never flipped | kickoff first touch, a kickoff dodge metric | state-based kickoff reward in run 1; add a kickoff-dodge count to the suite |
+| upstream action-head defaults untested for 1v1 continuous control | spread pinned at `var_max`, means stuck at 0 (run 1) | **found in run 1:** the entropy's tanh term pulls analog means to 0; profile flag `actions.entropy_squash_correction`, checked by `headcheck_1v1`. Run the saturation probe at 50M on every run |
+| no critic warmup in GigaLearn | a continuation run (new reward or horizon from an old checkpoint) whose first iterations update the policy on a critic fit to the old returns | **open:** SenseiBot warmed the critic before continuation runs; GigaLearn has no equivalent, and metrics.json records `critic_warmup: false`. From-scratch runs do not need it. Before the first `start_from` run, decide whether to add a `critic_warmup_iterations` option (policy LR 0 for N iterations; `SetLearningRates` then also freezes the shared head, so it trains the critic only) |
 | moving to 2v2 later | a 2v2 run from a 1v1 checkpoint | same network and observation carry over; the eval suite and probes are 1v1-only and need 2v2 versions (Necto and Nexto both play team modes) before a 2v2 run is judged |
 
 ## 6. Decisions log
@@ -534,3 +552,8 @@ The ladder, probes and auto-eval followed; Phase 2 is complete.
   not clearly better than the window 1B earlier on head to head vs v5, Nexto GD or Necto GD), adoption
   checks from 2B and a 5B cap (user's calls). Whether adoption must also match v11 is deferred until
   run 1 has started.
+- 2026-09-25: **run 1 stopped at ~4.16B steps, not adopted** (user's call on the evidence in SensAI
+  `docs/run1_spec.md` §8). Run 1b dropped. The next run is `headcheck_1v1`: run 1 with Gaussian-only
+  analog entropy, to confirm the cause before anything else changes.
+- 2026-09-25: critic warmup for continuation runs recorded as an open question (risks table); it has
+  no effect on from-scratch runs.
