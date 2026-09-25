@@ -1,6 +1,6 @@
 # Rebuild plan: SensAI on Prometheus
 
-Status: **agreed 2026-09-24; Phases 0, 1 and 2's gate passed 2026-09-24; reference ladder done; Phase 2's probes and auto-eval next.** SenseiBot's trainer is retired after v11
+Status: **agreed 2026-09-24; Phases 0, 1 and 2's gate passed 2026-09-24; reference ladder and probes done; Phase 2's auto-eval next.** SenseiBot's trainer is retired after v11
 (`docs/reward_v11_pretanh_spec.md` §8). Training moves to a new workspace, **`C:\Users\coryf\antigravity\SensAI`**,
 built from Prometheus (https://github.com/mitige/prometheus, reviewed at commit `e4d097d`; upstream HEAD
 re-checked 2026-09-24 and unchanged). SensAI Studio (`ui/`), the evaluation suite and the probes move to
@@ -385,13 +385,29 @@ frozen as `studio/config/profiles/run1_1v1.json`, and run 1's spec is `docs/run1
     run (v5 vs Necto, seed 11, three runs: 0–13, 2–7, 0–10), so seeds are independent samples. With 3
     seeds, "every seed on one side of zero" happens 25% of the time by chance. The source of the
     nondeterminism is not yet found (np and torch are seeded).
-  - Found on the way: **the blue seat is not neutral.** The evaluated checkpoint always plays blue.
-    Necto beats itself from blue 163–96 over 9 seeds (8 of 9 won); Nexto's mirror is even (91–93 over
-    7); SenseiBot's mirrors run about −3. So compare checkpoints with each other and with the
-    references' readings, not with zero. The Necto asymmetry is in Necto's path, not physics (Nexto
-    shares the physics and is even); not yet traced.
+  - Found on the way: **the blue seat is worth little, and one run is noisy.** The evaluated checkpoint
+    always plays blue. The first run suggested a large seat bias (Necto beat itself from blue 163–96
+    over 9 seeds); a second run of all seven references (SensAI `6e56ec4`) took Necto's mirror from
+    +9.2 to −0.2. Pooled over 12 seeds, blue Necto leads 204–138 (about +4 per 10 min); Nexto is even
+    (101–109); the SenseiBot mirrors are inconsistent. Identical runs moved 3-seed means by up to ~9
+    goals per 10 min (v11 230400 vs Necto −16.2 then −25.0), so one suite run is a rough reading and
+    run 1's pooling over ±50M steps is what calls a change. The table above is the first run; the
+    committed files are the second.
 - **Probe updates.** `action_saturation.py` must read the new head: pre-tanh means against the ±4
   clamp and the state-dependent spread. Braking share and steer reversals stay as-is.
+  - *Done 2026-09-24* (SensAI `768033d`). GigaLearn takes the log-probability on atanh(action), so the
+    mean's gradient carries no tanh derivative: v3–v11's failure (mean past full lock, gradient ~0)
+    cannot happen through tanh. The wall is the ±4 clamp on the raw mean, which passes no gradient.
+    For a SensAI checkpoint `action_saturation.py` reports per channel (throttle and steer grounded,
+    pitch, yaw, roll airborne) deterministic saturation, share at and near the clamp, the raw mean's
+    size, the per-state spread (median, p10, p90, share at the floor) and braking share. The smoke
+    model: nothing saturated or clamped, spread near its 1.0 ceiling, 77% braking or reversing.
+  - Kickoffs: the suite now reports `kickoff_dodge_pct` (dodged before first contact),
+    `kickoff_opp_dodge_pct`, `kickoff_contact_s` and `kickoff_approach_speed` (the step before
+    contact), shown in Studio as a Kickoffs section. Against Necto: every SenseiBot checkpoint and the
+    heuristic 0% dodges at ~1980–2070 uu/s; Necto and Nexto 100% at ~2200. The references carry them.
+  - Not ported: `defence_challenge_probe.py`, `retreat_comparison.py`, `steering_jitter_probe.py` and
+    `policy_health.py` still load SenseiBot `.pt` files only. Port one when a run needs it.
 - **Auto-eval.** Point the watcher at SensAI's checkpoint folder and Prometheus's checkpoint layout
   (one folder per timestep count, plus `RUNNING_STATS.json`).
 
@@ -401,7 +417,7 @@ frozen as `studio/config/profiles/run1_1v1.json`, and run 1's spec is `docs/run1
 scenarios of 24 trials) ran end to end on the smoke run's 6062848 save in 0.8 min on 8 workers, and
 its result lists in Studio as `smoke_1v1 +6M`. The smoke model barely plays (no touches against Necto;
 its training log shows 0.3-0.5 touches per player-minute), so this proves the plumbing, not a baseline.
-The probe updates and auto-eval remain before run 1 is judged.
+Auto-eval remains before run 1 is judged.
 
 ### Phase 3: first run
 
