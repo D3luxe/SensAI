@@ -1,6 +1,6 @@
 # Rebuild plan: SensAI on Prometheus
 
-Status: **agreed 2026-09-24; Phases 0, 1 and 2's gate passed 2026-09-24; Phase 2 complete; Phase 3's run 1 ended 2026-09-25 without adoption (an action-head entropy term; a head check is next).** SenseiBot's trainer is retired after v11
+Status: **agreed 2026-09-24; Phases 0, 1 and 2's gate passed 2026-09-24; Phase 2 complete; Phase 3's run 1 ended 2026-09-25 without adoption (a fresh policy jumps half the time, so ground controls never trained); `headcheck2_1v1` is next.** SenseiBot's trainer is retired after v11
 (`docs/reward_v11_pretanh_spec.md` §8). Training moves to a new workspace, **`C:\Users\coryf\antigravity\SensAI`**,
 built from Prometheus (https://github.com/mitige/prometheus, reviewed at commit `e4d097d`; upstream HEAD
 re-checked 2026-09-24 and unchanged). SensAI Studio (`ui/`), the evaluation suite and the probes move to
@@ -448,11 +448,17 @@ The ladder, probes and auto-eval followed; Phase 2 is complete.
 - **Why:** throttle, steer, pitch and roll never learned. Their means stayed at ~0 with the spread
   pinned at 1.0 through 4B steps; only yaw learned. So the policy moved by boosting and steered by
   jumping and yawing (81–88% airborne).
-- **The likely cause is upstream GigaLearn:** `ComputeContinuousEntropy` adds `log(1 − tanh²(mean))`
-  per analog dimension, so the entropy bonus pulls every mean to 0.
-- **Fix drafted:** profile field `actions.entropy_squash_correction` (false = Gaussian-only entropy).
-  The confirmation is `headcheck_1v1.json`: run 1 with only that change, for ~100M steps, judged on
-  `action_saturation.py`.
+- **First hypothesis, not sufficient:** GigaLearn's `ComputeContinuousEntropy` adds
+  `log(1 − tanh²(mean))`, which pulls the means to 0. `headcheck_1v1` switched it off
+  (`actions.entropy_squash_correction: false`) and tracked run 1 step for step to 200M.
+- **Revised cause:** a fresh head's button logits are ~0, so jump and handbrake are pressed half the
+  time. Both runs were 88% airborne from the first iteration, and jump p on the ground was still
+  0.44 at 200M (0.3 at 4B). Throttle and steer do nothing in the air, so they got almost no signal
+  while the entropy bonus pushed their spread to the ceiling, where `tanh` leaves it almost no
+  gradient.
+- **Next:** `headcheck2_1v1` adds `actions.init_button_bias: [-3, 0, -3]` and
+  `actions.init_spread: 0.3` (fresh weights only), judged at ~50–100M on ground time, jump p, the
+  throttle and steer spread, and touches (SensAI `docs/run1_spec.md` §8).
 - **Run 1b** (horizon ramp from run 1) is dropped.
 - **Process miss:** the 50M saturation check in the spec was never run. It would have caught this in
   minutes. The watcher should run the probe itself.
@@ -474,7 +480,7 @@ The ladder, probes and auto-eval followed; Phase 2 is complete.
 | licence | publishing or tournament entry | ask mitige before either |
 | retreat regression (v11, cause unknown) | retreat scenario in the suite | keep the retreat metrics as a guardrail |
 | kickoff: SenseiBot never flipped | kickoff first touch, a kickoff dodge metric | state-based kickoff reward in run 1; add a kickoff-dodge count to the suite |
-| upstream action-head defaults untested for 1v1 continuous control | spread pinned at `var_max`, means stuck at 0 (run 1) | **found in run 1:** the entropy's tanh term pulls analog means to 0; profile flag `actions.entropy_squash_correction`, checked by `headcheck_1v1`. Run the saturation probe at 50M on every run |
+| upstream action-head defaults untested for 1v1 continuous control | spread pinned at `var_max`, means stuck at 0 (run 1) | **found in run 1:** a fresh policy's buttons are pressed half the time, so the car is airborne from the start and ground controls never train; `actions.init_button_bias` / `init_spread` (checked by `headcheck2_1v1`). The entropy's tanh term, which pulls the means to 0, is switched off too (`entropy_squash_correction`) but was not the cause. Run the saturation probe at 50M on every run |
 | no critic warmup in GigaLearn | a continuation run (new reward or horizon from an old checkpoint) whose first iterations update the policy on a critic fit to the old returns | **open:** SenseiBot warmed the critic before continuation runs; GigaLearn has no equivalent, and metrics.json records `critic_warmup: false`. From-scratch runs do not need it. Before the first `start_from` run, decide whether to add a `critic_warmup_iterations` option (policy LR 0 for N iterations; `SetLearningRates` then also freezes the shared head, so it trains the critic only) |
 | moving to 2v2 later | a 2v2 run from a 1v1 checkpoint | same network and observation carry over; the eval suite and probes are 1v1-only and need 2v2 versions (Necto and Nexto both play team modes) before a 2v2 run is judged |
 
@@ -557,3 +563,7 @@ The ladder, probes and auto-eval followed; Phase 2 is complete.
   analog entropy, to confirm the cause before anything else changes.
 - 2026-09-25: critic warmup for continuation runs recorded as an open question (risks table); it has
   no effect on from-scratch runs.
+- 2026-09-25: `headcheck_1v1` stopped at ~201M: switching off the entropy's squash term did not
+  unstick throttle and steer. The revised cause is the fresh policy's 50% jump and handbrake, which
+  keeps the car airborne from the start. Next is `headcheck2_1v1` (grounded start: button logit
+  biases and a low starting spread).
